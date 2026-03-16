@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.3 (2026-03-17)
+
+- Add extension icon
+
 ## 1.0.2 (2026-03-16)
 
 - Security: Replace all ANSI Win32 APIs with Unicode (W) versions for proper path handling
