@@ -65,7 +65,10 @@ private:
 	void OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t size);
 
 	// Helper
-	std::string GetDllPath();
+	std::string GetExeDir();
+	std::string ResolveDll(const std::string& dir, bool use32);
+	std::string GetDllPath(uint32_t pid);
+	std::string GetDllPathForExe(const std::string& exePath);
 	bool ParseAddress(const std::string& addrStr, uint64_t& out);
 
 	dap::Transport* transport_ = nullptr;
@@ -76,8 +79,8 @@ private:
 	// Session state
 	uint32_t targetPid_ = 0;
 	HANDLE targetProcess_ = nullptr;
-	bool attached_ = false;
-	bool launchedByUs_ = false;
+	std::atomic<bool> attached_{false};
+	std::atomic<bool> launchedByUs_{false};
 
 	// Breakpoint tracking
 	struct BpMapping { uint32_t id; uint64_t address; };

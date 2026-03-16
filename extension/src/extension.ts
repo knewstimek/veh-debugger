@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as net from 'net';
 import { execFile } from 'child_process';
 
 export function activate(context: vscode.ExtensionContext) {
@@ -26,12 +25,14 @@ function autoRegisterMcpServer(context: vscode.ExtensionContext): void {
 	if (installedVersion === currentVersion) return;
 
 	execFile(mcpServerPath, ['--install'], (err) => {
-		if (!err) {
-			context.globalState.update('mcpInstalledVersion', currentVersion);
-			vscode.window.showInformationMessage(
-				'VEH Debugger: MCP server registered for AI agents.'
-			);
+		if (err) {
+			console.error('VEH Debugger: MCP server registration failed:', err.message);
+			return;
 		}
+		context.globalState.update('mcpInstalledVersion', currentVersion);
+		vscode.window.showInformationMessage(
+			'VEH Debugger: MCP server registered for AI agents.'
+		);
 	});
 }
 
@@ -71,11 +72,7 @@ class VehDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
 		const adapterPort: number = config.adapterPort || 0;
 
 		if (adapterPort > 0) {
-			// TCP 모드: 어댑터를 TCP로 실행하고 소켓으로 연결
-			const args: string[] = ['--tcp', `--port=${adapterPort}`];
-			if (config.logFile) args.push(`--log=${config.logFile}`);
-			if (config.logLevel) args.push(`--log-level=${config.logLevel}`);
-
+			// TCP 모드: 외부에서 실행 중인 어댑터에 연결
 			return new vscode.DebugAdapterServer(adapterPort, 'localhost');
 		} else {
 			// stdio 모드 (기본)

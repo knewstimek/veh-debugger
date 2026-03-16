@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.2 (2026-03-16)
+
+- Security: Replace all ANSI Win32 APIs with Unicode (W) versions for proper path handling
+- Security: Fix command injection in installer (CreateProcessW with lpApplicationName)
+- Security: Add toml++ library for proper TOML parsing (Codex CLI support)
+- Security: Atomic file writes with temp+rename pattern for config files
+- Fix: MCP server bitness detection — PE header-based for launch, pid-based for attach
+- Fix: Disassembler null safety check
+- Fix: ToolDetach SendCommand exception handling
+- Fix: WaitForSingleObject zombie process prevention
+- Auto-register MCP server on extension activation
+
 ## 1.0.1 (2026-03-16)
 
 - Fix MCP installer: Claude CLI support (`claude mcp add --scope user`)
