@@ -278,6 +278,17 @@ PDB 없이도 주소 기반 디버깅은 가능.
 | `stepIn` (F11) | Step Into — 함수 내부로 진입 |
 | `stepOut` (Shift+F11) | Step Out — 현재 함수 완료까지 실행 |
 
+### 프로세스 실행 디버깅 (Launch)
+
+Windows 디버거의 "실행하며 디버깅" 기능과 동일. DAP(`launch` 요청)와 MCP(`veh_launch`) 모두 지원.
+
+동작 순서:
+1. `CreateProcess` + `CREATE_SUSPENDED` — 프로세스를 정지 상태로 생성
+2. DLL 인젝션 — VEH 핸들러 등록, Named Pipe 서버 시작
+3. `stopOnEntry=true`이면 진입점에서 정지 유지, `false`이면 `ResumeThread`로 실행 계속
+
+이미 실행 중인 프로세스에는 `attach` / `veh_attach`로 연결.
+
 ### DLL 인젝션
 
 4가지 인젝션 방식 지원 (자동 선택):
