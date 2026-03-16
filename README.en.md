@@ -183,6 +183,17 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | Memory/Disasm | readMemory, writeMemory, disassemble |
 | Misc | modules, loadedSources, exceptionInfo, completions, source, cancel, gotoTargets |
 
+## Launch Debugging
+
+Same as "Start Debugging" in Windows debuggers. Supported by both DAP (`launch` request) and MCP (`veh_launch`).
+
+How it works:
+1. `CreateProcess` + `CREATE_SUSPENDED` — create the process in suspended state
+2. DLL injection — register VEH handler, start Named Pipe server
+3. If `stopOnEntry=true`, keep suspended at entry point; if `false`, `ResumeThread` to continue
+
+For already running processes, use `attach` / `veh_attach`.
+
 ## DLL Injection Methods
 
 4 injection methods supported (auto-selected):
