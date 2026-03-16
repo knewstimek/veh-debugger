@@ -45,7 +45,7 @@ Desktop.ini
 *.log
 
 # Test artifacts
-test_target/
+test_target.exe
 dap_test.py
 dap_full_test.py
 dap_stdio_test.py
