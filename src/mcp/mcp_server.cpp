@@ -57,13 +57,21 @@ void McpServer::Stop() {
 // --- JSON-RPC message handling ---
 
 void McpServer::OnMessage(const std::string& jsonStr) {
+	json msg;
 	try {
-		auto msg = json::parse(jsonStr);
+		msg = json::parse(jsonStr);
+	} catch (const std::exception& e) {
+		LOG_ERROR("JSON parse error: %s", e.what());
+		return;
+	}
+
+	json id = msg.contains("id") ? msg["id"] : json(nullptr);
+
+	try {
 		LOG_DEBUG("MCP recv: %s", msg.value("method", "").c_str());
 
 		// JSON-RPC 2.0: notification (no id) or request (has id)
 		std::string method = msg.value("method", "");
-		json id = msg.contains("id") ? msg["id"] : json(nullptr);
 		json params = msg.value("params", json::object());
 
 		if (method == "initialize") {
@@ -83,7 +91,10 @@ void McpServer::OnMessage(const std::string& jsonStr) {
 			}
 		}
 	} catch (const std::exception& e) {
-		LOG_ERROR("JSON parse error: %s", e.what());
+		LOG_ERROR("Message handling error: %s", e.what());
+		if (!id.is_null()) {
+			SendError(id, -32603, std::string("Internal error: ") + e.what());
+		}
 	}
 }
 
@@ -127,7 +138,7 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 		}},
 		{"serverInfo", {
 			{"name", "veh-debugger"},
-			{"version", "1.0.0"}
+			{"version", "1.0.2"}
 		}}
 	};
 	SendResult(id, result);
@@ -196,8 +207,8 @@ json McpServer::ToolAttach(const json& args) {
 	uint32_t pid = args.value("pid", 0u);
 	if (pid == 0) return {{"error", "pid is required"}};
 
-	// DLL 경로 결정
-	std::string dllPath = GetDllPath();
+	// DLL 경로 결정 (pid 기반 비트니스 감지)
+	std::string dllPath = GetDllPath(pid);
 	if (dllPath.empty()) return {{"error", "DLL not found"}};
 
 	// DLL 인젝션
@@ -208,7 +219,8 @@ json McpServer::ToolAttach(const json& args) {
 
 	// Named Pipe 연결
 	if (!pipeClient_.Connect(pid, 7000)) {
-		return {{"error", "Pipe connection failed (timeout)"}};
+		LOG_ERROR("Pipe connection failed after injection (pid=%u), DLL remains in target", pid);
+		return {{"error", "Pipe connection failed (timeout). DLL was injected but could not connect."}};
 	}
 
 	// 이벤트 리스너 시작
@@ -238,11 +250,23 @@ json McpServer::ToolLaunch(const json& args) {
 			if (!argsStr.empty()) argsStr += " ";
 			std::string arg = a.get<std::string>();
 			if (arg.find_first_of(" \t\"") != std::string::npos) {
+				// Windows CommandLineToArgvW 규칙에 따른 이스케이프
 				std::string quoted = "\"";
+				int numBackslashes = 0;
 				for (char c : arg) {
-					if (c == '"') quoted += "\\\"";
-					else quoted += c;
+					if (c == '\\') {
+						numBackslashes++;
+					} else if (c == '"') {
+						for (int j = 0; j < numBackslashes; j++) quoted += "\\\\";
+						quoted += "\\\"";
+						numBackslashes = 0;
+					} else {
+						for (int j = 0; j < numBackslashes; j++) quoted += "\\";
+						quoted += c;
+						numBackslashes = 0;
+					}
 				}
+				for (int j = 0; j < numBackslashes; j++) quoted += "\\\\";
 				quoted += "\"";
 				argsStr += quoted;
 			} else {
@@ -252,13 +276,17 @@ json McpServer::ToolLaunch(const json& args) {
 	}
 
 	bool stopOnEntry = args.value("stopOnEntry", true);
-	std::string dllPath = GetDllPath();
+	// PE 헤더에서 비트니스 확인 (아직 프로세스가 없으므로 파일 기반)
+	std::string dllPath = GetDllPathForExe(program);
 	if (dllPath.empty()) return {{"error", "DLL not found"}};
 
 	uint32_t pid = Injector::LaunchAndInject(program, argsStr, "", dllPath, stopOnEntry);
 	if (pid == 0) return {{"error", "Launch failed"}};
 
 	targetProcess_ = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+	if (!targetProcess_) {
+		LOG_WARN("OpenProcess(TERMINATE) failed for pid=%u, cannot terminate on cleanup", pid);
+	}
 	launchedByUs_ = true;
 
 	// Named Pipe 연결
@@ -288,7 +316,11 @@ json McpServer::ToolDetach(const json& args) {
 
 	pipeClient_.StopHeartbeat();
 	pipeClient_.StopEventListener();
-	pipeClient_.SendCommand(IpcCommand::Detach);
+	try {
+		pipeClient_.SendCommand(IpcCommand::Detach);
+	} catch (...) {
+		// 파이프가 이미 끊어진 경우 무시 (소멸자와 동일 패턴)
+	}
 	pipeClient_.Disconnect();
 
 	swBreakpoints_.clear();
@@ -427,7 +459,9 @@ json McpServer::ToolContinue(const json& args) {
 	ContinueRequest req;
 	req.threadId = threadId;
 
-	pipeClient_.SendCommand(IpcCommand::Continue, &req, sizeof(req));
+	if (!pipeClient_.SendCommand(IpcCommand::Continue, &req, sizeof(req))) {
+		return {{"error", "IPC send failed"}};
+	}
 	return {{"success", true}, {"threadId", threadId}};
 }
 
@@ -438,7 +472,9 @@ json McpServer::ToolStepIn(const json& args) {
 
 	StepRequest req;
 	req.threadId = threadId;
-	pipeClient_.SendCommand(IpcCommand::StepInto, &req, sizeof(req));
+	if (!pipeClient_.SendCommand(IpcCommand::StepInto, &req, sizeof(req))) {
+		return {{"error", "IPC send failed"}};
+	}
 	return {{"success", true}, {"threadId", threadId}};
 }
 
@@ -449,7 +485,9 @@ json McpServer::ToolStepOver(const json& args) {
 
 	StepRequest req;
 	req.threadId = threadId;
-	pipeClient_.SendCommand(IpcCommand::StepOver, &req, sizeof(req));
+	if (!pipeClient_.SendCommand(IpcCommand::StepOver, &req, sizeof(req))) {
+		return {{"error", "IPC send failed"}};
+	}
 	return {{"success", true}, {"threadId", threadId}};
 }
 
@@ -460,7 +498,9 @@ json McpServer::ToolStepOut(const json& args) {
 
 	StepRequest req;
 	req.threadId = threadId;
-	pipeClient_.SendCommand(IpcCommand::StepOut, &req, sizeof(req));
+	if (!pipeClient_.SendCommand(IpcCommand::StepOut, &req, sizeof(req))) {
+		return {{"error", "IPC send failed"}};
+	}
 	return {{"success", true}, {"threadId", threadId}};
 }
 
@@ -470,7 +510,9 @@ json McpServer::ToolPause(const json& args) {
 	uint32_t threadId = args.value("threadId", 0u);
 	PauseRequest req;
 	req.threadId = threadId;
-	pipeClient_.SendCommand(IpcCommand::Pause, &req, sizeof(req));
+	if (!pipeClient_.SendCommand(IpcCommand::Pause, &req, sizeof(req))) {
+		return {{"error", "IPC send failed"}};
+	}
 	return {{"success", true}, {"threadId", threadId}};
 }
 
@@ -771,6 +813,9 @@ json McpServer::ToolDisassemble(const json& args) {
 	const uint8_t* code = respData.data() + sizeof(IpcStatus);
 	size_t codeLen = respData.size() - sizeof(IpcStatus);
 
+	if (!disassembler_) {
+		return {{"error", "Disassembler not available"}};
+	}
 	auto instructions = disassembler_->Disassemble(code, (uint32_t)codeLen, addr, count);
 
 	json result = json::array();
@@ -847,26 +892,20 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 
 // --- Helpers ---
 
-std::string McpServer::GetDllPath() {
-	// 실행 파일 옆의 DLL 찾기
+std::string McpServer::GetExeDir() {
 	char exePath[MAX_PATH];
-	GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-	std::string dir(exePath);
+	DWORD exeLen = GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+	if (exeLen == 0 || exeLen >= MAX_PATH) {
+		LOG_ERROR("GetModuleFileName failed or path too long");
+		return "";
+	}
+	std::string dir(exePath, exeLen);
 	size_t lastSlash = dir.find_last_of("\\/");
 	if (lastSlash != std::string::npos) dir = dir.substr(0, lastSlash + 1);
+	return dir;
+}
 
-	// 타겟 비트니스 감지
-	bool use32 = false;
-	if (targetPid_ != 0) {
-		HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, targetPid_);
-		if (hProc) {
-			BOOL isWow64 = FALSE;
-			IsWow64Process(hProc, &isWow64);
-			CloseHandle(hProc);
-			use32 = (isWow64 != FALSE);
-		}
-	}
-
+std::string McpServer::ResolveDll(const std::string& dir, bool use32) {
 	if (use32) {
 		std::string path32 = dir + "vcruntime_net32.dll";
 		if (GetFileAttributesA(path32.c_str()) != INVALID_FILE_ATTRIBUTES) return path32;
@@ -875,7 +914,7 @@ std::string McpServer::GetDllPath() {
 	std::string path64 = dir + "vcruntime_net.dll";
 	if (GetFileAttributesA(path64.c_str()) != INVALID_FILE_ATTRIBUTES) return path64;
 
-	// 32비트 폴백
+	// 폴백
 	if (!use32) {
 		std::string path32 = dir + "vcruntime_net32.dll";
 		if (GetFileAttributesA(path32.c_str()) != INVALID_FILE_ATTRIBUTES) return path32;
@@ -883,6 +922,56 @@ std::string McpServer::GetDllPath() {
 
 	LOG_ERROR("DLL not found in %s", dir.c_str());
 	return "";
+}
+
+std::string McpServer::GetDllPath(uint32_t pid) {
+	std::string dir = GetExeDir();
+	if (dir.empty()) return "";
+
+	// 타겟 비트니스 감지 (pid 기반)
+	bool use32 = false;
+	if (pid != 0) {
+		HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+		if (hProc) {
+			BOOL isWow64 = FALSE;
+			IsWow64Process(hProc, &isWow64);
+			CloseHandle(hProc);
+			use32 = (isWow64 != FALSE);
+		}
+	}
+
+	return ResolveDll(dir, use32);
+}
+
+std::string McpServer::GetDllPathForExe(const std::string& exePath) {
+	std::string dir = GetExeDir();
+	if (dir.empty()) return "";
+
+	// PE 헤더에서 비트니스 감지 (파일 기반)
+	bool use32 = false;
+	HANDLE hFile = CreateFileA(exePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+	                           OPEN_EXISTING, 0, nullptr);
+	if (hFile != INVALID_HANDLE_VALUE) {
+		IMAGE_DOS_HEADER dosHeader;
+		DWORD bytesRead;
+		if (ReadFile(hFile, &dosHeader, sizeof(dosHeader), &bytesRead, nullptr) &&
+		    bytesRead == sizeof(dosHeader) && dosHeader.e_magic == IMAGE_DOS_SIGNATURE) {
+			if (SetFilePointer(hFile, dosHeader.e_lfanew, nullptr, FILE_BEGIN) != INVALID_SET_FILE_POINTER) {
+				DWORD ntSig;
+				if (ReadFile(hFile, &ntSig, sizeof(ntSig), &bytesRead, nullptr) &&
+				    bytesRead == sizeof(ntSig) && ntSig == IMAGE_NT_SIGNATURE) {
+					IMAGE_FILE_HEADER fileHeader;
+					if (ReadFile(hFile, &fileHeader, sizeof(fileHeader), &bytesRead, nullptr) &&
+					    bytesRead == sizeof(fileHeader)) {
+						use32 = (fileHeader.Machine == IMAGE_FILE_MACHINE_I386);
+					}
+				}
+			}
+		}
+		CloseHandle(hFile);
+	}
+
+	return ResolveDll(dir, use32);
 }
 
 bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
