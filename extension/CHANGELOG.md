@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1 (2026-03-16)
+
+- Fix MCP installer: Claude CLI support (`claude mcp add --scope user`)
+- Auto-register permissions (`mcp__veh-debugger__*`)
+- Updated binaries
+
 ## 1.0.0 (2026-03-16)
 
 - Initial release
