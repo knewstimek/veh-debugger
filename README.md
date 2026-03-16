@@ -337,7 +337,7 @@ PDB 없이도 주소 기반 디버깅은 가능.
 │       └── logger.h            # 로깅 유틸리티
 ├── third_party/                # 외부 라이브러리
 │   └── nlohmann/json.hpp       # JSON 파서 (MIT)
-│   # Zydis는 CMake FetchContent로 자동 다운로드 (build/_deps/)
+│   # Zydis v4.1 (vendored in third_party/)
 └── extension/                  # VSCode 익스텐션
     ├── package.json
     ├── tsconfig.json
@@ -370,7 +370,7 @@ PDB 없이도 주소 기반 디버깅은 가능.
 | 라이브러리 | 용도 | 라이선스 |
 |-----------|------|---------|
 | [nlohmann/json](https://github.com/nlohmann/json) | JSON 파싱 (header-only) | MIT |
-| [Zydis v4.1](https://github.com/zyantific/zydis) | x86/x64 디스어셈블리 (CMake FetchContent 자동 다운로드) | MIT |
+| [Zydis v4.1](https://github.com/zyantific/zydis) | x86/x64 디스어셈블리 (third_party에 포함) | MIT |
 
 ## 라이선스
 
