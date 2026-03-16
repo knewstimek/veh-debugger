@@ -33,7 +33,7 @@ veh-debug-adapter.exe              veh-mcp-server.exe
 
 | Component | Role |
 |-----------|------|
-| `veh-debugger.dll` | Injected into target. Registers VEH handler, manages breakpoints, queries threads/stack/memory |
+| `veh-debugger.dll` (`vcruntime_net.dll`) | Injected into target. Registers VEH handler, manages breakpoints, queries threads/stack/memory |
 | `veh-debug-adapter.exe` | DAP protocol server. DLL injection, Named Pipe IPC, JSON-RPC processing |
 | `veh-mcp-server.exe` | MCP tool server. 19 tools for AI agents to directly control the debugger |
 | VSCode Extension | launch.json schema, adapter path configuration (minimal wrapper) |
