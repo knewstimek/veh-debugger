@@ -33,7 +33,7 @@ veh-debug-adapter.exe              veh-mcp-server.exe
 
 | 컴포넌트 | 역할 |
 |---------|------|
-| `veh-debugger.dll` | 타겟 프로세스에 인젝션. VEH 핸들러 등록, 브레이크포인트 관리, 스레드/스택/메모리 조회 |
+| `veh-debugger.dll` (`vcruntime_net.dll`) | 타겟 프로세스에 인젝션. VEH 핸들러 등록, 브레이크포인트 관리, 스레드/스택/메모리 조회 |
 | `veh-debug-adapter.exe` | DAP 프로토콜 서버. DLL 인젝션, Named Pipe 통신, JSON-RPC 처리 |
 | `veh-mcp-server.exe` | MCP 도구 서버. AI 에이전트가 19개 도구로 디버거 직접 제어 |
 | VSCode Extension | launch.json 스키마 정의, 어댑터 경로 설정 (최소 래퍼) |
