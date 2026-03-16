@@ -1,0 +1,215 @@
+{
+	"name": "veh-debugger",
+	"displayName": "VEH Debugger",
+	"description": "Windows VEH (Vectored Exception Handler) based debugger — anti-debug bypass, hardware breakpoints, memory watch, disassembly. DAP & MCP supported.",
+	"version": "1.0.0",
+	"publisher": "knewstimek",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/user/veh-debugger"
+	},
+	"engines": {
+		"vscode": "^1.80.0"
+	},
+	"categories": [
+		"Debuggers"
+	],
+	"keywords": [
+		"debugger",
+		"veh",
+		"windows",
+		"x64",
+		"x86",
+		"reverse-engineering",
+		"dap",
+		"mcp",
+		"anti-debug",
+		"hardware-breakpoint",
+		"memory",
+		"disassembly"
+	],
+	"os": [
+		"win32"
+	],
+	"activationEvents": [
+		"onDebugResolve:veh"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"debuggers": [
+			{
+				"type": "veh",
+				"label": "VEH Debugger",
+				"languages": [],
+				"configurationAttributes": {
+					"launch": {
+						"required": [
+							"program"
+						],
+						"properties": {
+							"program": {
+								"type": "string",
+								"description": "Path to the executable to debug",
+								"default": "${workspaceFolder}/target.exe"
+							},
+							"args": {
+								"type": "array",
+								"description": "Command line arguments",
+								"items": {
+									"type": "string"
+								},
+								"default": []
+							},
+							"cwd": {
+								"type": "string",
+								"description": "Working directory",
+								"default": "${workspaceFolder}"
+							},
+							"stopOnEntry": {
+								"type": "boolean",
+								"description": "Stop at entry point after launch",
+								"default": false
+							},
+							"injectionMethod": {
+								"type": "string",
+								"enum": [
+									"auto",
+									"createRemoteThread",
+									"ntCreateThreadEx",
+									"threadHijack",
+									"queueUserApc"
+								],
+								"enumDescriptions": [
+									"Try all methods in order (CRT → NtCTE → Hijack → APC)",
+									"Classic CreateRemoteThread + LoadLibrary",
+									"ntdll!NtCreateThreadEx (bypasses user-mode CRT hooks)",
+									"Hijack existing thread context (no new thread created)",
+									"Queue APC to alertable threads (unreliable)"
+								],
+								"description": "DLL injection method",
+								"default": "auto"
+							},
+							"adapterPort": {
+								"type": "number",
+								"description": "TCP port for the debug adapter (0 = use stdio)",
+								"default": 0
+							},
+							"adapterPath": {
+								"type": "string",
+								"description": "Path to veh-debug-adapter.exe (auto-detected if not set)",
+								"default": ""
+							},
+							"logFile": {
+								"type": "string",
+								"description": "Log file path for the debug adapter",
+								"default": ""
+							},
+							"logLevel": {
+								"type": "string",
+								"enum": [
+									"debug",
+									"info",
+									"warn",
+									"error"
+								],
+								"description": "Log level",
+								"default": "info"
+							}
+						}
+					},
+					"attach": {
+						"required": [
+							"processId"
+						],
+						"properties": {
+							"processId": {
+								"type": "number",
+								"description": "Process ID to attach to",
+								"default": 0
+							},
+							"injectionMethod": {
+								"type": "string",
+								"enum": [
+									"auto",
+									"createRemoteThread",
+									"ntCreateThreadEx",
+									"threadHijack",
+									"queueUserApc"
+								],
+								"enumDescriptions": [
+									"Try all methods in order (CRT → NtCTE → Hijack → APC)",
+									"Classic CreateRemoteThread + LoadLibrary",
+									"ntdll!NtCreateThreadEx (bypasses user-mode CRT hooks)",
+									"Hijack existing thread context (no new thread created)",
+									"Queue APC to alertable threads (unreliable)"
+								],
+								"description": "DLL injection method",
+								"default": "auto"
+							},
+							"adapterPort": {
+								"type": "number",
+								"description": "TCP port for the debug adapter (0 = use stdio)",
+								"default": 0
+							},
+							"adapterPath": {
+								"type": "string",
+								"description": "Path to veh-debug-adapter.exe (auto-detected if not set)",
+								"default": ""
+							},
+							"logFile": {
+								"type": "string",
+								"description": "Log file path for the debug adapter",
+								"default": ""
+							},
+							"logLevel": {
+								"type": "string",
+								"enum": [
+									"debug",
+									"info",
+									"warn",
+									"error"
+								],
+								"description": "Log level",
+								"default": "info"
+							}
+						}
+					}
+				},
+				"configurationSnippets": [
+					{
+						"label": "VEH Debug: Launch",
+						"description": "Launch a program with VEH debugger",
+						"body": {
+							"type": "veh",
+							"request": "launch",
+							"name": "VEH Debug: Launch",
+							"program": "^\"${workspaceFolder}/target.exe\"",
+							"stopOnEntry": true
+						}
+					},
+					{
+						"label": "VEH Debug: Attach",
+						"description": "Attach VEH debugger to a running process",
+						"body": {
+							"type": "veh",
+							"request": "attach",
+							"name": "VEH Debug: Attach",
+							"processId": 0
+						}
+					}
+				]
+			}
+		]
+	},
+	"scripts": {
+		"vscode:prepublish": "npm run compile",
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./"
+	},
+	"devDependencies": {
+		"@types/vscode": "^1.80.0",
+		"@types/node": "^18.0.0",
+		"typescript": "^5.0.0"
+	}
+}

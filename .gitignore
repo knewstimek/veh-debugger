@@ -1,0 +1,52 @@
+# Build
+build/
+build32/
+out/
+bin/
+*.obj
+*.o
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.iobj
+*.ipdb
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.sln
+*.vcxproj
+*.vcxproj.filters
+
+# IDE
+.vs/
+.vscode/settings.json
+.vscode/launch.json
+*.user
+*.suo
+
+# Node
+node_modules/
+extension/out/
+extension/node_modules/
+extension/bin/
+*.vsix
+
+# OS
+Thumbs.db
+.DS_Store
+Desktop.ini
+
+# Logs
+*.log
+
+# Test artifacts
+test_target/
+dap_test.py
+dap_full_test.py
+dap_stdio_test.py
+*.test_output
