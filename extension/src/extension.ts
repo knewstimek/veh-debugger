@@ -2,15 +2,38 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as net from 'net';
+import { execFile } from 'child_process';
 
 export function activate(context: vscode.ExtensionContext) {
 	const factory = new VehDebugAdapterFactory(context);
 	context.subscriptions.push(
 		vscode.debug.registerDebugAdapterDescriptorFactory('veh', factory)
 	);
+
+	// MCP 서버 자동 등록 (최초 설치 또는 업데이트 시)
+	autoRegisterMcpServer(context);
 }
 
 export function deactivate() {}
+
+function autoRegisterMcpServer(context: vscode.ExtensionContext): void {
+	const mcpServerPath = path.join(context.extensionPath, 'bin', 'veh-mcp-server.exe');
+	if (!fs.existsSync(mcpServerPath)) return;
+
+	const currentVersion: string = context.extension.packageJSON.version;
+	const installedVersion = context.globalState.get<string>('mcpInstalledVersion');
+
+	if (installedVersion === currentVersion) return;
+
+	execFile(mcpServerPath, ['--install'], (err) => {
+		if (!err) {
+			context.globalState.update('mcpInstalledVersion', currentVersion);
+			vscode.window.showInformationMessage(
+				'VEH Debugger: MCP server registered for AI agents.'
+			);
+		}
+	});
+}
 
 class VehDebugAdapterFactory implements vscode.DebugAdapterDescriptorFactory {
 	constructor(private context: vscode.ExtensionContext) {}
