@@ -1,5 +1,7 @@
 # VEH Debugger for VSCode
 
+**한국어** | [English](README.en.md)
+
 Windows VEH(Vectored Exception Handler) 기반 디버거. DAP(Debug Adapter Protocol) 완전 지원.
 
 ## 특징
