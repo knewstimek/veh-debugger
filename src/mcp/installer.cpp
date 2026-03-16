@@ -90,15 +90,16 @@ static bool InstallClaudeMCPAdd(const std::string& claudePath, const std::string
 	std::string normalizedPath = NormalizePath(serverPath);
 
 	// 기존 등록 제거 (업데이트 지원)
+	// _popen → cmd /c 사용하므로 전체를 바깥 따옴표로 감싸야 함
 	{
-		std::string removeCmd = "\"" + claudePath + "\" mcp remove " + SERVER_NAME;
+		std::string removeCmd = "\"\"" + claudePath + "\" mcp remove " + SERVER_NAME + "\"";
 		FILE* pipe = _popen(removeCmd.c_str(), "r");
 		if (pipe) _pclose(pipe);  // 실패 무시
 	}
 
 	// --scope user 로 global 등록
-	std::string addCmd = "\"" + claudePath + "\" mcp add --scope user " +
-	                     SERVER_NAME + " \"" + normalizedPath + "\"";
+	std::string addCmd = "\"\"" + claudePath + "\" mcp add --scope user " +
+	                     SERVER_NAME + " \"" + normalizedPath + "\"\"";
 	FILE* pipe = _popen(addCmd.c_str(), "r");
 	if (!pipe) return false;
 
@@ -433,7 +434,7 @@ bool UninstallFromAgent(const AgentConfig& agent) {
 		// Claude CLI로 제거 시도
 		std::string claudePath = FindClaudeCLI();
 		if (!claudePath.empty()) {
-			std::string removeCmd = "\"" + claudePath + "\" mcp remove " + SERVER_NAME;
+			std::string removeCmd = "\"\"" + claudePath + "\" mcp remove " + SERVER_NAME + "\"";
 			FILE* pipe = _popen(removeCmd.c_str(), "r");
 			if (pipe) _pclose(pipe);
 		}
