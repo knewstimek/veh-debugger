@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="shieldGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3A8FFF"/>
+      <stop offset="100%" stop-color="#1A5CBF"/>
+    </linearGradient>
+    <linearGradient id="bugGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FF6B6B"/>
+      <stop offset="100%" stop-color="#CC3333"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="128" cy="128" r="120" fill="#1E1E2E"/>
+
+  <!-- Shield body -->
+  <path d="M128 28 L208 68 L208 138 C208 185 172 222 128 238 C84 222 48 185 48 138 L48 68 Z"
+        fill="url(#shieldGrad)" stroke="#5AAFFF" stroke-width="3" filter="url(#shadow)"/>
+
+  <!-- Shield inner highlight -->
+  <path d="M128 42 L196 76 L196 138 C196 178 165 210 128 224 C91 210 60 178 60 138 L60 76 Z"
+        fill="none" stroke="#7EC8FF" stroke-width="1.5" opacity="0.4"/>
+
+  <!-- Bug body (oval) -->
+  <ellipse cx="128" cy="148" rx="28" ry="36" fill="url(#bugGrad)" filter="url(#shadow)"/>
+
+  <!-- Bug head -->
+  <circle cx="128" cy="108" r="16" fill="url(#bugGrad)"/>
+
+  <!-- Bug eyes -->
+  <circle cx="121" cy="105" r="4" fill="#FFF"/>
+  <circle cx="135" cy="105" r="4" fill="#FFF"/>
+  <circle cx="122" cy="106" r="2" fill="#1E1E2E"/>
+  <circle cx="136" cy="106" r="2" fill="#1E1E2E"/>
+
+  <!-- Bug antennae -->
+  <line x1="118" y1="95" x2="105" y2="78" stroke="#FF6B6B" stroke-width="3" stroke-linecap="round"/>
+  <line x1="138" y1="95" x2="151" y2="78" stroke="#FF6B6B" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="105" cy="78" r="3" fill="#FF9999"/>
+  <circle cx="151" cy="78" r="3" fill="#FF9999"/>
+
+  <!-- Bug legs (3 pairs) -->
+  <!-- Left legs -->
+  <line x1="102" y1="132" x2="82" y2="120" stroke="#FF6B6B" stroke-width="3" stroke-linecap="round"/>
+  <line x1="100" y1="148" x2="78" y2="148" stroke="#FF6B6B" stroke-width="3" stroke-linecap="round"/>
+  <line x1="102" y1="164" x2="82" y2="176" stroke="#FF6B6B" stroke-width="3" stroke-linecap="round"/>
+  <!-- Right legs -->
+  <line x1="154" y1="132" x2="174" y2="120" stroke="#FF6B6B" stroke-width="3" stroke-linecap="round"/>
+  <line x1="156" y1="148" x2="178" y2="148" stroke="#FF6B6B" stroke-width="3" stroke-linecap="round"/>
+  <line x1="154" y1="164" x2="174" y2="176" stroke="#FF6B6B" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- Bug body segments -->
+  <line x1="106" y1="138" x2="150" y2="138" stroke="#CC3333" stroke-width="1.5" opacity="0.5"/>
+  <line x1="104" y1="152" x2="152" y2="152" stroke="#CC3333" stroke-width="1.5" opacity="0.5"/>
+  <line x1="106" y1="166" x2="150" y2="166" stroke="#CC3333" stroke-width="1.5" opacity="0.5"/>
+
+  <!-- Crosshair/target overlay on bug (debugger feel) -->
+  <circle cx="128" cy="148" r="22" fill="none" stroke="#FFFFFF" stroke-width="1.5" opacity="0.6"/>
+  <line x1="128" y1="122" x2="128" y2="132" stroke="#FFFFFF" stroke-width="1.5" opacity="0.6"/>
+  <line x1="128" y1="164" x2="128" y2="174" stroke="#FFFFFF" stroke-width="1.5" opacity="0.6"/>
+  <line x1="102" y1="148" x2="112" y2="148" stroke="#FFFFFF" stroke-width="1.5" opacity="0.6"/>
+  <line x1="144" y1="148" x2="154" y2="148" stroke="#FFFFFF" stroke-width="1.5" opacity="0.6"/>
+</svg>
