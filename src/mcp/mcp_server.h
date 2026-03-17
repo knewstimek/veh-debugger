@@ -57,6 +57,7 @@ private:
 	json ToolWriteMemory(const json& args);
 	json ToolModules(const json& args);
 	json ToolDisassemble(const json& args);
+	json ToolEnumLocals(const json& args);
 
 	// Tool list definition
 	json GetToolsList();

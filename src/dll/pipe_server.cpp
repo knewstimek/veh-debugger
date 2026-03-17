@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <algorithm>
 #include "pipe_server.h"
 #include "veh_handler.h"
 #include "breakpoint.h"
@@ -323,6 +324,19 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		break;
 	}
 
+	case IpcCommand::RemoveBreakpointByAddr: {
+		if (payloadSize < sizeof(RemoveBreakpointByAddrRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const RemoveBreakpointByAddrRequest*>(payload);
+		bool ok = BreakpointManager::Instance().RemoveByAddress(req->address);
+		IpcStatus status = ok ? IpcStatus::Ok : IpcStatus::NotFound;
+		SendResponse(command, &status, sizeof(status));
+		break;
+	}
+
 	case IpcCommand::SetHwBreakpoint: {
 		if (payloadSize < sizeof(SetHwBreakpointRequest)) {
 			SetHwBreakpointResponse resp{IpcStatus::InvalidArgs, 0, 0};
@@ -395,12 +409,9 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			return;
 		}
 		auto* req = reinterpret_cast<const StepRequest*>(payload);
-		// 싱글스텝 TF 설정: 정지된 컨텍스트에서 직접 설정은 불가
-		// VEH 핸들러가 재개 후 다음 명령어에서 TF를 설정하도록 함
-		// → 여기서는 단순히 resume하고, VEH 핸들러 쪽에서 처리
-		bool ok = ThreadManager::Instance().SetSingleStep(req->threadId);
-		VehHandler::Instance().ResumeStoppedThread(req->threadId);
-		IpcStatus status = ok ? IpcStatus::Ok : IpcStatus::Error;
+		// step=true: BP rearm 후 다시 TF 설정하여 StepCompleted 이벤트 발생
+		VehHandler::Instance().ResumeStoppedThread(req->threadId, /*step=*/true);
+		IpcStatus status = IpcStatus::Ok;
 		SendResponse(command, &status, sizeof(status));
 		break;
 	}
@@ -412,9 +423,9 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			return;
 		}
 		auto* req = reinterpret_cast<const StepRequest*>(payload);
-		bool ok = ThreadManager::Instance().SetSingleStep(req->threadId);
-		VehHandler::Instance().ResumeStoppedThread(req->threadId);
-		IpcStatus status = ok ? IpcStatus::Ok : IpcStatus::Error;
+		// StepOut도 step=true (함수 리턴까지는 어댑터에서 반복 step으로 구현)
+		VehHandler::Instance().ResumeStoppedThread(req->threadId, /*step=*/true);
+		IpcStatus status = IpcStatus::Ok;
 		SendResponse(command, &status, sizeof(status));
 		break;
 	}
@@ -503,6 +514,10 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		auto* req = reinterpret_cast<const GetStackTraceRequest*>(payload);
 		auto frames = StackWalker::Instance().Walk(req->threadId, req->startFrame, req->maxFrames);
 
+		// StackWalk64 스택 바닥에서 address=0 프레임을 반환할 수 있다 — 필터링
+		frames.erase(std::remove_if(frames.begin(), frames.end(),
+			[](const auto& f) { return f.address == 0; }), frames.end());
+
 		GetStackTraceResponse resp;
 		resp.status = IpcStatus::Ok;
 		resp.totalFrames = static_cast<uint32_t>(frames.size());
@@ -515,6 +530,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			infos[i].address       = frames[i].address;
 			infos[i].returnAddress = frames[i].returnAddress;
 			infos[i].frameBase     = frames[i].frameBase;
+			infos[i].moduleBase    = frames[i].moduleBase;
 			infos[i].line          = frames[i].line;
 			memset(infos[i].moduleName, 0, sizeof(infos[i].moduleName));
 			strncpy_s(infos[i].moduleName, frames[i].moduleName.c_str(), sizeof(infos[i].moduleName) - 1);
@@ -608,6 +624,12 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 		auto data = MemoryManager::Instance().Read(req->address, req->size);
 
+		// 활성 BP의 INT3(0xCC)를 원본 바이트로 치환 — 디스어셈블리/메모리 뷰에서
+		// BP 유무와 관계없이 원본 명령어를 표시. 실제 메모리는 변경하지 않음.
+		if (!data.empty()) {
+			BreakpointManager::Instance().MaskBreakpointsInBuffer(req->address, data.data(), data.size());
+		}
+
 		IpcStatus status = data.empty() ? IpcStatus::Error : IpcStatus::Ok;
 		std::vector<uint8_t> buf(sizeof(IpcStatus) + data.size());
 		memcpy(buf.data(), &status, sizeof(status));
@@ -656,14 +678,35 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		lineInfo.SizeOfStruct = sizeof(lineInfo);
 		LONG displacement = 0;
 
-		// SymGetLineFromName64 대신 전체 모듈 순회
 		HANDLE hProcess = GetCurrentProcess();
+
+		// 모듈 목록 갱신 (detach/재연결 시 스테일 방지)
+		SymRefreshModuleList(hProcess);
+
 		if (SymGetLineFromName64(hProcess, NULL, safeReq.fileName, safeReq.line, &displacement, &lineInfo)) {
 			resp.status = IpcStatus::Ok;
 			resp.address = lineInfo.Address;
 			LOG_INFO("ResolveSourceLine: %s:%u -> 0x%llX", safeReq.fileName, safeReq.line, resp.address);
 		} else {
-			LOG_WARN("ResolveSourceLine failed: %s:%u (error=%lu)", safeReq.fileName, safeReq.line, GetLastError());
+			DWORD err = GetLastError();
+			LOG_WARN("ResolveSourceLine failed: %s:%u (error=%lu)", safeReq.fileName, safeReq.line, err);
+
+			// 풀 경로 실패 시 파일명만으로 재시도
+			const char* baseName = strrchr(safeReq.fileName, '\\');
+			if (!baseName) baseName = strrchr(safeReq.fileName, '/');
+			if (baseName) {
+				baseName++; // 구분자 건너뛰기
+				lineInfo = {};
+				lineInfo.SizeOfStruct = sizeof(lineInfo);
+				displacement = 0;
+				if (SymGetLineFromName64(hProcess, NULL, baseName, safeReq.line, &displacement, &lineInfo)) {
+					resp.status = IpcStatus::Ok;
+					resp.address = lineInfo.Address;
+					LOG_INFO("ResolveSourceLine (basename retry): %s:%u -> 0x%llX", baseName, safeReq.line, resp.address);
+				} else {
+					LOG_WARN("ResolveSourceLine basename retry also failed: %s:%u (error=%lu)", baseName, safeReq.line, GetLastError());
+				}
+			}
 		}
 
 		SendResponse(command, &resp, sizeof(resp));
@@ -702,6 +745,32 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 
 		SendResponse(command, &resp, sizeof(resp));
+		break;
+	}
+
+	case IpcCommand::EnumLocals: {
+		if (payloadSize < sizeof(EnumLocalsRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const EnumLocalsRequest*>(payload);
+
+		auto locals = StackWalker::Instance().EnumLocals(
+			req->threadId, req->instructionAddress, req->frameBase);
+
+		// Build variable-length response
+		size_t respSize = sizeof(EnumLocalsResponse) + locals.size() * sizeof(LocalVariableInfo);
+		std::vector<uint8_t> respBuf(respSize, 0);
+		auto* resp2 = reinterpret_cast<EnumLocalsResponse*>(respBuf.data());
+		resp2->status = IpcStatus::Ok;
+		resp2->count = static_cast<uint32_t>(locals.size());
+		if (!locals.empty()) {
+			memcpy(respBuf.data() + sizeof(EnumLocalsResponse),
+			       locals.data(), locals.size() * sizeof(LocalVariableInfo));
+		}
+
+		SendResponse(command, respBuf.data(), static_cast<uint32_t>(respSize));
 		break;
 	}
 

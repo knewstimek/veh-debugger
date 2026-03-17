@@ -6,8 +6,12 @@
 volatile int g_counter = 0;
 
 void WorkFunction() {
+	int localCounter = g_counter;
+	double pi = 3.14159265;
+	const char* msg = "hello";
 	g_counter++;
-	printf("[%d] Working...\n", g_counter);
+	localCounter = g_counter;
+	printf("[%d] Working... pi=%.2f msg=%s\n", localCounter, pi, msg);
 }
 
 int main() {

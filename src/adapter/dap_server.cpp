@@ -3,6 +3,21 @@
 #include <filesystem>
 #include <sstream>
 #include <algorithm>
+#include <fstream>
+#include <set>
+
+// VEH_DAP_TRACE: 파일 기반 DAP 디버그 로그 (cmake -DVEH_DAP_TRACE=ON)
+#ifdef VEH_DAP_TRACE
+namespace {
+void DumpToFile(const char* tag, const std::string& msg) {
+	std::ofstream f("C:\\tmp\\veh_dap_trace.log", std::ios::app);
+	if (f.is_open()) f << "[" << tag << "] " << msg << "\n";
+}
+}
+#define DAP_TRACE(tag, msg) DumpToFile(tag, msg)
+#else
+#define DAP_TRACE(tag, msg) ((void)0)
+#endif
 
 // base64 인코딩 (readMemory 응답용)
 namespace {
@@ -83,6 +98,7 @@ void DapServer::OnMessage(const std::string& jsonStr) {
 
 void DapServer::HandleRequest(const Request& req) {
 	LOG_DEBUG("Request: %s (seq=%d)", req.command.c_str(), req.seq);
+	DAP_TRACE("REQUEST", req.command + " | " + req.arguments.dump());
 
 	// 명령어 디스패치
 	#define HANDLE_CMD(name, fn) if (req.command == name) { fn(req); return; }
@@ -230,17 +246,38 @@ void DapServer::OnLaunch(const Request& req) {
 		return;
 	}
 
-	std::string dllPath = GetDllPath();
-	targetPid_ = Injector::LaunchAndInject(programPath_, argStr, cwd, dllPath, stopOnEntry_, injectionMethod_);
+	// restart 시 재사용을 위해 저장
+	launchArgStr_ = argStr;
+	launchCwd_ = cwd;
 
-	if (targetPid_ == 0) {
+	std::string dllPath = GetDllPath();
+	auto result = Injector::LaunchAndInject(programPath_, argStr, cwd, dllPath, injectionMethod_);
+
+	if (result.pid == 0) {
 		resp.success = false;
 		resp.message = "Failed to launch and inject: " + programPath_;
 		SendResponse(resp);
 		return;
 	}
 
+	targetPid_ = result.pid;
+	launchedMainThreadId_ = result.mainThreadId;
+	mainThreadResumed_ = false;
 	launchedByUs_ = true;
+
+	// 프로세스 핸들 (ReadProcessMemory용 — StepOver CALL 판별 등)
+	targetProcess_ = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, targetPid_);
+	if (!targetProcess_) {
+		LOG_WARN("OpenProcess for VM_READ failed: %u", GetLastError());
+	}
+
+	// PDB 심볼 엔진 초기화 (인라인 프레임 기반 StepOver용)
+	if (targetProcess_) {
+		symbolEngineReady_ = symbolEngine_.Initialize(targetProcess_);
+		if (!symbolEngineReady_) {
+			LOG_WARN("SymbolEngine init failed, PDB step will use fallback");
+		}
+	}
 
 	// VEH DLL과 파이프 연결
 	if (!pipeClient_.Connect(targetPid_, 10000)) {
@@ -286,6 +323,15 @@ void DapServer::OnAttach(const Request& req) {
 	}
 
 	launchedByUs_ = false;
+	targetProcess_ = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, targetPid_);
+
+	// PDB 심볼 엔진 초기화 (인라인 프레임 기반 StepOver용)
+	if (targetProcess_) {
+		symbolEngineReady_ = symbolEngine_.Initialize(targetProcess_);
+		if (!symbolEngineReady_) {
+			LOG_WARN("SymbolEngine init failed, PDB step will use fallback");
+		}
+	}
 
 	if (!pipeClient_.Connect(targetPid_, 10000)) {
 		resp.success = false;
@@ -367,13 +413,22 @@ void DapServer::OnConfigurationDone(const Request& req) {
 	resp.success = true;
 	SendResponse(resp);
 
-	// stopOnEntry이면 stopped 이벤트 전송
-	if (stopOnEntry_) {
-		SendEvent("stopped", {
-			{"reason", "entry"},
-			{"threadId", 1},
-			{"allThreadsStopped", true},
-		});
+	// Launch 모드: 메인 스레드가 CREATE_SUSPENDED 상태
+	// setBreakpoints가 이미 완료된 상태이므로 이제 안전하게 resume 가능
+	if (launchedByUs_ && launchedMainThreadId_ != 0 && !mainThreadResumed_) {
+		if (stopOnEntry_) {
+			// stopOnEntry: 메인 스레드는 suspended 유지, stopped 이벤트만 전송
+			// 사용자가 Continue 누르면 OnContinue에서 resume
+			LOG_INFO("stopOnEntry: main thread %u stays suspended", launchedMainThreadId_);
+			SendEvent("stopped", {
+				{"reason", "entry"},
+				{"threadId", 1},
+				{"allThreadsStopped", true},
+			});
+		} else {
+			// stopOnEntry=false: 메인 스레드 resume → BP 히트 시 stopped 이벤트
+			ResumeMainThread();
+		}
 	}
 }
 
@@ -381,6 +436,7 @@ void DapServer::OnConfigurationDone(const Request& req) {
 
 void DapServer::OnSetBreakpoints(const Request& req) {
 	// DAP에서는 setBreakpoints가 전체 교체 방식
+	DAP_TRACE("setBreakpoints", req.arguments.dump());
 	std::lock_guard<std::mutex> lock(breakpointMutex_);
 
 	std::string sourceFile;
@@ -388,9 +444,67 @@ void DapServer::OnSetBreakpoints(const Request& req) {
 		sourceFile = req.arguments["source"]["path"].get<std::string>();
 	}
 
-	// 기존 source BP 제거 (같은 source에 대해)
+	// 1단계: 새 BP 목록의 주소를 먼저 해석
+	auto bps = req.arguments.value("breakpoints", json::array());
+	struct ResolvedBp {
+		uint64_t address = 0;
+		int line = 0;
+		std::string condition;
+		std::string hitCondition;
+		std::string logMessage;
+		std::string errorMsg;
+	};
+	std::vector<ResolvedBp> resolvedBps;
+	resolvedBps.reserve(bps.size());
+
+	for (auto& bp : bps) {
+		ResolvedBp rb;
+		rb.condition = bp.value("condition", "");
+		rb.hitCondition = bp.value("hitCondition", "");
+		rb.logMessage = bp.value("logMessage", "");
+
+		if (bp.contains("instructionReference")) {
+			rb.address = ParseAddress(bp["instructionReference"].get<std::string>());
+		} else if (bp.contains("line")) {
+			rb.line = bp["line"].get<int>();
+			if (!sourceFile.empty() && rb.line > 0) {
+				ResolveSourceLineRequest resolveReq = {};
+				strncpy_s(resolveReq.fileName, sourceFile.c_str(), sizeof(resolveReq.fileName) - 1);
+				resolveReq.line = rb.line;
+
+				std::vector<uint8_t> resolveResp;
+				if (pipeClient_.SendAndReceive(IpcCommand::ResolveSourceLine, &resolveReq, sizeof(resolveReq), resolveResp)
+					&& resolveResp.size() >= sizeof(ResolveSourceLineResponse)) {
+					auto* resp2 = reinterpret_cast<const ResolveSourceLineResponse*>(resolveResp.data());
+					if (resp2->status == IpcStatus::Ok) {
+						rb.address = resp2->address;
+						DAP_TRACE("resolveSourceLine", sourceFile + ":" + std::to_string(rb.line) + " -> " + FormatAddress(rb.address));
+					}
+				}
+				if (rb.address == 0) {
+					rb.errorMsg = "No PDB symbol found for " + sourceFile + ":" + std::to_string(rb.line);
+				}
+			} else {
+				rb.errorMsg = "Source path and line required";
+			}
+		}
+		if (rb.address == 0 && rb.errorMsg.empty()) {
+			rb.errorMsg = "Invalid address";
+		}
+		resolvedBps.push_back(std::move(rb));
+	}
+
+	// 2단계: 새 목록에 없는 기존 BP만 제거 (diff 기반)
+	std::set<uint64_t> newAddresses;
+	for (auto& rb : resolvedBps) {
+		if (rb.address != 0) newAddresses.insert(rb.address);
+	}
+
+	std::vector<uint64_t> changedAddresses; // BP 설정/해제로 메모리가 변경된 주소
 	for (auto it = breakpointMappings_.begin(); it != breakpointMappings_.end(); ) {
-		if (it->source == sourceFile) {
+		if (it->source == sourceFile && newAddresses.find(it->address) == newAddresses.end()) {
+			DAP_TRACE("RemoveSourceBP", "vehId=" + std::to_string(it->vehId) + " addr=" + FormatAddress(it->address));
+			changedAddresses.push_back(it->address);
 			RemoveBreakpointRequest rmReq;
 			rmReq.id = it->vehId;
 			pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
@@ -400,71 +514,42 @@ void DapServer::OnSetBreakpoints(const Request& req) {
 		}
 	}
 
+	// 3단계: 새 BP 설정 (이미 존재하는 주소는 재사용)
 	json breakpointsJson = json::array();
-	auto bps = req.arguments.value("breakpoints", json::array());
 
-	// 주소 기반 브레이크포인트 (instructionReference)
-	// source가 있으면 소스 브레이크포인트, 없으면 주소 기반
-	for (auto& bp : bps) {
-		uint64_t address = 0;
-
-		// 소스 파일 기반이면 PDB 심볼을 사용하여 주소 해석
-		if (bp.contains("instructionReference")) {
-			address = ParseAddress(bp["instructionReference"].get<std::string>());
-		} else if (bp.contains("line")) {
-			int line = bp["line"].get<int>();
-			std::string sourceFile;
-			if (req.arguments.contains("source") && req.arguments["source"].contains("path")) {
-				sourceFile = req.arguments["source"]["path"].get<std::string>();
-			}
-
-			if (!sourceFile.empty() && line > 0) {
-				// PDB를 통한 소스 라인 → 주소 해석
-				ResolveSourceLineRequest resolveReq = {};
-				strncpy_s(resolveReq.fileName, sourceFile.c_str(), sizeof(resolveReq.fileName) - 1);
-				resolveReq.line = line;
-
-				std::vector<uint8_t> resolveResp;
-				if (pipeClient_.SendAndReceive(IpcCommand::ResolveSourceLine, &resolveReq, sizeof(resolveReq), resolveResp)) {
-					if (resolveResp.size() >= sizeof(ResolveSourceLineResponse)) {
-						auto* resp2 = reinterpret_cast<const ResolveSourceLineResponse*>(resolveResp.data());
-						if (resp2->status == IpcStatus::Ok) {
-							address = resp2->address;
-							LOG_INFO("Source BP: %s:%d -> 0x%llX", sourceFile.c_str(), line, address);
-						}
-					}
-				}
-
-				if (address == 0) {
-					Breakpoint dbp;
-					dbp.id = nextDapBpId_++;
-					dbp.verified = false;
-					dbp.message = "No PDB symbol found for " + sourceFile + ":" + std::to_string(line);
-					breakpointsJson.push_back(dbp.ToJson());
-					continue;
-				}
-			} else {
-				Breakpoint dbp;
-				dbp.id = nextDapBpId_++;
-				dbp.verified = false;
-				dbp.message = "Source path and line required";
-				breakpointsJson.push_back(dbp.ToJson());
-				continue;
-			}
-		}
-
-		if (address == 0) {
+	for (auto& rb : resolvedBps) {
+		if (!rb.errorMsg.empty()) {
 			Breakpoint dbp;
 			dbp.id = nextDapBpId_++;
 			dbp.verified = false;
-			dbp.message = "Invalid address";
+			dbp.message = rb.errorMsg;
 			breakpointsJson.push_back(dbp.ToJson());
 			continue;
 		}
 
-		// VEH DLL에 브레이크포인트 설정 요청
+		// 이미 같은 주소에 BP가 있으면 재사용 (조건만 업데이트)
+		bool found = false;
+		for (auto& m : breakpointMappings_) {
+			if (m.source == sourceFile && m.address == rb.address) {
+				m.condition = rb.condition;
+				m.hitCondition = rb.hitCondition;
+				m.logMessage = rb.logMessage;
+
+				Breakpoint dbp;
+				dbp.id = m.dapId;
+				dbp.verified = true;
+				dbp.instructionReference = rb.address;
+				breakpointsJson.push_back(dbp.ToJson());
+				found = true;
+				DAP_TRACE("ReuseBP", "addr=" + FormatAddress(rb.address) + " dapId=" + std::to_string(m.dapId));
+				break;
+			}
+		}
+		if (found) continue;
+
+		// 새 BP 설정
 		SetBreakpointRequest setReq;
-		setReq.address = address;
+		setReq.address = rb.address;
 
 		std::vector<uint8_t> respData;
 		if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &setReq, sizeof(setReq), respData)) {
@@ -473,13 +558,12 @@ void DapServer::OnSetBreakpoints(const Request& req) {
 				Breakpoint dbp;
 				dbp.id = nextDapBpId_++;
 				dbp.verified = (setResp->status == IpcStatus::Ok);
-				dbp.instructionReference = address;
+				dbp.instructionReference = rb.address;
+				DAP_TRACE("SetBreakpoint", "addr=" + FormatAddress(rb.address) + " vehId=" + std::to_string(setResp->id) + " verified=" + (dbp.verified ? "true" : "false"));
 
-				std::string cond = bp.value("condition", "");
-				std::string hitCond = bp.value("hitCondition", "");
-				std::string logMsg = bp.value("logMessage", "");
-				breakpointMappings_.push_back({dbp.id, setResp->id, address, sourceFile, cond, hitCond, 0, logMsg});
+				breakpointMappings_.push_back({dbp.id, setResp->id, rb.address, sourceFile, rb.condition, rb.hitCondition, 0, rb.logMessage});
 				breakpointsJson.push_back(dbp.ToJson());
+				changedAddresses.push_back(rb.address);
 			}
 		} else {
 			Breakpoint dbp;
@@ -496,12 +580,34 @@ void DapServer::OnSetBreakpoints(const Request& req) {
 	resp.success = true;
 	resp.body = {{"breakpoints", breakpointsJson}};
 	SendResponse(resp);
+
+	// BP 설정/해제로 메모리가 변경된 주소에 대해 memory 이벤트 전송
+	// → VSCode 디스어셈블리 뷰가 해당 주소를 다시 읽어 0xCC 잔존 문제 해결
+	for (uint64_t addr : changedAddresses) {
+		SendEvent("memory", {
+			{"memoryReference", FormatAddress(addr)},
+			{"offset", 0},
+			{"count", 1},
+		});
+	}
 }
 
 void DapServer::OnSetFunctionBreakpoints(const Request& req) {
 	std::lock_guard<std::mutex> lock(breakpointMutex_);
 	json breakpointsJson = json::array();
 	auto bps = req.arguments.value("breakpoints", json::array());
+
+	// 기존 function breakpoint 제거 (DAP: 전체 교체 방식)
+	for (auto it = breakpointMappings_.begin(); it != breakpointMappings_.end(); ) {
+		if (it->type == BpType::Function) {
+			RemoveBreakpointRequest rmReq;
+			rmReq.id = it->vehId;
+			pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
+			it = breakpointMappings_.erase(it);
+		} else {
+			++it;
+		}
+	}
 
 	for (auto& bp : bps) {
 		std::string funcName = bp.value("name", "");
@@ -551,7 +657,7 @@ void DapServer::OnSetFunctionBreakpoints(const Request& req) {
 				dbp.verified = (setResp->status == IpcStatus::Ok);
 				dbp.instructionReference = address;
 
-				breakpointMappings_.push_back({dbp.id, setResp->id, address, {}, {}, {}, 0, {}});
+				breakpointMappings_.push_back({dbp.id, setResp->id, address, {}, {}, {}, 0, {}, BpType::Function});
 				breakpointsJson.push_back(dbp.ToJson());
 			}
 		} else {
@@ -582,13 +688,14 @@ void DapServer::OnSetExceptionBreakpoints(const Request& req) {
 }
 
 void DapServer::OnSetInstructionBreakpoints(const Request& req) {
+	DAP_TRACE("setInstructionBreakpoints", req.arguments.dump());
 	std::lock_guard<std::mutex> lock(breakpointMutex_);
 	json breakpointsJson = json::array();
 	auto bps = req.arguments.value("breakpoints", json::array());
 
 	// 기존 instruction breakpoint 제거 (전체 교체 방식)
 	for (auto it = breakpointMappings_.begin(); it != breakpointMappings_.end(); ) {
-		if (it->source.empty()) {
+		if (it->type == BpType::Instruction) {
 			RemoveBreakpointRequest rmReq;
 			rmReq.id = it->vehId;
 			pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
@@ -641,7 +748,7 @@ void DapServer::OnSetInstructionBreakpoints(const Request& req) {
 				std::string cond = bp.value("condition", "");
 				std::string hitCond = bp.value("hitCondition", "");
 				std::string logMsg = bp.value("logMessage", "");
-				breakpointMappings_.push_back({dbp.id, setResp->id, address, {}, cond, hitCond, 0, logMsg});
+				breakpointMappings_.push_back({dbp.id, setResp->id, address, {}, cond, hitCond, 0, logMsg, BpType::Instruction});
 				breakpointsJson.push_back(dbp.ToJson());
 			}
 		} else {
@@ -666,6 +773,13 @@ void DapServer::OnSetInstructionBreakpoints(const Request& req) {
 void DapServer::OnContinue(const Request& req) {
 	uint32_t threadId = req.arguments.value("threadId", 0);
 
+	// Continue 시 이전 스텝의 temp BP 정리
+	CleanupStaleTempBp();
+	{
+		std::lock_guard<std::mutex> stepLock(steppingMutex_);
+		steppingMode_ = SteppingMode::None;
+	}
+
 	// 실행 재개 시 프레임 매핑 초기화 (다음 stopped에서 새로 생성됨)
 	{
 		std::lock_guard<std::mutex> lock(frameMutex_);
@@ -673,8 +787,13 @@ void DapServer::OnContinue(const Request& req) {
 		nextFrameId_ = 1;
 	}
 
+	// Launch + stopOnEntry: 메인 스레드가 아직 OS-suspended 상태
+	// VEH Continue 전에 먼저 OS resume 해야 함
+	ResumeMainThread();
+
 	ContinueRequest contReq;
 	contReq.threadId = threadId;
+	DAP_TRACE("Continue", "threadId=" + std::to_string(threadId));
 	pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 
 	Response resp;
@@ -687,9 +806,154 @@ void DapServer::OnContinue(const Request& req) {
 
 void DapServer::OnNext(const Request& req) {
 	uint32_t threadId = req.arguments.value("threadId", 0);
-	StepRequest stepReq;
-	stepReq.threadId = threadId;
-	pipeClient_.SendCommand(IpcCommand::StepOver, &stepReq, sizeof(stepReq));
+	std::string granularity = req.arguments.value("granularity", "statement");
+	ResumeMainThread();
+
+	LOG_INFO("OnNext: threadId=%u granularity=%s", threadId, granularity.c_str());
+
+	{
+		std::lock_guard<std::mutex> stepLock(steppingMutex_);
+		steppingMode_ = SteppingMode::Over;
+		steppingThreadId_ = threadId;
+		steppingInstruction_ = (granularity == "instruction");
+		steppingStartAddr_ = 0;
+		steppingNextLineAddr_ = 0;
+		steppingSourceLine_ = 0;
+		steppingSourceFile_.clear();
+	}
+
+	CleanupStaleTempBp();
+
+	// === PDB 경로: 다음 소스 라인 주소에 temp BP → Continue (O(1)) ===
+	if (!steppingInstruction_ && symbolEngineReady_) {
+		// 현재 RIP 획득 (IPC GetStackTrace)
+		uint64_t currentIP = 0;
+		{
+			GetStackTraceRequest stReq;
+			stReq.threadId = threadId;
+			stReq.startFrame = 0;
+			stReq.maxFrames = 1;
+			std::vector<uint8_t> stResp;
+			if (pipeClient_.SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), stResp)
+				&& stResp.size() >= sizeof(GetStackTraceResponse) + sizeof(StackFrameInfo)) {
+				auto* hdr = reinterpret_cast<const GetStackTraceResponse*>(stResp.data());
+				if (hdr->status == IpcStatus::Ok && hdr->count > 0) {
+					auto* frame = reinterpret_cast<const StackFrameInfo*>(
+						stResp.data() + sizeof(GetStackTraceResponse));
+					currentIP = frame->address;
+				}
+			}
+		}
+
+		if (currentIP != 0) {
+			auto lineRange = symbolEngine_.GetCurrentLineRange(currentIP);
+			if (lineRange.success && lineRange.nextLineAddress != 0
+				&& lineRange.nextLineAddress != currentIP) {
+
+				// 조건분기 체크: [currentIP, nextLine) 범위에 Jcc가 있으면 폴백
+				// Jcc가 nextLine을 건너뛸 수 있으므로 temp BP가 미히트될 위험
+				bool hasJcc = false;
+				uint32_t rangeLen = (uint32_t)(lineRange.nextLineAddress - currentIP);
+				if (targetProcess_ && rangeLen > 0 && rangeLen <= 256) {
+					uint8_t codeBuf[256] = {};
+					SIZE_T bytesRead = 0;
+					if (ReadProcessMemory(targetProcess_, (LPCVOID)currentIP, codeBuf, rangeLen, &bytesRead)
+						&& bytesRead > 0) {
+						auto insns = disassembler_->Disassemble(codeBuf, (uint32_t)bytesRead, currentIP, 64);
+						for (const auto& insn : insns) {
+							if (insn.address >= lineRange.nextLineAddress) break;
+							const auto& mn = insn.mnemonic;
+							// Jcc: j로 시작 + jmp 제외 (무조건 점프는 안전하지 않지만 별도 처리)
+							if (!mn.empty() && (mn[0] == 'j' || mn[0] == 'J') && mn != "jmp" && mn != "JMP") {
+								LOG_INFO("OnNext PDB: Jcc '%s' at 0x%llX in range → fallback",
+									mn.c_str(), insn.address);
+								hasJcc = true;
+								break;
+							}
+						}
+					}
+				}
+
+				if (hasJcc) {
+					// 조건분기 있음 → PDB path 사용 불가, 폴백
+					LOG_INFO("OnNext: conditional branch detected, falling back to legacy step");
+				} else {
+				LOG_INFO("OnNext PDB: IP=0x%llX → next=%s:%u at 0x%llX",
+					currentIP, lineRange.sourceFile.c_str(), lineRange.line,
+					lineRange.nextLineAddress);
+
+				// temp BP 설정
+				SetBreakpointRequest bpReq;
+				bpReq.address = lineRange.nextLineAddress;
+				std::vector<uint8_t> bpResp;
+				if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq), bpResp)
+					&& bpResp.size() >= sizeof(SetBreakpointResponse)) {
+					auto* r = reinterpret_cast<const SetBreakpointResponse*>(bpResp.data());
+					if (r->status == IpcStatus::Ok) {
+						{
+							std::lock_guard<std::mutex> stepLock(steppingMutex_);
+							stepOverTempBpId_ = r->id;
+							stepOverTempBpAddr_ = lineRange.nextLineAddress;
+						}
+						LOG_INFO("OnNext PDB: temp BP id=%u at 0x%llX", r->id, lineRange.nextLineAddress);
+
+						// Continue → temp BP에서 멈춤 (single-step 0회)
+						ContinueRequest contReq;
+						contReq.threadId = threadId;
+						pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+						goto send_response;
+					}
+				}
+				} // else (no Jcc)
+			}
+		}
+		LOG_INFO("OnNext: PDB path failed, falling back to legacy step");
+	}
+
+	// === 폴백: 기존 로직 (IPC ResolveStepRange + single-step + auto-step) ===
+	if (!steppingInstruction_) {
+		ResolveStepRange(threadId);
+		std::string file;
+		uint32_t line = 0;
+		if (GetTopFrameSourceLine(threadId, file, line)) {
+			steppingSourceLine_ = line;
+			steppingSourceFile_ = file;
+		}
+	}
+
+	{
+		// CALL 명령어 판별 → 임시 BP로 건너뛰기 (instruction/statement 모두)
+		uint64_t nextInsnAddr = 0;
+		bool callSkipped = false;
+		if (IsCallInstruction(threadId, nextInsnAddr)) {
+			LOG_INFO("OnNext fallback: CALL detected, temp BP at 0x%llX", nextInsnAddr);
+			SetBreakpointRequest bpReq;
+			bpReq.address = nextInsnAddr;
+			std::vector<uint8_t> bpResp;
+			if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq), bpResp)
+				&& bpResp.size() >= sizeof(SetBreakpointResponse)) {
+				auto* r = reinterpret_cast<const SetBreakpointResponse*>(bpResp.data());
+				if (r->status == IpcStatus::Ok) {
+					{
+						std::lock_guard<std::mutex> stepLock(steppingMutex_);
+						stepOverTempBpId_ = r->id;
+						stepOverTempBpAddr_ = nextInsnAddr;
+					}
+					ContinueRequest contReq;
+					contReq.threadId = threadId;
+					pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+					callSkipped = true;
+				}
+			}
+		}
+		if (!callSkipped) {
+			StepRequest stepReq;
+			stepReq.threadId = threadId;
+			pipeClient_.SendCommand(IpcCommand::StepOver, &stepReq, sizeof(stepReq));
+		}
+	}
+
+send_response:
 
 	Response resp;
 	resp.request_seq = req.seq;
@@ -700,6 +964,22 @@ void DapServer::OnNext(const Request& req) {
 
 void DapServer::OnStepIn(const Request& req) {
 	uint32_t threadId = req.arguments.value("threadId", 0);
+	std::string granularity = req.arguments.value("granularity", "statement");
+	ResumeMainThread();
+
+	CleanupStaleTempBp();
+	{
+		std::lock_guard<std::mutex> stepLock(steppingMutex_);
+		steppingMode_ = SteppingMode::In;
+		steppingThreadId_ = threadId;
+		steppingInstruction_ = (granularity == "instruction");
+		steppingStartAddr_ = 0;
+		steppingNextLineAddr_ = 0;
+	}
+	if (!steppingInstruction_) {
+		ResolveStepRange(threadId);
+	}
+
 	StepRequest stepReq;
 	stepReq.threadId = threadId;
 	pipeClient_.SendCommand(IpcCommand::StepInto, &stepReq, sizeof(stepReq));
@@ -713,6 +993,18 @@ void DapServer::OnStepIn(const Request& req) {
 
 void DapServer::OnStepOut(const Request& req) {
 	uint32_t threadId = req.arguments.value("threadId", 0);
+	ResumeMainThread();
+
+	// StepOut은 라인 비교 불필요 — 함수 리턴까지 실행
+	CleanupStaleTempBp();
+	{
+		std::lock_guard<std::mutex> stepLock(steppingMutex_);
+		steppingMode_ = SteppingMode::Out;
+		steppingThreadId_ = threadId;
+		steppingStartAddr_ = 0;
+		steppingNextLineAddr_ = 0;
+	}
+
 	StepRequest stepReq;
 	stepReq.threadId = threadId;
 	pipeClient_.SendCommand(IpcCommand::StepOut, &stepReq, sizeof(stepReq));
@@ -819,15 +1111,36 @@ void DapServer::OnStackTrace(const Request& req) {
 				{
 					std::lock_guard<std::mutex> lock(frameMutex_);
 					fid = nextFrameId_++;
-					frameMap_[fid] = {threadId, (int)(startFrame + i)};
+					if (nextFrameId_ & SCOPE_MASK) nextFrameId_ = 1; // scope 비트 침범 방지
+					frameMap_[fid] = {threadId, (int)(startFrame + i), frames[i].address, frames[i].frameBase};
 				}
 
 				StackFrameDap f;
 				f.id = fid;
-				f.name = frames[i].functionName[0] ? frames[i].functionName :
-					FormatAddress(frames[i].address);
-				f.line = frames[i].line;
 				f.instructionPointerReference = FormatAddress(frames[i].address);
+
+				// 프레임 이름: module!func+0xOFFSET (0xADDR) — 오프셋 + 쌩 주소 둘 다 표시
+				{
+					std::string mod = frames[i].moduleName[0] ? frames[i].moduleName : "";
+					std::string func = frames[i].functionName[0] ? frames[i].functionName : "";
+					std::string addr = FormatAddress(frames[i].address);
+					uint64_t modOffset = (frames[i].moduleBase && frames[i].address >= frames[i].moduleBase)
+						? (frames[i].address - frames[i].moduleBase) : 0;
+					char offsetStr[32];
+					snprintf(offsetStr, sizeof(offsetStr), "+0x%llX", modOffset);
+
+					if (!func.empty() && !mod.empty()) {
+						f.name = mod + "!" + func + offsetStr + " (" + addr + ")";
+					} else if (!func.empty()) {
+						f.name = func + " (" + addr + ")";
+					} else if (!mod.empty()) {
+						f.name = mod + offsetStr + " (" + addr + ")";
+					} else {
+						f.name = addr;
+					}
+				}
+
+				f.line = frames[i].line;
 				if (frames[i].sourceFile[0]) {
 					f.source.path = frames[i].sourceFile;
 					std::string fullPath = frames[i].sourceFile;
@@ -836,6 +1149,15 @@ void DapServer::OnStackTrace(const Request& req) {
 				}
 				if (frames[i].moduleName[0]) {
 					f.moduleId = frames[i].moduleName;
+					// 소스 파일이 없으면 모듈+오프셋을 소스로 표시 (Unknown Source 방지)
+					if (!frames[i].sourceFile[0]) {
+						uint64_t offset = (frames[i].moduleBase && frames[i].address >= frames[i].moduleBase)
+							? (frames[i].address - frames[i].moduleBase) : frames[i].address;
+						char buf[64];
+						snprintf(buf, sizeof(buf), "%s+0x%llX", frames[i].moduleName, offset);
+						f.source.name = buf;
+						f.source.presentationHint = "deemphasize";
+					}
 				}
 				framesJson.push_back(f.ToJson());
 			}
@@ -857,21 +1179,24 @@ void DapServer::OnStackTrace(const Request& req) {
 				auto& r = regResp->regs;
 				uint64_t ip = r.rip;
 
-				int fid;
-				{
-					std::lock_guard<std::mutex> lock(frameMutex_);
-					fid = nextFrameId_++;
-					frameMap_[fid] = {threadId, 0};
+				if (ip != 0) {
+					int fid;
+					{
+						std::lock_guard<std::mutex> lock(frameMutex_);
+						fid = nextFrameId_++;
+						if (nextFrameId_ & SCOPE_MASK) nextFrameId_ = 1;
+						frameMap_[fid] = {threadId, 0, ip, r.rbp};
+					}
+
+					StackFrameDap f;
+					f.id = fid;
+					f.name = FormatAddress(ip);
+					f.line = 0;
+					f.instructionPointerReference = FormatAddress(ip);
+					framesJson.push_back(f.ToJson());
+
+					LOG_DEBUG("StackTrace fallback: thread %u, RIP=%s", threadId, FormatAddress(ip).c_str());
 				}
-
-				StackFrameDap f;
-				f.id = fid;
-				f.name = FormatAddress(ip);
-				f.line = 0;
-				f.instructionPointerReference = FormatAddress(ip);
-				framesJson.push_back(f.ToJson());
-
-				LOG_DEBUG("StackTrace fallback: thread %u, RIP=%s", threadId, FormatAddress(ip).c_str());
 			}
 		}
 	}
@@ -892,11 +1217,19 @@ void DapServer::OnScopes(const Request& req) {
 
 	json scopesJson = json::array();
 
+	// 로컬 변수 스코프 (Locals) — Registers보다 먼저 표시
+	Scope localScope;
+	localScope.name = "Locals";
+	localScope.variablesReference = SCOPE_LOCALS | frameId;
+	localScope.namedVariables = 0;  // 동적으로 결정됨
+	localScope.expensive = false;
+	scopesJson.push_back(localScope.ToJson());
+
 	// 레지스터 스코프
 	Scope regScope;
 	regScope.name = "Registers";
 	regScope.variablesReference = SCOPE_REGISTERS | frameId;
-	regScope.namedVariables = 26;  // 레지스터 대략 개수: GPR 16~18 + RFLAGS + DR0~DR7 (VSCode가 펼침 가능하다고 인식하게 함)
+	regScope.namedVariables = 26;  // GPR 16~18 + RFLAGS + DR0~DR7
 	regScope.expensive = false;
 	scopesJson.push_back(regScope.ToJson());
 
@@ -1000,6 +1333,177 @@ void DapServer::OnVariables(const Request& req) {
 			v.value = "Failed to read registers (thread " + std::to_string(threadId) + ")";
 			v.type = "string";
 			varsJson.push_back(v.ToJson());
+		}
+	} else if (scopeType == SCOPE_LOCALS) {
+		// 로컬 변수 열거 — EnumLocals IPC 호출
+		uint64_t instrAddr = 0;
+		uint64_t fBase = 0;
+		{
+			std::lock_guard<std::mutex> lock(frameMutex_);
+			auto it = frameMap_.find(frameId);
+			if (it != frameMap_.end()) {
+				instrAddr = it->second.instructionAddress;
+				fBase = it->second.frameBase;
+			}
+		}
+
+		if (instrAddr == 0) {
+			Variable v;
+			v.name = "(no frame info)";
+			v.value = "Frame data not available";
+			v.type = "string";
+			varsJson.push_back(v.ToJson());
+		} else {
+			EnumLocalsRequest locReq;
+			locReq.threadId = threadId;
+			locReq.instructionAddress = instrAddr;
+			locReq.frameBase = fBase;
+
+			std::vector<uint8_t> locData;
+			if (pipeClient_.SendAndReceive(IpcCommand::EnumLocals, &locReq, sizeof(locReq), locData)
+				&& locData.size() >= sizeof(EnumLocalsResponse)) {
+				auto* locResp = reinterpret_cast<const EnumLocalsResponse*>(locData.data());
+				auto* locals = reinterpret_cast<const LocalVariableInfo*>(
+					locData.data() + sizeof(EnumLocalsResponse));
+				uint32_t maxCount = (uint32_t)((locData.size() - sizeof(EnumLocalsResponse)) / sizeof(LocalVariableInfo));
+				uint32_t count = std::min(locResp->count, maxCount);
+
+				for (uint32_t i = 0; i < count; i++) {
+					// IPC 고정 크기 char[] null 종단 강제 (손상된 데이터 방어)
+					char safeName[sizeof(LocalVariableInfo::name) + 1] = {};
+					memcpy(safeName, locals[i].name, sizeof(locals[i].name));
+					char safeType[sizeof(LocalVariableInfo::typeName) + 1] = {};
+					memcpy(safeType, locals[i].typeName, sizeof(locals[i].typeName));
+
+					Variable v;
+					v.name = safeName;
+					v.type = safeType[0] ? safeType : "unknown";
+
+					// Format value based on type name and size
+					if (locals[i].valueSize == 0) {
+						v.value = "(unreadable)";
+					} else {
+						std::string tn = v.type;
+						bool isPointer = (tn.size() > 0 && tn.back() == '*');
+						bool isFloat = (tn == "float");
+						bool isDouble = (tn == "double");
+						bool isBool = (tn == "bool");
+						bool isChar = (tn == "char");
+						char buf[64];
+
+						if (isPointer && locals[i].valueSize >= sizeof(void*)) {
+							// Pointer: show as hex address
+							uint64_t ptr;
+							memcpy(&ptr, locals[i].value, sizeof(ptr));
+							snprintf(buf, sizeof(buf), "0x%llX", ptr);
+
+							if (tn.find("char*") != std::string::npos && ptr != 0) {
+								// char*: read pointed-to string via ReadMemory IPC
+								ReadMemoryRequest rmReq;
+								rmReq.address = ptr;
+								rmReq.size = 128;
+								std::vector<uint8_t> rmData;
+								if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &rmReq, sizeof(rmReq), rmData)
+									&& rmData.size() > sizeof(IpcStatus)) {
+									auto* rmStatus = reinterpret_cast<const IpcStatus*>(rmData.data());
+									if (*rmStatus == IpcStatus::Ok) {
+										const char* strData = reinterpret_cast<const char*>(rmData.data() + sizeof(IpcStatus));
+										size_t strLen = rmData.size() - sizeof(IpcStatus);
+										// Find null terminator
+										size_t len = strnlen(strData, strLen);
+										if (len > 0) {
+											std::string preview(strData, std::min(len, (size_t)80));
+											v.value = std::string(buf) + " \"" + preview + "\"";
+										} else {
+											v.value = std::string(buf) + " \"\"";
+										}
+									} else {
+										v.value = buf;
+									}
+								} else {
+									v.value = buf;
+								}
+								v.memoryReference = buf;
+							} else {
+								v.value = buf;
+							}
+						} else if (isFloat && locals[i].valueSize >= 4) {
+							float val;
+							memcpy(&val, locals[i].value, 4);
+							snprintf(buf, sizeof(buf), "%.6g", val);
+							v.value = buf;
+						} else if (isDouble && locals[i].valueSize >= 8) {
+							double val;
+							memcpy(&val, locals[i].value, 8);
+							snprintf(buf, sizeof(buf), "%.10g", val);
+							v.value = buf;
+						} else if (isBool && locals[i].valueSize >= 1) {
+							v.value = locals[i].value[0] ? "true" : "false";
+						} else if (isChar && locals[i].size == 1) {
+							char ch = (char)locals[i].value[0];
+							if (ch >= 32 && ch < 127)
+								snprintf(buf, sizeof(buf), "'%c' (%d)", ch, (int)(uint8_t)ch);
+							else
+								snprintf(buf, sizeof(buf), "%d (0x%02X)", (int)(uint8_t)ch, (uint8_t)ch);
+							v.value = buf;
+						} else if (locals[i].size <= 1) {
+							snprintf(buf, sizeof(buf), "%u (0x%02X)", locals[i].value[0], locals[i].value[0]);
+							v.value = buf;
+						} else if (locals[i].size <= 4) {
+							uint32_t val = 0;
+							memcpy(&val, locals[i].value, std::min(locals[i].valueSize, (uint32_t)4));
+							int32_t sval;
+							memcpy(&sval, &val, 4);
+							snprintf(buf, sizeof(buf), "%d (0x%08X)", sval, val);
+							v.value = buf;
+						} else if (locals[i].size <= 8) {
+							uint64_t val = 0;
+							memcpy(&val, locals[i].value, std::min(locals[i].valueSize, (uint32_t)8));
+							int64_t sval;
+							memcpy(&sval, &val, 8);
+							snprintf(buf, sizeof(buf), "%lld (0x%llX)", sval, val);
+							v.value = buf;
+						} else {
+							// Large type: show hex bytes
+							std::string hex;
+							uint32_t showBytes = std::min(locals[i].valueSize, (uint32_t)16);
+							for (uint32_t b = 0; b < showBytes; b++) {
+								char byte[4];
+								snprintf(byte, sizeof(byte), "%02X ", locals[i].value[b]);
+								hex += byte;
+							}
+							if (locals[i].valueSize > 16) hex += "...";
+							v.value = hex;
+						}
+					}
+
+					// Show address as evaluateName for hover
+					char addrBuf[24];
+					snprintf(addrBuf, sizeof(addrBuf), "*0x%llX", locals[i].address);
+					v.evaluateName = addrBuf;
+
+					// Flags info: parameter vs local
+					if (locals[i].flags & 0x00000008) { // SYMFLAG_PARAMETER
+						v.name = "[param] " + v.name;
+					}
+
+					varsJson.push_back(v.ToJson());
+				}
+
+				if (count == 0) {
+					Variable v;
+					v.name = "(no locals)";
+					v.value = "No local variables found in this frame";
+					v.type = "string";
+					varsJson.push_back(v.ToJson());
+				}
+			} else {
+				Variable v;
+				v.name = "(error)";
+				v.value = "Failed to enumerate local variables";
+				v.type = "string";
+				varsJson.push_back(v.ToJson());
+			}
 		}
 	}
 
@@ -1437,10 +1941,30 @@ void DapServer::OnDisassemble(const Request& req) {
 	}
 	addr += offset;
 
-	// 충분한 바이트를 읽어서 디스어셈블
-	uint32_t readSize = instrCount * 15; // x86 최대 명령어 길이 15바이트
+	// [CRITICAL FIX] instructionOffset 처리
+	// VSCode 디스어셈블리 뷰는 instructionOffset:-200, instructionCount:400 으로 요청하여
+	// 현재 RIP 기준 앞뒤 명령어를 표시한다. instructionOffset을 무시하면
+	// 주소-라인 매핑이 완전히 어긋나서 F9 브포가 항상 RIP에 설정되는 버그 발생.
+	uint64_t startAddr = addr;
+	int totalNeeded = instrCount;
+	int skipCount = 0; // 앞쪽 여분에서 버릴 명령어 수
+
+	if (instrOffset < 0) {
+		// 뒤로 갈 바이트 수 추정 (평균 명령어 크기 ~4바이트 + 여유)
+		uint64_t backBytes = (uint64_t)((-instrOffset) * 5 + 64);
+		if (backBytes > addr) backBytes = addr; // underflow 방지
+		startAddr = addr - backBytes;
+		// 여분 포함해서 더 많이 디스어셈블 후 정확한 위치 찾기
+		totalNeeded = instrCount + (int)(-instrOffset) + 64;
+	} else if (instrOffset > 0) {
+		// 앞쪽 명령어 건너뛰기: 먼저 instrOffset만큼 디스어셈블 후 스킵
+		skipCount = (int)instrOffset;
+		totalNeeded = instrCount + skipCount;
+	}
+
+	uint32_t readSize = (uint32_t)totalNeeded * 15;
 	ReadMemoryRequest readReq;
-	readReq.address = addr;
+	readReq.address = startAddr;
 	readReq.size = readSize;
 
 	Response resp;
@@ -1448,22 +1972,71 @@ void DapServer::OnDisassemble(const Request& req) {
 	resp.command = "disassemble";
 
 	std::vector<uint8_t> memData;
-	if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), memData)) {
-		auto instructions = disassembler_->Disassemble(
-			memData.data(), (uint32_t)memData.size(), addr, instrCount);
+	if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), memData) &&
+		memData.size() >= sizeof(IpcStatus) &&
+		*reinterpret_cast<const IpcStatus*>(memData.data()) == IpcStatus::Ok) {
+		const uint8_t* code = memData.data() + sizeof(IpcStatus);
+		uint32_t codeLen = (uint32_t)(memData.size() - sizeof(IpcStatus));
+		auto allInstructions = disassembler_->Disassemble(code, codeLen, startAddr, totalNeeded);
+
+		// instrOffset < 0: addr(원래 memRef+offset) 위치를 찾아서 그 앞 |instrOffset|개부터 시작
+		size_t startIdx = 0;
+		if (instrOffset < 0) {
+			// addr와 같거나 넘는 첫 명령어 위치 찾기
+			size_t addrIdx = 0;
+			for (size_t i = 0; i < allInstructions.size(); i++) {
+				if (allInstructions[i].address >= addr) {
+					addrIdx = i;
+					break;
+				}
+			}
+			// addrIdx에서 |instrOffset|만큼 뒤로
+			int backCount = (int)(-instrOffset);
+			startIdx = (addrIdx >= (size_t)backCount) ? (addrIdx - backCount) : 0;
+		} else if (instrOffset > 0) {
+			startIdx = (size_t)skipCount;
+			if (startIdx >= allInstructions.size()) startIdx = allInstructions.size();
+		}
 
 		json instrsJson = json::array();
-		for (auto& insn : instructions) {
+		for (size_t i = startIdx; i < allInstructions.size() && (int)instrsJson.size() < instrCount; i++) {
 			DisassembledInstruction di;
-			di.address = FormatAddress(insn.address);
-			di.instructionBytes = insn.bytes;
-			di.instruction = insn.mnemonic;
+			di.address = FormatAddress(allInstructions[i].address);
+			di.instructionBytes = allInstructions[i].bytes;
+			di.instruction = allInstructions[i].mnemonic;
 			instrsJson.push_back(di.ToJson());
+		}
+
+		{
+			std::string traceMsg = "startAddr=" + FormatAddress(startAddr)
+				+ " addr=" + FormatAddress(addr)
+				+ " instrOffset=" + std::to_string(instrOffset)
+				+ " totalDisasm=" + std::to_string(allInstructions.size())
+				+ " startIdx=" + std::to_string(startIdx)
+				+ " returned=" + std::to_string(instrsJson.size());
+			// 처음 5개 주소 덤프
+			for (size_t di = 0; di < instrsJson.size() && di < 5; di++) {
+				traceMsg += "\n  [" + std::to_string(di) + "] " + instrsJson[di]["address"].get<std::string>()
+					+ " " + instrsJson[di]["instruction"].get<std::string>();
+			}
+			// RIP 근처 찾아서 덤프
+			for (size_t di = 0; di < instrsJson.size(); di++) {
+				if (instrsJson[di]["address"].get<std::string>() == FormatAddress(addr)) {
+					traceMsg += "\n  === RIP at index " + std::to_string(di) + " ===";
+					for (size_t k = (di > 2 ? di - 2 : 0); k < instrsJson.size() && k <= di + 2; k++) {
+						traceMsg += "\n  [" + std::to_string(k) + "] " + instrsJson[k]["address"].get<std::string>()
+							+ " " + instrsJson[k]["instruction"].get<std::string>();
+					}
+					break;
+				}
+			}
+			DAP_TRACE("disassemble", traceMsg);
 		}
 
 		resp.success = true;
 		resp.body = {{"instructions", instrsJson}};
 	} else {
+		DAP_TRACE("disassemble", "FAILED - ReadMemory error for 0x" + FormatAddress(startAddr));
 		resp.success = false;
 		resp.message = "Failed to read memory for disassembly";
 	}
@@ -1601,6 +2174,17 @@ void DapServer::OnRestart(const Request& req) {
 		});
 		pipeClient_.StartHeartbeat();
 
+		// targetProcess_ + symbolEngine_ 재초기화 (attach 모드)
+		if (targetProcess_) CloseHandle(targetProcess_);
+		targetProcess_ = OpenProcess(
+			PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION,
+			FALSE, targetPid_);
+		if (targetProcess_) {
+			symbolEngineReady_ = symbolEngine_.Initialize(targetProcess_);
+		} else {
+			symbolEngineReady_ = false;
+		}
+
 		resp.success = true;
 		SendResponse(resp);
 	} else {
@@ -1617,10 +2201,12 @@ void DapServer::OnRestart(const Request& req) {
 			}
 		}
 
-		// 재시작
+		// 재시작 — 원래 launch 시의 args/cwd를 사용
 		std::string dllPath = GetDllPath();
-		std::string argStr;
-		targetPid_ = Injector::LaunchAndInject(programPath_, argStr, "", dllPath, stopOnEntry_, injectionMethod_);
+		auto relaunch = Injector::LaunchAndInject(programPath_, launchArgStr_, launchCwd_, dllPath, injectionMethod_);
+		targetPid_ = relaunch.pid;
+		launchedMainThreadId_ = relaunch.mainThreadId;
+		mainThreadResumed_ = false;
 
 		if (targetPid_ == 0) {
 			resp.success = false;
@@ -1641,9 +2227,20 @@ void DapServer::OnRestart(const Request& req) {
 		});
 		pipeClient_.StartHeartbeat();
 
+		// targetProcess_ + symbolEngine_ 재초기화
+		targetProcess_ = OpenProcess(
+			PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION,
+			FALSE, targetPid_);
+		if (targetProcess_) {
+			symbolEngineReady_ = symbolEngine_.Initialize(targetProcess_);
+		} else {
+			symbolEngineReady_ = false;
+			LOG_WARN("OnRestart: OpenProcess failed for pid %u: %u", targetPid_, GetLastError());
+		}
+
 		resp.success = true;
 		SendResponse(resp);
-		SendEvent("initialized");
+		// DAP 스펙: initialized는 initialize 응답에서만 1회 전송, restart에서 재전송하면 안 됨
 	}
 }
 
@@ -1790,52 +2387,121 @@ void DapServer::OnCompletions(const Request& req) {
 void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t size) {
 	auto event = static_cast<IpcEvent>(eventId);
 
+	DAP_TRACE("IpcEvent", "eventId=" + std::to_string(eventId) + " size=" + std::to_string(size));
+
 	switch (event) {
 	case IpcEvent::BreakpointHit: {
 		if (size >= sizeof(BreakpointHitEvent)) {
 			auto* e = reinterpret_cast<const BreakpointHitEvent*>(payload);
+			DAP_TRACE("BreakpointHit", "bpId=" + std::to_string(e->breakpointId) + " addr=" + FormatAddress(e->address) + " thread=" + std::to_string(e->threadId));
 			lastStoppedThreadId_.store(e->threadId);
 
-			// 매칭된 BP 검색 + 조건 평가
-			std::lock_guard<std::mutex> bpLock(breakpointMutex_);
-			json hitBps = json::array();
-			bool shouldStop = true;
-			for (auto& m : breakpointMappings_) {
-				if (m.vehId == e->breakpointId) {
-					hitBps.push_back(m.dapId);
-
-					// hitCondition 평가 (히트 카운터)
-					if (!m.hitCondition.empty()) {
-						m.hitCount++;
-						try {
-							uint32_t target = std::stoul(m.hitCondition, nullptr, 0);
-							if (m.hitCount < target) {
-								shouldStop = false;
-							}
-						} catch (...) {
-							// 파싱 실패시 무시, 항상 중단
+			// StepOver 임시 BP 히트 처리 (ID 또는 주소 매칭)
+			bool isTempBp = false;
+			{
+				std::lock_guard<std::mutex> stepLock(steppingMutex_);
+				if (stepOverTempBpId_ != 0 && e->breakpointId == stepOverTempBpId_) {
+					isTempBp = true;
+				} else if (stepOverTempBpAddr_ != 0 && e->address == stepOverTempBpAddr_) {
+					isTempBp = true;
+				}
+			}
+			if (isTempBp) {
+				LOG_INFO("Temp BP hit (stepOver call skip): id=%u addr=0x%llX", e->breakpointId, e->address);
+				// 임시 BP 제거 — 단, 사용자 BP와 같은 주소면 제거하지 않음
+				bool isUserBp = false;
+				{
+					std::lock_guard<std::mutex> bpLock(breakpointMutex_);
+					for (const auto& m : breakpointMappings_) {
+						if (m.vehId == e->breakpointId) {
+							isUserBp = true;
+							break;
 						}
 					}
+				}
+				if (!isUserBp) {
+					RemoveBreakpointRequest rmReq;
+					rmReq.id = e->breakpointId;
+					pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
+				}
+				bool sameLine = false;
+				{
+					std::lock_guard<std::mutex> stepLock(steppingMutex_);
+					stepOverTempBpId_ = 0;
+					stepOverTempBpAddr_ = 0;
 
-					// condition 평가 (레지스터/메모리 조건식)
-					if (shouldStop && !m.condition.empty()) {
-						shouldStop = EvaluateCondition(m.condition, e->threadId);
+					// 소스 라인 스텝 중이면 라인 변경 확인 (instruction 모드는 스킵)
+					if (steppingMode_ == SteppingMode::Over && !steppingInstruction_
+						&& steppingSourceLine_ != 0
+						&& steppingStartAddr_ != 0 && steppingNextLineAddr_ != 0
+						&& e->address >= steppingStartAddr_ && e->address < steppingNextLineAddr_) {
+						sameLine = true;
 					}
-
-					// Log Point: condition 통과 시에만 메시지 출력 후 Continue (중단하지 않음)
-					if (shouldStop && !m.logMessage.empty()) {
-						std::string expanded = ExpandLogMessage(m.logMessage, e->threadId);
-						SendEvent("output", {
-							{"category", "console"},
-							{"output", expanded + "\n"},
-						});
-						shouldStop = false;
-					}
+				}
+				if (sameLine) {
+					// 같은 라인 → 계속 스텝
+					LOG_DEBUG("Temp BP: still same line, auto-stepping");
+					StepRequest stepReq;
+					stepReq.threadId = e->threadId;
+					pipeClient_.SendCommand(IpcCommand::StepOver, &stepReq, sizeof(stepReq));
 					break;
 				}
+
+				// 라인 변경됨 → stopped(step) 이벤트
+				{
+					std::lock_guard<std::mutex> stepLock(steppingMutex_);
+					steppingMode_ = SteppingMode::None;
+				}
+				SendEvent("stopped", {
+					{"reason", "step"},
+					{"threadId", (int)e->threadId},
+					{"allThreadsStopped", true},
+				});
+				break;
+			}
+
+			// 매칭된 BP 검색 — mutex 안에서 정보 복사만, IPC 호출은 밖에서 (데드락 방지)
+			json hitBps = json::array();
+			bool shouldStop = true;
+			std::string bpCondition, bpLogMessage;
+			{
+				std::lock_guard<std::mutex> bpLock(breakpointMutex_);
+				for (auto& m : breakpointMappings_) {
+					if (m.vehId == e->breakpointId) {
+						hitBps.push_back(m.dapId);
+						if (!m.hitCondition.empty()) {
+							m.hitCount++;
+							try {
+								uint32_t target = std::stoul(m.hitCondition, nullptr, 0);
+								if (m.hitCount < target) shouldStop = false;
+							} catch (...) {}
+						}
+						bpCondition = m.condition;
+						bpLogMessage = m.logMessage;
+						break;
+					}
+				}
+			}
+			// mutex 해제 후 — 이벤트 내장 레지스터 사용 (Reader 스레드에서 SendAndReceive 데드락 방지)
+			if (shouldStop && !bpCondition.empty()) {
+				shouldStop = EvaluateCondition(bpCondition, e->threadId, &e->regs);
+			}
+			if (shouldStop && !bpLogMessage.empty()) {
+				std::string expanded = ExpandLogMessage(bpLogMessage, e->threadId, &e->regs);
+				SendEvent("output", {
+					{"category", "console"},
+					{"output", expanded + "\n"},
+				});
+				shouldStop = false;
 			}
 
 			if (shouldStop) {
+				// 스텝 중 BP 히트 → 스텝 종료 + 좀비 temp BP 정리
+				CleanupStaleTempBp();
+				{
+					std::lock_guard<std::mutex> stepLock(steppingMutex_);
+					steppingMode_ = SteppingMode::None;
+				}
 				SendEvent("stopped", {
 					{"reason", "breakpoint"},
 					{"threadId", (int)e->threadId},
@@ -1855,12 +2521,123 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 	case IpcEvent::StepCompleted: {
 		if (size >= sizeof(StepCompletedEvent)) {
 			auto* e = reinterpret_cast<const StepCompletedEvent*>(payload);
+
+			// 스텝핑 상태 안전하게 복사 (steppingMutex_ 보호)
+			SteppingMode curMode;
+			uint32_t curThreadId;
+			bool curInstruction;
+			uint64_t curStartAddr, curNextLineAddr;
+			{
+				std::lock_guard<std::mutex> stepLock(steppingMutex_);
+				curMode = steppingMode_;
+				curThreadId = steppingThreadId_;
+				curInstruction = steppingInstruction_;
+				curStartAddr = steppingStartAddr_;
+				curNextLineAddr = steppingNextLineAddr_;
+			}
+			LOG_INFO("StepCompleted: threadId=%u addr=0x%llX mode=%d", e->threadId, e->address, (int)curMode);
+
+			// 소스 라인 스텝 중이면 CALL 스킵 + 라인이 바뀔 때까지 자동 반복
+			// instruction 모드면 auto-step 안 함 → 바로 stopped
+			if (curMode == SteppingMode::Over && !curInstruction
+				&& e->threadId == curThreadId) {
+				// 주소 범위로 판별: steppingStartAddr_ <= addr < steppingNextLineAddr_이면 같은 라인
+				bool sameLine = false;
+				if (curStartAddr != 0 && curNextLineAddr != 0) {
+					sameLine = (e->address >= curStartAddr && e->address < curNextLineAddr);
+				}
+
+				// 범위 resolve 실패 시에도 CALL 감지하여 스킵 (함수 안으로 빠지는 것 방지)
+				if (!sameLine && targetProcess_) {
+					uint8_t codeBuf[16] = {};
+					SIZE_T bytesRead = 0;
+					if (ReadProcessMemory(targetProcess_, (LPCVOID)e->address, codeBuf, 16, &bytesRead)
+						&& bytesRead >= 2) {
+						auto insns = disassembler_->Disassemble(codeBuf, (uint32_t)bytesRead, e->address, 1);
+						if (!insns.empty()) {
+							const auto& mn = insns[0].mnemonic;
+							if (mn.size() >= 4 && (mn[0]=='c'||mn[0]=='C') && (mn[1]=='a'||mn[1]=='A')
+								&& (mn[2]=='l'||mn[2]=='L') && (mn[3]=='l'||mn[3]=='L')) {
+								uint64_t retAddr = e->address + insns[0].length;
+								LOG_INFO("StepOver fallback: CALL at 0x%llX, temp BP at 0x%llX", e->address, retAddr);
+								SetBreakpointRequest bpReq;
+								bpReq.address = retAddr;
+								pipeClient_.SendCommand(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq));
+								{
+									std::lock_guard<std::mutex> stepLock(steppingMutex_);
+									stepOverTempBpAddr_ = retAddr;
+								}
+								ContinueRequest contReq;
+								contReq.threadId = e->threadId;
+								pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+								break;
+							}
+						}
+					}
+				}
+
+				if (sameLine) {
+					LOG_DEBUG("StepCompleted: still in same line (0x%llX in [0x%llX, 0x%llX)), auto-stepping",
+						e->address, curStartAddr, curNextLineAddr);
+
+					// CALL 명령어 감지: ReadProcessMemory (직접 Win32, IPC 불필요)
+					bool isCall = false;
+					uint64_t callRetAddr = 0;
+					if (targetProcess_) {
+						uint8_t codeBuf[16] = {};
+						SIZE_T bytesRead = 0;
+						if (ReadProcessMemory(targetProcess_, (LPCVOID)e->address, codeBuf, 16, &bytesRead)
+							&& bytesRead >= 2) {
+							auto insns = disassembler_->Disassemble(codeBuf, (uint32_t)bytesRead, e->address, 1);
+							if (!insns.empty()) {
+								const auto& mn = insns[0].mnemonic;
+								if (mn.size() >= 4 && (mn[0]=='c'||mn[0]=='C') && (mn[1]=='a'||mn[1]=='A')
+									&& (mn[2]=='l'||mn[2]=='L') && (mn[3]=='l'||mn[3]=='L')) {
+									isCall = true;
+									callRetAddr = e->address + insns[0].length;
+								}
+							}
+						}
+					}
+
+					if (isCall) {
+						LOG_INFO("Auto-step: CALL at 0x%llX, temp BP at 0x%llX", e->address, callRetAddr);
+						// 임시 BP 설정 (fire-and-forget) + Continue
+						SetBreakpointRequest bpReq;
+						bpReq.address = callRetAddr;
+						pipeClient_.SendCommand(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq));
+						{
+							std::lock_guard<std::mutex> stepLock(steppingMutex_);
+							stepOverTempBpAddr_ = callRetAddr;
+						}
+
+						ContinueRequest contReq;
+						contReq.threadId = e->threadId;
+						pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+					} else {
+						StepRequest stepReq;
+						stepReq.threadId = e->threadId;
+						pipeClient_.SendCommand(IpcCommand::StepOver, &stepReq, sizeof(stepReq));
+					}
+					break; // DAP stopped 이벤트 보내지 않음
+				}
+
+				LOG_INFO("StepCompleted: line changed (addr=0x%llX outside [0x%llX, 0x%llX))",
+					e->address, curStartAddr, curNextLineAddr);
+			}
+
+			{
+				std::lock_guard<std::mutex> stepLock(steppingMutex_);
+				steppingMode_ = SteppingMode::None;
+			}
 			lastStoppedThreadId_.store(e->threadId);
 			SendEvent("stopped", {
 				{"reason", "step"},
 				{"threadId", (int)e->threadId},
 				{"allThreadsStopped", true},
 			});
+		} else {
+			LOG_ERROR("StepCompleted: payload too small (%u < %zu)", size, sizeof(StepCompletedEvent));
 		}
 		break;
 	}
@@ -1924,6 +2701,14 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				{"reason", "new"},
 				{"module", m.ToJson()},
 			});
+
+			// PDB 심볼 엔진에 모듈 로드
+			if (symbolEngineReady_) {
+				char safePath[sizeof(e->module.path)];
+				memcpy(safePath, e->module.path, sizeof(e->module.path));
+				safePath[sizeof(e->module.path) - 1] = '\0';
+				symbolEngine_.LoadModule(safePath, e->module.baseAddress, e->module.size);
+			}
 		}
 		break;
 	}
@@ -1935,6 +2720,11 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				{"reason", "removed"},
 				{"module", {{"id", std::to_string(e->module.baseAddress)}}},
 			});
+
+			// PDB 심볼 엔진에서 모듈 언로드
+			if (symbolEngineReady_) {
+				symbolEngine_.UnloadModule(e->module.baseAddress);
+			}
 		}
 		break;
 	}
@@ -2029,7 +2819,7 @@ uint64_t DapServer::ResolveRegisterByName(const std::string& name, const Registe
 	return 0;
 }
 
-bool DapServer::EvaluateCondition(const std::string& condition, uint32_t threadId) {
+bool DapServer::EvaluateCondition(const std::string& condition, uint32_t threadId, const RegisterSet* cachedRegs) {
 	// 조건 문법: REG==VAL, REG!=VAL, REG>VAL, REG<VAL, REG>=VAL, REG<=VAL
 	// 또는 *ADDR==VAL (메모리 비교)
 	// 파싱 실패 시 true 반환 (항상 중단)
@@ -2069,31 +2859,29 @@ bool DapServer::EvaluateCondition(const std::string& condition, uint32_t threadI
 	// LHS 값 해석
 	uint64_t lhsVal = 0;
 	if (lhs[0] == '*' || lhs[0] == '[') {
-		// 메모리 읽기
+		// 메모리 읽기 — ReadProcessMemory 직접 사용 (Reader 스레드 데드락 방지)
 		std::string addrStr = lhs.substr(1);
 		if (!addrStr.empty() && addrStr.back() == ']') addrStr.pop_back();
 		try {
 			uint64_t addr = std::stoull(addrStr, nullptr, 0);
-			ReadMemoryRequest readReq;
-			readReq.address = addr;
-			readReq.size = 8;
-			std::vector<uint8_t> respData;
-			if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)) {
-				if (respData.size() >= sizeof(IpcStatus) + 8 &&
-					*reinterpret_cast<const IpcStatus*>(respData.data()) == IpcStatus::Ok) {
-					lhsVal = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
-				}
+			if (targetProcess_) {
+				SIZE_T bytesRead = 0;
+				ReadProcessMemory(targetProcess_, (LPCVOID)addr, &lhsVal, 8, &bytesRead);
 			}
 		} catch (...) { return true; }
 	} else if (TryParseRegisterName(lhs)) {
-		// 레지스터
-		GetRegistersRequest regReq;
-		regReq.threadId = threadId;
-		std::vector<uint8_t> respData;
-		if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
-			if (respData.size() >= sizeof(GetRegistersResponse)) {
-				auto* regResp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
-				lhsVal = ResolveRegisterByName(lhs, regResp->regs);
+		// 레지스터 — cachedRegs 우선 사용 (Reader 스레드에서 SendAndReceive 데드락 방지)
+		if (cachedRegs) {
+			lhsVal = ResolveRegisterByName(lhs, *cachedRegs);
+		} else {
+			GetRegistersRequest regReq;
+			regReq.threadId = threadId;
+			std::vector<uint8_t> respData;
+			if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
+				if (respData.size() >= sizeof(GetRegistersResponse)) {
+					auto* regResp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
+					lhsVal = ResolveRegisterByName(lhs, regResp->regs);
+				}
 			}
 		}
 	} else {
@@ -2103,13 +2891,17 @@ bool DapServer::EvaluateCondition(const std::string& condition, uint32_t threadI
 	// RHS 값 해석
 	uint64_t rhsVal = 0;
 	if (TryParseRegisterName(rhs)) {
-		GetRegistersRequest regReq;
-		regReq.threadId = threadId;
-		std::vector<uint8_t> respData;
-		if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
-			if (respData.size() >= sizeof(GetRegistersResponse)) {
-				auto* regResp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
-				rhsVal = ResolveRegisterByName(rhs, regResp->regs);
+		if (cachedRegs) {
+			rhsVal = ResolveRegisterByName(rhs, *cachedRegs);
+		} else {
+			GetRegistersRequest regReq;
+			regReq.threadId = threadId;
+			std::vector<uint8_t> respData;
+			if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
+				if (respData.size() >= sizeof(GetRegistersResponse)) {
+					auto* regResp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
+					rhsVal = ResolveRegisterByName(rhs, regResp->regs);
+				}
 			}
 		}
 	} else {
@@ -2126,15 +2918,15 @@ bool DapServer::EvaluateCondition(const std::string& condition, uint32_t threadI
 	return true;
 }
 
-std::string DapServer::ExpandLogMessage(const std::string& msg, uint32_t threadId) {
+std::string DapServer::ExpandLogMessage(const std::string& msg, uint32_t threadId, const RegisterSet* cachedRegs) {
 	// {표현식}을 실제 값으로 치환
 	// 예: "RAX={RAX}, mem={*0x7FF600}" → "RAX=0x0000000000001234, mem=0x00000000DEADBEEF"
 	std::string result;
 	result.reserve(msg.size());
 
-	// 레지스터 캐시 (한 번만 IPC 호출)
-	bool regsLoaded = false;
-	RegisterSet regs = {};
+	// 레지스터 캐시 — cachedRegs 우선 사용 (Reader 스레드 데드락 방지)
+	bool regsLoaded = (cachedRegs != nullptr);
+	RegisterSet regs = cachedRegs ? *cachedRegs : RegisterSet{};
 	auto ensureRegs = [&]() {
 		if (!regsLoaded) {
 			GetRegistersRequest regReq;
@@ -2174,19 +2966,14 @@ std::string DapServer::ExpandLogMessage(const std::string& msg, uint32_t threadI
 					snprintf(buf, sizeof(buf), "0x%016llX", val);
 				result += buf;
 			} else if (!expr.empty() && (expr[0] == '*' || expr[0] == '[')) {
-				// 메모리 읽기
+				// 메모리 읽기 — ReadProcessMemory 직접 사용 (Reader 스레드 데드락 방지)
 				std::string addrStr = expr.substr(1);
 				if (!addrStr.empty() && addrStr.back() == ']') addrStr.pop_back();
 				try {
 					uint64_t addr = std::stoull(addrStr, nullptr, 0);
-					ReadMemoryRequest readReq;
-					readReq.address = addr;
-					readReq.size = 8;
-					std::vector<uint8_t> respData;
-					if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData) &&
-						respData.size() >= sizeof(IpcStatus) + 8 &&
-						*reinterpret_cast<const IpcStatus*>(respData.data()) == IpcStatus::Ok) {
-						uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
+					uint64_t val = 0;
+					SIZE_T bytesRead = 0;
+					if (targetProcess_ && ReadProcessMemory(targetProcess_, (LPCVOID)addr, &val, 8, &bytesRead) && bytesRead >= 8) {
 						snprintf(buf, sizeof(buf), "0x%016llX", val);
 						result += buf;
 					} else {
@@ -2209,7 +2996,202 @@ std::string DapServer::ExpandLogMessage(const std::string& msg, uint32_t threadI
 	return result;
 }
 
+bool DapServer::IsCallInstruction(uint32_t threadId, uint64_t& nextInsnAddr) {
+	if (!targetProcess_) return false;
+
+	// 현재 RIP 가져오기 (GetStackTrace IPC)
+	GetStackTraceRequest stReq;
+	stReq.threadId = threadId;
+	stReq.startFrame = 0;
+	stReq.maxFrames = 1;
+
+	std::vector<uint8_t> stResp;
+	if (!pipeClient_.SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), stResp))
+		return false;
+	if (stResp.size() < sizeof(GetStackTraceResponse) + sizeof(StackFrameInfo))
+		return false;
+	auto* hdr = reinterpret_cast<const GetStackTraceResponse*>(stResp.data());
+	if (hdr->status != IpcStatus::Ok || hdr->count == 0)
+		return false;
+	auto* frame = reinterpret_cast<const StackFrameInfo*>(stResp.data() + sizeof(GetStackTraceResponse));
+	uint64_t rip = frame->address;
+
+	// ReadProcessMemory 직접 호출 (IPC 우회 — BP에 의한 0xCC 패치 영향 없음)
+	uint8_t codeBuf[16] = {};
+	SIZE_T bytesRead = 0;
+	if (!ReadProcessMemory(targetProcess_, (LPCVOID)rip, codeBuf, 16, &bytesRead) || bytesRead < 1) {
+		LOG_WARN("IsCallInstruction: ReadProcessMemory at 0x%llX failed: %u", rip, GetLastError());
+		return false;
+	}
+
+	auto insns = disassembler_->Disassemble(codeBuf, (uint32_t)bytesRead, rip, 1);
+	if (insns.empty()) {
+		LOG_WARN("IsCallInstruction: disassemble failed at 0x%llX", rip);
+		return false;
+	}
+
+	const auto& insn = insns[0];
+	LOG_DEBUG("IsCallInstruction: RIP=0x%llX insn='%s' len=%u", rip, insn.mnemonic.c_str(), insn.length);
+
+	// mnemonic이 "call"로 시작하는지 확인
+	if (insn.mnemonic.size() >= 4
+		&& (insn.mnemonic[0] == 'c' || insn.mnemonic[0] == 'C')
+		&& (insn.mnemonic[1] == 'a' || insn.mnemonic[1] == 'A')
+		&& (insn.mnemonic[2] == 'l' || insn.mnemonic[2] == 'L')
+		&& (insn.mnemonic[3] == 'l' || insn.mnemonic[3] == 'L')) {
+		nextInsnAddr = rip + insn.length;
+		return true;
+	}
+	return false;
+}
+
+void DapServer::CleanupStaleTempBp() {
+	// 사용자 BP와 같은 ID이면 제거하지 않음 (BP 충돌 방지)
+	auto isUserBpId = [&](uint32_t vehId) -> bool {
+		std::lock_guard<std::mutex> bpLock(breakpointMutex_);
+		for (const auto& m : breakpointMappings_) {
+			if (m.vehId == vehId) return true;
+		}
+		return false;
+	};
+	auto isUserBpAddr = [&](uint64_t addr) -> bool {
+		std::lock_guard<std::mutex> bpLock(breakpointMutex_);
+		for (const auto& m : breakpointMappings_) {
+			if (m.address == addr) return true;
+		}
+		return false;
+	};
+
+	uint32_t tempId;
+	uint64_t tempAddr;
+	{
+		std::lock_guard<std::mutex> stepLock(steppingMutex_);
+		tempId = stepOverTempBpId_;
+		tempAddr = stepOverTempBpAddr_;
+	}
+
+	if (tempId != 0) {
+		if (!isUserBpId(tempId)) {
+			LOG_INFO("CleanupStaleTempBp: removing id=%u", tempId);
+			RemoveBreakpointRequest rmReq;
+			rmReq.id = tempId;
+			pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
+		} else {
+			LOG_INFO("CleanupStaleTempBp: id=%u is user BP, skipping removal", tempId);
+		}
+	} else if (tempAddr != 0) {
+		if (!isUserBpAddr(tempAddr)) {
+			LOG_INFO("CleanupStaleTempBp: removing by addr=0x%llX", tempAddr);
+			RemoveBreakpointByAddrRequest rmReq;
+			rmReq.address = tempAddr;
+			pipeClient_.SendCommand(IpcCommand::RemoveBreakpointByAddr, &rmReq, sizeof(rmReq));
+		} else {
+			LOG_INFO("CleanupStaleTempBp: addr=0x%llX is user BP, skipping removal", tempAddr);
+		}
+	}
+	{
+		std::lock_guard<std::mutex> stepLock(steppingMutex_);
+		stepOverTempBpId_ = 0;
+		stepOverTempBpAddr_ = 0;
+	}
+}
+
+bool DapServer::GetTopFrameSourceLine(uint32_t threadId, std::string& file, uint32_t& line) {
+	GetStackTraceRequest stReq;
+	stReq.threadId = threadId;
+	stReq.startFrame = 0;
+	stReq.maxFrames = 1;
+
+	std::vector<uint8_t> stResp;
+	if (!pipeClient_.SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), stResp))
+		return false;
+
+	if (stResp.size() < sizeof(GetStackTraceResponse))
+		return false;
+
+	auto* hdr = reinterpret_cast<const GetStackTraceResponse*>(stResp.data());
+	if (hdr->status != IpcStatus::Ok || hdr->count == 0)
+		return false;
+
+	size_t frameOffset = sizeof(GetStackTraceResponse);
+	if (stResp.size() < frameOffset + sizeof(StackFrameInfo))
+		return false;
+
+	auto* frame = reinterpret_cast<const StackFrameInfo*>(stResp.data() + frameOffset);
+	if (frame->line == 0 || frame->sourceFile[0] == '\0')
+		return false;
+
+	char safeBuf[sizeof(frame->sourceFile)];
+	memcpy(safeBuf, frame->sourceFile, sizeof(frame->sourceFile));
+	safeBuf[sizeof(frame->sourceFile) - 1] = '\0';
+	file = safeBuf;
+	line = frame->line;
+	return true;
+}
+
+void DapServer::ResolveStepRange(uint32_t threadId) {
+	std::string file;
+	uint32_t line = 0;
+	if (!GetTopFrameSourceLine(threadId, file, line))
+		return;
+
+	// 현재 라인의 주소 = steppingStartAddr_
+	ResolveSourceLineRequest resolveReq = {};
+	strncpy_s(resolveReq.fileName, file.c_str(), sizeof(resolveReq.fileName) - 1);
+	resolveReq.line = line;
+
+	std::vector<uint8_t> respData;
+	if (pipeClient_.SendAndReceive(IpcCommand::ResolveSourceLine, &resolveReq, sizeof(resolveReq), respData)
+		&& respData.size() >= sizeof(ResolveSourceLineResponse)) {
+		auto* r = reinterpret_cast<const ResolveSourceLineResponse*>(respData.data());
+		if (r->status == IpcStatus::Ok) {
+			std::lock_guard<std::mutex> stepLock(steppingMutex_);
+			steppingStartAddr_ = r->address;
+		}
+	}
+
+	// 다음 라인의 주소 = steppingNextLineAddr_
+	resolveReq.line = line + 1;
+	if (pipeClient_.SendAndReceive(IpcCommand::ResolveSourceLine, &resolveReq, sizeof(resolveReq), respData)
+		&& respData.size() >= sizeof(ResolveSourceLineResponse)) {
+		auto* r = reinterpret_cast<const ResolveSourceLineResponse*>(respData.data());
+		if (r->status == IpcStatus::Ok) {
+			std::lock_guard<std::mutex> stepLock(steppingMutex_);
+			steppingNextLineAddr_ = r->address;
+		}
+	}
+
+	uint64_t snapStart, snapNext;
+	{
+		std::lock_guard<std::mutex> stepLock(steppingMutex_);
+		snapStart = steppingStartAddr_;
+		snapNext = steppingNextLineAddr_;
+	}
+	DAP_TRACE("ResolveStepRange", file + ":" + std::to_string(line)
+		+ " start=" + FormatAddress(snapStart)
+		+ " nextLine=" + FormatAddress(snapNext));
+}
+
+void DapServer::ResumeMainThread() {
+	if (mainThreadResumed_ || launchedMainThreadId_ == 0) return;
+
+	HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, launchedMainThreadId_);
+	if (hThread) {
+		DWORD prevCount = ResumeThread(hThread);
+		CloseHandle(hThread);
+		mainThreadResumed_ = true;
+		LOG_INFO("Resumed main thread %u (prev suspend count: %u)",
+			launchedMainThreadId_, prevCount);
+	} else {
+		LOG_ERROR("Failed to open main thread %u for resume: %u",
+			launchedMainThreadId_, GetLastError());
+	}
+}
+
 void DapServer::Cleanup(bool detachOnly) {
+	// 메인 스레드가 아직 suspended이면 resume (안 하면 프로세스가 좀비로 남음)
+	ResumeMainThread();
+
 	if (pipeClient_.IsConnected()) {
 		// detachOnly=true: Detach 명령 → DLL 파이프 서버는 유지 (재연결 가능)
 		// detachOnly=false: Shutdown 명령 → DLL 파이프 서버도 종료
@@ -2229,6 +3211,17 @@ void DapServer::Cleanup(bool detachOnly) {
 		std::lock_guard<std::mutex> lock(frameMutex_);
 		frameMap_.clear();
 		nextFrameId_ = 1;
+	}
+
+	// SymbolEngine 정리 (targetProcess_ close 전에 — SymCleanup이 핸들 사용)
+	if (symbolEngineReady_) {
+		symbolEngine_.Cleanup();
+		symbolEngineReady_ = false;
+	}
+
+	if (targetProcess_) {
+		CloseHandle(targetProcess_);
+		targetProcess_ = nullptr;
 	}
 }
 

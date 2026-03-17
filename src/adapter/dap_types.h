@@ -58,11 +58,13 @@ inline json MakeCapabilities() {
 		{"supportsDataBreakpoints", true},
 		{"supportsCancelRequest", true},
 		{"supportsTerminateThreadsRequest", true},
+		{"supportsSteppingGranularity", true},
 		{"supportsInstructionBreakpoints", true},
+		{"supportsMemoryEvent", true},
 		{"supportsBreakpointLocationsRequest", false},
 		{"exceptionBreakpointFilters", json::array({
-			{{"filter", "all"}, {"label", "All Exceptions"}, {"default_", false}},
-			{{"filter", "uncaught"}, {"label", "Uncaught Exceptions"}, {"default_", true}},
+			{{"filter", "all"}, {"label", "All Exceptions"}, {"default", false}},
+			{{"filter", "uncaught"}, {"label", "Uncaught Exceptions"}, {"default", true}},
 		})},
 	};
 }
@@ -71,13 +73,17 @@ inline json MakeCapabilities() {
 struct Source {
 	std::string name;
 	std::string path;
+	std::string presentationHint; // "normal", "emphasize", "deemphasize"
 
 	json ToJson() const {
 		json j;
 		if (!name.empty()) j["name"] = name;
 		if (!path.empty()) j["path"] = path;
+		if (!presentationHint.empty()) j["presentationHint"] = presentationHint;
 		return j;
 	}
+
+	bool empty() const { return name.empty() && path.empty(); }
 };
 
 struct Breakpoint {
@@ -117,7 +123,7 @@ struct StackFrameDap {
 			{"line", line},
 			{"column", column},
 		};
-		if (!source.path.empty()) j["source"] = source.ToJson();
+		if (!source.empty()) j["source"] = source.ToJson();
 		if (!instructionPointerReference.empty())
 			j["instructionPointerReference"] = instructionPointerReference;
 		if (!moduleId.empty()) j["moduleId"] = moduleId;
@@ -150,6 +156,7 @@ struct Variable {
 	std::string type;
 	int variablesReference = 0;
 	std::string memoryReference;
+	std::string evaluateName;
 
 	json ToJson() const {
 		json j = {
@@ -159,6 +166,7 @@ struct Variable {
 		};
 		if (!type.empty()) j["type"] = type;
 		if (!memoryReference.empty()) j["memoryReference"] = memoryReference;
+		if (!evaluateName.empty()) j["evaluateName"] = evaluateName;
 		return j;
 	}
 };
