@@ -204,13 +204,22 @@ struct DisassembledInstruction {
 };
 
 // --- Helper: parse hex address ---
-inline uint64_t ParseAddress(const std::string& s) {
-	if (s.empty()) return 0;
+inline bool ParseAddress(const std::string& s, uint64_t& out) {
+	if (s.empty()) return false;
 	try {
-		return std::stoull(s, nullptr, 0);
+		size_t pos = 0;
+		out = std::stoull(s, &pos, 0);
+		return pos > 0; // 최소 1자 이상 파싱 성공
 	} catch (...) {
-		return 0;
+		return false;
 	}
+}
+
+// 하위 호환: 기존 코드에서 ParseAddress(str)로 호출하는 곳
+inline uint64_t ParseAddress(const std::string& s) {
+	uint64_t addr = 0;
+	ParseAddress(s, addr);
+	return addr;
 }
 
 inline std::string FormatAddress(uint64_t addr) {

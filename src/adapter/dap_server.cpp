@@ -187,12 +187,35 @@ void DapServer::OnLaunch(const Request& req) {
 	stopOnEntry_ = req.arguments.value("stopOnEntry", false);
 	injectionMethod_ = ParseInjectionMethod(req.arguments.value("injectionMethod", "auto"));
 
-	// args 배열을 공백 구분 문자열로 변환
+	// args 배열을 공백 구분 문자열로 변환 (Windows CommandLineToArgvW 규칙)
 	std::string argStr;
 	if (req.arguments.contains("args") && req.arguments["args"].is_array()) {
 		for (auto& a : req.arguments["args"]) {
+			if (!a.is_string()) continue;
 			if (!argStr.empty()) argStr += " ";
-			argStr += a.get<std::string>();
+			std::string arg = a.get<std::string>();
+			if (arg.find_first_of(" \t\\\"") != std::string::npos) {
+				std::string quoted = "\"";
+				int nbs = 0;
+				for (char c : arg) {
+					if (c == '\\')
+						nbs++;
+					else if (c == '\"') {
+						for (int j = 0; j < nbs; j++) quoted += "\\\\";
+						quoted += "\\\"";
+						nbs = 0;
+					} else {
+						for (int j = 0; j < nbs; j++) quoted += "\\";
+						quoted += c;
+						nbs = 0;
+					}
+				}
+				for (int j = 0; j < nbs; j++) quoted += "\\\\";
+				quoted += "\"";
+				argStr += quoted;
+			} else {
+				argStr += arg;
+			}
 		}
 	}
 
@@ -1053,8 +1076,9 @@ void DapServer::OnEvaluate(const Request& req) {
 
 			std::vector<uint8_t> respData;
 			if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)) {
-				if (respData.size() >= 8) {
-					uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data());
+				if (respData.size() >= sizeof(IpcStatus) + 8 &&
+					*reinterpret_cast<const IpcStatus*>(respData.data()) == IpcStatus::Ok) {
+					uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
 					char buf[64];
 					snprintf(buf, sizeof(buf), "[0x%llX] = 0x%016llX", addr, val);
 					resp.success = true;
@@ -1083,8 +1107,9 @@ void DapServer::OnEvaluate(const Request& req) {
 
 			std::vector<uint8_t> respData;
 			if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)) {
-				if (respData.size() >= 8) {
-					uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data());
+				if (respData.size() >= sizeof(IpcStatus) + 8 &&
+					*reinterpret_cast<const IpcStatus*>(respData.data()) == IpcStatus::Ok) {
+					uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
 					char buf[32];
 					snprintf(buf, sizeof(buf), "0x%016llX", val);
 					resp.success = true;
@@ -1187,8 +1212,11 @@ void DapServer::OnSetVariable(const Request& req) {
 		if (respData.size() >= sizeof(SetRegisterResponse)) {
 			auto* setResp = reinterpret_cast<const SetRegisterResponse*>(respData.data());
 			if (setResp->status == IpcStatus::Ok) {
-				// 32비트 레지스터명(EAX 등)이면 32비트 포맷
-				bool is32 = (upperName[0] == 'E');
+				// 32비트 레지스터명(EAX, EBX 등)이면 32비트 포맷
+				// EFLAGS는 64비트 프로세스에서 RFLAGS와 같은 레지스터이지만
+				// 사용자가 EFLAGS로 입력하면 32비트로 취급
+				bool is32 = (upperName[0] == 'E' && upperName != "EFLAGS") ||
+					(upperName == "EFLAGS" && (newVal <= 0xFFFFFFFF));
 				char buf[32];
 				if (is32) {
 					newVal &= 0xFFFFFFFF;
@@ -1300,7 +1328,17 @@ void DapServer::OnReadMemory(const Request& req) {
 		SendResponse(resp);
 		return;
 	}
-	uint64_t addr = ParseAddress(memRef) + offset;
+	uint64_t addr = 0;
+	if (!ParseAddress(memRef, addr)) {
+		Response resp;
+		resp.request_seq = req.seq;
+		resp.command = "readMemory";
+		resp.success = false;
+		resp.message = "Invalid memoryReference: " + memRef;
+		SendResponse(resp);
+		return;
+	}
+	addr += offset;
 
 	ReadMemoryRequest readReq;
 	readReq.address = addr;
@@ -1311,12 +1349,16 @@ void DapServer::OnReadMemory(const Request& req) {
 	resp.command = "readMemory";
 
 	std::vector<uint8_t> respData;
-	if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)) {
+	if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData) &&
+		respData.size() >= sizeof(IpcStatus) &&
+		*reinterpret_cast<const IpcStatus*>(respData.data()) == IpcStatus::Ok) {
+		const uint8_t* memData = respData.data() + sizeof(IpcStatus);
+		size_t memLen = respData.size() - sizeof(IpcStatus);
 		resp.success = true;
 		resp.body = {
 			{"address", FormatAddress(addr)},
-			{"data", Base64Encode(respData.data(), respData.size())},
-			{"unreadableBytes", count - (int)respData.size()},
+			{"data", Base64Encode(memData, memLen)},
+			{"unreadableBytes", count - (int)memLen},
 		};
 	} else {
 		resp.success = false;
@@ -1339,7 +1381,17 @@ void DapServer::OnWriteMemory(const Request& req) {
 		SendResponse(resp);
 		return;
 	}
-	uint64_t addr = ParseAddress(memRef) + offset;
+	uint64_t addr = 0;
+	if (!ParseAddress(memRef, addr)) {
+		Response resp;
+		resp.request_seq = req.seq;
+		resp.command = "writeMemory";
+		resp.success = false;
+		resp.message = "Invalid memoryReference: " + memRef;
+		SendResponse(resp);
+		return;
+	}
+	addr += offset;
 	auto bytes = Base64Decode(data);
 
 	WriteMemoryRequest writeReq;
@@ -1373,7 +1425,17 @@ void DapServer::OnDisassemble(const Request& req) {
 	if (instrCount < 0) instrCount = 50;
 	if (instrCount > 10000) instrCount = 10000;
 
-	uint64_t addr = ParseAddress(memRef) + offset;
+	uint64_t addr = 0;
+	if (!ParseAddress(memRef, addr)) {
+		Response resp;
+		resp.request_seq = req.seq;
+		resp.command = "disassemble";
+		resp.success = false;
+		resp.message = "Invalid memoryReference: " + memRef;
+		SendResponse(resp);
+		return;
+	}
+	addr += offset;
 
 	// 충분한 바이트를 읽어서 디스어셈블
 	uint32_t readSize = instrCount * 15; // x86 최대 명령어 길이 15바이트
@@ -1443,6 +1505,8 @@ void DapServer::OnDataBreakpointInfo(const Request& req) {
 }
 
 void DapServer::OnSetDataBreakpoints(const Request& req) {
+	std::lock_guard<std::mutex> lock(breakpointMutex_);
+
 	// 기존 data breakpoints 제거
 	for (auto& m : dataBreakpointMappings_) {
 		RemoveHwBreakpointRequest rmReq;
@@ -1471,7 +1535,7 @@ void DapServer::OnSetDataBreakpoints(const Request& req) {
 
 		SetHwBreakpointRequest hwReq;
 		hwReq.address = address;
-		hwReq.type = (accessType == "readWrite") ? 2 : 1; // 1=write, 2=readwrite
+		hwReq.type = (accessType == "readWrite") ? 3 : 1; // 1=write, 3=readwrite (DR7 R/W field)
 		hwReq.size = 8; // 기본 8바이트 감시
 
 		std::vector<uint8_t> respData;
@@ -1701,7 +1765,7 @@ void DapServer::OnCompletions(const Request& req) {
 	// 메모리 접근 패턴
 	const char* patterns[] = {"*0x", "[0x"};
 
-	size_t col = (column > 0) ? static_cast<size_t>(column) : 0;
+	size_t col = (column > 1) ? static_cast<size_t>(column - 1) : 0; // DAP column is 1-based
 	std::string prefix = text.substr(0, std::min(col, text.size()));
 	for (auto& reg : regs64) {
 		if (prefix.empty() || std::string(reg).find(prefix) == 0) {
@@ -1809,14 +1873,19 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				std::lock_guard<std::mutex> lock(exceptionMutex_);
 				lastException_.threadId = e->threadId;
 				lastException_.code = e->exceptionCode;
-				lastException_.description = e->description;
+				{
+					char safeBuf[sizeof(e->description)];
+					memcpy(safeBuf, e->description, sizeof(e->description));
+					safeBuf[sizeof(e->description) - 1] = '\0';
+					lastException_.description = safeBuf;
+				}
 			}
 
 			SendEvent("stopped", {
 				{"reason", "exception"},
 				{"threadId", (int)e->threadId},
 				{"allThreadsStopped", true},
-				{"description", std::string(e->description)},
+				{"description", lastException_.description},
 			});
 		}
 		break;
@@ -1906,10 +1975,10 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 // --- Helpers ---
 
 std::string DapServer::GetDllPath() {
-	char exePath[MAX_PATH];
-	GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+	wchar_t exePathW[MAX_PATH];
+	GetModuleFileNameW(nullptr, exePathW, MAX_PATH);
 
-	std::filesystem::path dir = std::filesystem::path(exePath).parent_path();
+	std::filesystem::path dir = std::filesystem::path(exePathW).parent_path();
 
 	if (targetPid_ != 0) {
 		return Injector::SelectDllForTarget(targetPid_, dir.string());
@@ -2010,8 +2079,9 @@ bool DapServer::EvaluateCondition(const std::string& condition, uint32_t threadI
 			readReq.size = 8;
 			std::vector<uint8_t> respData;
 			if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)) {
-				if (respData.size() >= 8) {
-					lhsVal = *reinterpret_cast<const uint64_t*>(respData.data());
+				if (respData.size() >= sizeof(IpcStatus) + 8 &&
+					*reinterpret_cast<const IpcStatus*>(respData.data()) == IpcStatus::Ok) {
+					lhsVal = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
 				}
 			}
 		} catch (...) { return true; }
@@ -2113,8 +2183,10 @@ std::string DapServer::ExpandLogMessage(const std::string& msg, uint32_t threadI
 					readReq.address = addr;
 					readReq.size = 8;
 					std::vector<uint8_t> respData;
-					if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData) && respData.size() >= 8) {
-						uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data());
+					if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData) &&
+						respData.size() >= sizeof(IpcStatus) + 8 &&
+						*reinterpret_cast<const IpcStatus*>(respData.data()) == IpcStatus::Ok) {
+						uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
 						snprintf(buf, sizeof(buf), "0x%016llX", val);
 						result += buf;
 					} else {
