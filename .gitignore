@@ -55,3 +55,4 @@ test_detach_reattach.py
 
 # Personal config (not for repo)
 CLAUDE.md
+.github/
