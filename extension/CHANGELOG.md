@@ -4,7 +4,6 @@
 
 ### New Features
 - **PDB inline frame-based StepOver (O(1))** — `SymbolEngine` uses `SymGetLineFromAddrW64` to calculate next source line address, sets a single temp BP + Continue instead of O(n) single-steps. Falls back to legacy step when Jcc detected in range or PDB unavailable
-- **Hover preview** — Mouse over register names (RAX, RCX, ...) or hex addresses (0x...) in disassembly to see values
 - **Register modification** — Double-click register values in Variables panel to edit them
 - **Conditional breakpoints** — Break only when condition is met (e.g. `RAX==0x1234`, `*0x7FF600!=0`)
 - **Hit count breakpoints** — Break on Nth hit (e.g. hit count = 5 → break on 5th hit)
