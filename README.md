@@ -10,8 +10,8 @@ Windows VEH(Vectored Exception Handler) 기반 디버거. DAP(Debug Adapter Prot
 
 ## 왜 VEH Debugger인가?
 
-### 🔓 안티디버그 자동 우회
-Windows Debug API(`NtSetInformationThread`, `IsDebuggerPresent` 등)를 사용하지 않으므로 **Themida, VMProtect, EasyAntiCheat** 등의 안티디버그 루틴이 디버거를 감지하지 못합니다. `PEB.BeingDebugged = 0` 상태를 유지하므로, 보호된 프로세스를 별도 패치 없이 디버깅할 수 있습니다.
+### 안티디버그 우회에 유리
+Windows Debug API(`NtSetInformationThread`, `IsDebuggerPresent` 등)를 사용하지 않으므로 `PEB.BeingDebugged = 0` 상태를 유지합니다. **Themida, VMProtect** 등 PEB/NtQuery 기반 안티디버그 체크를 자연스럽게 우회합니다. 단, VEH 자체를 검사하는 보호(EAC 등 커널 안티치트)는 감지될 수 있습니다.
 
 ### 🤝 기존 디버거와 동시 사용 가능
 Windows Debug API 디버거(x64dbg, WinDbg, Visual Studio 등)는 프로세스당 하나만 붙을 수 있지만, VEH Debugger는 **Windows 디버거와 동시에 같은 프로세스에 붙을 수 있습니다.** 커널 디버거나 다른 유저모드 디버거로 분석하면서, VEH Debugger로 보조 브레이크포인트/메모리 감시를 병행할 수 있습니다.

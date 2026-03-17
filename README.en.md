@@ -4,19 +4,41 @@
 
 Windows debugger based on **VEH (Vectored Exception Handler)** instead of the Windows Debug API. Fully supports **DAP** (Debug Adapter Protocol) and **MCP** (Model Context Protocol).
 
+## Why VEH Debugger?
+
+### Anti-debug bypass advantage
+Does not use Windows Debug API (`NtSetInformationThread`, `IsDebuggerPresent`, etc.), keeping `PEB.BeingDebugged = 0`. Naturally bypasses PEB/NtQuery-based anti-debug checks used by **Themida, VMProtect**, etc. Note: protections that inspect VEH itself (kernel anti-cheats like EAC) can still detect it.
+
+### Side-by-side with existing debuggers
+Windows Debug API debuggers (x64dbg, WinDbg, Visual Studio) allow only one per process, but VEH Debugger can **attach alongside them simultaneously**. Useful for running kernel/user-mode debugger analysis while using VEH Debugger for auxiliary breakpoints/memory watches.
+
+### Native AI agent support
+Built-in MCP (Model Context Protocol) tool server lets **Claude, Cursor, Windsurf, Codex** and other AI agents control the debugger directly. Debug with natural language: "Set a breakpoint on this function and check the RAX value."
+
+### Full VSCode integration
+No separate debugger GUI needed. **Everything works inside the VSCode debug panel** - disassembly view, register read/write, memory read/write, hardware breakpoints.
+
+---
+
 ## Features
 
-- **VEH-based**: Uses VEH instead of Windows Debug API — bypasses common anti-debug checks
+- **VEH-based**: Uses VEH instead of Windows Debug API - bypasses PEB/NtQuery-based anti-debug checks (Themida, VMProtect, etc.)
 - **Full DAP support**: Works with VSCode, MCP debug tools, and any DAP-compatible client
 - **MCP tool server**: 19 tools for AI agents (Claude, Cursor, etc.) to directly control the debugger
 - **TCP mode**: Remote debugging via `--tcp --port=PORT`
 - **Remote access**: `--remote` / `--bind=0.0.0.0` for VM/network debugging
-- **32/64-bit**: Debug both x86 and x64 processes
-- **Software breakpoints**: INT3 (0xCC) patching
+- **32/64-bit**: Debug both x86 and x64 processes (WoW64 injection for 32-bit targets)
+- **Software breakpoints**: INT3 (0xCC) patching with original byte masking in ReadMemory
+- **Conditional breakpoints**: Break on condition (e.g. `RAX==0x1234`, `*0x7FF600!=0`)
+- **Hit count breakpoints**: Break on Nth hit
+- **Log points**: Log to Debug Console without stopping (e.g. `RAX={RAX}, ptr={*0x7FF600}`)
 - **Hardware breakpoints**: DR0-DR3 (memory read/write watch = Find What Writes/Accesses)
 - **PDB symbols**: Source file/line mapping, function name breakpoints
+- **PDB O(1) StepOver**: Uses `SymGetLineFromAddrW64` to compute next source line address - single temp BP instead of O(n) single-steps
+- **Register editing**: Double-click register values in Variables panel to modify
 - **Disassembly**: Zydis x86/x64 disassembler (default) + built-in lightweight decoder (fallback)
 - **Memory read/write**: DAP readMemory/writeMemory support
+- **Detach/re-attach**: DLL pipe server stays alive after detach, allowing re-attach without restarting the target
 - **Static CRT build**: No vcruntime dependency when injecting DLL
 
 ## Architecture
