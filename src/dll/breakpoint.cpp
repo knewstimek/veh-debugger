@@ -174,6 +174,18 @@ void BreakpointManager::RearmBreakpoint(uint64_t address) {
 	bpIt->second.enabled = true;
 }
 
+void BreakpointManager::MaskBreakpointsInBuffer(uint64_t startAddress, uint8_t* buffer, size_t size) {
+	std::lock_guard<std::mutex> lock(mutex_);
+
+	uint64_t endAddress = startAddress + size;
+	for (const auto& [id, bp] : breakpoints_) {
+		if (bp.enabled && bp.address >= startAddress && bp.address < endAddress) {
+			size_t offset = static_cast<size_t>(bp.address - startAddress);
+			buffer[offset] = bp.originalByte;
+		}
+	}
+}
+
 // VirtualProtect로 메모리 보호 변경 후 바이트 패치
 bool BreakpointManager::PatchByte(uint64_t address, uint8_t byte, uint8_t* original) {
 	auto* ptr = reinterpret_cast<uint8_t*>(address);
@@ -191,6 +203,14 @@ bool BreakpointManager::PatchByte(uint64_t address, uint8_t byte, uint8_t* origi
 
 	// 바이트 패치
 	*ptr = byte;
+
+	// 기록 검증 — 실제로 바이트가 변경되었는지 확인
+	uint8_t verify = *ptr;
+	if (verify != byte) {
+		LOG_ERROR("PatchByte VERIFY FAIL at 0x%p: wrote 0x%02X, read back 0x%02X", ptr, byte, verify);
+	} else {
+		LOG_DEBUG("PatchByte OK at 0x%p: 0x%02X", ptr, byte);
+	}
 
 	// 보호 복원
 	if (!VirtualProtect(ptr, 1, oldProtect, &oldProtect)) {

@@ -8,7 +8,7 @@
 namespace veh {
 
 // thread_local: 각 스레드마다 재활성화 대기 정보 보관
-thread_local VehHandler::PendingRearm VehHandler::pendingRearm_ = {0, 0, false};
+thread_local VehHandler::PendingRearm VehHandler::pendingRearm_ = {0, 0, false, false};
 
 VehHandler& VehHandler::Instance() {
 	static VehHandler instance;
@@ -74,8 +74,19 @@ HANDLE VehHandler::GetOrCreateThreadEvent(uint32_t threadId) {
 	return evt;
 }
 
-void VehHandler::ResumeStoppedThread(uint32_t threadId) {
-	LOG_DEBUG("ResumeStoppedThread(%u)", threadId);
+void VehHandler::ResumeStoppedThread(uint32_t threadId, bool step) {
+	LOG_DEBUG("ResumeStoppedThread(%u, step=%d)", threadId, step);
+
+	// step 플래그 설정 (VEH 핸들러 스레드에서 읽음)
+	{
+		std::lock_guard<std::mutex> lock(stepFlagMutex_);
+		if (step) {
+			stepFlags_[threadId] = true;
+		} else {
+			stepFlags_.erase(threadId);
+		}
+	}
+
 	{
 		std::lock_guard<std::mutex> lock(contextMapMutex_);
 		stoppedContexts_.erase(threadId);
@@ -125,7 +136,7 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 	case EXCEPTION_BREAKPOINT: { // 0x80000003 — INT3 히트
 		auto bp = BreakpointManager::Instance().FindByAddress(addr);
 		if (!bp) {
-			// 우리가 설정한 브레이크포인트가 아님
+			LOG_DEBUG("FindByAddress(0x%llX) returned nullopt — not our BP", addr);
 			return EXCEPTION_CONTINUE_SEARCH;
 		}
 
@@ -138,7 +149,7 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		info->ContextRecord->EFlags |= 0x100;
 
 		// 싱글스텝 후 브레이크포인트 재활성화를 위해 기록
-		pendingRearm_ = {addr, tid, true};
+		pendingRearm_ = {addr, tid, true, false};
 
 		// 이벤트 콜백으로 어댑터에 알림
 		if (callback_) {
@@ -154,6 +165,7 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 			evt.address = addr;
 			evt.breakpointId = bp->id;
 			evt.exceptionCode = code;
+			evt.context = info->ContextRecord;
 			callback_(evt);
 
 			// continue/step 시그널이 올 때까지 대기
@@ -162,6 +174,17 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 				LOG_DEBUG("Thread %u waiting for continue signal", tid);
 				WaitForSingleObject(waitEvent, INFINITE);
 				LOG_DEBUG("Thread %u resumed", tid);
+
+				// 파이프 스레드에서 설정한 step 플래그 확인
+				{
+					std::lock_guard<std::mutex> lock(stepFlagMutex_);
+					auto it = stepFlags_.find(tid);
+					if (it != stepFlags_.end() && it->second) {
+						pendingRearm_.stepRequested = true;
+						stepFlags_.erase(it);
+						LOG_DEBUG("Thread %u: step requested, will re-TF after rearm", tid);
+					}
+				}
 			}
 		}
 
@@ -173,7 +196,15 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		if (pendingRearm_.active) {
 			BreakpointManager::Instance().RearmBreakpoint(pendingRearm_.address);
 			LOG_DEBUG("Rearmed breakpoint at 0x%llX", pendingRearm_.address);
+			bool wantStep = pendingRearm_.stepRequested;
 			pendingRearm_.active = false;
+			pendingRearm_.stepRequested = false;
+
+			if (wantStep) {
+				// StepOver/StepIn 요청: rearm 후 다시 TF 설정 → 다음 SINGLE_STEP에서 StepCompleted
+				info->ContextRecord->EFlags |= 0x100;
+				LOG_DEBUG("Step requested after rearm — TF set again at 0x%llX", addr);
+			}
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 
@@ -238,6 +269,17 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 				LOG_DEBUG("Thread %u (step) waiting for continue signal", tid);
 				WaitForSingleObject(waitEvent, INFINITE);
 				LOG_DEBUG("Thread %u (step) resumed", tid);
+
+				// step 플래그 확인 — 연속 스텝 요청이면 TF 재설정
+				{
+					std::lock_guard<std::mutex> lock(stepFlagMutex_);
+					auto it = stepFlags_.find(tid);
+					if (it != stepFlags_.end() && it->second) {
+						info->ContextRecord->EFlags |= 0x100;
+						stepFlags_.erase(it);
+						LOG_DEBUG("Thread %u: consecutive step — TF set at 0x%llX", tid, addr);
+					}
+				}
 			}
 		}
 

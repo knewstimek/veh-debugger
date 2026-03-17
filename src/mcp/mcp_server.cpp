@@ -63,6 +63,7 @@ void McpServer::OnMessage(const std::string& jsonStr) {
 		msg = json::parse(jsonStr);
 	} catch (const std::exception& e) {
 		LOG_ERROR("JSON parse error: %s", e.what());
+		SendError(nullptr, -32700, std::string("Parse error: ") + e.what());
 		return;
 	}
 
@@ -177,6 +178,7 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 		else if (name == "veh_write_memory")          result = ToolWriteMemory(args);
 		else if (name == "veh_modules")               result = ToolModules(args);
 		else if (name == "veh_disassemble")           result = ToolDisassemble(args);
+		else if (name == "veh_enum_locals")           result = ToolEnumLocals(args);
 		else {
 			SendError(id, -32602, "Unknown tool: " + name);
 			return;
@@ -281,7 +283,8 @@ json McpServer::ToolLaunch(const json& args) {
 	std::string dllPath = GetDllPathForExe(program);
 	if (dllPath.empty()) return {{"error", "DLL not found"}};
 
-	uint32_t pid = Injector::LaunchAndInject(program, argsStr, "", dllPath, stopOnEntry);
+	auto launchResult = Injector::LaunchAndInject(program, argsStr, "", dllPath, InjectionMethod::CreateRemoteThread);
+	uint32_t pid = launchResult.pid;
 	if (pid == 0) return {{"error", "Launch failed"}};
 
 	targetProcess_ = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
@@ -600,6 +603,119 @@ json McpServer::ToolStackTrace(const json& args) {
 	}
 
 	return {{"frames", frames}, {"totalFrames", resp->totalFrames}};
+}
+
+json McpServer::ToolEnumLocals(const json& args) {
+	if (!attached_) return {{"error", "Not attached"}};
+
+	uint32_t threadId = args.value("threadId", 0u);
+	if (threadId == 0) return {{"error", "threadId is required"}};
+
+	// instructionAddress (RIP) and frameBase (RBP) for SymSetContext
+	uint64_t instrAddr = 0, frameBase = 0;
+	if (args.contains("instructionAddress")) {
+		auto& v = args["instructionAddress"];
+		if (v.is_string()) instrAddr = std::strtoull(v.get<std::string>().c_str(), nullptr, 16);
+		else if (v.is_number()) instrAddr = v.get<uint64_t>();
+	}
+	if (args.contains("frameBase")) {
+		auto& v = args["frameBase"];
+		if (v.is_string()) frameBase = std::strtoull(v.get<std::string>().c_str(), nullptr, 16);
+		else if (v.is_number()) frameBase = v.get<uint64_t>();
+	}
+
+	// If not provided, get from top frame of stack trace
+	if (instrAddr == 0 || frameBase == 0) {
+		GetStackTraceRequest stReq;
+		stReq.threadId = threadId;
+		stReq.startFrame = 0;
+		stReq.maxFrames = 1;
+
+		std::vector<uint8_t> stResp;
+		if (pipeClient_.SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), stResp)
+			&& stResp.size() >= sizeof(GetStackTraceResponse) + sizeof(StackFrameInfo)) {
+			auto* frame = reinterpret_cast<const StackFrameInfo*>(stResp.data() + sizeof(GetStackTraceResponse));
+			if (instrAddr == 0) instrAddr = frame->address;
+			if (frameBase == 0) frameBase = frame->frameBase;
+		}
+
+		if (instrAddr == 0) return {{"error", "Could not determine instruction address. Provide instructionAddress or ensure target is stopped."}};
+	}
+
+	EnumLocalsRequest req;
+	req.threadId = threadId;
+	req.instructionAddress = instrAddr;
+	req.frameBase = frameBase;
+
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::EnumLocals, &req, sizeof(req), respData)) {
+		return {{"error", "IPC failed"}};
+	}
+
+	if (respData.size() < sizeof(EnumLocalsResponse)) {
+		return {{"error", "Invalid response"}};
+	}
+
+	auto* resp = reinterpret_cast<const EnumLocalsResponse*>(respData.data());
+	if (resp->status != IpcStatus::Ok) return {{"error", "Failed to enumerate locals"}};
+
+	auto* locals = reinterpret_cast<const LocalVariableInfo*>(respData.data() + sizeof(EnumLocalsResponse));
+	uint32_t count = resp->count;
+	const size_t maxItems = (respData.size() > sizeof(EnumLocalsResponse))
+		? (respData.size() - sizeof(EnumLocalsResponse)) / sizeof(LocalVariableInfo) : 0;
+	if (count > maxItems) count = static_cast<uint32_t>(maxItems);
+
+	json vars = json::array();
+	char buf[32];
+	for (uint32_t i = 0; i < count; i++) {
+		// Safe null-terminated copy
+		char safeName[sizeof(LocalVariableInfo::name) + 1] = {};
+		memcpy(safeName, locals[i].name, sizeof(locals[i].name));
+		char safeType[sizeof(LocalVariableInfo::typeName) + 1] = {};
+		memcpy(safeType, locals[i].typeName, sizeof(locals[i].typeName));
+
+		snprintf(buf, sizeof(buf), "0x%llX", locals[i].address);
+
+		// Format value based on type
+		std::string valueStr;
+		if (locals[i].valueSize >= 4 && (strstr(safeType, "float") != nullptr)) {
+			float f;
+			memcpy(&f, locals[i].value, sizeof(f));
+			char fBuf[64];
+			snprintf(fBuf, sizeof(fBuf), "%.6g", f);
+			valueStr = fBuf;
+		} else if (locals[i].valueSize >= 8 && (strstr(safeType, "double") != nullptr)) {
+			double d;
+			memcpy(&d, locals[i].value, sizeof(d));
+			char dBuf[64];
+			snprintf(dBuf, sizeof(dBuf), "%.10g", d);
+			valueStr = dBuf;
+		} else if (locals[i].valueSize >= 8 && (strstr(safeType, "*") != nullptr)) {
+			uint64_t ptr;
+			memcpy(&ptr, locals[i].value, sizeof(ptr));
+			char pBuf[32];
+			snprintf(pBuf, sizeof(pBuf), "0x%llX", ptr);
+			valueStr = pBuf;
+		} else if (locals[i].valueSize >= 4) {
+			int32_t val;
+			memcpy(&val, locals[i].value, sizeof(val));
+			valueStr = std::to_string(val);
+		} else {
+			valueStr = "(unreadable)";
+		}
+
+		json var = {
+			{"name", safeName},
+			{"type", safeType},
+			{"address", buf},
+			{"value", valueStr},
+			{"size", locals[i].size}
+		};
+		if (locals[i].flags & 0x100) var["isParameter"] = true;  // SYMFLAG_PARAMETER
+		vars.push_back(var);
+	}
+
+	return {{"variables", vars}, {"count", count}};
 }
 
 json McpServer::ToolRegisters(const json& args) {
@@ -1122,7 +1238,14 @@ json McpServer::GetToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Hex address"}}},
 			{"count", {{"type", "integer"}, {"description", "Number of instructions (default: 20)"}}}
-		 }}, {"required", json::array({"address"})}}}}
+		 }}, {"required", json::array({"address"})}}}},
+
+		{{"name", "veh_enum_locals"}, {"description", "Enumerate local variables and parameters for a stopped thread's stack frame. Returns variable names, types, addresses, and values."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"threadId", {{"type", "integer"}, {"description", "Thread ID (required)"}}},
+			{"instructionAddress", {{"type", "string"}, {"description", "RIP/EIP hex address of the frame (auto-detected from top frame if omitted)"}}},
+			{"frameBase", {{"type", "string"}, {"description", "RBP/EBP hex address (auto-detected from top frame if omitted)"}}}
+		 }}, {"required", json::array({"threadId"})}}}}
 	});
 }
 

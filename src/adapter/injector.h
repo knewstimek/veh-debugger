@@ -16,19 +16,24 @@ enum class InjectionMethod {
 // 문자열 → enum 변환
 InjectionMethod ParseInjectionMethod(const std::string& str);
 
+// LaunchAndInject 결과 — 메인 스레드는 항상 suspended 상태로 반환
+struct LaunchResult {
+	uint32_t pid = 0;
+	uint32_t mainThreadId = 0;
+};
+
 class Injector {
 public:
 	// 지정된 방식으로 DLL 인젝션
 	static bool InjectDll(uint32_t pid, const std::string& dllPath,
 		InjectionMethod method = InjectionMethod::Auto);
 
-	// 프로세스 생성 + 인젝션
-	static uint32_t LaunchAndInject(
+	// 프로세스 생성 + 인젝션 (메인 스레드는 suspended 상태 유지)
+	static LaunchResult LaunchAndInject(
 		const std::string& exePath,
 		const std::string& args,
 		const std::string& workingDir,
 		const std::string& dllPath,
-		bool stopOnEntry,
 		InjectionMethod method = InjectionMethod::Auto);
 
 	// DLL 이젝트
@@ -47,11 +52,14 @@ private:
 	static LPVOID AllocRemoteString(HANDLE process, const std::string& str);
 	static void FreeRemoteString(HANDLE process, LPVOID remoteMem);
 
+	// WoW64 원격 프로세스에서 32비트 LoadLibraryA 주소 찾기
+	static FARPROC GetRemoteLoadLibraryA(HANDLE process);
+
 	// 개별 인젝션 방식
-	static bool InjectViaCreateRemoteThread(HANDLE process, LPVOID remoteStr);
-	static bool InjectViaNtCreateThreadEx(HANDLE process, LPVOID remoteStr);
-	static bool InjectViaThreadHijack(HANDLE process, uint32_t pid, LPVOID remoteStr);
-	static bool InjectViaQueueUserAPC(HANDLE process, uint32_t pid, LPVOID remoteStr);
+	static bool InjectViaCreateRemoteThread(HANDLE process, LPVOID remoteStr, FARPROC loadLib);
+	static bool InjectViaNtCreateThreadEx(HANDLE process, LPVOID remoteStr, FARPROC loadLib);
+	static bool InjectViaThreadHijack(HANDLE process, uint32_t pid, LPVOID remoteStr, bool isWow64);
+	static bool InjectViaQueueUserAPC(HANDLE process, uint32_t pid, LPVOID remoteStr, FARPROC loadLib);
 };
 
 } // namespace veh

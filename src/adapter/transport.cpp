@@ -201,7 +201,7 @@ void TcpTransport::AcceptThread() {
 		// 읽기 스레드 시작
 		if (readThread_.joinable()) readThread_.join();
 		readThread_ = std::thread(&TcpTransport::ReadThread, this);
-		break; // 단일 클라이언트만 허용
+		break; // 단일 클라이언트만 허용 — VSCode가 세션마다 새 어댑터 프로세스를 spawn하므로 재연결 불필요
 	}
 }
 
@@ -212,7 +212,7 @@ void TcpTransport::ReadThread() {
 		if (n <= 0) {
 			if (n == 0) LOG_INFO("DAP client disconnected");
 			else LOG_ERROR("recv() error: %d", WSAGetLastError());
-			running_ = false;
+			running_ = false; // 클라이언트 끊김 → 어댑터 프로세스 종료 (VSCode가 세션 종료로 처리)
 			break;
 		}
 

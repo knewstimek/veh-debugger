@@ -32,6 +32,11 @@ public:
 	// Called after single-step to re-enable breakpoint
 	void RearmBreakpoint(uint64_t address);
 
+	// ReadMemory 결과에서 활성 BP의 INT3(0xCC)를 원본 바이트로 치환.
+	// 디스어셈블리 뷰 등에서 BP 유무와 관계없이 원본 명령어를 표시하기 위해 사용.
+	// 실제 메모리는 변경하지 않음 — 버퍼만 수정.
+	void MaskBreakpointsInBuffer(uint64_t startAddress, uint8_t* buffer, size_t size);
+
 private:
 	bool PatchByte(uint64_t address, uint8_t byte, uint8_t* original = nullptr);
 

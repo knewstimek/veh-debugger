@@ -30,6 +30,7 @@ enum class IpcCommand : uint32_t {
 	// Breakpoints
 	SetBreakpoint          = 0x0001,
 	RemoveBreakpoint       = 0x0002,
+	RemoveBreakpointByAddr = 0x0005,
 	SetHwBreakpoint        = 0x0003,
 	RemoveHwBreakpoint     = 0x0004,
 
@@ -56,6 +57,7 @@ enum class IpcCommand : uint32_t {
 	// Symbol resolution (PDB)
 	ResolveSourceLine      = 0x0040,
 	ResolveFunction        = 0x0041,
+	EnumLocals             = 0x0042,
 
 	// Lifecycle
 	Heartbeat              = 0x00FE,
@@ -101,6 +103,10 @@ struct SetBreakpointResponse {
 
 struct RemoveBreakpointRequest {
 	uint32_t id;
+};
+
+struct RemoveBreakpointByAddrRequest {
+	uint64_t address;
 };
 
 struct SetHwBreakpointRequest {
@@ -168,6 +174,7 @@ struct StackFrameInfo {
 	uint64_t address;
 	uint64_t returnAddress;
 	uint64_t frameBase;
+	uint64_t moduleBase;     // 모듈 베이스 주소 (ntdll.dll+0xOFFSET 표시용)
 	char     moduleName[128];
 	char     functionName[128];
 	char     sourceFile[256];
@@ -242,6 +249,7 @@ struct BreakpointHitEvent {
 	uint32_t threadId;
 	uint32_t breakpointId;
 	uint64_t address;
+	RegisterSet regs;  // VEH 정지 시점의 레지스터 (조건부 BP 평가에 사용, SendAndReceive 데드락 방지)
 };
 
 struct StepCompletedEvent {
@@ -286,6 +294,31 @@ struct ResolveFunctionRequest {
 struct ResolveFunctionResponse {
 	IpcStatus status;
 	uint64_t  address;
+};
+
+// Local variable enumeration (via PDB symbols)
+struct EnumLocalsRequest {
+	uint32_t threadId;
+	uint64_t instructionAddress;  // RIP of the frame (for SymSetContext)
+	uint64_t frameBase;           // RBP/frame base (for computing variable addresses)
+};
+
+struct LocalVariableInfo {
+	char     name[64];
+	char     typeName[64];
+	uint64_t address;     // computed absolute address (frameBase + offset)
+	uint32_t size;        // size in bytes
+	uint32_t flags;       // SYMFLAG_PARAMETER, SYMFLAG_LOCAL, etc.
+	uint8_t  value[32];   // first 32 bytes of value (inline preview)
+	uint32_t valueSize;   // actual bytes read into value[]
+};
+
+static constexpr uint32_t kMaxLocals = 64;
+
+struct EnumLocalsResponse {
+	IpcStatus status;
+	uint32_t  count;
+	// followed by `count` LocalVariableInfo structs
 };
 
 #pragma pack(pop)
