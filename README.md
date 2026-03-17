@@ -1,3 +1,7 @@
+2026.03.17 22.19
+The tool is so buggy that it's unusable. I'm currently working on fixing it.
+
+
 # VEH Debugger for VSCode
 
 **한국어** | [English](README.en.md)
