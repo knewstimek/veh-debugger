@@ -235,11 +235,16 @@ void PipeClient::StopEventListener() {
 		// 최대 2초만 대기하고, 초과 시 detach하여 disconnect 응답 지연을 방지한다.
 		// detach된 스레드는 어댑터 프로세스 종료 시 OS가 정리한다.
 		auto handle = readerThread_.native_handle();
-		if (WaitForSingleObject(handle, 2000) == WAIT_OBJECT_0) {
+		if (WaitForSingleObject(handle, 5000) == WAIT_OBJECT_0) {
 			readerThread_.join();
 		} else {
-			LOG_WARN("Reader thread did not exit in 2s, detaching");
-			readerThread_.detach();
+			// detach 대신 TerminateThread로 강제 종료.
+			// detach하면 PipeClient 소멸 후에도 스레드가 멤버에 접근하여
+			// use-after-free 위험이 있다. TerminateThread는 최후의 수단이지만
+			// 이 시점에서 리더 스레드가 5초 후에도 종료되지 않으면 안전하게 제거해야 한다.
+			LOG_WARN("Reader thread did not exit in 5s, terminating");
+			TerminateThread(handle, 1);
+			readerThread_.join();
 		}
 	}
 }
