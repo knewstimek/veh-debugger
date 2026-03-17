@@ -43,6 +43,9 @@ bool PipeClient::AsyncReadExact(void* buf, DWORD size, DWORD timeoutMs) {
 		} else {
 			CancelIoEx(pipe_, &ov);
 			CloseHandle(ov.hEvent);
+			// CancelIoEx/CloseHandle가 GetLastError()를 덮어쓰므로
+			// 호출자가 타임아웃과 실제 오류를 구분할 수 있도록 명시적으로 설정
+			SetLastError(wait == WAIT_TIMEOUT ? WAIT_TIMEOUT : ERROR_OPERATION_ABORTED);
 			return false;
 		}
 	}
@@ -249,8 +252,12 @@ void PipeClient::ReaderThread() {
 		if (!AsyncReadExact(&hdr, sizeof(hdr), 5000)) {
 			if (!running_) break;
 			// 타임아웃은 정상 (하트비트가 올 때까지 대기)
+			// AsyncReadExact는 타임아웃 시 SetLastError(WAIT_TIMEOUT)을 설정함
 			DWORD err = GetLastError();
-			if (err != ERROR_OPERATION_ABORTED && err != WAIT_TIMEOUT) {
+			if (err != ERROR_OPERATION_ABORTED && err != WAIT_TIMEOUT
+				&& err != ERROR_IO_PENDING) {
+				// ERROR_IO_PENDING(997)은 비동기 I/O 취소 후 잔여 상태일 수 있으므로 무시
+				// 실제 파이프 오류(ERROR_BROKEN_PIPE=109 등)만 치명적으로 처리
 				LOG_ERROR("Pipe read error: %u", err);
 				connected_ = false;
 			}

@@ -8,6 +8,22 @@ The tool is so buggy that it's unusable. I'm currently working on fixing it.
 
 Windows VEH(Vectored Exception Handler) 기반 디버거. DAP(Debug Adapter Protocol) 완전 지원.
 
+## 왜 VEH Debugger인가?
+
+### 🔓 안티디버그 자동 우회
+Windows Debug API(`NtSetInformationThread`, `IsDebuggerPresent` 등)를 사용하지 않으므로 **Themida, VMProtect, EasyAntiCheat** 등의 안티디버그 루틴이 디버거를 감지하지 못합니다. `PEB.BeingDebugged = 0` 상태를 유지하므로, 보호된 프로세스를 별도 패치 없이 디버깅할 수 있습니다.
+
+### 🤝 기존 디버거와 동시 사용 가능
+Windows Debug API 디버거(x64dbg, WinDbg, Visual Studio 등)는 프로세스당 하나만 붙을 수 있지만, VEH Debugger는 **Windows 디버거와 동시에 같은 프로세스에 붙을 수 있습니다.** 커널 디버거나 다른 유저모드 디버거로 분석하면서, VEH Debugger로 보조 브레이크포인트/메모리 감시를 병행할 수 있습니다.
+
+### 🤖 AI 에이전트 네이티브 지원
+MCP(Model Context Protocol) 도구 서버를 내장하여 **Claude, Cursor, Windsurf, Codex** 등 AI 에이전트가 디버거를 직접 제어합니다. "이 함수에 브레이크포인트 걸고 RAX 값 확인해줘"처럼 자연어로 디버깅을 지시할 수 있습니다.
+
+### 🖥️ VSCode 환경 통합
+별도 디버거 GUI 없이 **VSCode 디버그 패널에서 모든 것을 수행합니다.** 디스어셈블리 뷰, 레지스터 조회/수정, 메모리 읽기/쓰기, 하드웨어 브레이크포인트까지 VSCode 안에서 완결됩니다.
+
+---
+
 ## 특징
 
 - **VEH 기반**: Windows Debug API 대신 VEH를 사용하여 안티디버그 우회에 유리

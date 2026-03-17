@@ -558,6 +558,10 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			resp.regs.cs = ctx.SegCs; resp.regs.ss = ctx.SegSs;
 			resp.regs.ds = ctx.SegDs; resp.regs.es = ctx.SegEs;
 			resp.regs.fs = ctx.SegFs; resp.regs.gs = ctx.SegGs;
+			// Debug registers
+			resp.regs.dr0 = ctx.Dr0; resp.regs.dr1 = ctx.Dr1;
+			resp.regs.dr2 = ctx.Dr2; resp.regs.dr3 = ctx.Dr3;
+			resp.regs.dr6 = ctx.Dr6; resp.regs.dr7 = ctx.Dr7;
 			static_assert(sizeof(ctx.FltSave.XmmRegisters) >= sizeof(resp.regs.xmm),
 				"XMM register size mismatch");
 			memcpy(resp.regs.xmm, ctx.FltSave.XmmRegisters, sizeof(resp.regs.xmm));
@@ -576,6 +580,10 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			resp.regs.cs = ctx.SegCs; resp.regs.ss = ctx.SegSs;
 			resp.regs.ds = ctx.SegDs; resp.regs.es = ctx.SegEs;
 			resp.regs.fs = ctx.SegFs; resp.regs.gs = ctx.SegGs;
+			// Debug registers (x86도 동일한 CONTEXT 필드)
+			resp.regs.dr0 = ctx.Dr0; resp.regs.dr1 = ctx.Dr1;
+			resp.regs.dr2 = ctx.Dr2; resp.regs.dr3 = ctx.Dr3;
+			resp.regs.dr6 = ctx.Dr6; resp.regs.dr7 = ctx.Dr7;
 			// x86에는 XMM이 FloatSave에 포함되지 않음 — 0으로 초기화
 			memset(resp.regs.xmm, 0, sizeof(resp.regs.xmm));
 #endif

@@ -3,6 +3,7 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <filesystem>
 
 namespace veh {
 
@@ -650,6 +651,10 @@ json McpServer::ToolRegisters(const json& args) {
 	}
 	regs["eflags"] = hex(r.rflags);
 	regs["cs"] = hex(r.cs); regs["ss"] = hex(r.ss);
+	// Debug registers
+	regs["dr0"] = hex(r.dr0); regs["dr1"] = hex(r.dr1);
+	regs["dr2"] = hex(r.dr2); regs["dr3"] = hex(r.dr3);
+	regs["dr6"] = hex(r.dr6); regs["dr7"] = hex(r.dr7);
 	regs["is32bit"] = (bool)r.is32bit;
 
 	return {{"registers", regs}};
@@ -884,6 +889,41 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 	case IpcEvent::Ready:
 		LOG_INFO("VEH DLL ready");
 		break;
+	case IpcEvent::Paused: {
+		std::lock_guard<std::mutex> lock(eventMutex_);
+		pendingEvents_.push({"notifications/message", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", "Target paused"}}});
+		break;
+	}
+	case IpcEvent::ProcessExited: {
+		if (size >= sizeof(ProcessExitEvent)) {
+			auto* e = reinterpret_cast<const ProcessExitEvent*>(payload);
+			char buf[64];
+			snprintf(buf, sizeof(buf), "Process exited (code=%u)", e->exitCode);
+			LOG_INFO("%s", buf);
+			attached_ = false;
+			{
+				std::lock_guard<std::mutex> lock(eventMutex_);
+				pendingEvents_.push({"notifications/message", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
+			}
+		}
+		break;
+	}
+	case IpcEvent::ExceptionOccurred: {
+		if (size >= sizeof(ExceptionEvent)) {
+			auto* e = reinterpret_cast<const ExceptionEvent*>(payload);
+			char buf[384];
+			snprintf(buf, sizeof(buf), "Exception 0x%08X at 0x%llX (thread %u): %s",
+				e->exceptionCode, e->address, e->threadId, e->description);
+			{
+				std::lock_guard<std::mutex> lock(eventMutex_);
+				pendingEvents_.push({"notifications/message", {{"level", "warning"}, {"logger", "veh-debugger"}, {"data", buf}}});
+			}
+		}
+		break;
+	}
+	case IpcEvent::Error:
+		LOG_ERROR("VEH DLL error event received");
+		break;
 	default:
 		LOG_DEBUG("IPC event: 0x%04X", eventId);
 		break;
@@ -893,15 +933,14 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 // --- Helpers ---
 
 std::string McpServer::GetExeDir() {
-	char exePath[MAX_PATH];
-	DWORD exeLen = GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+	wchar_t exePathW[MAX_PATH];
+	DWORD exeLen = GetModuleFileNameW(nullptr, exePathW, MAX_PATH);
 	if (exeLen == 0 || exeLen >= MAX_PATH) {
 		LOG_ERROR("GetModuleFileName failed or path too long");
 		return "";
 	}
-	std::string dir(exePath, exeLen);
-	size_t lastSlash = dir.find_last_of("\\/");
-	if (lastSlash != std::string::npos) dir = dir.substr(0, lastSlash + 1);
+	std::filesystem::path exePath(exePathW);
+	std::string dir = exePath.parent_path().string() + "\\";
 	return dir;
 }
 

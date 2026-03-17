@@ -137,7 +137,7 @@ void DapServer::HandleRequest(const Request& req) {
 
 void DapServer::SendResponse(const Response& resp) {
 	json j = {
-		{"seq", seq_++},
+		{"seq", 0},  // placeholder
 		{"type", "response"},
 		{"request_seq", resp.request_seq},
 		{"success", resp.success},
@@ -147,17 +147,25 @@ void DapServer::SendResponse(const Response& resp) {
 	if (!resp.success && !resp.message.empty()) {
 		j["message"] = resp.message;
 	}
-	transport_->Send(j.dump());
+	{
+		std::lock_guard<std::mutex> lock(sendMutex_);
+		j["seq"] = seq_++;
+		transport_->Send(j.dump());
+	}
 }
 
 void DapServer::SendEvent(const std::string& event, const json& body) {
 	json j = {
-		{"seq", seq_++},
+		{"seq", 0},  // placeholder
 		{"type", "event"},
 		{"event", event},
 		{"body", body},
 	};
-	transport_->Send(j.dump());
+	{
+		std::lock_guard<std::mutex> lock(sendMutex_);
+		j["seq"] = seq_++;
+		transport_->Send(j.dump());
+	}
 }
 
 // --- Lifecycle ---
@@ -572,12 +580,15 @@ void DapServer::OnSetInstructionBreakpoints(const Request& req) {
 
 	for (auto& bp : bps) {
 		std::string instrRef = bp.value("instructionReference", std::string(""));
-		LOG_DEBUG("  bp instrRef='%s' raw=%s", instrRef.c_str(), bp.dump().c_str());
+		int64_t offset = bp.value("offset", (int64_t)0);
+		LOG_DEBUG("  bp instrRef='%s' offset=%lld raw=%s", instrRef.c_str(), offset, bp.dump().c_str());
 
 		uint64_t address = 0;
 		if (!instrRef.empty()) {
 			try {
 				address = std::stoull(instrRef, nullptr, 0);
+				// VSCode 디스어셈블리 뷰는 instructionReference + offset으로 실제 주소를 전달
+				address = (uint64_t)((int64_t)address + offset);
 			} catch (...) {
 				LOG_ERROR("  ParseAddress failed for '%s'", instrRef.c_str());
 			}
@@ -633,8 +644,11 @@ void DapServer::OnContinue(const Request& req) {
 	uint32_t threadId = req.arguments.value("threadId", 0);
 
 	// 실행 재개 시 프레임 매핑 초기화 (다음 stopped에서 새로 생성됨)
-	frameMap_.clear();
-	nextFrameId_ = 1;
+	{
+		std::lock_guard<std::mutex> lock(frameMutex_);
+		frameMap_.clear();
+		nextFrameId_ = 1;
+	}
 
 	ContinueRequest contReq;
 	contReq.threadId = threadId;
@@ -698,6 +712,23 @@ void DapServer::OnPause(const Request& req) {
 	resp.command = "pause";
 	resp.success = true;
 	SendResponse(resp);
+
+	// DAP 프로토콜: pause 성공 후 stopped 이벤트를 보내야
+	// VSCode가 threads → stackTrace → scopes → variables 시퀀스를 시작한다.
+	// 이 이벤트가 없으면 CALL STACK 패널이 갱신되지 않아
+	// 스레드를 펼쳐도 스택 프레임이 표시되지 않는다.
+	lastStoppedThreadId_.store(threadId);
+	{
+		std::lock_guard<std::mutex> lock(frameMutex_);
+		frameMap_.clear();
+		nextFrameId_ = 1;
+	}
+
+	SendEvent("stopped", {
+		{"reason", "pause"},
+		{"threadId", (int)threadId},
+		{"allThreadsStopped", true},
+	});
 }
 
 // --- State Queries ---
@@ -761,8 +792,12 @@ void DapServer::OnStackTrace(const Request& req) {
 			for (uint32_t i = 0; i < count; i++) {
 				// 순차 ID 발급 + 맵에 (threadId, frameIndex) 저장
 				// Windows 스레드 ID가 16비트 초과 가능(예: 169644)하므로 비트 패킹 불가
-				int fid = nextFrameId_++;
-				frameMap_[fid] = {threadId, (int)(startFrame + i)};
+				int fid;
+				{
+					std::lock_guard<std::mutex> lock(frameMutex_);
+					fid = nextFrameId_++;
+					frameMap_[fid] = {threadId, (int)(startFrame + i)};
+				}
 
 				StackFrameDap f;
 				f.id = fid;
@@ -799,8 +834,12 @@ void DapServer::OnStackTrace(const Request& req) {
 				auto& r = regResp->regs;
 				uint64_t ip = r.rip;
 
-				int fid = nextFrameId_++;
-				frameMap_[fid] = {threadId, 0};
+				int fid;
+				{
+					std::lock_guard<std::mutex> lock(frameMutex_);
+					fid = nextFrameId_++;
+					frameMap_[fid] = {threadId, 0};
+				}
 
 				StackFrameDap f;
 				f.id = fid;
@@ -834,7 +873,7 @@ void DapServer::OnScopes(const Request& req) {
 	Scope regScope;
 	regScope.name = "Registers";
 	regScope.variablesReference = SCOPE_REGISTERS | frameId;
-	regScope.namedVariables = 20;  // 레지스터 대략 개수 (VSCode가 펼침 가능하다고 인식하게 함)
+	regScope.namedVariables = 26;  // 레지스터 대략 개수: GPR 16~18 + RFLAGS + DR0~DR7 (VSCode가 펼침 가능하다고 인식하게 함)
 	regScope.expensive = false;
 	scopesJson.push_back(regScope.ToJson());
 
@@ -856,10 +895,15 @@ void DapServer::OnVariables(const Request& req) {
 	// frameMap_에서 threadId 복원 (비트 패킹 대신 맵 사용)
 	uint32_t threadId = 1;
 	int frameIndex = 0;
-	auto it = frameMap_.find(frameId);
-	if (it != frameMap_.end()) {
-		threadId = it->second.threadId;
-		frameIndex = it->second.frameIndex;
+	bool frameFound = false;
+	{
+		std::lock_guard<std::mutex> lock(frameMutex_);
+		auto it = frameMap_.find(frameId);
+		if (it != frameMap_.end()) {
+			threadId = it->second.threadId;
+			frameIndex = it->second.frameIndex;
+			frameFound = true;
+		}
 	}
 
 	if (scopeType == SCOPE_REGISTERS) {
@@ -868,7 +912,7 @@ void DapServer::OnVariables(const Request& req) {
 		regReq.threadId = threadId;
 
 		LOG_INFO("OnVariables: requesting registers for threadId=%u (frameId=%d, mapFound=%d)",
-			threadId, frameId, (it != frameMap_.end()) ? 1 : 0);
+			threadId, frameId, frameFound ? 1 : 0);
 
 		std::vector<uint8_t> respData;
 		if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
@@ -892,6 +936,10 @@ void DapServer::OnVariables(const Request& req) {
 					addReg32("ESI", r.rsi); addReg32("EDI", r.rdi);
 					addReg32("EBP", r.rbp); addReg32("ESP", r.rsp);
 					addReg32("EIP", r.rip); addReg32("EFLAGS", r.rflags);
+					// Debug registers
+					addReg32("DR0", r.dr0); addReg32("DR1", r.dr1);
+					addReg32("DR2", r.dr2); addReg32("DR3", r.dr3);
+					addReg32("DR6", r.dr6); addReg32("DR7", r.dr7);
 				} else {
 					// 64비트 프로세스 레지스터
 					auto addReg = [&](const char* name, uint64_t val) {
@@ -912,6 +960,10 @@ void DapServer::OnVariables(const Request& req) {
 					addReg("R12", r.r12); addReg("R13", r.r13);
 					addReg("R14", r.r14); addReg("R15", r.r15);
 					addReg("RIP", r.rip); addReg("RFLAGS", r.rflags);
+					// Debug registers
+					addReg("DR0", r.dr0); addReg("DR1", r.dr1);
+					addReg("DR2", r.dr2); addReg("DR3", r.dr3);
+					addReg("DR6", r.dr6); addReg("DR7", r.dr7);
 				}
 				LOG_INFO("OnVariables: got %zu registers", varsJson.size());
 			} else {
@@ -956,6 +1008,7 @@ void DapServer::OnEvaluate(const Request& req) {
 	// threadId 결정: frameMap_에서 복원, 없으면 lastStoppedThreadId_
 	uint32_t threadId = 0;
 	if (frameId != 0) {
+		std::lock_guard<std::mutex> lock(frameMutex_);
 		auto it = frameMap_.find(frameId);
 		if (it != frameMap_.end()) threadId = it->second.threadId;
 	}
@@ -1115,8 +1168,11 @@ void DapServer::OnSetVariable(const Request& req) {
 	// frameMap_에서 threadId 복원
 	int frameId = varRef & ~SCOPE_MASK;
 	uint32_t threadId = 0;
-	auto it = frameMap_.find(frameId);
-	if (it != frameMap_.end()) threadId = it->second.threadId;
+	{
+		std::lock_guard<std::mutex> lock(frameMutex_);
+		auto it = frameMap_.find(frameId);
+		if (it != frameMap_.end()) threadId = it->second.threadId;
+	}
 	if (threadId == 0) threadId = lastStoppedThreadId_.load();
 	if (threadId == 0) threadId = 1;
 
@@ -1211,11 +1267,16 @@ void DapServer::OnExceptionInfo(const Request& req) {
 	resp.success = true;
 
 	char codeBuf[32];
-	snprintf(codeBuf, sizeof(codeBuf), "0x%08X", lastException_.code);
+	std::string desc;
+	{
+		std::lock_guard<std::mutex> lock(exceptionMutex_);
+		snprintf(codeBuf, sizeof(codeBuf), "0x%08X", lastException_.code);
+		desc = lastException_.description;
+	}
 
 	resp.body = {
 		{"exceptionId", codeBuf},
-		{"description", lastException_.description},
+		{"description", desc},
 		{"breakMode", "always"},
 	};
 	SendResponse(resp);
@@ -1230,6 +1291,15 @@ void DapServer::OnReadMemory(const Request& req) {
 	if (count <= 0) count = 256;
 	if (count > 1048576) count = 1048576;  // 최대 1MB
 
+	if (memRef.empty()) {
+		Response resp;
+		resp.request_seq = req.seq;
+		resp.command = "readMemory";
+		resp.success = false;
+		resp.message = "memoryReference is required";
+		SendResponse(resp);
+		return;
+	}
 	uint64_t addr = ParseAddress(memRef) + offset;
 
 	ReadMemoryRequest readReq;
@@ -1260,6 +1330,15 @@ void DapServer::OnWriteMemory(const Request& req) {
 	int64_t offset = req.arguments.value("offset", 0);
 	std::string data = req.arguments.value("data", "");
 
+	if (memRef.empty()) {
+		Response resp;
+		resp.request_seq = req.seq;
+		resp.command = "writeMemory";
+		resp.success = false;
+		resp.message = "memoryReference is required";
+		SendResponse(resp);
+		return;
+	}
 	uint64_t addr = ParseAddress(memRef) + offset;
 	auto bytes = Base64Decode(data);
 
@@ -1518,6 +1597,7 @@ void DapServer::OnTerminateThreads(const Request& req) {
 
 	bool allOk = true;
 	for (auto& tid : threadIds) {
+		if (!tid.is_number()) continue;
 		TerminateThreadRequest termReq;
 		termReq.threadId = tid.get<uint32_t>();
 
@@ -1621,7 +1701,8 @@ void DapServer::OnCompletions(const Request& req) {
 	// 메모리 접근 패턴
 	const char* patterns[] = {"*0x", "[0x"};
 
-	std::string prefix = text.substr(0, column);
+	size_t col = (column > 0) ? static_cast<size_t>(column) : 0;
+	std::string prefix = text.substr(0, std::min(col, text.size()));
 	for (auto& reg : regs64) {
 		if (prefix.empty() || std::string(reg).find(prefix) == 0) {
 			targets.push_back({{"label", reg}, {"type", "property"}});
@@ -1724,9 +1805,12 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 		if (size >= sizeof(ExceptionEvent)) {
 			auto* e = reinterpret_cast<const ExceptionEvent*>(payload);
 			lastStoppedThreadId_.store(e->threadId);
-			lastException_.threadId = e->threadId;
-			lastException_.code = e->exceptionCode;
-			lastException_.description = e->description;
+			{
+				std::lock_guard<std::mutex> lock(exceptionMutex_);
+				lastException_.threadId = e->threadId;
+				lastException_.code = e->exceptionCode;
+				lastException_.description = e->description;
+			}
 
 			SendEvent("stopped", {
 				{"reason", "exception"},
@@ -1801,6 +1885,16 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 
 	case IpcEvent::Error:
 		LOG_ERROR("VEH DLL error event received");
+		break;
+
+	case IpcEvent::HeartbeatAck:
+		LOG_DEBUG("Heartbeat ack received");
+		break;
+
+	case IpcEvent::Paused:
+		// OnPause에서 이미 선제적으로 stopped 이벤트를 보냄.
+		// DLL에서 오는 Paused 이벤트는 중복 방지를 위해 로깅만 한다.
+		LOG_DEBUG("IPC Paused event received (already handled by OnPause)");
 		break;
 
 	default:
@@ -2057,10 +2151,13 @@ void DapServer::Cleanup(bool detachOnly) {
 	{
 		std::lock_guard<std::mutex> lock(breakpointMutex_);
 		breakpointMappings_.clear();
+		dataBreakpointMappings_.clear();
 	}
-	dataBreakpointMappings_.clear();
-	frameMap_.clear();
-	nextFrameId_ = 1;
+	{
+		std::lock_guard<std::mutex> lock(frameMutex_);
+		frameMap_.clear();
+		nextFrameId_ = 1;
+	}
 }
 
 } // namespace veh::dap
