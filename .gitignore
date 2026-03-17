@@ -49,4 +49,9 @@ test_target.exe
 dap_test.py
 dap_full_test.py
 dap_stdio_test.py
+test_dap.py
+test_detach_reattach.py
 *.test_output
+
+# Personal config (not for repo)
+CLAUDE.md

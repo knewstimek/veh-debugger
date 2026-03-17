@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.4 (2026-03-17)
+
+### New Features
+- **Hover preview** — Mouse over register names (RAX, RCX, ...) or hex addresses (0x...) in disassembly to see values
+- **Register modification** — Double-click register values in Variables panel to edit them
+- **Conditional breakpoints** — Break only when condition is met (e.g. `RAX==0x1234`, `*0x7FF600!=0`)
+- **Hit count breakpoints** — Break on Nth hit (e.g. hit count = 5 → break on 5th hit)
+- **Log points** — Log messages to Debug Console without stopping (e.g. `RAX={RAX}, ptr={*0x7FF600}`)
+
+### Bug Fixes
+- **Fix: Stop button requires two clicks** — VSCode sends terminate then disconnect; now both are handled immediately with response-first ordering
+- **Fix: Stack frames not appearing** — GetStackTrace fallback via GetRegisters when DLL stack walking fails
+- **Fix: Registers panel empty** — Frame ID encoding overflow with large Windows thread IDs (e.g. 169644); replaced bit-packing with sequential ID map
+- **Fix: Registers scope not expandable** — Added namedVariables hint so VSCode shows expand arrow
+- **Fix: Thread safety** — Mutex for breakpointMappings_, atomic for lastStoppedThreadId_
+- **Fix: Log points ignoring condition** — Log message now only emitted when condition passes
+- **Fix: Disconnect hang** — Response sent before Cleanup; reader thread join with 2s timeout to prevent blocking
+
 ## 1.0.3 (2026-03-17)
 
 - Add extension icon

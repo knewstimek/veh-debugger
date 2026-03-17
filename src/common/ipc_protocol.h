@@ -47,6 +47,7 @@ enum class IpcCommand : uint32_t {
 	GetStackTrace          = 0x0021,
 	GetRegisters           = 0x0022,
 	GetModules             = 0x0023,
+	SetRegister            = 0x0024,
 
 	// Memory
 	ReadMemory             = 0x0030,
@@ -207,6 +208,16 @@ struct GetRegistersRequest {
 struct GetRegistersResponse {
 	IpcStatus   status;
 	RegisterSet regs;
+};
+
+struct SetRegisterRequest {
+	uint32_t threadId;
+	uint32_t regIndex;   // RegisterSet 내 오프셋 (0=rax, 1=rbx, ..., 16=rip, 17=rflags)
+	uint64_t value;
+};
+
+struct SetRegisterResponse {
+	IpcStatus status;
 };
 
 // Module info

@@ -227,7 +227,17 @@ void PipeClient::StopEventListener() {
 	if (stopEvent_) SetEvent(stopEvent_);
 	if (pipe_ != INVALID_HANDLE_VALUE) CancelIoEx(pipe_, nullptr);
 	if (readerThread_.joinable()) {
-		readerThread_.join();
+		// reader thread는 AsyncReadExact(5초 타임아웃)에서 블로킹될 수 있다.
+		// CancelIoEx로 I/O를 취소했지만 타이밍상 즉시 종료되지 않을 수 있으므로
+		// 최대 2초만 대기하고, 초과 시 detach하여 disconnect 응답 지연을 방지한다.
+		// detach된 스레드는 어댑터 프로세스 종료 시 OS가 정리한다.
+		auto handle = readerThread_.native_handle();
+		if (WaitForSingleObject(handle, 2000) == WAIT_OBJECT_0) {
+			readerThread_.join();
+		} else {
+			LOG_WARN("Reader thread did not exit in 2s, detaching");
+			readerThread_.detach();
+		}
 	}
 }
 

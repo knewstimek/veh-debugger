@@ -56,6 +56,7 @@ private:
 	void OnScopes(const Request& req);
 	void OnVariables(const Request& req);
 	void OnEvaluate(const Request& req);
+	void OnSetVariable(const Request& req);
 
 	void OnModules(const Request& req);
 	void OnLoadedSources(const Request& req);
@@ -79,7 +80,7 @@ private:
 
 	// Helpers
 	std::string GetDllPath();
-	void Cleanup();
+	void Cleanup(bool detachOnly = false);
 
 	Transport* transport_ = nullptr;
 	PipeClient pipeClient_;
@@ -98,7 +99,7 @@ private:
 	InjectionMethod injectionMethod_ = InjectionMethod::Auto;
 
 	// Variable references
-	// Format: high 16 bits = scope type, low 16 bits = thread/frame id
+	// Format: SCOPE_MASK 비트 = scope type, 나머지 비트 = frameId (frameMap_의 key)
 	// Scope types: 1=registers, 2=locals(memory), 3=modules
 	static constexpr int SCOPE_REGISTERS = 0x10000000;
 	static constexpr int SCOPE_MEMORY    = 0x20000000;
@@ -117,6 +118,10 @@ private:
 		uint32_t vehId;
 		uint64_t address;
 		std::string source;
+		std::string condition;
+		std::string hitCondition;
+		uint32_t hitCount = 0;
+		std::string logMessage;
 	};
 	std::vector<BreakpointMapping> breakpointMappings_;
 	int nextDapBpId_ = 1;
@@ -130,6 +135,28 @@ private:
 		uint8_t size;
 	};
 	std::vector<DataBreakpointMapping> dataBreakpointMappings_;
+
+	// Mutex for breakpointMappings_ (accessed from both DAP and IPC event threads)
+	std::mutex breakpointMutex_;
+
+	// Frame ID → (threadId, frameIndex) 매핑
+	// Windows 스레드 ID는 16비트를 초과할 수 있어(예: 169644) 비트 패킹 불가.
+	// 순차 ID를 발급하고 맵으로 원래 threadId/frameIndex를 복원한다.
+	struct FrameInfo {
+		uint32_t threadId;
+		int frameIndex;
+	};
+	std::unordered_map<int, FrameInfo> frameMap_;
+	int nextFrameId_ = 1;
+
+	// Last stopped thread for evaluate context
+	std::atomic<uint32_t> lastStoppedThreadId_{0};
+
+	// Condition evaluation helpers
+	bool EvaluateCondition(const std::string& condition, uint32_t threadId);
+	uint64_t ResolveRegisterByName(const std::string& name, const RegisterSet& regs);
+	bool TryParseRegisterName(const std::string& name);
+	std::string ExpandLogMessage(const std::string& msg, uint32_t threadId);
 };
 
 } // namespace veh::dap

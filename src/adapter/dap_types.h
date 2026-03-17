@@ -36,6 +36,10 @@ struct Event : ProtocolMessage {
 inline json MakeCapabilities() {
 	return {
 		{"supportsConfigurationDoneRequest", true},
+		{"supportsEvaluateForHovers", true},
+		{"supportsConditionalBreakpoints", true},
+		{"supportsHitConditionalBreakpoints", true},
+		{"supportsLogPoints", true},
 		{"supportsFunctionBreakpoints", true},
 		{"supportsExceptionInfoRequest", true},
 		{"supportsReadMemoryRequest", true},
@@ -44,7 +48,7 @@ inline json MakeCapabilities() {
 		{"supportsModulesRequest", true},
 		{"supportsLoadedSourcesRequest", true},
 		{"supportsTerminateRequest", true},
-		{"supportsSetVariable", false},
+		{"supportsSetVariable", true},
 		{"supportsSetExpression", false},
 		{"supportsStepBack", false},
 		{"supportsRestartRequest", true},
@@ -124,14 +128,19 @@ struct StackFrameDap {
 struct Scope {
 	std::string name;
 	int variablesReference = 0;
+	int namedVariables = 0;    // VSCode는 이 값이 0이면 scope를 빈 것으로 판단하여 펼침 불가
 	bool expensive = false;
 
 	json ToJson() const {
-		return {
+		json j = {
 			{"name", name},
 			{"variablesReference", variablesReference},
 			{"expensive", expensive},
 		};
+		if (namedVariables > 0) {
+			j["namedVariables"] = namedVariables;
+		}
+		return j;
 	}
 };
 
