@@ -11,6 +11,11 @@ Windows debugger based on **VEH (Vectored Exception Handler)** instead of the Wi
 - **PDB symbols** — Source file + line number mapping, function name breakpoints
 - **Disassembly** — Zydis x86/x64 disassembler with full operand display
 - **Memory read/write** — Inspect and modify process memory
+- **Register editing** — Modify register values directly from the Variables panel
+- **Conditional breakpoints** — Break only when condition is met (`RAX==0x1234`, `*0x7FF600!=0`, `RCX>0x100`)
+- **Hit count breakpoints** — Break on Nth hit
+- **Log points** — Log `{RAX}`, `{*0x7FF600}` to Debug Console without stopping execution
+- **Hover preview** — Mouse over registers or addresses in disassembly to see live values
 - **4 injection methods** — CreateRemoteThread, NtCreateThreadEx, Thread Hijack, QueueUserAPC
 - **TCP remote mode** — Debug across VMs or network
 - **MCP tool server** — 19 tools for AI agent integration (Claude, Cursor, etc.)

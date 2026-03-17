@@ -108,6 +108,7 @@ void DapServer::HandleRequest(const Request& req) {
 	HANDLE_CMD("scopes",                  OnScopes)
 	HANDLE_CMD("variables",               OnVariables)
 	HANDLE_CMD("evaluate",                OnEvaluate)
+	HANDLE_CMD("setVariable",             OnSetVariable)
 	HANDLE_CMD("modules",                 OnModules)
 	HANDLE_CMD("loadedSources",           OnLoadedSources)
 	HANDLE_CMD("exceptionInfo",           OnExceptionInfo)
@@ -276,7 +277,22 @@ void DapServer::OnAttach(const Request& req) {
 void DapServer::OnDisconnect(const Request& req) {
 	bool terminateDebuggee = req.arguments.value("terminateDebuggee", launchedByUs_);
 
-	Cleanup();
+	// 응답을 Cleanup보다 먼저 전송한다.
+	// Cleanup()은 DLL에 Shutdown/Detach IPC를 보내고 파이프를 닫는데,
+	// reader thread join 등으로 수 초간 블로킹될 수 있다.
+	// 그 동안 VSCode가 disconnect 응답을 못 받으면 Stop 버튼이 반응 없는 것처럼 보인다.
+	// 응답을 먼저 보내면 VSCode는 즉시 세션 종료 UI를 갱신하고,
+	// 어댑터는 이후 Cleanup을 정상 수행한 뒤 프로세스를 종료한다.
+	Response resp;
+	resp.request_seq = req.seq;
+	resp.command = "disconnect";
+	resp.success = true;
+	SendResponse(resp);
+
+	// terminateDebuggee=false (detach): DLL에 Detach 전송 → 파이프 서버 유지 (재연결 가능)
+	// terminateDebuggee=true (종료): DLL에 Shutdown 전송 → 파이프 서버도 종료
+	bool detachOnly = !terminateDebuggee;
+	Cleanup(detachOnly);
 
 	if (terminateDebuggee && targetPid_) {
 		HANDLE proc = OpenProcess(PROCESS_TERMINATE, FALSE, targetPid_);
@@ -286,16 +302,19 @@ void DapServer::OnDisconnect(const Request& req) {
 		}
 	}
 
-	Response resp;
-	resp.request_seq = req.seq;
-	resp.command = "disconnect";
-	resp.success = true;
-	SendResponse(resp);
-
 	running_ = false;
 }
 
 void DapServer::OnTerminate(const Request& req) {
+	// VSCode Stop 흐름: terminate 요청 → terminate 응답 → terminated 이벤트 → disconnect 요청
+	// terminated 이벤트를 보내지 않으면 VSCode가 disconnect를 보내지 않아
+	// 사용자가 Stop을 두 번 눌러야 세션이 종료된다.
+	Response resp;
+	resp.request_seq = req.seq;
+	resp.command = "terminate";
+	resp.success = true;
+	SendResponse(resp);
+
 	if (targetPid_) {
 		HANDLE proc = OpenProcess(PROCESS_TERMINATE, FALSE, targetPid_);
 		if (proc) {
@@ -304,11 +323,8 @@ void DapServer::OnTerminate(const Request& req) {
 		}
 	}
 
-	Response resp;
-	resp.request_seq = req.seq;
-	resp.command = "terminate";
-	resp.success = true;
-	SendResponse(resp);
+	// terminated 이벤트를 보내야 VSCode가 자동으로 disconnect를 이어서 보냄
+	SendEvent("terminated");
 }
 
 void DapServer::OnConfigurationDone(const Request& req) {
@@ -334,6 +350,7 @@ void DapServer::OnConfigurationDone(const Request& req) {
 
 void DapServer::OnSetBreakpoints(const Request& req) {
 	// DAP에서는 setBreakpoints가 전체 교체 방식
+	std::lock_guard<std::mutex> lock(breakpointMutex_);
 
 	std::string sourceFile;
 	if (req.arguments.contains("source") && req.arguments["source"].contains("path")) {
@@ -427,7 +444,10 @@ void DapServer::OnSetBreakpoints(const Request& req) {
 				dbp.verified = (setResp->status == IpcStatus::Ok);
 				dbp.instructionReference = address;
 
-				breakpointMappings_.push_back({dbp.id, setResp->id, address, sourceFile});
+				std::string cond = bp.value("condition", "");
+				std::string hitCond = bp.value("hitCondition", "");
+				std::string logMsg = bp.value("logMessage", "");
+				breakpointMappings_.push_back({dbp.id, setResp->id, address, sourceFile, cond, hitCond, 0, logMsg});
 				breakpointsJson.push_back(dbp.ToJson());
 			}
 		} else {
@@ -448,6 +468,7 @@ void DapServer::OnSetBreakpoints(const Request& req) {
 }
 
 void DapServer::OnSetFunctionBreakpoints(const Request& req) {
+	std::lock_guard<std::mutex> lock(breakpointMutex_);
 	json breakpointsJson = json::array();
 	auto bps = req.arguments.value("breakpoints", json::array());
 
@@ -499,7 +520,7 @@ void DapServer::OnSetFunctionBreakpoints(const Request& req) {
 				dbp.verified = (setResp->status == IpcStatus::Ok);
 				dbp.instructionReference = address;
 
-				breakpointMappings_.push_back({dbp.id, setResp->id, address, {}});
+				breakpointMappings_.push_back({dbp.id, setResp->id, address, {}, {}, {}, 0, {}});
 				breakpointsJson.push_back(dbp.ToJson());
 			}
 		} else {
@@ -530,6 +551,7 @@ void DapServer::OnSetExceptionBreakpoints(const Request& req) {
 }
 
 void DapServer::OnSetInstructionBreakpoints(const Request& req) {
+	std::lock_guard<std::mutex> lock(breakpointMutex_);
 	json breakpointsJson = json::array();
 	auto bps = req.arguments.value("breakpoints", json::array());
 
@@ -582,7 +604,10 @@ void DapServer::OnSetInstructionBreakpoints(const Request& req) {
 				dbp.verified = (setResp->status == IpcStatus::Ok);
 				dbp.instructionReference = address;
 
-				breakpointMappings_.push_back({dbp.id, setResp->id, address, {}});
+				std::string cond = bp.value("condition", "");
+				std::string hitCond = bp.value("hitCondition", "");
+				std::string logMsg = bp.value("logMessage", "");
+				breakpointMappings_.push_back({dbp.id, setResp->id, address, {}, cond, hitCond, 0, logMsg});
 				breakpointsJson.push_back(dbp.ToJson());
 			}
 		} else {
@@ -606,6 +631,10 @@ void DapServer::OnSetInstructionBreakpoints(const Request& req) {
 
 void DapServer::OnContinue(const Request& req) {
 	uint32_t threadId = req.arguments.value("threadId", 0);
+
+	// 실행 재개 시 프레임 매핑 초기화 (다음 stopped에서 새로 생성됨)
+	frameMap_.clear();
+	nextFrameId_ = 1;
 
 	ContinueRequest contReq;
 	contReq.threadId = threadId;
@@ -718,6 +747,10 @@ void DapServer::OnStackTrace(const Request& req) {
 	json framesJson = json::array();
 	std::vector<uint8_t> respData;
 
+	// frameMap_은 stopped/continued 이벤트 시 초기화됨 (OnIpcEvent)
+	// 여기서 clear하면 안 됨: VSCode가 여러 스레드의 stackTrace를 순차 요청하므로
+	// 앞 스레드의 프레임 매핑이 뒷 스레드 요청 시 삭제되어 scopes/variables가 깨짐
+
 	if (pipeClient_.SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), respData)) {
 		if (respData.size() >= sizeof(GetStackTraceResponse)) {
 			auto* hdr = reinterpret_cast<const GetStackTraceResponse*>(respData.data());
@@ -726,15 +759,19 @@ void DapServer::OnStackTrace(const Request& req) {
 			uint32_t maxCount = (uint32_t)((respData.size() - sizeof(GetStackTraceResponse)) / sizeof(StackFrameInfo));
 			uint32_t count = std::min(hdr->count, maxCount);
 			for (uint32_t i = 0; i < count; i++) {
+				// 순차 ID 발급 + 맵에 (threadId, frameIndex) 저장
+				// Windows 스레드 ID가 16비트 초과 가능(예: 169644)하므로 비트 패킹 불가
+				int fid = nextFrameId_++;
+				frameMap_[fid] = {threadId, (int)(startFrame + i)};
+
 				StackFrameDap f;
-				f.id = (threadId << 16) | (startFrame + i);
+				f.id = fid;
 				f.name = frames[i].functionName[0] ? frames[i].functionName :
 					FormatAddress(frames[i].address);
 				f.line = frames[i].line;
 				f.instructionPointerReference = FormatAddress(frames[i].address);
 				if (frames[i].sourceFile[0]) {
 					f.source.path = frames[i].sourceFile;
-					// 파일명만 추출하여 source.name에 설정
 					std::string fullPath = frames[i].sourceFile;
 					auto pos = fullPath.find_last_of("\\/");
 					f.source.name = (pos != std::string::npos) ? fullPath.substr(pos + 1) : fullPath;
@@ -743,6 +780,36 @@ void DapServer::OnStackTrace(const Request& req) {
 					f.moduleId = frames[i].moduleName;
 				}
 				framesJson.push_back(f.ToJson());
+			}
+		}
+	}
+
+	// Fallback: DLL의 GetStackTrace가 빈 결과를 반환하는 경우 대비
+	// (스택 워킹 실패, 심볼 미로드, IPC 타임아웃 등)
+	// 빈 stackFrames를 반환하면 VSCode가 스레드 아래에 아무것도 표시하지 않고,
+	// 사용자가 Scopes/Variables도 볼 수 없게 됨.
+	// → GetRegisters로 현재 RIP를 가져와 합성 프레임 1개를 만들어 최소한의 디버깅 보장.
+	if (framesJson.empty() && startFrame == 0) {
+		GetRegistersRequest regReq;
+		regReq.threadId = threadId;
+		std::vector<uint8_t> regData;
+		if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), regData)) {
+			if (regData.size() >= sizeof(GetRegistersResponse)) {
+				auto* regResp = reinterpret_cast<const GetRegistersResponse*>(regData.data());
+				auto& r = regResp->regs;
+				uint64_t ip = r.rip;
+
+				int fid = nextFrameId_++;
+				frameMap_[fid] = {threadId, 0};
+
+				StackFrameDap f;
+				f.id = fid;
+				f.name = FormatAddress(ip);
+				f.line = 0;
+				f.instructionPointerReference = FormatAddress(ip);
+				framesJson.push_back(f.ToJson());
+
+				LOG_DEBUG("StackTrace fallback: thread %u, RIP=%s", threadId, FormatAddress(ip).c_str());
 			}
 		}
 	}
@@ -767,6 +834,7 @@ void DapServer::OnScopes(const Request& req) {
 	Scope regScope;
 	regScope.name = "Registers";
 	regScope.variablesReference = SCOPE_REGISTERS | frameId;
+	regScope.namedVariables = 20;  // 레지스터 대략 개수 (VSCode가 펼침 가능하다고 인식하게 함)
 	regScope.expensive = false;
 	scopesJson.push_back(regScope.ToJson());
 
@@ -784,14 +852,23 @@ void DapServer::OnVariables(const Request& req) {
 
 	int scopeType = varRef & SCOPE_MASK;
 	int frameId = varRef & ~SCOPE_MASK;
-	int threadId = (frameId >> 16) & 0x3FFF;
-	int frameIndex = frameId & 0xFFFF;
-	if (threadId == 0) threadId = 1;
+
+	// frameMap_에서 threadId 복원 (비트 패킹 대신 맵 사용)
+	uint32_t threadId = 1;
+	int frameIndex = 0;
+	auto it = frameMap_.find(frameId);
+	if (it != frameMap_.end()) {
+		threadId = it->second.threadId;
+		frameIndex = it->second.frameIndex;
+	}
 
 	if (scopeType == SCOPE_REGISTERS) {
 		// 레지스터 값 가져오기
 		GetRegistersRequest regReq;
 		regReq.threadId = threadId;
+
+		LOG_INFO("OnVariables: requesting registers for threadId=%u (frameId=%d, mapFound=%d)",
+			threadId, frameId, (it != frameMap_.end()) ? 1 : 0);
 
 		std::vector<uint8_t> respData;
 		if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
@@ -836,7 +913,18 @@ void DapServer::OnVariables(const Request& req) {
 					addReg("R14", r.r14); addReg("R15", r.r15);
 					addReg("RIP", r.rip); addReg("RFLAGS", r.rflags);
 				}
+				LOG_INFO("OnVariables: got %zu registers", varsJson.size());
+			} else {
+				LOG_WARN("OnVariables: response too small (%zu < %zu)", respData.size(), sizeof(GetRegistersResponse));
 			}
+		} else {
+			LOG_WARN("OnVariables: GetRegisters IPC failed for threadId=%u", threadId);
+			// IPC 실패 시 에러 표시
+			Variable v;
+			v.name = "error";
+			v.value = "Failed to read registers (thread " + std::to_string(threadId) + ")";
+			v.type = "string";
+			varsJson.push_back(v.ToJson());
 		}
 	}
 
@@ -851,12 +939,85 @@ void DapServer::OnVariables(const Request& req) {
 void DapServer::OnEvaluate(const Request& req) {
 	std::string expression = req.arguments.value("expression", "");
 	std::string context = req.arguments.value("context", "repl");
+	int frameId = req.arguments.value("frameId", 0);
 
 	Response resp;
 	resp.request_seq = req.seq;
 	resp.command = "evaluate";
 
-	// 간단한 메모리 읽기 표현식 지원: *0xADDRESS 또는 [0xADDRESS]
+	// 표현식 앞뒤 공백 제거
+	auto trim = [](std::string s) {
+		while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+		while (!s.empty() && s.back() == ' ') s.pop_back();
+		return s;
+	};
+	expression = trim(expression);
+
+	// threadId 결정: frameMap_에서 복원, 없으면 lastStoppedThreadId_
+	uint32_t threadId = 0;
+	if (frameId != 0) {
+		auto it = frameMap_.find(frameId);
+		if (it != frameMap_.end()) threadId = it->second.threadId;
+	}
+	if (threadId == 0) threadId = lastStoppedThreadId_.load();
+	if (threadId == 0) threadId = 1;
+
+	// 1) 레지스터 이름 인식 (hover에서 레지스터 값 표시)
+	if (TryParseRegisterName(expression)) {
+		GetRegistersRequest regReq;
+		regReq.threadId = threadId;
+
+		std::vector<uint8_t> respData;
+		if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
+			if (respData.size() >= sizeof(GetRegistersResponse)) {
+				auto* regResp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
+				uint64_t val = ResolveRegisterByName(expression, regResp->regs);
+				char buf[32];
+				if (regResp->regs.is32bit) {
+					snprintf(buf, sizeof(buf), "0x%08X", (uint32_t)val);
+				} else {
+					snprintf(buf, sizeof(buf), "0x%016llX", val);
+				}
+				resp.success = true;
+				resp.body = {
+					{"result", buf},
+					{"type", regResp->regs.is32bit ? "uint32" : "uint64"},
+					{"variablesReference", 0},
+				};
+				SendResponse(resp);
+				return;
+			}
+		}
+	}
+
+	// 2) 순수 hex 주소 (0x...) — 메모리 미리보기
+	if (expression.size() > 2 && expression[0] == '0' && (expression[1] == 'x' || expression[1] == 'X')) {
+		try {
+			uint64_t addr = std::stoull(expression, nullptr, 16);
+			ReadMemoryRequest readReq;
+			readReq.address = addr;
+			readReq.size = 8;
+
+			std::vector<uint8_t> respData;
+			if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)) {
+				if (respData.size() >= 8) {
+					uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data());
+					char buf[64];
+					snprintf(buf, sizeof(buf), "[0x%llX] = 0x%016llX", addr, val);
+					resp.success = true;
+					resp.body = {
+						{"result", buf},
+						{"type", "memory"},
+						{"variablesReference", 0},
+					};
+					SendResponse(resp);
+					return;
+				}
+			}
+		} catch (...) {}
+	}
+
+	// 3) *addr / [addr] 문법 — 메모리 읽기
 	if (!expression.empty() && (expression[0] == '*' || expression[0] == '[')) {
 		std::string addrStr = expression.substr(1);
 		if (!addrStr.empty() && addrStr.back() == ']') addrStr.pop_back();
@@ -865,7 +1026,7 @@ void DapServer::OnEvaluate(const Request& req) {
 			uint64_t addr = std::stoull(addrStr, nullptr, 0);
 			ReadMemoryRequest readReq;
 			readReq.address = addr;
-			readReq.size = 8; // 8바이트 읽기
+			readReq.size = 8;
 
 			std::vector<uint8_t> respData;
 			if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)) {
@@ -887,7 +1048,112 @@ void DapServer::OnEvaluate(const Request& req) {
 	}
 
 	resp.success = false;
-	resp.message = "Evaluation not supported. Use *<address> to read memory.";
+	resp.message = "Use register name (RAX, RCX, ...) or *<address> / 0x<address> to evaluate.";
+	SendResponse(resp);
+}
+
+void DapServer::OnSetVariable(const Request& req) {
+	int varRef = req.arguments.value("variablesReference", 0);
+	std::string name = req.arguments.value("name", "");
+	std::string value = req.arguments.value("value", "");
+
+	Response resp;
+	resp.request_seq = req.seq;
+	resp.command = "setVariable";
+
+	int scopeType = varRef & SCOPE_MASK;
+
+	if (scopeType != SCOPE_REGISTERS) {
+		resp.success = false;
+		resp.message = "Only register modification is supported";
+		SendResponse(resp);
+		return;
+	}
+
+	// 레지스터 이름 → regIndex 변환
+	std::string upperName = name;
+	std::transform(upperName.begin(), upperName.end(), upperName.begin(), ::toupper);
+
+	// regIndex: RegisterSet 내 uint64_t 배열 순서
+	// rax=0, rbx=1, rcx=2, rdx=3, rsi=4, rdi=5, rbp=6, rsp=7,
+	// r8=8, r9=9, r10=10, r11=11, r12=12, r13=13, r14=14, r15=15,
+	// rip=16, rflags=17
+	static const std::pair<std::string, uint32_t> regMap[] = {
+		{"RAX", 0}, {"EAX", 0}, {"RBX", 1}, {"EBX", 1},
+		{"RCX", 2}, {"ECX", 2}, {"RDX", 3}, {"EDX", 3},
+		{"RSI", 4}, {"ESI", 4}, {"RDI", 5}, {"EDI", 5},
+		{"RBP", 6}, {"EBP", 6}, {"RSP", 7}, {"ESP", 7},
+		{"R8",  8}, {"R9",  9}, {"R10", 10}, {"R11", 11},
+		{"R12", 12}, {"R13", 13}, {"R14", 14}, {"R15", 15},
+		{"RIP", 16}, {"EIP", 16},
+		{"RFLAGS", 17}, {"EFLAGS", 17},
+	};
+
+	uint32_t regIndex = UINT32_MAX;
+	for (auto& [rn, ri] : regMap) {
+		if (upperName == rn) { regIndex = ri; break; }
+	}
+
+	if (regIndex == UINT32_MAX) {
+		resp.success = false;
+		resp.message = "Unknown register: " + name;
+		SendResponse(resp);
+		return;
+	}
+
+	// 값 파싱
+	uint64_t newVal = 0;
+	try {
+		newVal = std::stoull(value, nullptr, 0);
+	} catch (...) {
+		resp.success = false;
+		resp.message = "Invalid value: " + value;
+		SendResponse(resp);
+		return;
+	}
+
+	// frameMap_에서 threadId 복원
+	int frameId = varRef & ~SCOPE_MASK;
+	uint32_t threadId = 0;
+	auto it = frameMap_.find(frameId);
+	if (it != frameMap_.end()) threadId = it->second.threadId;
+	if (threadId == 0) threadId = lastStoppedThreadId_.load();
+	if (threadId == 0) threadId = 1;
+
+	// IPC로 레지스터 수정 요청
+	SetRegisterRequest setReq;
+	setReq.threadId = threadId;
+	setReq.regIndex = regIndex;
+	setReq.value = newVal;
+
+	std::vector<uint8_t> respData;
+	if (pipeClient_.SendAndReceive(IpcCommand::SetRegister, &setReq, sizeof(setReq), respData)) {
+		if (respData.size() >= sizeof(SetRegisterResponse)) {
+			auto* setResp = reinterpret_cast<const SetRegisterResponse*>(respData.data());
+			if (setResp->status == IpcStatus::Ok) {
+				// 32비트 레지스터명(EAX 등)이면 32비트 포맷
+				bool is32 = (upperName[0] == 'E');
+				char buf[32];
+				if (is32) {
+					newVal &= 0xFFFFFFFF;
+					snprintf(buf, sizeof(buf), "0x%08X", (uint32_t)newVal);
+				} else {
+					snprintf(buf, sizeof(buf), "0x%016llX", newVal);
+				}
+				resp.success = true;
+				resp.body = {
+					{"value", buf},
+					{"type", is32 ? "uint32" : "uint64"},
+					{"variablesReference", 0},
+				};
+				SendResponse(resp);
+				return;
+			}
+		}
+	}
+
+	resp.success = false;
+	resp.message = "Failed to set register (DLL may not support SetRegister command)";
 	SendResponse(resp);
 }
 
@@ -1169,8 +1435,8 @@ void DapServer::OnRestart(const Request& req) {
 	resp.command = "restart";
 
 	if (!launchedByUs_) {
-		// attach 모드에서는 detach 후 재연결
-		Cleanup();
+		// attach 모드: Detach 전송 → DLL 파이프 서버 유지 → 재연결
+		Cleanup(/*detachOnly=*/true);
 
 		std::string dllPath = GetDllPath();
 		if (!Injector::InjectDll(targetPid_, dllPath, injectionMethod_)) {
@@ -1383,21 +1649,60 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 	case IpcEvent::BreakpointHit: {
 		if (size >= sizeof(BreakpointHitEvent)) {
 			auto* e = reinterpret_cast<const BreakpointHitEvent*>(payload);
+			lastStoppedThreadId_.store(e->threadId);
 
+			// 매칭된 BP 검색 + 조건 평가
+			std::lock_guard<std::mutex> bpLock(breakpointMutex_);
 			json hitBps = json::array();
+			bool shouldStop = true;
 			for (auto& m : breakpointMappings_) {
 				if (m.vehId == e->breakpointId) {
 					hitBps.push_back(m.dapId);
+
+					// hitCondition 평가 (히트 카운터)
+					if (!m.hitCondition.empty()) {
+						m.hitCount++;
+						try {
+							uint32_t target = std::stoul(m.hitCondition, nullptr, 0);
+							if (m.hitCount < target) {
+								shouldStop = false;
+							}
+						} catch (...) {
+							// 파싱 실패시 무시, 항상 중단
+						}
+					}
+
+					// condition 평가 (레지스터/메모리 조건식)
+					if (shouldStop && !m.condition.empty()) {
+						shouldStop = EvaluateCondition(m.condition, e->threadId);
+					}
+
+					// Log Point: condition 통과 시에만 메시지 출력 후 Continue (중단하지 않음)
+					if (shouldStop && !m.logMessage.empty()) {
+						std::string expanded = ExpandLogMessage(m.logMessage, e->threadId);
+						SendEvent("output", {
+							{"category", "console"},
+							{"output", expanded + "\n"},
+						});
+						shouldStop = false;
+					}
 					break;
 				}
 			}
 
-			SendEvent("stopped", {
-				{"reason", "breakpoint"},
-				{"threadId", (int)e->threadId},
-				{"allThreadsStopped", true},
-				{"hitBreakpointIds", hitBps},
-			});
+			if (shouldStop) {
+				SendEvent("stopped", {
+					{"reason", "breakpoint"},
+					{"threadId", (int)e->threadId},
+					{"allThreadsStopped", true},
+					{"hitBreakpointIds", hitBps},
+				});
+			} else {
+				// 조건 불만족 or Log Point → 자동 Continue
+				ContinueRequest contReq;
+				contReq.threadId = e->threadId;
+				pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+			}
 		}
 		break;
 	}
@@ -1405,6 +1710,7 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 	case IpcEvent::StepCompleted: {
 		if (size >= sizeof(StepCompletedEvent)) {
 			auto* e = reinterpret_cast<const StepCompletedEvent*>(payload);
+			lastStoppedThreadId_.store(e->threadId);
 			SendEvent("stopped", {
 				{"reason", "step"},
 				{"threadId", (int)e->threadId},
@@ -1417,6 +1723,7 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 	case IpcEvent::ExceptionOccurred: {
 		if (size >= sizeof(ExceptionEvent)) {
 			auto* e = reinterpret_cast<const ExceptionEvent*>(payload);
+			lastStoppedThreadId_.store(e->threadId);
 			lastException_.threadId = e->threadId;
 			lastException_.code = e->exceptionCode;
 			lastException_.description = e->description;
@@ -1517,13 +1824,243 @@ std::string DapServer::GetDllPath() {
 	return (dir / "vcruntime_net.dll").string();
 }
 
-void DapServer::Cleanup() {
-	if (pipeClient_.IsConnected()) {
-		pipeClient_.SendCommand(IpcCommand::Shutdown);
-		pipeClient_.Disconnect();
+bool DapServer::TryParseRegisterName(const std::string& name) {
+	std::string upper = name;
+	std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+
+	static const char* regNames[] = {
+		"RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP",
+		"R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15",
+		"RIP", "RFLAGS",
+		"EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP",
+		"EIP", "EFLAGS",
+	};
+	for (auto* rn : regNames) {
+		if (upper == rn) return true;
 	}
-	breakpointMappings_.clear();
+	return false;
+}
+
+uint64_t DapServer::ResolveRegisterByName(const std::string& name, const RegisterSet& regs) {
+	std::string upper = name;
+	std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+
+	if (upper == "RAX" || upper == "EAX") return regs.rax;
+	if (upper == "RBX" || upper == "EBX") return regs.rbx;
+	if (upper == "RCX" || upper == "ECX") return regs.rcx;
+	if (upper == "RDX" || upper == "EDX") return regs.rdx;
+	if (upper == "RSI" || upper == "ESI") return regs.rsi;
+	if (upper == "RDI" || upper == "EDI") return regs.rdi;
+	if (upper == "RBP" || upper == "EBP") return regs.rbp;
+	if (upper == "RSP" || upper == "ESP") return regs.rsp;
+	if (upper == "R8")  return regs.r8;
+	if (upper == "R9")  return regs.r9;
+	if (upper == "R10") return regs.r10;
+	if (upper == "R11") return regs.r11;
+	if (upper == "R12") return regs.r12;
+	if (upper == "R13") return regs.r13;
+	if (upper == "R14") return regs.r14;
+	if (upper == "R15") return regs.r15;
+	if (upper == "RIP" || upper == "EIP") return regs.rip;
+	if (upper == "RFLAGS" || upper == "EFLAGS") return regs.rflags;
+	return 0;
+}
+
+bool DapServer::EvaluateCondition(const std::string& condition, uint32_t threadId) {
+	// 조건 문법: REG==VAL, REG!=VAL, REG>VAL, REG<VAL, REG>=VAL, REG<=VAL
+	// 또는 *ADDR==VAL (메모리 비교)
+	// 파싱 실패 시 true 반환 (항상 중단)
+
+	// 연산자 검색
+	struct { const char* op; size_t len; } ops[] = {
+		{"==", 2}, {"!=", 2}, {">=", 2}, {"<=", 2}, {">", 1}, {"<", 1},
+	};
+
+	std::string lhs, rhs;
+	std::string opStr;
+
+	for (auto& [op, len] : ops) {
+		auto pos = condition.find(op);
+		if (pos != std::string::npos) {
+			lhs = condition.substr(0, pos);
+			rhs = condition.substr(pos + len);
+			opStr = op;
+			break;
+		}
+	}
+
+	if (opStr.empty() || lhs.empty() || rhs.empty()) {
+		LOG_WARN("Condition parse failed: '%s'", condition.c_str());
+		return true; // 파싱 실패 → 항상 중단
+	}
+
+	// 앞뒤 공백 제거
+	auto trim = [](std::string s) {
+		while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+		while (!s.empty() && s.back() == ' ') s.pop_back();
+		return s;
+	};
+	lhs = trim(lhs);
+	rhs = trim(rhs);
+
+	// LHS 값 해석
+	uint64_t lhsVal = 0;
+	if (lhs[0] == '*' || lhs[0] == '[') {
+		// 메모리 읽기
+		std::string addrStr = lhs.substr(1);
+		if (!addrStr.empty() && addrStr.back() == ']') addrStr.pop_back();
+		try {
+			uint64_t addr = std::stoull(addrStr, nullptr, 0);
+			ReadMemoryRequest readReq;
+			readReq.address = addr;
+			readReq.size = 8;
+			std::vector<uint8_t> respData;
+			if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)) {
+				if (respData.size() >= 8) {
+					lhsVal = *reinterpret_cast<const uint64_t*>(respData.data());
+				}
+			}
+		} catch (...) { return true; }
+	} else if (TryParseRegisterName(lhs)) {
+		// 레지스터
+		GetRegistersRequest regReq;
+		regReq.threadId = threadId;
+		std::vector<uint8_t> respData;
+		if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
+			if (respData.size() >= sizeof(GetRegistersResponse)) {
+				auto* regResp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
+				lhsVal = ResolveRegisterByName(lhs, regResp->regs);
+			}
+		}
+	} else {
+		try { lhsVal = std::stoull(lhs, nullptr, 0); } catch (...) { return true; }
+	}
+
+	// RHS 값 해석
+	uint64_t rhsVal = 0;
+	if (TryParseRegisterName(rhs)) {
+		GetRegistersRequest regReq;
+		regReq.threadId = threadId;
+		std::vector<uint8_t> respData;
+		if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
+			if (respData.size() >= sizeof(GetRegistersResponse)) {
+				auto* regResp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
+				rhsVal = ResolveRegisterByName(rhs, regResp->regs);
+			}
+		}
+	} else {
+		try { rhsVal = std::stoull(rhs, nullptr, 0); } catch (...) { return true; }
+	}
+
+	// 비교
+	if (opStr == "==") return lhsVal == rhsVal;
+	if (opStr == "!=") return lhsVal != rhsVal;
+	if (opStr == ">=") return lhsVal >= rhsVal;
+	if (opStr == "<=") return lhsVal <= rhsVal;
+	if (opStr == ">")  return lhsVal > rhsVal;
+	if (opStr == "<")  return lhsVal < rhsVal;
+	return true;
+}
+
+std::string DapServer::ExpandLogMessage(const std::string& msg, uint32_t threadId) {
+	// {표현식}을 실제 값으로 치환
+	// 예: "RAX={RAX}, mem={*0x7FF600}" → "RAX=0x0000000000001234, mem=0x00000000DEADBEEF"
+	std::string result;
+	result.reserve(msg.size());
+
+	// 레지스터 캐시 (한 번만 IPC 호출)
+	bool regsLoaded = false;
+	RegisterSet regs = {};
+	auto ensureRegs = [&]() {
+		if (!regsLoaded) {
+			GetRegistersRequest regReq;
+			regReq.threadId = threadId;
+			std::vector<uint8_t> respData;
+			if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
+				if (respData.size() >= sizeof(GetRegistersResponse)) {
+					auto* regResp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
+					regs = regResp->regs;
+				}
+			}
+			regsLoaded = true;
+		}
+	};
+
+	size_t i = 0;
+	while (i < msg.size()) {
+		if (msg[i] == '{') {
+			auto end = msg.find('}', i + 1);
+			if (end == std::string::npos) {
+				result += msg[i++];
+				continue;
+			}
+
+			std::string expr = msg.substr(i + 1, end - i - 1);
+			// 앞뒤 공백 제거
+			while (!expr.empty() && expr.front() == ' ') expr.erase(expr.begin());
+			while (!expr.empty() && expr.back() == ' ') expr.pop_back();
+
+			char buf[32];
+			if (TryParseRegisterName(expr)) {
+				ensureRegs();
+				uint64_t val = ResolveRegisterByName(expr, regs);
+				if (regs.is32bit)
+					snprintf(buf, sizeof(buf), "0x%08X", (uint32_t)val);
+				else
+					snprintf(buf, sizeof(buf), "0x%016llX", val);
+				result += buf;
+			} else if (!expr.empty() && (expr[0] == '*' || expr[0] == '[')) {
+				// 메모리 읽기
+				std::string addrStr = expr.substr(1);
+				if (!addrStr.empty() && addrStr.back() == ']') addrStr.pop_back();
+				try {
+					uint64_t addr = std::stoull(addrStr, nullptr, 0);
+					ReadMemoryRequest readReq;
+					readReq.address = addr;
+					readReq.size = 8;
+					std::vector<uint8_t> respData;
+					if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData) && respData.size() >= 8) {
+						uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data());
+						snprintf(buf, sizeof(buf), "0x%016llX", val);
+						result += buf;
+					} else {
+						result += "???";
+					}
+				} catch (...) {
+					result += "???";
+				}
+			} else {
+				// 해석 불가 → 그대로 유지
+				result += '{';
+				result += expr;
+				result += '}';
+			}
+			i = end + 1;
+		} else {
+			result += msg[i++];
+		}
+	}
+	return result;
+}
+
+void DapServer::Cleanup(bool detachOnly) {
+	if (pipeClient_.IsConnected()) {
+		// detachOnly=true: Detach 명령 → DLL 파이프 서버는 유지 (재연결 가능)
+		// detachOnly=false: Shutdown 명령 → DLL 파이프 서버도 종료
+		auto cmd = detachOnly ? IpcCommand::Detach : IpcCommand::Shutdown;
+		pipeClient_.SendCommand(cmd);
+		LOG_INFO("Sent %s to DLL", detachOnly ? "Detach" : "Shutdown");
+	}
+	// Disconnect는 항상 호출 (파이프 닫기 + 스레드 정리)
+	pipeClient_.Disconnect();
+
+	{
+		std::lock_guard<std::mutex> lock(breakpointMutex_);
+		breakpointMappings_.clear();
+	}
 	dataBreakpointMappings_.clear();
+	frameMap_.clear();
+	nextFrameId_ = 1;
 }
 
 } // namespace veh::dap

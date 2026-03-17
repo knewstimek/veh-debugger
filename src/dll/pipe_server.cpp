@@ -173,79 +173,108 @@ void PipeServer::EmergencyCleanup() {
 }
 
 void PipeServer::ServerThread() {
-	LOG_INFO("Server thread started, waiting for client...");
+	LOG_INFO("Server thread started");
 
 	// DbgHelp 심볼 엔진 초기화
 	StackWalker::Instance().Initialize();
 
-	// Overlapped ConnectNamedPipe
-	{
-		OVERLAPPED ov = {};
-		ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-		BOOL ok = ConnectNamedPipe(pipe_, &ov);
-		if (!ok) {
-			DWORD err = GetLastError();
-			if (err == ERROR_PIPE_CONNECTED) {
-				// 이미 연결됨
-			} else if (err == ERROR_IO_PENDING) {
-				HANDLE events[] = { ov.hEvent, stopEvent_ };
-				DWORD wait = WaitForMultipleObjects(2, events, FALSE, 30000);
-				if (wait != WAIT_OBJECT_0) {
-					CloseHandle(ov.hEvent);
-					if (running_) LOG_ERROR("ConnectNamedPipe timeout or stopped");
-					return;
-				}
-				DWORD dummy;
-				GetOverlappedResult(pipe_, &ov, &dummy, FALSE);
-			} else {
-				CloseHandle(ov.hEvent);
-				LOG_ERROR("ConnectNamedPipe failed: %lu", err);
-				return;
-			}
-		}
-		CloseHandle(ov.hEvent);
-	}
-
-	connected_ = true;
-	lastCommandTime_ = GetTickCount64();
-	LOG_INFO("Client connected");
-
-	// Ready 이벤트 전송
-	SendEvent(static_cast<uint32_t>(IpcEvent::Ready));
-
+	// 외부 루프: running_ 동안 클라이언트 연결을 반복 수락한다.
+	// Detach 시 내부 커맨드 루프만 탈출하고 여기서 새 클라이언트를 기다린다.
+	// Shutdown 시 running_=false가 되어 외부 루프도 종료된다.
 	while (running_) {
-		IpcHeader hdr;
-		if (!AsyncReadExact(&hdr, sizeof(hdr), READ_TIMEOUT_MS)) {
-			if (!running_) break;
+		LOG_INFO("Waiting for client connection...");
 
-			// 하트비트 타임아웃 체크
-			uint64_t elapsed = GetTickCount64() - lastCommandTime_;
-			if (elapsed >= HEARTBEAT_TIMEOUT_MS) {
-				LOG_ERROR("Heartbeat timeout: no command for %llu ms", elapsed);
-				EmergencyCleanup();
-				break;
+		// Overlapped ConnectNamedPipe
+		{
+			OVERLAPPED ov = {};
+			ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+			BOOL ok = ConnectNamedPipe(pipe_, &ov);
+			if (!ok) {
+				DWORD err = GetLastError();
+				if (err == ERROR_PIPE_CONNECTED) {
+					// 이미 연결됨 — 정상
+				} else if (err == ERROR_IO_PENDING) {
+					HANDLE events[] = { ov.hEvent, stopEvent_ };
+					// 재연결 대기: 타임아웃 없이 무한 대기 (stopEvent_로 깨움)
+					DWORD wait = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+					if (wait != WAIT_OBJECT_0) {
+						CloseHandle(ov.hEvent);
+						if (running_) LOG_ERROR("ConnectNamedPipe stopped");
+						break;
+					}
+					DWORD dummy;
+					GetOverlappedResult(pipe_, &ov, &dummy, FALSE);
+				} else {
+					CloseHandle(ov.hEvent);
+					LOG_ERROR("ConnectNamedPipe failed: %lu", err);
+					break;
+				}
 			}
-			// 타임아웃이면 재시도 (정상 — READ_TIMEOUT_MS마다 체크)
-			continue;
+			CloseHandle(ov.hEvent);
 		}
 
+		if (!running_) break;
+
+		connected_ = true;
 		lastCommandTime_ = GetTickCount64();
+		LOG_INFO("Client connected");
 
-		std::vector<uint8_t> payload;
-		if (hdr.payloadSize > 0) {
-			if (hdr.payloadSize > 16 * 1024 * 1024) {
-				LOG_ERROR("Payload too large: %u", hdr.payloadSize);
-				break;
-			}
-			payload.resize(hdr.payloadSize);
-			if (!AsyncReadExact(payload.data(), hdr.payloadSize, 3000)) {
-				LOG_ERROR("AsyncReadExact(payload) failed");
-				break;
-			}
+		// Detach 후 재연결 시 VEH 재설치 (최초 연결은 InitThread가 처리)
+		if (!VehHandler::Instance().IsInstalled()) {
+			VehHandler::Instance().Install();
+			LOG_INFO("VEH handler re-installed for new session");
 		}
 
-		LOG_DEBUG("IPC cmd=0x%04X size=%u", hdr.command, hdr.payloadSize);
-		HandleCommand(hdr.command, payload.data(), hdr.payloadSize);
+		// Ready 이벤트 전송
+		SendEvent(static_cast<uint32_t>(IpcEvent::Ready));
+
+		// 내부 커맨드 루프: running_ && connected_ 동안 명령 처리
+		// Detach 시 connected_=false로 내부 루프만 탈출
+		// Shutdown 시 running_=false로 양쪽 루프 모두 탈출
+		while (running_ && connected_) {
+			IpcHeader hdr;
+			if (!AsyncReadExact(&hdr, sizeof(hdr), READ_TIMEOUT_MS)) {
+				if (!running_ || !connected_) break;
+
+				// 하트비트 타임아웃 체크
+				uint64_t elapsed = GetTickCount64() - lastCommandTime_;
+				if (elapsed >= HEARTBEAT_TIMEOUT_MS) {
+					LOG_ERROR("Heartbeat timeout: no command for %llu ms", elapsed);
+					EmergencyCleanup();
+					connected_ = false;
+					break;
+				}
+				// 타임아웃이면 재시도 (정상 — READ_TIMEOUT_MS마다 체크)
+				continue;
+			}
+
+			lastCommandTime_ = GetTickCount64();
+
+			std::vector<uint8_t> payload;
+			if (hdr.payloadSize > 0) {
+				if (hdr.payloadSize > 16 * 1024 * 1024) {
+					LOG_ERROR("Payload too large: %u", hdr.payloadSize);
+					connected_ = false;
+					break;
+				}
+				payload.resize(hdr.payloadSize);
+				if (!AsyncReadExact(payload.data(), hdr.payloadSize, 3000)) {
+					LOG_ERROR("AsyncReadExact(payload) failed");
+					connected_ = false;
+					break;
+				}
+			}
+
+			LOG_DEBUG("IPC cmd=0x%04X size=%u", hdr.command, hdr.payloadSize);
+			HandleCommand(hdr.command, payload.data(), hdr.payloadSize);
+		}
+
+		// Detach 후: 파이프 연결만 끊고 외부 루프에서 새 클라이언트 대기
+		// Shutdown 후: running_=false이므로 외부 루프도 종료
+		if (running_) {
+			DisconnectNamedPipe(pipe_);
+			LOG_INFO("Client disconnected, ready for re-connection");
+		}
 	}
 
 	connected_ = false;
@@ -702,9 +731,26 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		break;
 	}
 
-	case IpcCommand::Detach:
+	case IpcCommand::Detach: {
+		// Detach: 디버깅 상태만 정리하고 파이프 서버는 유지한다.
+		// connected_=false로 내부 커맨드 루프만 탈출 → 외부 루프에서 새 클라이언트 대기
+		// 이를 통해 어댑터가 다시 attach 할 때 DLL 재주입 없이 즉시 연결 가능
+		LOG_INFO("Detach requested");
+		BreakpointManager::Instance().RemoveAll();
+		HwBreakpointManager::Instance().RemoveAll();
+		VehHandler::Instance().ResumeAllStoppedThreads();
+		VehHandler::Instance().Uninstall();
+		ThreadManager::Instance().ResumeAll();
+		IpcStatus status = IpcStatus::Ok;
+		SendResponse(command, &status, sizeof(status));
+		connected_ = false;
+		break;
+	}
+
 	case IpcCommand::Shutdown: {
-		LOG_INFO("%s requested", cmd == IpcCommand::Detach ? "Detach" : "Shutdown");
+		// Shutdown: 완전 종료. running_=false로 ServerThread 자체가 종료된다.
+		// 프로세스 종료 또는 DLL 언로드 시 사용
+		LOG_INFO("Shutdown requested");
 		BreakpointManager::Instance().RemoveAll();
 		HwBreakpointManager::Instance().RemoveAll();
 		VehHandler::Instance().Uninstall();
