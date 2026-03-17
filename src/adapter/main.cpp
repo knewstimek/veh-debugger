@@ -74,11 +74,6 @@ int main(int argc, char* argv[]) {
 	}
 
 	// 로거 설정
-	// 디버깅용: 항상 로그 파일 출력 (릴리즈 시 제거)
-	if (logFile.empty()) {
-		logFile = "D:/veh-adapter.log";
-		logLevel = veh::LogLevel::Debug;
-	}
 	veh::Logger::Instance().SetLevel(logLevel);
 	if (!logFile.empty()) {
 		veh::Logger::Instance().SetFile(logFile);

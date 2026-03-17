@@ -196,6 +196,9 @@ struct RegisterSet {
 	uint64_t rip;
 	uint64_t rflags;
 	uint64_t cs, ss, ds, es, fs, gs;
+	// Debug registers (DR0~DR3: HW BP address, DR6: status, DR7: control)
+	uint64_t dr0, dr1, dr2, dr3;
+	uint64_t dr6, dr7;
 	// XMM registers
 	uint8_t  xmm[16][16]; // XMM0~XMM15
 	uint8_t  is32bit;      // 1이면 32비트 프로세스 (eax~eip만 유효)

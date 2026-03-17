@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.5 (2026-03-17)
+
+### New Features
+- **Debug registers (DR0~DR7) in Variables panel** — Hardware breakpoint addresses (DR0~DR3), status (DR6), and control (DR7) now visible in VSCode Registers scope and MCP `veh_registers` tool
+
+### Bug Fixes
+- **Fix: Pipe reader thread dying (error 997)** — `ERROR_IO_PENDING` after `CancelIoEx` was misinterpreted as fatal pipe error, killing the IPC reader thread ~5s after start. Root cause of intermittent "stack trace not showing" and "registers empty"
+- **Fix: Stack trace not showing after Pause** — `stopped` event was missing after `OnPause`, so VSCode never requested stackTrace/scopes/variables
+- **Fix: Instruction breakpoint offset ignored** — VSCode sends `instructionReference + offset` for disassembly breakpoints; offset was not applied to the target address
+- **Fix: HeartbeatAck flooding logs** — `IpcEvent::HeartbeatAck` (0x10FE) was logged as "Unknown IPC event" on every heartbeat cycle
+- **Fix: Thread safety** — Added `frameMutex_` for frameMap_/nextFrameId_, `sendMutex_` for DAP seq ordering, `exceptionMutex_` for lastException_; dataBreakpointMappings_ now under breakpointMutex_
+- **Fix: MCP ProcessExited not handled** — `attached_` flag stayed true after target exit, causing all subsequent tool calls to fail on dead pipe
+- **Fix: MCP GetModuleFileNameA** — Replaced with `GetModuleFileNameW` for non-ASCII path support
+- **Fix: memoryReference validation** — ReadMemory/WriteMemory now reject empty memoryReference instead of reading address 0
+- **Fix: IpcEvent::Paused not handled** — Both DAP and MCP now handle DLL's Paused event (DAP deduplicates with OnPause's preemptive stopped)
+
+### Improvements
+- **F9 breakpoint toggle in disassembly** — Added `disassemblyViewFocus` keybinding and `contributes.breakpoints` for proper F9 support in disassembly view
+- **Removed hardcoded debug logging** — `D:/veh-adapter.log` fallback removed; use `--log=FILE` or launch.json `logFile` option instead
+
 ## 1.0.4 (2026-03-17)
 
 ### New Features
@@ -8,6 +28,9 @@
 - **Conditional breakpoints** — Break only when condition is met (e.g. `RAX==0x1234`, `*0x7FF600!=0`)
 - **Hit count breakpoints** — Break on Nth hit (e.g. hit count = 5 → break on 5th hit)
 - **Log points** — Log messages to Debug Console without stopping (e.g. `RAX={RAX}, ptr={*0x7FF600}`)
+
+### Improvements
+- **Detach/re-attach support** — DLL pipe server stays alive after detach, allowing re-attach without process restart
 
 ### Bug Fixes
 - **Fix: Stop button requires two clicks** — VSCode sends terminate then disconnect; now both are handled immediately with response-first ordering

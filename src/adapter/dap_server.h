@@ -136,8 +136,17 @@ private:
 	};
 	std::vector<DataBreakpointMapping> dataBreakpointMappings_;
 
-	// Mutex for breakpointMappings_ (accessed from both DAP and IPC event threads)
+	// Mutex for breakpointMappings_ and dataBreakpointMappings_ (accessed from both DAP and IPC event threads)
 	std::mutex breakpointMutex_;
+
+	// Mutex for frameMap_/nextFrameId_ (accessed from DAP and IPC event threads)
+	std::mutex frameMutex_;
+
+	// Mutex for transport send ordering (seq_ increment + send must be atomic)
+	std::mutex sendMutex_;
+
+	// Mutex for lastException_ (written by IPC thread, read by DAP thread)
+	std::mutex exceptionMutex_;
 
 	// Frame ID → (threadId, frameIndex) 매핑
 	// Windows 스레드 ID는 16비트를 초과할 수 있어(예: 169644) 비트 패킹 불가.

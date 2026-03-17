@@ -2,7 +2,7 @@
 	"name": "veh-debugger",
 	"displayName": "VEH Debugger",
 	"description": "Windows VEH (Vectored Exception Handler) based debugger — anti-debug bypass, hardware breakpoints, memory watch, disassembly. DAP & MCP supported.",
-	"version": "1.0.4",
+	"version": "1.0.5",
 	"icon": "images/icon.png",
 	"publisher": "knewstimek",
 	"license": "MIT",
@@ -38,6 +38,20 @@
 	],
 	"main": "./out/extension.js",
 	"contributes": {
+		"breakpoints": [
+			{ "language": "c" },
+			{ "language": "cpp" },
+			{ "language": "asm" },
+			{ "language": "rust" },
+			{ "language": "go" }
+		],
+		"keybindings": [
+			{
+				"command": "editor.debug.action.toggleBreakpoint",
+				"key": "f9",
+				"when": "disassemblyViewFocus"
+			}
+		],
 		"debuggers": [
 			{
 				"type": "veh",
