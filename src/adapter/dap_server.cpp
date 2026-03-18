@@ -922,13 +922,24 @@ void DapServer::OnNext(const Request& req) {
 	}
 
 	{
-		// CALL 명령어 판별 → 임시 BP로 건너뛰기 (instruction/statement 모두)
+		// CALL 명령어 판별 -> 임시 BP로 건너뛰기 (instruction/statement 모두)
 		uint64_t nextInsnAddr = 0;
+		uint64_t callAfterAddr = 0;
 		bool callSkipped = false;
+
+		// (1) 현재 명령어가 CALL
 		if (IsCallInstruction(threadId, nextInsnAddr)) {
 			LOG_INFO("OnNext fallback: CALL detected, temp BP at 0x%llX", nextInsnAddr);
+			callAfterAddr = nextInsnAddr;
+		}
+		// (2) BP rearm 시 다음 명령어가 CALL (2-instruction 실행 문제)
+		else if (IsNextInstructionCall(threadId, callAfterAddr)) {
+			LOG_INFO("OnNext fallback: next insn is CALL (BP rearm), temp BP at 0x%llX", callAfterAddr);
+		}
+
+		if (callAfterAddr != 0) {
 			SetBreakpointRequest bpReq;
-			bpReq.address = nextInsnAddr;
+			bpReq.address = callAfterAddr;
 			std::vector<uint8_t> bpResp;
 			if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq), bpResp)
 				&& bpResp.size() >= sizeof(SetBreakpointResponse)) {
@@ -937,7 +948,7 @@ void DapServer::OnNext(const Request& req) {
 					{
 						std::lock_guard<std::mutex> stepLock(steppingMutex_);
 						stepOverTempBpId_ = r->id;
-						stepOverTempBpAddr_ = nextInsnAddr;
+						stepOverTempBpAddr_ = callAfterAddr;
 					}
 					ContinueRequest contReq;
 					contReq.threadId = threadId;
@@ -3045,6 +3056,59 @@ bool DapServer::IsCallInstruction(uint32_t threadId, uint64_t& nextInsnAddr) {
 		&& (insn.mnemonic[2] == 'l' || insn.mnemonic[2] == 'L')
 		&& (insn.mnemonic[3] == 'l' || insn.mnemonic[3] == 'L')) {
 		nextInsnAddr = rip + insn.length;
+		return true;
+	}
+	return false;
+}
+
+bool DapServer::IsNextInstructionCall(uint32_t threadId, uint64_t& addrAfterCall) {
+	if (!targetProcess_) return false;
+
+	// 현재 RIP 가져오기
+	GetStackTraceRequest stReq;
+	stReq.threadId = threadId;
+	stReq.startFrame = 0;
+	stReq.maxFrames = 1;
+
+	std::vector<uint8_t> stResp;
+	if (!pipeClient_.SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), stResp))
+		return false;
+	if (stResp.size() < sizeof(GetStackTraceResponse) + sizeof(StackFrameInfo))
+		return false;
+	auto* hdr = reinterpret_cast<const GetStackTraceResponse*>(stResp.data());
+	if (hdr->status != IpcStatus::Ok || hdr->count == 0)
+		return false;
+	auto* frame = reinterpret_cast<const StackFrameInfo*>(stResp.data() + sizeof(GetStackTraceResponse));
+	uint64_t rip = frame->address;
+
+	// 현재 주소가 BP 위에 있는지 확인 (rearm 시에만 2-instruction 문제 발생)
+	bool onBp = false;
+	{
+		std::lock_guard<std::mutex> bpLock(breakpointMutex_);
+		for (const auto& m : breakpointMappings_) {
+			if (m.address == rip) { onBp = true; break; }
+		}
+	}
+	if (!onBp) return false;
+
+	// BP 위에 있으면 2개 명령어를 디코딩하여 두 번째가 CALL인지 확인
+	uint8_t codeBuf[32] = {};
+	SIZE_T bytesRead = 0;
+	if (!ReadProcessMemory(targetProcess_, (LPCVOID)rip, codeBuf, 32, &bytesRead) || bytesRead < 2)
+		return false;
+
+	auto insns = disassembler_->Disassemble(codeBuf, (uint32_t)bytesRead, rip, 2);
+	if (insns.size() < 2) return false;
+
+	const auto& secondInsn = insns[1];
+	if (secondInsn.mnemonic.size() >= 4
+		&& (secondInsn.mnemonic[0] == 'c' || secondInsn.mnemonic[0] == 'C')
+		&& (secondInsn.mnemonic[1] == 'a' || secondInsn.mnemonic[1] == 'A')
+		&& (secondInsn.mnemonic[2] == 'l' || secondInsn.mnemonic[2] == 'L')
+		&& (secondInsn.mnemonic[3] == 'l' || secondInsn.mnemonic[3] == 'L')) {
+		addrAfterCall = secondInsn.address + secondInsn.length;
+		LOG_INFO("IsNextInstructionCall: BP at 0x%llX, next insn is CALL at 0x%llX, skip to 0x%llX",
+			rip, secondInsn.address, addrAfterCall);
 		return true;
 	}
 	return false;
