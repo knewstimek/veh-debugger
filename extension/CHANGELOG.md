@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.72 (2026-03-18)
+
+### Bug Fixes
+- **DAP StepOver BP rearm + CALL**: Same fix as MCP 1.0.71 applied to DAP adapter fallback path. When PDB path falls back to legacy stepping, BP rearm could enter CALL functions instead of skipping
+
 ## 1.0.71 (2026-03-18)
 
 ### Bug Fixes
