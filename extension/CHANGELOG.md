@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+- **StartEventListener race condition**: Reader thread might not have entered its loop before SendAndReceive was called, causing condvar timeout. Now waits for reader thread ready signal before returning
+
 ## 1.0.72 (2026-03-18)
 
 ### Bug Fixes
