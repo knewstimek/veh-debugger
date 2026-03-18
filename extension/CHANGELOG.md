@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.62 (2026-03-18)
+
+### Bug Fixes
+- **MCP launch: process frozen after veh_launch** -- `ToolLaunch` never called `ResumeThread` on the main thread after `CREATE_SUSPENDED` injection. The process stayed OS-suspended forever, and `veh_continue` only does VEH-level resume. Added `ResumeMainThread()` to MCP server, called from `ToolLaunch` (when `stopOnEntry=false`), `ToolContinue`, `ToolStepIn/Over/Out`, and `ToolDetach`
+
 ## 1.0.61 (2026-03-18)
 
 ### Improvements
