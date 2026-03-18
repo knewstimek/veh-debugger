@@ -422,7 +422,7 @@ void DapServer::OnConfigurationDone(const Request& req) {
 			LOG_INFO("stopOnEntry: main thread %u stays suspended", launchedMainThreadId_);
 			SendEvent("stopped", {
 				{"reason", "entry"},
-				{"threadId", 1},
+				{"threadId", launchedMainThreadId_},
 				{"allThreadsStopped", true},
 			});
 		} else {
@@ -1081,7 +1081,8 @@ void DapServer::OnThreads(const Request& req) {
 }
 
 void DapServer::OnStackTrace(const Request& req) {
-	uint32_t threadId = req.arguments.value("threadId", 1);
+	uint32_t threadId = req.arguments.value("threadId", 0u);
+	if (threadId == 0) threadId = lastStoppedThreadId_.load();
 	int startFrame = req.arguments.value("startFrame", 0);
 	int levels = req.arguments.value("levels", 20);
 
@@ -1249,7 +1250,7 @@ void DapServer::OnVariables(const Request& req) {
 	int frameId = varRef & ~SCOPE_MASK;
 
 	// frameMap_에서 threadId 복원 (비트 패킹 대신 맵 사용)
-	uint32_t threadId = 1;
+	uint32_t threadId = 0;
 	int frameIndex = 0;
 	bool frameFound = false;
 	{
@@ -1261,6 +1262,7 @@ void DapServer::OnVariables(const Request& req) {
 			frameFound = true;
 		}
 	}
+	if (threadId == 0) threadId = lastStoppedThreadId_.load();
 
 	if (scopeType == SCOPE_REGISTERS) {
 		// 레지스터 값 가져오기
@@ -1540,7 +1542,7 @@ void DapServer::OnEvaluate(const Request& req) {
 		if (it != frameMap_.end()) threadId = it->second.threadId;
 	}
 	if (threadId == 0) threadId = lastStoppedThreadId_.load();
-	if (threadId == 0) threadId = 1;
+	if (threadId == 0) threadId = launchedMainThreadId_;
 
 	// 1) 레지스터 이름 인식 (hover에서 레지스터 값 표시)
 	if (TryParseRegisterName(expression)) {
@@ -1703,7 +1705,7 @@ void DapServer::OnSetVariable(const Request& req) {
 		if (it != frameMap_.end()) threadId = it->second.threadId;
 	}
 	if (threadId == 0) threadId = lastStoppedThreadId_.load();
-	if (threadId == 0) threadId = 1;
+	if (threadId == 0) threadId = launchedMainThreadId_;
 
 	// IPC로 레지스터 수정 요청
 	SetRegisterRequest setReq;

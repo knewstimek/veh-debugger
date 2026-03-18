@@ -10,6 +10,7 @@ namespace veh {
 McpServer::McpServer() {}
 McpServer::~McpServer() {
 	running_ = false;
+	StopProcessMonitor();
 	if (attached_) {
 		try {
 			pipeClient_.SendCommand(IpcCommand::Detach);
@@ -234,6 +235,7 @@ json McpServer::ToolAttach(const json& args) {
 
 	targetPid_ = pid;
 	attached_ = true;
+	StartProcessMonitor();
 
 	return {{"success", true}, {"pid", pid}, {"message", "Attached to process"}};
 }
@@ -315,6 +317,7 @@ json McpServer::ToolLaunch(const json& args) {
 
 	targetPid_ = pid;
 	attached_ = true;
+	StartProcessMonitor();
 
 	// stopOnEntry=false: 즉시 메인 스레드 resume (DAP의 configurationDone과 동일)
 	// stopOnEntry=true: 에이전트가 veh_continue 호출 시 resume
@@ -331,6 +334,7 @@ json McpServer::ToolDetach(const json& args) {
 
 	// 메인 스레드가 아직 suspended이면 resume (안 하면 프로세스가 좀비로 남음)
 	ResumeMainThread();
+	StopProcessMonitor();
 
 	pipeClient_.StopHeartbeat();
 	pipeClient_.StopEventListener();
@@ -551,12 +555,12 @@ json McpServer::ToolThreads(const json& args) {
 	}
 
 	if (respData.size() < sizeof(GetThreadsResponse)) {
-		return {{"error", "Invalid response"}};
+		return {{"error", "Invalid response from DLL (truncated data)"}};
 	}
 
 	auto* resp = reinterpret_cast<const GetThreadsResponse*>(respData.data());
 	if (resp->status != IpcStatus::Ok) {
-		return {{"error", "GetThreads failed"}};
+		return {{"error", "GetThreads failed (CreateToolhelp32Snapshot error)"}};
 	}
 	auto* infos = reinterpret_cast<const ThreadInfo*>(respData.data() + sizeof(GetThreadsResponse));
 
@@ -596,7 +600,7 @@ json McpServer::ToolStackTrace(const json& args) {
 	}
 
 	if (respData.size() < sizeof(GetStackTraceResponse)) {
-		return {{"error", "Invalid response"}};
+		return {{"error", "Invalid response from DLL (truncated data)"}};
 	}
 
 	auto* resp = reinterpret_cast<const GetStackTraceResponse*>(respData.data());
@@ -675,11 +679,11 @@ json McpServer::ToolEnumLocals(const json& args) {
 	}
 
 	if (respData.size() < sizeof(EnumLocalsResponse)) {
-		return {{"error", "Invalid response"}};
+		return {{"error", "Invalid response from DLL (truncated data)"}};
 	}
 
 	auto* resp = reinterpret_cast<const EnumLocalsResponse*>(respData.data());
-	if (resp->status != IpcStatus::Ok) return {{"error", "Failed to enumerate locals"}};
+	if (resp->status != IpcStatus::Ok) return {{"error", "Failed to enumerate locals (no PDB symbols or invalid frame)"}};
 
 	auto* locals = reinterpret_cast<const LocalVariableInfo*>(respData.data() + sizeof(EnumLocalsResponse));
 	uint32_t count = resp->count;
@@ -755,11 +759,11 @@ json McpServer::ToolRegisters(const json& args) {
 	}
 
 	if (respData.size() < sizeof(GetRegistersResponse)) {
-		return {{"error", "Invalid response"}};
+		return {{"error", "Invalid response from DLL (truncated data)"}};
 	}
 
 	auto* resp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
-	if (resp->status != IpcStatus::Ok) return {{"error", "Failed to get registers"}};
+	if (resp->status != IpcStatus::Ok) return {{"error", "Failed to get registers (thread may not exist or is not suspended)"}};
 
 	const auto& r = resp->regs;
 	char buf[20];
@@ -819,9 +823,9 @@ json McpServer::ToolReadMemory(const json& args) {
 		return {{"error", IpcErrorMessage()}};
 	}
 
-	if (respData.size() < sizeof(IpcStatus)) return {{"error", "Invalid response"}};
+	if (respData.size() < sizeof(IpcStatus)) return {{"error", "Invalid response from DLL (truncated data)"}};
 	auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
-	if (status != IpcStatus::Ok) return {{"error", "Read failed"}};
+	if (status != IpcStatus::Ok) return {{"error", "Memory read failed (address may be invalid or inaccessible)"}};
 
 	const uint8_t* data = respData.data() + sizeof(IpcStatus);
 	size_t dataLen = respData.size() - sizeof(IpcStatus);
@@ -886,7 +890,7 @@ json McpServer::ToolWriteMemory(const json& args) {
 			return {{"success", true}, {"bytesWritten", bytes.size()}};
 		}
 	}
-	return {{"error", "Write failed"}};
+	return {{"error", "Memory write failed (address may be invalid, read-only, or inaccessible)"}};
 }
 
 json McpServer::ToolModules(const json& args) {
@@ -898,7 +902,7 @@ json McpServer::ToolModules(const json& args) {
 	}
 
 	if (respData.size() < sizeof(GetModulesResponse)) {
-		return {{"error", "Invalid response"}};
+		return {{"error", "Invalid response from DLL (truncated data)"}};
 	}
 
 	auto* resp = reinterpret_cast<const GetModulesResponse*>(respData.data());
@@ -949,9 +953,9 @@ json McpServer::ToolDisassemble(const json& args) {
 		return {{"error", IpcErrorMessage()}};
 	}
 
-	if (respData.size() < sizeof(IpcStatus)) return {{"error", "Read failed"}};
+	if (respData.size() < sizeof(IpcStatus)) return {{"error", "Invalid response from DLL"}};
 	auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
-	if (status != IpcStatus::Ok) return {{"error", "Memory read failed"}};
+	if (status != IpcStatus::Ok) return {{"error", "Memory read failed for disassembly (address may be invalid or inaccessible)"}};
 
 	const uint8_t* code = respData.data() + sizeof(IpcStatus);
 	size_t codeLen = respData.size() - sizeof(IpcStatus);
@@ -1287,6 +1291,59 @@ void McpServer::ResumeMainThread() {
 	}
 }
 
+void McpServer::StartProcessMonitor() {
+	StopProcessMonitor(); // 이전 모니터 정리
+	if (!targetProcess_) return;
+
+	// PROCESS_SYNCHRONIZE 권한이 필요하지만 targetProcess_는 TERMINATE로 열림
+	// 별도 핸들로 열어야 함
+	HANDLE hWait = OpenProcess(SYNCHRONIZE, FALSE, targetPid_);
+	if (!hWait) {
+		LOG_WARN("Cannot open process %u for SYNCHRONIZE, exit monitor disabled", targetPid_);
+		return;
+	}
+
+	processMonitorThread_ = std::thread([this, hWait]() {
+		DWORD result = WaitForSingleObject(hWait, INFINITE);
+		CloseHandle(hWait);
+
+		if (result == WAIT_OBJECT_0 && attached_) {
+			DWORD exitCode = 0;
+			if (targetProcess_) {
+				GetExitCodeProcess(targetProcess_, &exitCode);
+			}
+
+			LOG_INFO("MCP: Target process %u exited (code: %lu)", targetPid_, exitCode);
+
+			char buf[128];
+			snprintf(buf, sizeof(buf), "Target process exited (exit code: %lu)", exitCode);
+
+			// MCP notification 전송
+			json params = {
+				{"event", "process_exited"},
+				{"pid", targetPid_},
+				{"exitCode", exitCode},
+				{"message", buf}
+			};
+
+			{
+				std::lock_guard<std::mutex> lock(eventMutex_);
+				pendingEvents_.push({"notification", params});
+			}
+
+			attached_ = false;
+		}
+	});
+}
+
+void McpServer::StopProcessMonitor() {
+	if (processMonitorThread_.joinable()) {
+		// 스레드가 WaitForSingleObject 중이면 프로세스 종료 시 자동 해제
+		// detach로 두면 됨 (프로세스가 이미 죽었거나 곧 죽을 거라)
+		processMonitorThread_.detach();
+	}
+}
+
 bool McpServer::IsTargetAlive() {
 	if (!targetProcess_) return false;
 	DWORD exitCode = 0;
@@ -1296,8 +1353,16 @@ bool McpServer::IsTargetAlive() {
 
 std::string McpServer::IpcErrorMessage() {
 	if (!attached_) return "Not attached";
-	if (!IsTargetAlive()) return "Target process has exited";
-	return "IPC communication failed (pipe broken or timeout)";
+	if (targetProcess_) {
+		DWORD exitCode = 0;
+		if (GetExitCodeProcess(targetProcess_, &exitCode) && exitCode != STILL_ACTIVE) {
+			char buf[128];
+			snprintf(buf, sizeof(buf), "Target process has exited (exit code: %lu)", exitCode);
+			return buf;
+		}
+	}
+	if (!pipeClient_.IsConnected()) return "Target pipe disconnected (process may have crashed)";
+	return "IPC communication failed (timeout)";
 }
 
 } // namespace veh
