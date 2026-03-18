@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.71 (2026-03-18)
+
+### Bug Fixes
+- **StepOver on BP with next CALL**: When stepping over a non-CALL instruction sitting on a breakpoint, the BP rearm mechanism caused 2 instructions to execute. If the second was a CALL, step-over entered the function instead of skipping it. Now pre-checks if the next instruction is CALL via `IsNextInstructionCall()` and uses temp BP to skip
+- **StepOver synchronous wait**: ToolStepOver now waits for StepCompleted event before returning, preventing race conditions with subsequent register reads
+
+### Improvements
+- **"Not attached" detailed messages**: All 23 "Not attached" error sites now check if the target process has exited and include the exit code (e.g. "Not attached - target process exited (code 0)")
+- **Launch file validation**: `veh_launch` checks if the program file exists before attempting launch. Returns "File not found: <path>" instead of generic "Launch failed"
+- **Launch error includes path**: "Launch failed" now includes the program path for easier debugging
+- **OpenProcess permission fix**: Added `PROCESS_QUERY_LIMITED_INFORMATION` to OpenProcess flags so `GetExitCodeProcess` can retrieve the exit code
+- **Unicode-safe file check**: Replaced `GetFileAttributesA` with `std::filesystem::exists()` for path validation
+
 ## 1.0.70 (2026-03-18)
 
 ### New MCP Tools (19 -> 25)
