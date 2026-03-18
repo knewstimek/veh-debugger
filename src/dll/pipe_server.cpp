@@ -477,6 +477,59 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		break;
 	}
 
+	case IpcCommand::SetRegister: {
+		if (payloadSize < sizeof(SetRegisterRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const SetRegisterRequest*>(payload);
+		CONTEXT ctx;
+		SetRegisterResponse resp;
+		resp.status = IpcStatus::Error;
+
+		// VEH stopped context first, then fallback to ThreadManager
+		bool isVehStopped = VehHandler::Instance().GetStoppedContext(req->threadId, ctx);
+		bool gotContext = isVehStopped || ThreadManager::Instance().GetContext(req->threadId, ctx);
+		if (gotContext && req->regIndex <= 17) {
+			// Map regIndex to CONTEXT field (same order as RegisterSet: rax=0..rflags=17)
+#ifdef _WIN64
+			DWORD64* regMap[] = {
+				&ctx.Rax, &ctx.Rbx, &ctx.Rcx, &ctx.Rdx,
+				&ctx.Rsi, &ctx.Rdi, &ctx.Rbp, &ctx.Rsp,
+				&ctx.R8,  &ctx.R9,  &ctx.R10, &ctx.R11,
+				&ctx.R12, &ctx.R13, &ctx.R14, &ctx.R15,
+				&ctx.Rip, (DWORD64*)&ctx.EFlags,
+			};
+			*regMap[req->regIndex] = req->value;
+#else
+			DWORD* regMap[] = {
+				&ctx.Eax, &ctx.Ebx, &ctx.Ecx, &ctx.Edx,
+				&ctx.Esi, &ctx.Edi, &ctx.Ebp, &ctx.Esp,
+				nullptr,  nullptr,  nullptr,  nullptr,
+				nullptr,  nullptr,  nullptr,  nullptr,
+				&ctx.Eip, &ctx.EFlags,
+			};
+			if (regMap[req->regIndex]) {
+				*regMap[req->regIndex] = static_cast<DWORD>(req->value);
+			}
+#endif
+			// VEH stopped: update stoppedContexts_ (applied on resume)
+			// Otherwise: direct SetContext
+			if (isVehStopped) {
+				if (VehHandler::Instance().SetStoppedContext(req->threadId, ctx)) {
+					resp.status = IpcStatus::Ok;
+				}
+			} else {
+				if (ThreadManager::Instance().SetContext(req->threadId, ctx)) {
+					resp.status = IpcStatus::Ok;
+				}
+			}
+		}
+		SendResponse(command, &resp, sizeof(resp));
+		break;
+	}
+
 	case IpcCommand::Pause: {
 		if (payloadSize < sizeof(PauseRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;

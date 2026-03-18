@@ -190,6 +190,12 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 		else if (name == "veh_modules")               result = ToolModules(args);
 		else if (name == "veh_disassemble")           result = ToolDisassemble(args);
 		else if (name == "veh_enum_locals")           result = ToolEnumLocals(args);
+		else if (name == "veh_set_source_breakpoint") result = ToolSetSourceBreakpoint(args);
+		else if (name == "veh_set_function_breakpoint") result = ToolSetFunctionBreakpoint(args);
+		else if (name == "veh_list_breakpoints")      result = ToolListBreakpoints(args);
+		else if (name == "veh_evaluate")              result = ToolEvaluate(args);
+		else if (name == "veh_set_register")          result = ToolSetRegister(args);
+		else if (name == "veh_exception_info")        result = ToolExceptionInfo(args);
 		else {
 			SendError(id, -32602, "Unknown tool: " + name);
 			return;
@@ -392,7 +398,16 @@ json McpServer::ToolSetBreakpoint(const json& args) {
 	if (respData.size() >= sizeof(SetBreakpointResponse)) {
 		auto* resp = reinterpret_cast<const SetBreakpointResponse*>(respData.data());
 		if (resp->status == IpcStatus::Ok) {
-			swBreakpoints_.push_back({resp->id, addr});
+			BpMapping bp;
+			bp.id = resp->id;
+			bp.address = addr;
+			bp.condition = args.value("condition", "");
+			bp.hitCondition = args.value("hitCondition", "");
+			bp.logMessage = args.value("logMessage", "");
+			{
+				std::lock_guard<std::mutex> lock(bpMutex_);
+				swBreakpoints_.push_back(bp);
+			}
 			char buf[32]; snprintf(buf, sizeof(buf), "0x%llX", addr);
 			return {{"success", true}, {"id", resp->id}, {"address", buf}};
 		}
@@ -414,12 +429,292 @@ json McpServer::ToolRemoveBreakpoint(const json& args) {
 		return {{"error", IpcErrorMessage()}};
 	}
 
-	swBreakpoints_.erase(
-		std::remove_if(swBreakpoints_.begin(), swBreakpoints_.end(),
-			[id](const BpMapping& bp) { return bp.id == id; }),
-		swBreakpoints_.end());
+	{
+		std::lock_guard<std::mutex> lock(bpMutex_);
+		swBreakpoints_.erase(
+			std::remove_if(swBreakpoints_.begin(), swBreakpoints_.end(),
+				[id](const BpMapping& bp) { return bp.id == id; }),
+			swBreakpoints_.end());
+	}
 
 	return {{"success", true}, {"id", id}};
+}
+
+json McpServer::ToolSetSourceBreakpoint(const json& args) {
+	if (!attached_) return {{"error", "Not attached"}};
+
+	std::string source = args.value("source", "");
+	uint32_t line = args.value("line", 0u);
+	if (source.empty()) return {{"error", "source (file path) is required"}};
+	if (line == 0) return {{"error", "line is required"}};
+
+	// Resolve source line -> address via PDB
+	ResolveSourceLineRequest resolveReq = {};
+	strncpy_s(resolveReq.fileName, source.c_str(), sizeof(resolveReq.fileName) - 1);
+	resolveReq.line = line;
+
+	std::vector<uint8_t> resolveResp;
+	if (!pipeClient_.SendAndReceive(IpcCommand::ResolveSourceLine, &resolveReq, sizeof(resolveReq), resolveResp)) {
+		return {{"error", "ResolveSourceLine IPC failed - " + IpcErrorMessage()}};
+	}
+	if (resolveResp.size() < sizeof(ResolveSourceLineResponse)) {
+		return {{"error", "Invalid response from DLL"}};
+	}
+	auto* resolved = reinterpret_cast<const ResolveSourceLineResponse*>(resolveResp.data());
+	if (resolved->status != IpcStatus::Ok || resolved->address == 0) {
+		return {{"error", "Could not resolve source line (no PDB symbols or line not found)"}};
+	}
+
+	// Set breakpoint at resolved address
+	SetBreakpointRequest bpReq;
+	bpReq.address = resolved->address;
+	std::vector<uint8_t> bpResp;
+	if (!pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq), bpResp)) {
+		return {{"error", IpcErrorMessage()}};
+	}
+	if (bpResp.size() < sizeof(SetBreakpointResponse)) {
+		return {{"error", "Invalid response from DLL"}};
+	}
+	auto* resp = reinterpret_cast<const SetBreakpointResponse*>(bpResp.data());
+	if (resp->status != IpcStatus::Ok) {
+		return {{"error", "Failed to set breakpoint at resolved address"}};
+	}
+
+	BpMapping bp;
+	bp.id = resp->id;
+	bp.address = resolved->address;
+	bp.source = source;
+	bp.line = line;
+	bp.condition = args.value("condition", "");
+	bp.hitCondition = args.value("hitCondition", "");
+	bp.logMessage = args.value("logMessage", "");
+	{
+		std::lock_guard<std::mutex> lock(bpMutex_);
+		swBreakpoints_.push_back(bp);
+	}
+
+	char buf[32]; snprintf(buf, sizeof(buf), "0x%llX", resolved->address);
+	return {{"success", true}, {"id", resp->id}, {"address", buf}, {"source", source}, {"line", line}};
+}
+
+json McpServer::ToolSetFunctionBreakpoint(const json& args) {
+	if (!attached_) return {{"error", "Not attached"}};
+
+	std::string name = args.value("name", "");
+	if (name.empty()) return {{"error", "name (function name) is required"}};
+
+	// Resolve function name -> address via PDB
+	ResolveFunctionRequest resolveReq = {};
+	strncpy_s(resolveReq.functionName, name.c_str(), sizeof(resolveReq.functionName) - 1);
+
+	std::vector<uint8_t> resolveResp;
+	if (!pipeClient_.SendAndReceive(IpcCommand::ResolveFunction, &resolveReq, sizeof(resolveReq), resolveResp)) {
+		return {{"error", "ResolveFunction IPC failed - " + IpcErrorMessage()}};
+	}
+	if (resolveResp.size() < sizeof(ResolveFunctionResponse)) {
+		return {{"error", "Invalid response from DLL"}};
+	}
+	auto* resolved = reinterpret_cast<const ResolveFunctionResponse*>(resolveResp.data());
+	if (resolved->status != IpcStatus::Ok || resolved->address == 0) {
+		return {{"error", "Could not resolve function '" + name + "' (no PDB symbols or not found)"}};
+	}
+
+	// Set breakpoint at resolved address
+	SetBreakpointRequest bpReq;
+	bpReq.address = resolved->address;
+	std::vector<uint8_t> bpResp;
+	if (!pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq), bpResp)) {
+		return {{"error", IpcErrorMessage()}};
+	}
+	if (bpResp.size() < sizeof(SetBreakpointResponse)) {
+		return {{"error", "Invalid response from DLL"}};
+	}
+	auto* resp = reinterpret_cast<const SetBreakpointResponse*>(bpResp.data());
+	if (resp->status != IpcStatus::Ok) {
+		return {{"error", "Failed to set breakpoint at resolved address"}};
+	}
+
+	BpMapping bp;
+	bp.id = resp->id;
+	bp.address = resolved->address;
+	bp.functionName = name;
+	bp.condition = args.value("condition", "");
+	bp.hitCondition = args.value("hitCondition", "");
+	bp.logMessage = args.value("logMessage", "");
+	{
+		std::lock_guard<std::mutex> lock(bpMutex_);
+		swBreakpoints_.push_back(bp);
+	}
+
+	char buf[32]; snprintf(buf, sizeof(buf), "0x%llX", resolved->address);
+	return {{"success", true}, {"id", resp->id}, {"address", buf}, {"function", name}};
+}
+
+json McpServer::ToolListBreakpoints(const json& args) {
+	json swList = json::array();
+	{
+		std::lock_guard<std::mutex> lock(bpMutex_);
+		for (auto& bp : swBreakpoints_) {
+			char buf[32]; snprintf(buf, sizeof(buf), "0x%llX", bp.address);
+			json entry = {{"id", bp.id}, {"address", buf}};
+			if (!bp.condition.empty()) entry["condition"] = bp.condition;
+			if (!bp.hitCondition.empty()) entry["hitCondition"] = bp.hitCondition;
+			if (!bp.logMessage.empty()) entry["logMessage"] = bp.logMessage;
+			if (bp.hitCount > 0) entry["hitCount"] = bp.hitCount;
+			if (!bp.source.empty()) { entry["source"] = bp.source; entry["line"] = bp.line; }
+			if (!bp.functionName.empty()) entry["function"] = bp.functionName;
+			swList.push_back(entry);
+		}
+	}
+	json hwList = json::array();
+	{
+		std::lock_guard<std::mutex> lock(bpMutex_);
+		for (auto& bp : hwBreakpoints_) {
+			char buf[32]; snprintf(buf, sizeof(buf), "0x%llX", bp.address);
+			const char* typeStr = bp.type == 0 ? "execute" : bp.type == 1 ? "write" : "readwrite";
+			hwList.push_back({{"id", bp.id}, {"address", buf}, {"type", typeStr}, {"size", bp.size}});
+		}
+	}
+	return {{"software", swList}, {"hardware", hwList}};
+}
+
+json McpServer::ToolEvaluate(const json& args) {
+	if (!attached_) return {{"error", "Not attached"}};
+
+	std::string expression = args.value("expression", "");
+	uint32_t threadId = args.value("threadId", 0u);
+	if (expression.empty()) return {{"error", "expression is required"}};
+
+	// Trim
+	while (!expression.empty() && expression.front() == ' ') expression.erase(expression.begin());
+	while (!expression.empty() && expression.back() == ' ') expression.pop_back();
+
+	// 1) Register name
+	if (TryParseRegisterName(expression)) {
+		if (threadId == 0) return {{"error", "threadId is required for register evaluation"}};
+		GetRegistersRequest regReq;
+		regReq.threadId = threadId;
+		std::vector<uint8_t> respData;
+		if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)
+			&& respData.size() >= sizeof(GetRegistersResponse)) {
+			auto* regResp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
+			uint64_t val = ResolveRegisterByName(expression, regResp->regs);
+			char buf[32];
+			if (regResp->regs.is32bit)
+				snprintf(buf, sizeof(buf), "0x%08X", (uint32_t)val);
+			else
+				snprintf(buf, sizeof(buf), "0x%016llX", val);
+			return {{"value", buf}, {"type", regResp->regs.is32bit ? "uint32" : "uint64"}};
+		}
+		return {{"error", "Failed to read registers"}};
+	}
+
+	// 2) Hex address (0x...) -> memory preview
+	if (expression.size() > 2 && expression[0] == '0' && (expression[1] == 'x' || expression[1] == 'X')) {
+		try {
+			uint64_t addr = std::stoull(expression, nullptr, 16);
+			ReadMemoryRequest readReq;
+			readReq.address = addr;
+			readReq.size = 8;
+			std::vector<uint8_t> respData;
+			if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)
+				&& respData.size() >= sizeof(IpcStatus) + 8) {
+				auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
+				if (status == IpcStatus::Ok) {
+					uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
+					char buf[64];
+					snprintf(buf, sizeof(buf), "[0x%llX] = 0x%016llX", addr, val);
+					return {{"value", buf}, {"type", "memory"}};
+				}
+			}
+		} catch (...) {}
+		return {{"error", "Failed to read memory at " + expression}};
+	}
+
+	// 3) *addr or [addr] -> pointer dereference
+	if (!expression.empty() && (expression[0] == '*' || expression[0] == '[')) {
+		std::string addrStr = expression.substr(1);
+		if (!addrStr.empty() && addrStr.back() == ']') addrStr.pop_back();
+		while (!addrStr.empty() && addrStr.front() == ' ') addrStr.erase(addrStr.begin());
+		try {
+			uint64_t addr = std::stoull(addrStr, nullptr, 0);
+			ReadMemoryRequest readReq;
+			readReq.address = addr;
+			readReq.size = 8;
+			std::vector<uint8_t> respData;
+			if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)
+				&& respData.size() >= sizeof(IpcStatus) + 8) {
+				auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
+				if (status == IpcStatus::Ok) {
+					uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
+					char buf[32];
+					snprintf(buf, sizeof(buf), "0x%016llX", val);
+					return {{"value", buf}, {"type", "pointer"}};
+				}
+			}
+		} catch (...) {}
+		return {{"error", "Failed to read memory"}};
+	}
+
+	return {{"error", "Use register name (RAX, RCX, ...), 0x<address>, or *<address> to evaluate"}};
+}
+
+json McpServer::ToolSetRegister(const json& args) {
+	if (!attached_) return {{"error", "Not attached"}};
+
+	uint32_t threadId = args.value("threadId", 0u);
+	std::string name = args.value("name", "");
+	std::string valueStr = args.value("value", "");
+	if (threadId == 0) return {{"error", "threadId is required"}};
+	if (name.empty()) return {{"error", "name (register name) is required"}};
+	if (valueStr.empty()) return {{"error", "value is required"}};
+
+	uint32_t regIndex = GetRegisterIndex(name);
+	if (regIndex == UINT32_MAX) {
+		return {{"error", "Unknown register: " + name}};
+	}
+
+	uint64_t newVal;
+	try {
+		newVal = std::stoull(valueStr, nullptr, 0);
+	} catch (...) {
+		return {{"error", "Invalid value: " + valueStr}};
+	}
+
+	SetRegisterRequest req;
+	req.threadId = threadId;
+	req.regIndex = regIndex;
+	req.value = newVal;
+
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::SetRegister, &req, sizeof(req), respData)) {
+		return {{"error", IpcErrorMessage()}};
+	}
+	if (respData.size() >= sizeof(SetRegisterResponse)) {
+		auto* resp = reinterpret_cast<const SetRegisterResponse*>(respData.data());
+		if (resp->status == IpcStatus::Ok) {
+			char buf[32];
+			snprintf(buf, sizeof(buf), "0x%llX", newVal);
+			return {{"success", true}, {"name", name}, {"value", buf}};
+		}
+	}
+	return {{"error", "Failed to set register"}};
+}
+
+json McpServer::ToolExceptionInfo(const json& args) {
+	std::lock_guard<std::mutex> lock(exceptionMutex_);
+	if (lastException_.code == 0) {
+		return {{"error", "No exception recorded"}};
+	}
+	char codeBuf[32], addrBuf[32];
+	snprintf(codeBuf, sizeof(codeBuf), "0x%08X", lastException_.code);
+	snprintf(addrBuf, sizeof(addrBuf), "0x%llX", lastException_.address);
+	return {
+		{"exceptionCode", codeBuf},
+		{"address", addrBuf},
+		{"threadId", lastException_.threadId},
+		{"description", lastException_.description}
+	};
 }
 
 json McpServer::ToolSetDataBreakpoint(const json& args) {
@@ -455,7 +750,10 @@ json McpServer::ToolSetDataBreakpoint(const json& args) {
 	if (respData.size() >= sizeof(SetHwBreakpointResponse)) {
 		auto* resp = reinterpret_cast<const SetHwBreakpointResponse*>(respData.data());
 		if (resp->status == IpcStatus::Ok) {
-			hwBreakpoints_.push_back({resp->id, addr, req.type, req.size});
+			{
+				std::lock_guard<std::mutex> lock(bpMutex_);
+				hwBreakpoints_.push_back({resp->id, addr, req.type, req.size});
+			}
 			char buf[32]; snprintf(buf, sizeof(buf), "0x%llX", addr);
 			return {{"success", true}, {"id", resp->id}, {"slot", resp->slot},
 			        {"address", buf}, {"type", typeStr}, {"size", size}};
@@ -478,10 +776,13 @@ json McpServer::ToolRemoveDataBreakpoint(const json& args) {
 		return {{"error", IpcErrorMessage()}};
 	}
 
-	hwBreakpoints_.erase(
-		std::remove_if(hwBreakpoints_.begin(), hwBreakpoints_.end(),
-			[id](const HwBpMapping& bp) { return bp.id == id; }),
-		hwBreakpoints_.end());
+	{
+		std::lock_guard<std::mutex> lock(bpMutex_);
+		hwBreakpoints_.erase(
+			std::remove_if(hwBreakpoints_.begin(), hwBreakpoints_.end(),
+				[id](const HwBpMapping& bp) { return bp.id == id; }),
+			hwBreakpoints_.end());
+	}
 
 	return {{"success", true}, {"id", id}};
 }
@@ -491,6 +792,7 @@ json McpServer::ToolContinue(const json& args) {
 
 	// stopOnEntry=true로 launch한 경우, 첫 continue에서 OS-level resume 수행
 	ResumeMainThread();
+	CleanupTempStepOverBp();
 
 	uint32_t threadId = args.value("threadId", 0u);
 	ContinueRequest req;
@@ -505,6 +807,7 @@ json McpServer::ToolContinue(const json& args) {
 json McpServer::ToolStepIn(const json& args) {
 	if (!attached_) return {{"error", "Not attached"}};
 	ResumeMainThread();
+	CleanupTempStepOverBp();
 	uint32_t threadId = args.value("threadId", 0u);
 	if (threadId == 0) return {{"error", "threadId is required"}};
 
@@ -522,6 +825,35 @@ json McpServer::ToolStepOver(const json& args) {
 	uint32_t threadId = args.value("threadId", 0u);
 	if (threadId == 0) return {{"error", "threadId is required"}};
 
+	// Clean up any stale temp BP from previous step-over
+	CleanupTempStepOverBp();
+
+	// Check if current instruction is CALL - if so, skip over it
+	uint64_t nextAddr = 0;
+	if (IsCallInstruction(threadId, nextAddr)) {
+		// Set temp breakpoint at return address (instruction after CALL)
+		SetBreakpointRequest bpReq;
+		bpReq.address = nextAddr;
+		std::vector<uint8_t> bpResp;
+		if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq), bpResp)
+			&& bpResp.size() >= sizeof(SetBreakpointResponse)) {
+			auto* resp = reinterpret_cast<const SetBreakpointResponse*>(bpResp.data());
+			if (resp->status == IpcStatus::Ok) {
+				{
+					std::lock_guard<std::mutex> lock(eventMutex_);
+					tempStepOverBpId_ = resp->id;
+				}
+				// Continue execution - will stop at temp BP when CALL returns
+				ContinueRequest contReq;
+				contReq.threadId = 0; // all threads
+				pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+				return {{"success", true}, {"threadId", threadId}, {"skippedCall", true}};
+			}
+		}
+		// Temp BP failed - fall through to normal step
+	}
+
+	// Not a CALL (or temp BP setup failed): normal single-step
 	StepRequest req;
 	req.threadId = threadId;
 	if (!pipeClient_.SendCommand(IpcCommand::StepOver, &req, sizeof(req))) {
@@ -993,14 +1325,265 @@ json McpServer::ToolDisassemble(const json& args) {
 
 void McpServer::FlushEvents() {
 	std::queue<std::pair<std::string, json>> events;
+	std::queue<uint32_t> autoContinues;
 	{
 		std::lock_guard<std::mutex> lock(eventMutex_);
 		std::swap(events, pendingEvents_);
+		std::swap(autoContinues, pendingAutoContinue_);
 	}
 	while (!events.empty()) {
 		auto& [method, params] = events.front();
 		SendNotification(method, params);
 		events.pop();
+	}
+	// Process queued auto-continues (from condition fail / logpoints)
+	while (!autoContinues.empty()) {
+		uint32_t tid = autoContinues.front();
+		autoContinues.pop();
+		ContinueRequest req = {};
+		req.threadId = tid;
+		if (!pipeClient_.SendCommand(IpcCommand::Continue, &req, sizeof(req))) {
+			LOG_WARN("Auto-continue failed for thread %u", tid);
+		}
+	}
+}
+
+// --- Register/Condition/LogMessage helpers (ported from DAP adapter) ---
+
+bool McpServer::TryParseRegisterName(const std::string& name) {
+	std::string upper = name;
+	if (!upper.empty() && upper[0] == '$') upper = upper.substr(1);
+	std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+	static const char* regNames[] = {
+		"RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP",
+		"R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15",
+		"RIP", "RFLAGS",
+		"EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP",
+		"EIP", "EFLAGS",
+	};
+	for (auto* rn : regNames) {
+		if (upper == rn) return true;
+	}
+	return false;
+}
+
+uint64_t McpServer::ResolveRegisterByName(const std::string& name, const RegisterSet& regs) {
+	std::string upper = name;
+	if (!upper.empty() && upper[0] == '$') upper = upper.substr(1);
+	std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+	// RegisterSet layout: rax=0,rbx=1,rcx=2,rdx=3,rsi=4,rdi=5,rbp=6,rsp=7,
+	//   r8-r15=8-15, rip=16, rflags=17
+	const uint64_t* r = &regs.rax;
+	static const std::pair<const char*, int> map[] = {
+		{"RAX",0},{"EAX",0},{"RBX",1},{"EBX",1},{"RCX",2},{"ECX",2},{"RDX",3},{"EDX",3},
+		{"RSI",4},{"ESI",4},{"RDI",5},{"EDI",5},{"RBP",6},{"EBP",6},{"RSP",7},{"ESP",7},
+		{"R8",8},{"R9",9},{"R10",10},{"R11",11},{"R12",12},{"R13",13},{"R14",14},{"R15",15},
+		{"RIP",16},{"EIP",16},{"RFLAGS",17},{"EFLAGS",17},
+	};
+	for (auto& [rn, idx] : map) {
+		if (upper == rn) {
+			uint64_t val = r[idx];
+			if (upper[0] == 'E' && upper != "EFLAGS") val &= 0xFFFFFFFF;
+			return val;
+		}
+	}
+	return 0;
+}
+
+uint32_t McpServer::GetRegisterIndex(const std::string& name) {
+	std::string upper = name;
+	if (!upper.empty() && upper[0] == '$') upper = upper.substr(1);
+	std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+	static const std::pair<const char*, uint32_t> map[] = {
+		{"RAX",0},{"EAX",0},{"RBX",1},{"EBX",1},{"RCX",2},{"ECX",2},{"RDX",3},{"EDX",3},
+		{"RSI",4},{"ESI",4},{"RDI",5},{"EDI",5},{"RBP",6},{"EBP",6},{"RSP",7},{"ESP",7},
+		{"R8",8},{"R9",9},{"R10",10},{"R11",11},{"R12",12},{"R13",13},{"R14",14},{"R15",15},
+		{"RIP",16},{"EIP",16},{"RFLAGS",17},{"EFLAGS",17},
+	};
+	for (auto& [rn, idx] : map) {
+		if (upper == rn) return idx;
+	}
+	return UINT32_MAX;
+}
+
+bool McpServer::EvaluateCondition(const std::string& condition, uint32_t threadId, const RegisterSet* cachedRegs) {
+	// Condition syntax: LHS op RHS
+	// LHS/RHS: register name, *addr (memory), or integer constant
+	// Operators: ==, !=, >=, <=, >, <
+	struct { const char* op; size_t len; } ops[] = {
+		{"==", 2}, {"!=", 2}, {">=", 2}, {"<=", 2}, {">", 1}, {"<", 1},
+	};
+	std::string lhs, rhs, opStr;
+	for (auto& [op, len] : ops) {
+		auto pos = condition.find(op);
+		if (pos != std::string::npos) {
+			lhs = condition.substr(0, pos);
+			rhs = condition.substr(pos + len);
+			opStr = op;
+			break;
+		}
+	}
+	if (opStr.empty() || lhs.empty() || rhs.empty()) return true; // parse fail -> always stop
+
+	// Trim whitespace
+	auto trim = [](std::string& s) {
+		while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+		while (!s.empty() && s.back() == ' ') s.pop_back();
+	};
+	trim(lhs); trim(rhs);
+
+	// Resolve a value token (register, *memory, or constant)
+	auto resolveVal = [&](const std::string& tok) -> uint64_t {
+		if (tok.empty()) return 0;
+		// Memory dereference: *addr or [addr]
+		if (tok[0] == '*' || tok[0] == '[') {
+			std::string addrStr = tok.substr(1);
+			if (!addrStr.empty() && addrStr.back() == ']') addrStr.pop_back();
+			trim(addrStr);
+			try {
+				uint64_t addr = std::stoull(addrStr, nullptr, 0);
+				uint64_t val = 0;
+				SIZE_T bytesRead = 0;
+				if (targetProcess_ && ReadProcessMemory(targetProcess_, (LPCVOID)addr, &val, 8, &bytesRead))
+					return val;
+			} catch (...) {}
+			return 0;
+		}
+		// Register
+		if (TryParseRegisterName(tok)) {
+			if (cachedRegs) return ResolveRegisterByName(tok, *cachedRegs);
+			return 0;
+		}
+		// Constant
+		try { return std::stoull(tok, nullptr, 0); } catch (...) { return 0; }
+	};
+
+	uint64_t lhsVal = resolveVal(lhs);
+	uint64_t rhsVal = resolveVal(rhs);
+
+	if (opStr == "==") return lhsVal == rhsVal;
+	if (opStr == "!=") return lhsVal != rhsVal;
+	if (opStr == ">=") return lhsVal >= rhsVal;
+	if (opStr == "<=") return lhsVal <= rhsVal;
+	if (opStr == ">")  return lhsVal > rhsVal;
+	if (opStr == "<")  return lhsVal < rhsVal;
+	return true;
+}
+
+std::string McpServer::ExpandLogMessage(const std::string& msg, uint32_t threadId, const RegisterSet* cachedRegs) {
+	std::string result;
+	result.reserve(msg.size());
+	size_t i = 0;
+	while (i < msg.size()) {
+		if (msg[i] == '{') {
+			auto end = msg.find('}', i + 1);
+			if (end == std::string::npos) { result += msg[i++]; continue; }
+			std::string expr = msg.substr(i + 1, end - i - 1);
+			// Trim
+			while (!expr.empty() && expr.front() == ' ') expr.erase(expr.begin());
+			while (!expr.empty() && expr.back() == ' ') expr.pop_back();
+
+			char buf[32];
+			if (TryParseRegisterName(expr) && cachedRegs) {
+				uint64_t val = ResolveRegisterByName(expr, *cachedRegs);
+				if (cachedRegs->is32bit)
+					snprintf(buf, sizeof(buf), "0x%08X", (uint32_t)val);
+				else
+					snprintf(buf, sizeof(buf), "0x%016llX", val);
+				result += buf;
+			} else if (!expr.empty() && (expr[0] == '*' || expr[0] == '[')) {
+				std::string addrStr = expr.substr(1);
+				if (!addrStr.empty() && addrStr.back() == ']') addrStr.pop_back();
+				try {
+					uint64_t addr = std::stoull(addrStr, nullptr, 0);
+					uint64_t val = 0;
+					SIZE_T bytesRead = 0;
+					if (targetProcess_ && ReadProcessMemory(targetProcess_, (LPCVOID)addr, &val, 8, &bytesRead) && bytesRead >= 8) {
+						snprintf(buf, sizeof(buf), "0x%016llX", val);
+						result += buf;
+					} else {
+						result += "???";
+					}
+				} catch (...) {
+					result += "???";
+				}
+			} else {
+				result += '{'; result += expr; result += '}';
+			}
+			i = end + 1;
+		} else {
+			result += msg[i++];
+		}
+	}
+	return result;
+}
+
+// --- StepOver CALL skip helpers ---
+
+bool McpServer::IsCallInstruction(uint32_t threadId, uint64_t& nextInsnAddr) {
+	// 1. Get current RIP via GetStackTrace IPC
+	GetStackTraceRequest stReq;
+	stReq.threadId = threadId;
+	stReq.startFrame = 0;
+	stReq.maxFrames = 1;
+
+	std::vector<uint8_t> stResp;
+	if (!pipeClient_.SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), stResp))
+		return false;
+	if (stResp.size() < sizeof(GetStackTraceResponse) + sizeof(StackFrameInfo))
+		return false;
+	auto* hdr = reinterpret_cast<const GetStackTraceResponse*>(stResp.data());
+	if (hdr->status != IpcStatus::Ok || hdr->count == 0)
+		return false;
+	auto* frame = reinterpret_cast<const StackFrameInfo*>(stResp.data() + sizeof(GetStackTraceResponse));
+	uint64_t rip = frame->address;
+
+	// 2. Read memory at RIP via IPC (BP-masked: sees original bytes, not INT3)
+	ReadMemoryRequest memReq;
+	memReq.address = rip;
+	memReq.size = 16;
+	std::vector<uint8_t> memResp;
+	if (!pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &memReq, sizeof(memReq), memResp))
+		return false;
+	if (memResp.size() < sizeof(IpcStatus) + 1)
+		return false;
+	auto status = *reinterpret_cast<const IpcStatus*>(memResp.data());
+	if (status != IpcStatus::Ok)
+		return false;
+	const uint8_t* code = memResp.data() + sizeof(IpcStatus);
+	size_t codeLen = memResp.size() - sizeof(IpcStatus);
+
+	// 3. Disassemble first instruction
+	if (!disassembler_) return false;
+	auto insns = disassembler_->Disassemble(code, (uint32_t)codeLen, rip, 1);
+	if (insns.empty()) return false;
+
+	const auto& insn = insns[0];
+	// Check if mnemonic starts with "call"
+	if (insn.mnemonic.size() >= 4
+		&& (insn.mnemonic[0] == 'c' || insn.mnemonic[0] == 'C')
+		&& (insn.mnemonic[1] == 'a' || insn.mnemonic[1] == 'A')
+		&& (insn.mnemonic[2] == 'l' || insn.mnemonic[2] == 'L')
+		&& (insn.mnemonic[3] == 'l' || insn.mnemonic[3] == 'L')) {
+		nextInsnAddr = rip + insn.length;
+		LOG_DEBUG("IsCallInstruction: RIP=0x%llX -> CALL detected, next=0x%llX", rip, nextInsnAddr);
+		return true;
+	}
+	return false;
+}
+
+void McpServer::CleanupTempStepOverBp() {
+	uint32_t tempId = 0;
+	{
+		std::lock_guard<std::mutex> lock(eventMutex_);
+		tempId = tempStepOverBpId_;
+		tempStepOverBpId_ = 0;
+	}
+	if (tempId != 0) {
+		RemoveBreakpointRequest req;
+		req.id = tempId;
+		pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &req, sizeof(req));
+		LOG_DEBUG("CleanupTempStepOverBp: removed temp BP #%u", tempId);
 	}
 }
 
@@ -1013,12 +1596,82 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 	case IpcEvent::BreakpointHit: {
 		if (size >= sizeof(BreakpointHitEvent)) {
 			auto* e = reinterpret_cast<const BreakpointHitEvent*>(payload);
-			char buf[128];
-			snprintf(buf, sizeof(buf), "Breakpoint #%u hit at 0x%llX (thread %u)",
-				e->breakpointId, e->address, e->threadId);
+
+			// Check if this is our temp step-over breakpoint
+			bool isTempBp = false;
 			{
 				std::lock_guard<std::mutex> lock(eventMutex_);
-				pendingEvents_.push({"notifications/message", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
+				if (tempStepOverBpId_ != 0 && e->breakpointId == tempStepOverBpId_) {
+					isTempBp = true;
+					// Keep tempStepOverBpId_ set - CleanupTempStepOverBp() will remove it
+				}
+			}
+
+			if (isTempBp) {
+				// Report as step completed (BP removal deferred to next tool call)
+				char buf[128];
+				snprintf(buf, sizeof(buf), "Step completed at 0x%llX (thread %u)",
+					e->address, e->threadId);
+				{
+					std::lock_guard<std::mutex> lock(eventMutex_);
+					pendingEvents_.push({"notifications/message", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
+				}
+			} else {
+				// Look up BpMapping for condition/hitCondition/logMessage
+				bool shouldStop = true;
+				std::string logOutput;
+				{
+					std::lock_guard<std::mutex> lock(bpMutex_);
+					for (auto& bp : swBreakpoints_) {
+						if (bp.id == e->breakpointId) {
+							bp.hitCount++;
+
+							// Evaluate condition (using cached regs - no IPC deadlock)
+							if (!bp.condition.empty()) {
+								if (!EvaluateCondition(bp.condition, e->threadId, &e->regs)) {
+									shouldStop = false;
+									break;
+								}
+							}
+
+							// Check hitCondition
+							if (!bp.hitCondition.empty()) {
+								try {
+									uint32_t target = std::stoul(bp.hitCondition);
+									if (bp.hitCount < target) {
+										shouldStop = false;
+										break;
+									}
+								} catch (...) {}
+							}
+
+							// Expand logMessage (logpoint = no stop)
+							if (!bp.logMessage.empty()) {
+								logOutput = ExpandLogMessage(bp.logMessage, e->threadId, &e->regs);
+								shouldStop = false;
+							}
+							break;
+						}
+					}
+				}
+
+				if (!shouldStop) {
+					// Log message output (if any)
+					std::lock_guard<std::mutex> lock(eventMutex_);
+					if (!logOutput.empty()) {
+						pendingEvents_.push({"notifications/message", {{"level", "info"}, {"logger", "logpoint"}, {"data", logOutput}}});
+					}
+					// Queue auto-continue for main thread (avoid reader thread deadlock)
+					pendingAutoContinue_.push(e->threadId);
+				} else {
+					char buf[128];
+					snprintf(buf, sizeof(buf), "Breakpoint #%u hit at 0x%llX (thread %u)",
+						e->breakpointId, e->address, e->threadId);
+					{
+						std::lock_guard<std::mutex> lock(eventMutex_);
+						pendingEvents_.push({"notifications/message", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
+					}
+				}
 			}
 		}
 		break;
@@ -1063,6 +1716,14 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 	case IpcEvent::ExceptionOccurred: {
 		if (size >= sizeof(ExceptionEvent)) {
 			auto* e = reinterpret_cast<const ExceptionEvent*>(payload);
+			// Cache for veh_exception_info tool
+			{
+				std::lock_guard<std::mutex> lock(exceptionMutex_);
+				lastException_.threadId = e->threadId;
+				lastException_.code = e->exceptionCode;
+				lastException_.address = e->address;
+				lastException_.description = e->description;
+			}
 			char buf[384];
 			snprintf(buf, sizeof(buf), "Exception 0x%08X at 0x%llX (thread %u): %s",
 				e->exceptionCode, e->address, e->threadId, e->description);
@@ -1196,13 +1857,36 @@ json McpServer::GetToolsList() {
 
 		{{"name", "veh_set_breakpoint"}, {"description", "Set a software breakpoint (INT3) at an address."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"address", {{"type", "string"}, {"description", "Hex address (e.g. 0x7FF600001000)"}}}
+			{"address", {{"type", "string"}, {"description", "Hex address (e.g. 0x7FF600001000)"}}},
+			{"condition", {{"type", "string"}, {"description", "Condition expression (e.g. 'RAX==0x1000', 'RCX>5'). Supports registers, *memory, hex/dec constants."}}},
+			{"hitCondition", {{"type", "string"}, {"description", "Hit count threshold. BP fires only on Nth hit (e.g. '5' = fire on 5th hit)."}}},
+			{"logMessage", {{"type", "string"}, {"description", "Log message template (logpoint). Use {expr} for interpolation (e.g. 'x={RAX}'). Does NOT stop execution."}}}
 		 }}, {"required", json::array({"address"})}}}},
 
 		{{"name", "veh_remove_breakpoint"}, {"description", "Remove a software breakpoint by ID."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"id", {{"type", "integer"}, {"description", "Breakpoint ID from veh_set_breakpoint"}}}
 		 }}, {"required", json::array({"id"})}}}},
+
+		{{"name", "veh_set_source_breakpoint"}, {"description", "Set a breakpoint by source file and line number. Requires PDB symbols loaded."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"source", {{"type", "string"}, {"description", "Source file path (e.g. 'main.cpp', 'src/app.cpp')"}}},
+			{"line", {{"type", "integer"}, {"description", "Line number in the source file"}}},
+			{"condition", {{"type", "string"}, {"description", "Condition expression (e.g. 'RAX==0x1000')"}}},
+			{"hitCondition", {{"type", "string"}, {"description", "Hit count threshold"}}},
+			{"logMessage", {{"type", "string"}, {"description", "Log message template (logpoint)"}}}
+		 }}, {"required", json::array({"source", "line"})}}}},
+
+		{{"name", "veh_set_function_breakpoint"}, {"description", "Set a breakpoint at the entry of a function by name. Requires PDB symbols loaded."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"name", {{"type", "string"}, {"description", "Function name (e.g. 'main', 'MyClass::DoSomething')"}}},
+			{"condition", {{"type", "string"}, {"description", "Condition expression"}}},
+			{"hitCondition", {{"type", "string"}, {"description", "Hit count threshold"}}},
+			{"logMessage", {{"type", "string"}, {"description", "Log message template (logpoint)"}}}
+		 }}, {"required", json::array({"name"})}}}},
+
+		{{"name", "veh_list_breakpoints"}, {"description", "List all active software and hardware breakpoints with their properties."},
+		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}},
 
 		{{"name", "veh_set_data_breakpoint"}, {"description", "Set a hardware data breakpoint (DR0-DR3). Like Cheat Engine's 'Find out what writes/accesses'. Max 4 simultaneous."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
@@ -1281,7 +1965,23 @@ json McpServer::GetToolsList() {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}},
 			{"instructionAddress", {{"type", "string"}, {"description", "RIP/EIP hex address of the frame (auto-detected from top frame if omitted)"}}},
 			{"frameBase", {{"type", "string"}, {"description", "RBP/EBP hex address (auto-detected from top frame if omitted)"}}}
-		 }}, {"required", json::array({"threadId"})}}}}
+		 }}, {"required", json::array({"threadId"})}}}},
+
+		{{"name", "veh_evaluate"}, {"description", "Evaluate an expression. Supports register names (RAX, RBX, etc.), hex addresses (0x...), and pointer dereference (*addr or [addr])."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"expression", {{"type", "string"}, {"description", "Expression to evaluate (register name, hex address, *addr for dereference)"}}},
+			{"threadId", {{"type", "integer"}, {"description", "OS thread ID for register context"}}}
+		 }}, {"required", json::array({"expression", "threadId"})}}}},
+
+		{{"name", "veh_set_register"}, {"description", "Set a CPU register value for a stopped thread."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"threadId", {{"type", "integer"}, {"description", "OS thread ID"}}},
+			{"name", {{"type", "string"}, {"description", "Register name (e.g. RAX, RBX, RCX, RDX, RSP, RBP, RSI, RDI, R8-R15, RIP, RFLAGS)"}}},
+			{"value", {{"type", "string"}, {"description", "New value (hex or decimal, e.g. '0x1000' or '4096')"}}}
+		 }}, {"required", json::array({"threadId", "name", "value"})}}}},
+
+		{{"name", "veh_exception_info"}, {"description", "Get information about the last exception that occurred in the target process."},
+		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}
 	});
 }
 

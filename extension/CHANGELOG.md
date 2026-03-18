@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.7 (2026-03-18)
+
+### New MCP Tools (19 -> 25)
+- **veh_set_source_breakpoint** -- Set breakpoint by source file and line number (resolves via PDB symbols)
+- **veh_set_function_breakpoint** -- Set breakpoint by function name (resolves via PDB symbols)
+- **veh_evaluate** -- Evaluate register names, memory addresses, and pointer dereferences
+- **veh_set_register** -- Modify CPU register values on stopped threads
+- **veh_exception_info** -- Get last exception details (code, address, description)
+- **veh_list_breakpoints** -- List all active software and hardware breakpoints
+
+### Enhanced Existing Tools
+- **veh_set_breakpoint** -- Added `condition`, `hitCondition`, `logMessage` parameters for conditional breakpoints and logpoints
+
+### Conditional Breakpoint Infrastructure
+- Condition evaluation using register comparisons and memory reads (e.g. `RAX==0x1000`, `[0x7FF600001000]==42`)
+- Hit condition support (break after N-th hit)
+- Logpoint support with register interpolation (e.g. `"RSP={RSP}, value={RAX}"`)
+- Auto-continue when condition not met or logpoint fires (deadlock-safe via pending queue)
+
+### DLL Improvements
+- **SetRegister IPC handler** -- DLL now handles SetRegister commands with VEH-aware context modification
+- **VEH context restore on resume** -- Modified registers are correctly applied when VEH-stopped threads resume (3 handler paths: BP hit, HW BP, step complete)
+
+### Bug Fixes
+- **hwBreakpoints_ accessed without mutex** -- Added bpMutex_ protection in set/remove/list data breakpoint operations
+- **veh_evaluate with threadId=0** -- Now returns error instead of sending invalid IPC request
+
 ## 1.0.66 (2026-03-18)
 
 ### Bug Fixes

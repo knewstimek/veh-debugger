@@ -43,8 +43,9 @@ public:
 	void ResumeStoppedThread(uint32_t threadId, bool step = false);
 	void ResumeAllStoppedThreads();
 
-	// 정지된 스레드의 예외 시점 컨텍스트 가져오기
+	// 정지된 스레드의 예외 시점 컨텍스트 가져오기/설정하기
 	bool GetStoppedContext(uint32_t threadId, CONTEXT& ctx);
+	bool SetStoppedContext(uint32_t threadId, const CONTEXT& ctx);
 
 private:
 	static LONG CALLBACK ExceptionHandler(PEXCEPTION_POINTERS info);

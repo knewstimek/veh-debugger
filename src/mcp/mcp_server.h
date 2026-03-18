@@ -32,17 +32,22 @@ private:
 	void SendError(const json& id, int code, const std::string& message);
 	void SendNotification(const std::string& method, const json& params);
 
-	// MCP protocol handlers
-	void OnInitialize(const json& id, const json& params);
-	void OnToolsList(const json& id, const json& params);
-	void OnToolsCall(const json& id, const json& params);
+		// MCP protocol handlers
+		void OnInitialize(const json& id, const json& params);
+		void OnToolsList(const json& id, const json& params);
+		void OnToolsCall(const json& id, const json& params);
+		void OnResourcesList(const json& id, const json& params);
+		void OnResourceTemplatesList(const json& id, const json& params);
 
-	// Tool implementations (19 tools)
+	// Tool implementations (25 tools)
 	json ToolAttach(const json& args);
 	json ToolLaunch(const json& args);
 	json ToolDetach(const json& args);
 	json ToolSetBreakpoint(const json& args);
 	json ToolRemoveBreakpoint(const json& args);
+	json ToolSetSourceBreakpoint(const json& args);
+	json ToolSetFunctionBreakpoint(const json& args);
+	json ToolListBreakpoints(const json& args);
 	json ToolSetDataBreakpoint(const json& args);
 	json ToolRemoveDataBreakpoint(const json& args);
 	json ToolContinue(const json& args);
@@ -58,12 +63,26 @@ private:
 	json ToolModules(const json& args);
 	json ToolDisassemble(const json& args);
 	json ToolEnumLocals(const json& args);
+	json ToolEvaluate(const json& args);
+	json ToolSetRegister(const json& args);
+	json ToolExceptionInfo(const json& args);
 
 	// Tool list definition
 	json GetToolsList();
 
 	// IPC event handler (breakpoint hit, etc.)
 	void OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t size);
+
+	// StepOver CALL skip helpers
+	bool IsCallInstruction(uint32_t threadId, uint64_t& nextInsnAddr);
+	void CleanupTempStepOverBp();
+
+	// Condition/evaluate helpers (ported from DAP adapter)
+	static bool TryParseRegisterName(const std::string& name);
+	static uint64_t ResolveRegisterByName(const std::string& name, const RegisterSet& regs);
+	static uint32_t GetRegisterIndex(const std::string& name);
+	bool EvaluateCondition(const std::string& condition, uint32_t threadId, const RegisterSet* cachedRegs);
+	std::string ExpandLogMessage(const std::string& msg, uint32_t threadId, const RegisterSet* cachedRegs);
 
 	// Helper
 	std::string GetExeDir();
@@ -95,16 +114,41 @@ private:
 	void StopProcessMonitor();
 	std::thread processMonitorThread_;
 
-	// Breakpoint tracking
-	struct BpMapping { uint32_t id; uint64_t address; };
+	// Breakpoint tracking (with condition/hitCondition/logMessage support)
+	struct BpMapping {
+		uint32_t id;
+		uint64_t address;
+		std::string condition;
+		std::string hitCondition;
+		std::string logMessage;
+		uint32_t hitCount = 0;
+		// Source info (for source breakpoints)
+		std::string source;
+		uint32_t line = 0;
+		std::string functionName;
+	};
 	std::vector<BpMapping> swBreakpoints_;
+	std::mutex bpMutex_; // protects swBreakpoints_ (accessed from reader thread)
 	struct HwBpMapping { uint32_t id; uint64_t address; uint8_t type; uint8_t size; };
 	std::vector<HwBpMapping> hwBreakpoints_;
 
+	// Last exception info (cached from ExceptionOccurred event)
+	struct {
+		uint32_t threadId = 0;
+		uint32_t code = 0;
+		uint64_t address = 0;
+		std::string description;
+	} lastException_;
+	std::mutex exceptionMutex_;
+
 	std::mutex sendMutex_;
+
+	// Temp breakpoint for StepOver CALL skip (guarded by eventMutex_)
+	uint32_t tempStepOverBpId_ = 0;
 
 	// Event queue for thread-safe notification delivery
 	std::queue<std::pair<std::string, json>> pendingEvents_;
+	std::queue<uint32_t> pendingAutoContinue_; // threadIds to auto-continue (from condition/logpoint)
 	std::mutex eventMutex_;
 	void FlushEvents();
 };
