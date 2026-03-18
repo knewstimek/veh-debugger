@@ -90,6 +90,11 @@ private:
 	// OS-level resume (CREATE_SUSPENDED -> ResumeThread)
 	void ResumeMainThread();
 
+	// Process exit monitor
+	void StartProcessMonitor();
+	void StopProcessMonitor();
+	std::thread processMonitorThread_;
+
 	// Breakpoint tracking
 	struct BpMapping { uint32_t id; uint64_t address; };
 	std::vector<BpMapping> swBreakpoints_;
