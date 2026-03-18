@@ -71,6 +71,8 @@ private:
 	std::string GetDllPath(uint32_t pid);
 	std::string GetDllPathForExe(const std::string& exePath);
 	bool ParseAddress(const std::string& addrStr, uint64_t& out);
+	bool IsTargetAlive();
+	std::string IpcErrorMessage();
 
 	dap::Transport* transport_ = nullptr;
 	PipeClient pipeClient_;

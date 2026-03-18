@@ -365,6 +365,9 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		if (id) {
 			auto hwbp = HwBreakpointManager::Instance().FindById(id);
 			if (hwbp) resp.slot = hwbp->slot;
+
+			// 모든 스레드의 DR 레지스터에 즉시 적용
+			ApplyHwBreakpointsToAllThreads();
 		}
 		SendResponse(command, &resp, sizeof(resp));
 		break;
@@ -378,6 +381,10 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 		auto* req = reinterpret_cast<const RemoveHwBreakpointRequest*>(payload);
 		bool ok = HwBreakpointManager::Instance().Remove(req->id);
+		if (ok) {
+			// 제거된 HW BP를 모든 스레드에서 반영
+			ApplyHwBreakpointsToAllThreads();
+		}
 		IpcStatus status = ok ? IpcStatus::Ok : IpcStatus::NotFound;
 		SendResponse(command, &status, sizeof(status));
 		break;
@@ -857,6 +864,27 @@ bool PipeServer::SendResponse(uint32_t command, const void* payload, uint32_t pa
 	auto msg = BuildIpcMessage(command, payload, payloadSize);
 	std::lock_guard<std::mutex> lock(writeMutex_);
 	return AsyncWriteExact(msg.data(), static_cast<DWORD>(msg.size()));
+}
+
+void PipeServer::ApplyHwBreakpointsToAllThreads() {
+	DWORD currentTid = GetCurrentThreadId();
+	auto threads = ThreadManager::Instance().EnumerateThreads();
+
+	for (const auto& t : threads) {
+		if (t.id == currentTid) continue; // pipe server 스레드 자신은 skip
+
+		CONTEXT ctx;
+		if (!ThreadManager::Instance().GetContext(t.id, ctx)) continue;
+
+		// 기존 DR 값 클리어 후 현재 HW BP 목록으로 재설정
+		HwBreakpointManager::Instance().ClearFromContext(ctx);
+		HwBreakpointManager::Instance().ApplyToContext(ctx);
+
+		ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+		ThreadManager::Instance().SetContext(t.id, ctx);
+	}
+
+	LOG_DEBUG("Applied HW breakpoints to %zu threads", threads.size());
 }
 
 } // namespace veh
