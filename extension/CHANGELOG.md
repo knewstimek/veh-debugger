@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.7 (2026-03-18)
+## 1.0.70 (2026-03-18)
 
 ### New MCP Tools (19 -> 25)
 - **veh_set_source_breakpoint** -- Set breakpoint by source file and line number (resolves via PDB symbols)
