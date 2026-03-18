@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.64 (2026-03-18)
+
+### Bug Fixes
+- **Hardcoded threadId=1 in DAP adapter** -- 5 places assumed DAP thread ID 1 (stopOnEntry event, OnStackTrace, OnVariables, OnEvaluate, OnSetExpression). Our debugger uses OS thread IDs, so hardcoding 1 caused wrong thread context in multi-threaded targets. Now uses `launchedMainThreadId_` or `lastStoppedThreadId_` as appropriate fallbacks
+
+### Improvements
+- **Process exit auto-detection (MCP)** -- Background monitor thread watches target process handle; sends `process_exited` notification with exit code when process terminates
+- **IPC error messages include exit code and pipe state** -- `IpcErrorMessage()` now distinguishes: process exited (with code), pipe disconnected (crash), or IPC timeout
+- **Specific DLL failure responses** -- Memory read/write errors mention "address may be invalid or inaccessible"; register/thread/locals errors hint at likely cause (thread state, PDB symbols); "Invalid response" now says "truncated data"
+
 ## 1.0.63 (2026-03-18)
 
 ### Bug Fixes
