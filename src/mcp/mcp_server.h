@@ -82,6 +82,11 @@ private:
 	HANDLE targetProcess_ = nullptr;
 	std::atomic<bool> attached_{false};
 	std::atomic<bool> launchedByUs_{false};
+	uint32_t launchedMainThreadId_ = 0;
+	bool mainThreadResumed_ = false;
+
+	// OS-level resume (CREATE_SUSPENDED -> ResumeThread)
+	void ResumeMainThread();
 
 	// Breakpoint tracking
 	struct BpMapping { uint32_t id; uint64_t address; };

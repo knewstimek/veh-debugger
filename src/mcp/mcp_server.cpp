@@ -287,6 +287,9 @@ json McpServer::ToolLaunch(const json& args) {
 	uint32_t pid = launchResult.pid;
 	if (pid == 0) return {{"error", "Launch failed"}};
 
+	launchedMainThreadId_ = launchResult.mainThreadId;
+	mainThreadResumed_ = false;
+
 	targetProcess_ = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
 	if (!targetProcess_) {
 		LOG_WARN("OpenProcess(TERMINATE) failed for pid=%u, cannot terminate on cleanup", pid);
@@ -301,6 +304,7 @@ json McpServer::ToolLaunch(const json& args) {
 			targetProcess_ = nullptr;
 		}
 		launchedByUs_ = false;
+		launchedMainThreadId_ = 0;
 		return {{"error", "Pipe connection failed after launch"}};
 	}
 
@@ -312,11 +316,21 @@ json McpServer::ToolLaunch(const json& args) {
 	targetPid_ = pid;
 	attached_ = true;
 
-	return {{"success", true}, {"pid", pid}, {"message", "Launched and attached"}};
+	// stopOnEntry=false: 즉시 메인 스레드 resume (DAP의 configurationDone과 동일)
+	// stopOnEntry=true: 에이전트가 veh_continue 호출 시 resume
+	if (!stopOnEntry) {
+		ResumeMainThread();
+	}
+
+	return {{"success", true}, {"pid", pid}, {"message",
+		stopOnEntry ? "Launched and attached (stopped on entry)" : "Launched and attached"}};
 }
 
 json McpServer::ToolDetach(const json& args) {
 	if (!attached_) return {{"error", "Not attached"}};
+
+	// 메인 스레드가 아직 suspended이면 resume (안 하면 프로세스가 좀비로 남음)
+	ResumeMainThread();
 
 	pipeClient_.StopHeartbeat();
 	pipeClient_.StopEventListener();
@@ -331,6 +345,8 @@ json McpServer::ToolDetach(const json& args) {
 	hwBreakpoints_.clear();
 	attached_ = false;
 	targetPid_ = 0;
+	launchedMainThreadId_ = 0;
+	mainThreadResumed_ = false;
 
 	if (targetProcess_) {
 		CloseHandle(targetProcess_);
@@ -459,6 +475,9 @@ json McpServer::ToolRemoveDataBreakpoint(const json& args) {
 json McpServer::ToolContinue(const json& args) {
 	if (!attached_) return {{"error", "Not attached"}};
 
+	// stopOnEntry=true로 launch한 경우, 첫 continue에서 OS-level resume 수행
+	ResumeMainThread();
+
 	uint32_t threadId = args.value("threadId", 0u);
 	ContinueRequest req;
 	req.threadId = threadId;
@@ -471,6 +490,7 @@ json McpServer::ToolContinue(const json& args) {
 
 json McpServer::ToolStepIn(const json& args) {
 	if (!attached_) return {{"error", "Not attached"}};
+	ResumeMainThread();
 	uint32_t threadId = args.value("threadId", 0u);
 	if (threadId == 0) return {{"error", "threadId is required"}};
 
@@ -484,6 +504,7 @@ json McpServer::ToolStepIn(const json& args) {
 
 json McpServer::ToolStepOver(const json& args) {
 	if (!attached_) return {{"error", "Not attached"}};
+	ResumeMainThread();
 	uint32_t threadId = args.value("threadId", 0u);
 	if (threadId == 0) return {{"error", "threadId is required"}};
 
@@ -497,6 +518,7 @@ json McpServer::ToolStepOver(const json& args) {
 
 json McpServer::ToolStepOut(const json& args) {
 	if (!attached_) return {{"error", "Not attached"}};
+	ResumeMainThread();
 	uint32_t threadId = args.value("threadId", 0u);
 	if (threadId == 0) return {{"error", "threadId is required"}};
 
@@ -1247,6 +1269,22 @@ json McpServer::GetToolsList() {
 			{"frameBase", {{"type", "string"}, {"description", "RBP/EBP hex address (auto-detected from top frame if omitted)"}}}
 		 }}, {"required", json::array({"threadId"})}}}}
 	});
+}
+
+void McpServer::ResumeMainThread() {
+	if (mainThreadResumed_ || launchedMainThreadId_ == 0) return;
+
+	HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, launchedMainThreadId_);
+	if (hThread) {
+		DWORD prevCount = ResumeThread(hThread);
+		CloseHandle(hThread);
+		mainThreadResumed_ = true;
+		LOG_INFO("MCP: Resumed main thread %u (prev suspend count: %u)",
+			launchedMainThreadId_, prevCount);
+	} else {
+		LOG_ERROR("MCP: Failed to open main thread %u for resume: %u",
+			launchedMainThreadId_, GetLastError());
+	}
 }
 
 } // namespace veh
