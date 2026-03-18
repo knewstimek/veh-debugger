@@ -88,6 +88,16 @@ void McpServer::OnMessage(const std::string& jsonStr) {
 			OnToolsCall(id, params);
 		} else if (method == "ping") {
 			SendResult(id, json::object());
+		} else if (method == "resources/list" || method == "resources/templates/list" ||
+		           method == "prompts/list") {
+			// MCP optional capabilities -- return empty lists for compatibility
+			if (method == "prompts/list") {
+				SendResult(id, {{"prompts", json::array()}});
+			} else if (method == "resources/templates/list") {
+				SendResult(id, {{"resourceTemplates", json::array()}});
+			} else {
+				SendResult(id, {{"resources", json::array()}});
+			}
 		} else {
 			if (!id.is_null()) {
 				SendError(id, -32601, "Method not found: " + method);
