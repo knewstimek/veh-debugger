@@ -126,6 +126,14 @@ bool VehHandler::GetStoppedContext(uint32_t threadId, CONTEXT& ctx) {
 	return true;
 }
 
+bool VehHandler::SetStoppedContext(uint32_t threadId, const CONTEXT& ctx) {
+	std::lock_guard<std::mutex> lock(contextMapMutex_);
+	auto it = stoppedContexts_.find(threadId);
+	if (it == stoppedContexts_.end()) return false;
+	it->second = ctx;
+	return true;
+}
+
 // 정적 콜백 → 싱글톤 인스턴스의 HandleException 호출
 LONG CALLBACK VehHandler::ExceptionHandler(PEXCEPTION_POINTERS info) {
 	return Instance().HandleException(info);
@@ -180,6 +188,15 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 				LOG_DEBUG("Thread %u waiting for continue signal", tid);
 				WaitForSingleObject(waitEvent, INFINITE);
 				LOG_DEBUG("Thread %u resumed", tid);
+
+				// 정지 중에 SetStoppedContext로 수정된 컨텍스트를 반영
+				{
+					std::lock_guard<std::mutex> lock(contextMapMutex_);
+					auto ctxIt = stoppedContexts_.find(tid);
+					if (ctxIt != stoppedContexts_.end()) {
+						*info->ContextRecord = ctxIt->second;
+					}
+				}
 
 				// 파이프 스레드에서 설정한 step 플래그 확인
 				{
@@ -245,6 +262,14 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 							LOG_DEBUG("Thread %u (HW BP) waiting for continue signal", tid);
 							WaitForSingleObject(waitEvent, INFINITE);
 							LOG_DEBUG("Thread %u (HW BP) resumed", tid);
+							// Reflect any context modifications made during stop
+							{
+								std::lock_guard<std::mutex> lock(contextMapMutex_);
+								auto ctxIt = stoppedContexts_.find(tid);
+								if (ctxIt != stoppedContexts_.end()) {
+									*info->ContextRecord = ctxIt->second;
+								}
+							}
 						}
 					}
 
@@ -275,6 +300,15 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 				LOG_DEBUG("Thread %u (step) waiting for continue signal", tid);
 				WaitForSingleObject(waitEvent, INFINITE);
 				LOG_DEBUG("Thread %u (step) resumed", tid);
+
+				// Reflect any context modifications made during stop
+				{
+					std::lock_guard<std::mutex> lock(contextMapMutex_);
+					auto ctxIt = stoppedContexts_.find(tid);
+					if (ctxIt != stoppedContexts_.end()) {
+						*info->ContextRecord = ctxIt->second;
+					}
+				}
 
 				// step 플래그 확인 — 연속 스텝 요청이면 TF 재설정
 				{
