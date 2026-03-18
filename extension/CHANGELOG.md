@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.66 (2026-03-18)
+
+### Bug Fixes
+- **Codex CLI: Transport closed on MCP tool calls** -- Codex sends `resources/list`, `resources/templates/list`, and `prompts/list` during MCP initialization. Server returned `-32601 Method not found`, which Codex treated as fatal. Now returns empty lists per MCP spec
+
 ## 1.0.65 (2026-03-18)
 
 ### Bug Fixes
