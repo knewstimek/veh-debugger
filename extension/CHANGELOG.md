@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.65 (2026-03-18)
+
+### Bug Fixes
+- **MCP server not updated after extension upgrade** -- The `--install` command updated `settings.json` and per-project entries in `.claude.json`, but missed the root-level `mcpServers` in `.claude.json`. After upgrading (e.g. 1.0.5 to 1.0.64), the old version's binary kept running. Now updates all MCP path entries (global + per-project) in `.claude.json`
+- **Uninstall left stale entries in .claude.json** -- `--uninstall` only removed from `settings.json` and `claude mcp remove`. Now also cleans up `.claude.json` (global + per-project mcpServers)
+
 ## 1.0.64 (2026-03-18)
 
 ### Bug Fixes
