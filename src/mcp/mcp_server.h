@@ -4,6 +4,7 @@
 #include <atomic>
 #include <vector>
 #include <mutex>
+#include <condition_variable>
 #include <queue>
 #include "adapter/transport.h"
 #include "adapter/pipe_client.h"
@@ -75,6 +76,8 @@ private:
 
 	// StepOver CALL skip helpers
 	bool IsCallInstruction(uint32_t threadId, uint64_t& nextInsnAddr);
+	bool IsNextInstructionCall(uint32_t threadId, uint64_t& addrAfterCall);
+	bool SetTempBpAndContinue(uint64_t address);
 	void CleanupTempStepOverBp();
 
 	// Condition/evaluate helpers (ported from DAP adapter)
@@ -91,6 +94,7 @@ private:
 	std::string GetDllPathForExe(const std::string& exePath);
 	bool ParseAddress(const std::string& addrStr, uint64_t& out);
 	bool IsTargetAlive();
+	std::string NotAttachedMessage();
 	std::string IpcErrorMessage();
 
 	dap::Transport* transport_ = nullptr;
@@ -145,6 +149,13 @@ private:
 
 	// Temp breakpoint for StepOver CALL skip (guarded by eventMutex_)
 	uint32_t tempStepOverBpId_ = 0;
+
+	// Step completion synchronization
+	std::mutex stepMutex_;
+	std::condition_variable stepCv_;
+	bool stepCompleted_ = false;
+	uint64_t stepCompletedAddr_ = 0;
+	uint32_t stepCompletedThread_ = 0;
 
 	// Event queue for thread-safe notification delivery
 	std::queue<std::pair<std::string, json>> pendingEvents_;

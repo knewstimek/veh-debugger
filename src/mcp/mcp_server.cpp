@@ -297,18 +297,27 @@ json McpServer::ToolLaunch(const json& args) {
 	}
 
 	bool stopOnEntry = args.value("stopOnEntry", true);
+
+	// Check if program file exists
+	{
+		std::error_code ec;
+		if (!std::filesystem::exists(program, ec)) {
+			return {{"error", "File not found: " + program}};
+		}
+	}
+
 	// PE 헤더에서 비트니스 확인 (아직 프로세스가 없으므로 파일 기반)
 	std::string dllPath = GetDllPathForExe(program);
-	if (dllPath.empty()) return {{"error", "DLL not found"}};
+	if (dllPath.empty()) return {{"error", "DLL not found for: " + program}};
 
 	auto launchResult = Injector::LaunchAndInject(program, argsStr, "", dllPath, InjectionMethod::CreateRemoteThread);
 	uint32_t pid = launchResult.pid;
-	if (pid == 0) return {{"error", "Launch failed"}};
+	if (pid == 0) return {{"error", "Launch failed: " + program}};
 
 	launchedMainThreadId_ = launchResult.mainThreadId;
 	mainThreadResumed_ = false;
 
-	targetProcess_ = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+	targetProcess_ = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
 	if (!targetProcess_) {
 		LOG_WARN("OpenProcess(TERMINATE) failed for pid=%u, cannot terminate on cleanup", pid);
 	}
@@ -346,7 +355,7 @@ json McpServer::ToolLaunch(const json& args) {
 }
 
 json McpServer::ToolDetach(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	// 메인 스레드가 아직 suspended이면 resume (안 하면 프로세스가 좀비로 남음)
 	ResumeMainThread();
@@ -378,7 +387,7 @@ json McpServer::ToolDetach(const json& args) {
 }
 
 json McpServer::ToolSetBreakpoint(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	std::string addrStr = args.value("address", "");
 	if (addrStr.empty()) return {{"error", "address is required"}};
@@ -416,7 +425,7 @@ json McpServer::ToolSetBreakpoint(const json& args) {
 }
 
 json McpServer::ToolRemoveBreakpoint(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	if (!args.contains("id") || !args["id"].is_number_unsigned()) {
 		return {{"error", "id must be a valid unsigned integer"}};
@@ -441,7 +450,7 @@ json McpServer::ToolRemoveBreakpoint(const json& args) {
 }
 
 json McpServer::ToolSetSourceBreakpoint(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	std::string source = args.value("source", "");
 	uint32_t line = args.value("line", 0u);
@@ -498,7 +507,7 @@ json McpServer::ToolSetSourceBreakpoint(const json& args) {
 }
 
 json McpServer::ToolSetFunctionBreakpoint(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	std::string name = args.value("name", "");
 	if (name.empty()) return {{"error", "name (function name) is required"}};
@@ -579,7 +588,7 @@ json McpServer::ToolListBreakpoints(const json& args) {
 }
 
 json McpServer::ToolEvaluate(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	std::string expression = args.value("expression", "");
 	uint32_t threadId = args.value("threadId", 0u);
@@ -660,7 +669,7 @@ json McpServer::ToolEvaluate(const json& args) {
 }
 
 json McpServer::ToolSetRegister(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	uint32_t threadId = args.value("threadId", 0u);
 	std::string name = args.value("name", "");
@@ -718,7 +727,7 @@ json McpServer::ToolExceptionInfo(const json& args) {
 }
 
 json McpServer::ToolSetDataBreakpoint(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	std::string addrStr = args.value("address", "");
 	std::string typeStr = args.value("type", "write");
@@ -763,7 +772,7 @@ json McpServer::ToolSetDataBreakpoint(const json& args) {
 }
 
 json McpServer::ToolRemoveDataBreakpoint(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	if (!args.contains("id") || !args["id"].is_number_unsigned()) {
 		return {{"error", "id must be a valid unsigned integer"}};
@@ -788,7 +797,7 @@ json McpServer::ToolRemoveDataBreakpoint(const json& args) {
 }
 
 json McpServer::ToolContinue(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	// stopOnEntry=true로 launch한 경우, 첫 continue에서 OS-level resume 수행
 	ResumeMainThread();
@@ -805,7 +814,7 @@ json McpServer::ToolContinue(const json& args) {
 }
 
 json McpServer::ToolStepIn(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 	ResumeMainThread();
 	CleanupTempStepOverBp();
 	uint32_t threadId = args.value("threadId", 0u);
@@ -820,7 +829,7 @@ json McpServer::ToolStepIn(const json& args) {
 }
 
 json McpServer::ToolStepOver(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 	ResumeMainThread();
 	uint32_t threadId = args.value("threadId", 0u);
 	if (threadId == 0) return {{"error", "threadId is required"}};
@@ -832,38 +841,47 @@ json McpServer::ToolStepOver(const json& args) {
 	uint64_t nextAddr = 0;
 	if (IsCallInstruction(threadId, nextAddr)) {
 		// Set temp breakpoint at return address (instruction after CALL)
-		SetBreakpointRequest bpReq;
-		bpReq.address = nextAddr;
-		std::vector<uint8_t> bpResp;
-		if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq), bpResp)
-			&& bpResp.size() >= sizeof(SetBreakpointResponse)) {
-			auto* resp = reinterpret_cast<const SetBreakpointResponse*>(bpResp.data());
-			if (resp->status == IpcStatus::Ok) {
-				{
-					std::lock_guard<std::mutex> lock(eventMutex_);
-					tempStepOverBpId_ = resp->id;
-				}
-				// Continue execution - will stop at temp BP when CALL returns
-				ContinueRequest contReq;
-				contReq.threadId = 0; // all threads
-				pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
-				return {{"success", true}, {"threadId", threadId}, {"skippedCall", true}};
-			}
+		if (SetTempBpAndContinue(nextAddr)) {
+			return {{"success", true}, {"threadId", threadId}, {"skippedCall", true}};
 		}
 		// Temp BP failed - fall through to normal step
 	}
 
-	// Not a CALL (or temp BP setup failed): normal single-step
+	// Check if we're on a BP (rearm will execute 2 instructions)
+	// If the NEXT instruction is CALL, we need to handle it preemptively
+	uint64_t callAfterAddr = 0;
+	if (IsNextInstructionCall(threadId, callAfterAddr)) {
+		// Next instruction is CALL - set temp BP past the CALL and continue
+		if (SetTempBpAndContinue(callAfterAddr)) {
+			return {{"success", true}, {"threadId", threadId}, {"skippedCall", true}};
+		}
+	}
+
+	// Normal single-step with synchronous wait
+	{
+		std::lock_guard<std::mutex> lock(stepMutex_);
+		stepCompleted_ = false;
+	}
+
 	StepRequest req;
 	req.threadId = threadId;
 	if (!pipeClient_.SendCommand(IpcCommand::StepOver, &req, sizeof(req))) {
 		return {{"error", IpcErrorMessage()}};
 	}
+
+	// Wait for StepCompleted event (up to 5s)
+	{
+		std::unique_lock<std::mutex> lock(stepMutex_);
+		if (!stepCv_.wait_for(lock, std::chrono::seconds(5), [this]{ return stepCompleted_; })) {
+			return {{"error", "Step timed out"}};
+		}
+	}
+
 	return {{"success", true}, {"threadId", threadId}};
 }
 
 json McpServer::ToolStepOut(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 	ResumeMainThread();
 	uint32_t threadId = args.value("threadId", 0u);
 	if (threadId == 0) return {{"error", "threadId is required"}};
@@ -877,7 +895,7 @@ json McpServer::ToolStepOut(const json& args) {
 }
 
 json McpServer::ToolPause(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	uint32_t threadId = args.value("threadId", 0u);
 	PauseRequest req;
@@ -889,7 +907,7 @@ json McpServer::ToolPause(const json& args) {
 }
 
 json McpServer::ToolThreads(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::GetThreads, nullptr, 0, respData)) {
@@ -923,7 +941,7 @@ json McpServer::ToolThreads(const json& args) {
 }
 
 json McpServer::ToolStackTrace(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	uint32_t threadId = args.value("threadId", 0u);
 	if (threadId == 0) return {{"error", "threadId is required"}};
@@ -974,7 +992,7 @@ json McpServer::ToolStackTrace(const json& args) {
 }
 
 json McpServer::ToolEnumLocals(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	uint32_t threadId = args.value("threadId", 0u);
 	if (threadId == 0) return {{"error", "threadId is required"}};
@@ -1087,7 +1105,7 @@ json McpServer::ToolEnumLocals(const json& args) {
 }
 
 json McpServer::ToolRegisters(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	uint32_t threadId = args.value("threadId", 0u);
 	if (threadId == 0) return {{"error", "threadId is required"}};
@@ -1145,7 +1163,7 @@ json McpServer::ToolRegisters(const json& args) {
 }
 
 json McpServer::ToolReadMemory(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	std::string addrStr = args.value("address", "");
 	int size = args.value("size", 64);
@@ -1187,7 +1205,7 @@ json McpServer::ToolReadMemory(const json& args) {
 }
 
 json McpServer::ToolWriteMemory(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	std::string addrStr = args.value("address", "");
 	std::string dataHex = args.value("data", "");
@@ -1236,7 +1254,7 @@ json McpServer::ToolWriteMemory(const json& args) {
 }
 
 json McpServer::ToolModules(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::GetModules, nullptr, 0, respData)) {
@@ -1272,7 +1290,7 @@ json McpServer::ToolModules(const json& args) {
 }
 
 json McpServer::ToolDisassemble(const json& args) {
-	if (!attached_) return {{"error", "Not attached"}};
+	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	std::string addrStr = args.value("address", "");
 	int count = args.value("count", 20);
@@ -1520,6 +1538,85 @@ std::string McpServer::ExpandLogMessage(const std::string& msg, uint32_t threadI
 
 // --- StepOver CALL skip helpers ---
 
+bool McpServer::SetTempBpAndContinue(uint64_t address) {
+	SetBreakpointRequest bpReq;
+	bpReq.address = address;
+	std::vector<uint8_t> bpResp;
+	if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq), bpResp)
+		&& bpResp.size() >= sizeof(SetBreakpointResponse)) {
+		auto* resp = reinterpret_cast<const SetBreakpointResponse*>(bpResp.data());
+		if (resp->status == IpcStatus::Ok) {
+			{
+				std::lock_guard<std::mutex> lock(eventMutex_);
+				tempStepOverBpId_ = resp->id;
+			}
+			ContinueRequest contReq;
+			contReq.threadId = 0;
+			pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+			return true;
+		}
+	}
+	return false;
+}
+
+bool McpServer::IsNextInstructionCall(uint32_t threadId, uint64_t& addrAfterCall) {
+	// Get current RIP
+	GetStackTraceRequest stReq;
+	stReq.threadId = threadId;
+	stReq.startFrame = 0;
+	stReq.maxFrames = 1;
+	std::vector<uint8_t> stResp;
+	if (!pipeClient_.SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), stResp))
+		return false;
+	if (stResp.size() < sizeof(GetStackTraceResponse) + sizeof(StackFrameInfo))
+		return false;
+	auto* hdr = reinterpret_cast<const GetStackTraceResponse*>(stResp.data());
+	if (hdr->status != IpcStatus::Ok || hdr->count == 0) return false;
+	auto* frame = reinterpret_cast<const StackFrameInfo*>(stResp.data() + sizeof(GetStackTraceResponse));
+	uint64_t rip = frame->address;
+
+	// Check if this address has a BP (only relevant for BP rearm case)
+	bool onBp = false;
+	{
+		std::lock_guard<std::mutex> lock(bpMutex_);
+		for (const auto& bp : swBreakpoints_) {
+			if (bp.address == rip) { onBp = true; break; }
+		}
+	}
+	if (!onBp) return false; // Not on a BP, no rearm issue
+
+	// Read memory at RIP (BP-masked) and disassemble 2 instructions
+	ReadMemoryRequest memReq;
+	memReq.address = rip;
+	memReq.size = 32; // enough for 2 instructions
+	std::vector<uint8_t> memResp;
+	if (!pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &memReq, sizeof(memReq), memResp))
+		return false;
+	if (memResp.size() < sizeof(IpcStatus) + 1) return false;
+	auto status = *reinterpret_cast<const IpcStatus*>(memResp.data());
+	if (status != IpcStatus::Ok) return false;
+	const uint8_t* code = memResp.data() + sizeof(IpcStatus);
+	size_t codeLen = memResp.size() - sizeof(IpcStatus);
+
+	if (!disassembler_) return false;
+	auto insns = disassembler_->Disassemble(code, (uint32_t)codeLen, rip, 2);
+	if (insns.size() < 2) return false;
+
+	// Check if the SECOND instruction is CALL
+	const auto& insn = insns[1];
+	if (insn.mnemonic.size() >= 4
+		&& (insn.mnemonic[0] == 'c' || insn.mnemonic[0] == 'C')
+		&& (insn.mnemonic[1] == 'a' || insn.mnemonic[1] == 'A')
+		&& (insn.mnemonic[2] == 'l' || insn.mnemonic[2] == 'L')
+		&& (insn.mnemonic[3] == 'l' || insn.mnemonic[3] == 'L')) {
+		addrAfterCall = rip + insns[0].length + insn.length;
+		LOG_DEBUG("IsNextInstructionCall: RIP=0x%llX, next insn at 0x%llX is CALL, after=0x%llX",
+			rip, rip + insns[0].length, addrAfterCall);
+		return true;
+	}
+	return false;
+}
+
 bool McpServer::IsCallInstruction(uint32_t threadId, uint64_t& nextInsnAddr) {
 	// 1. Get current RIP via GetStackTrace IPC
 	GetStackTraceRequest stReq;
@@ -1686,6 +1783,14 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				std::lock_guard<std::mutex> lock(eventMutex_);
 				pendingEvents_.push({"notifications/message", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
 			}
+			// Signal synchronous waiters (ToolStepOver)
+			{
+				std::lock_guard<std::mutex> lock(stepMutex_);
+				stepCompleted_ = true;
+				stepCompletedAddr_ = e->address;
+				stepCompletedThread_ = e->threadId;
+			}
+			stepCv_.notify_all();
 		}
 		break;
 	}
@@ -1760,16 +1865,16 @@ std::string McpServer::GetExeDir() {
 std::string McpServer::ResolveDll(const std::string& dir, bool use32) {
 	if (use32) {
 		std::string path32 = dir + "vcruntime_net32.dll";
-		if (GetFileAttributesA(path32.c_str()) != INVALID_FILE_ATTRIBUTES) return path32;
+		if (std::filesystem::exists(path32)) return path32;
 	}
 
 	std::string path64 = dir + "vcruntime_net.dll";
-	if (GetFileAttributesA(path64.c_str()) != INVALID_FILE_ATTRIBUTES) return path64;
+	if (std::filesystem::exists(path64)) return path64;
 
 	// 폴백
 	if (!use32) {
 		std::string path32 = dir + "vcruntime_net32.dll";
-		if (GetFileAttributesA(path32.c_str()) != INVALID_FILE_ATTRIBUTES) return path32;
+		if (std::filesystem::exists(path32)) return path32;
 	}
 
 	LOG_ERROR("DLL not found in %s", dir.c_str());
@@ -2054,6 +2159,18 @@ void McpServer::StopProcessMonitor() {
 	}
 }
 
+std::string McpServer::NotAttachedMessage() {
+	if (targetProcess_) {
+		DWORD exitCode = 0;
+		if (GetExitCodeProcess(targetProcess_, &exitCode) && exitCode != STILL_ACTIVE) {
+			char buf[128];
+			snprintf(buf, sizeof(buf), "Not attached - target process exited (code %lu)", exitCode);
+			return buf;
+		}
+	}
+	return "Not attached";
+}
+
 bool McpServer::IsTargetAlive() {
 	if (!targetProcess_) return false;
 	DWORD exitCode = 0;
@@ -2062,7 +2179,7 @@ bool McpServer::IsTargetAlive() {
 }
 
 std::string McpServer::IpcErrorMessage() {
-	if (!attached_) return "Not attached";
+	if (!attached_) return NotAttachedMessage();
 	if (targetProcess_) {
 		DWORD exitCode = 0;
 		if (GetExitCodeProcess(targetProcess_, &exitCode) && exitCode != STILL_ACTIVE) {
