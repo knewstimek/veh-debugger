@@ -34,6 +34,9 @@ private:
 	bool AsyncReadExact(void* buf, DWORD size, DWORD timeoutMs = 5000);
 	bool AsyncWriteExact(const void* buf, DWORD size, DWORD timeoutMs = 3000);
 
+	// HW BP를 모든 스레드의 DR 레지스터에 즉시 적용
+	void ApplyHwBreakpointsToAllThreads();
+
 	// VEH 핸들러 해제 + BP 제거 + 스레드 복구
 	void EmergencyCleanup();
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.63 (2026-03-18)
+
+### Bug Fixes
+- **Hardware data breakpoints not applied to running threads** -- `SetHwBreakpoint` only stored BP in internal data structure but never wrote DR0-DR3 registers to thread contexts. Now immediately applies DR registers to all threads via `GetThreadContext`/`SetThreadContext` after set/remove
+- **Unhelpful "IPC failed" error messages** -- All 17 IPC error sites now check if the target process has exited and return specific messages: "Target process has exited" or "IPC communication failed (pipe broken or timeout)" instead of generic "IPC failed"
+
+### Improvements
+- **MCP tool descriptions clarify OS thread ID** -- `threadId` parameter descriptions now say "OS thread ID (from veh_threads)" to prevent confusion with DAP's 1-based thread IDs
+
 ## 1.0.62 (2026-03-18)
 
 ### Bug Fixes

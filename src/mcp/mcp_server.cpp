@@ -372,7 +372,7 @@ json McpServer::ToolSetBreakpoint(const json& args) {
 
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &req, sizeof(req), respData)) {
-		return {{"error", "IPC failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 
 	if (respData.size() >= sizeof(SetBreakpointResponse)) {
@@ -397,7 +397,7 @@ json McpServer::ToolRemoveBreakpoint(const json& args) {
 	RemoveBreakpointRequest req;
 	req.id = id;
 	if (!pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &req, sizeof(req))) {
-		return {{"error", "IPC send failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 
 	swBreakpoints_.erase(
@@ -435,7 +435,7 @@ json McpServer::ToolSetDataBreakpoint(const json& args) {
 
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::SetHwBreakpoint, &req, sizeof(req), respData)) {
-		return {{"error", "IPC failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 
 	if (respData.size() >= sizeof(SetHwBreakpointResponse)) {
@@ -461,7 +461,7 @@ json McpServer::ToolRemoveDataBreakpoint(const json& args) {
 	RemoveHwBreakpointRequest req;
 	req.id = id;
 	if (!pipeClient_.SendCommand(IpcCommand::RemoveHwBreakpoint, &req, sizeof(req))) {
-		return {{"error", "IPC send failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 
 	hwBreakpoints_.erase(
@@ -483,7 +483,7 @@ json McpServer::ToolContinue(const json& args) {
 	req.threadId = threadId;
 
 	if (!pipeClient_.SendCommand(IpcCommand::Continue, &req, sizeof(req))) {
-		return {{"error", "IPC send failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 	return {{"success", true}, {"threadId", threadId}};
 }
@@ -497,7 +497,7 @@ json McpServer::ToolStepIn(const json& args) {
 	StepRequest req;
 	req.threadId = threadId;
 	if (!pipeClient_.SendCommand(IpcCommand::StepInto, &req, sizeof(req))) {
-		return {{"error", "IPC send failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 	return {{"success", true}, {"threadId", threadId}};
 }
@@ -511,7 +511,7 @@ json McpServer::ToolStepOver(const json& args) {
 	StepRequest req;
 	req.threadId = threadId;
 	if (!pipeClient_.SendCommand(IpcCommand::StepOver, &req, sizeof(req))) {
-		return {{"error", "IPC send failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 	return {{"success", true}, {"threadId", threadId}};
 }
@@ -525,7 +525,7 @@ json McpServer::ToolStepOut(const json& args) {
 	StepRequest req;
 	req.threadId = threadId;
 	if (!pipeClient_.SendCommand(IpcCommand::StepOut, &req, sizeof(req))) {
-		return {{"error", "IPC send failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 	return {{"success", true}, {"threadId", threadId}};
 }
@@ -537,7 +537,7 @@ json McpServer::ToolPause(const json& args) {
 	PauseRequest req;
 	req.threadId = threadId;
 	if (!pipeClient_.SendCommand(IpcCommand::Pause, &req, sizeof(req))) {
-		return {{"error", "IPC send failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 	return {{"success", true}, {"threadId", threadId}};
 }
@@ -547,7 +547,7 @@ json McpServer::ToolThreads(const json& args) {
 
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::GetThreads, nullptr, 0, respData)) {
-		return {{"error", "IPC failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 
 	if (respData.size() < sizeof(GetThreadsResponse)) {
@@ -592,7 +592,7 @@ json McpServer::ToolStackTrace(const json& args) {
 
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::GetStackTrace, &req, sizeof(req), respData)) {
-		return {{"error", "IPC failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 
 	if (respData.size() < sizeof(GetStackTraceResponse)) {
@@ -671,7 +671,7 @@ json McpServer::ToolEnumLocals(const json& args) {
 
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::EnumLocals, &req, sizeof(req), respData)) {
-		return {{"error", "IPC failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 
 	if (respData.size() < sizeof(EnumLocalsResponse)) {
@@ -751,7 +751,7 @@ json McpServer::ToolRegisters(const json& args) {
 
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &req, sizeof(req), respData)) {
-		return {{"error", "IPC failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 
 	if (respData.size() < sizeof(GetRegistersResponse)) {
@@ -816,7 +816,7 @@ json McpServer::ToolReadMemory(const json& args) {
 
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &req, sizeof(req), respData)) {
-		return {{"error", "IPC failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 
 	if (respData.size() < sizeof(IpcStatus)) return {{"error", "Invalid response"}};
@@ -877,7 +877,7 @@ json McpServer::ToolWriteMemory(const json& args) {
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::WriteMemory, payload.data(),
 	                                 static_cast<uint32_t>(payload.size()), respData)) {
-		return {{"error", "IPC failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 
 	if (respData.size() >= sizeof(IpcStatus)) {
@@ -894,7 +894,7 @@ json McpServer::ToolModules(const json& args) {
 
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::GetModules, nullptr, 0, respData)) {
-		return {{"error", "IPC failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 
 	if (respData.size() < sizeof(GetModulesResponse)) {
@@ -946,7 +946,7 @@ json McpServer::ToolDisassemble(const json& args) {
 
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &req, sizeof(req), respData)) {
-		return {{"error", "IPC failed"}};
+		return {{"error", IpcErrorMessage()}};
 	}
 
 	if (respData.size() < sizeof(IpcStatus)) return {{"error", "Read failed"}};
@@ -1209,17 +1209,17 @@ json McpServer::GetToolsList() {
 
 		{{"name", "veh_step_in"}, {"description", "Single step into (execute one instruction, entering calls)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"threadId", {{"type", "integer"}, {"description", "Thread ID"}}}
+			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}}
 		 }}, {"required", json::array({"threadId"})}}}},
 
 		{{"name", "veh_step_over"}, {"description", "Step over (execute one instruction, skipping calls)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"threadId", {{"type", "integer"}, {"description", "Thread ID"}}}
+			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}}
 		 }}, {"required", json::array({"threadId"})}}}},
 
 		{{"name", "veh_step_out"}, {"description", "Step out (run until current function returns)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"threadId", {{"type", "integer"}, {"description", "Thread ID"}}}
+			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}}
 		 }}, {"required", json::array({"threadId"})}}}},
 
 		{{"name", "veh_pause"}, {"description", "Pause execution. threadId=0 pauses all threads."},
@@ -1232,13 +1232,13 @@ json McpServer::GetToolsList() {
 
 		{{"name", "veh_stack_trace"}, {"description", "Get stack trace for a thread."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"threadId", {{"type", "integer"}, {"description", "Thread ID"}}},
+			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}},
 			{"maxFrames", {{"type", "integer"}, {"description", "Max frames to return (default: 20)"}}}
 		 }}, {"required", json::array({"threadId"})}}}},
 
 		{{"name", "veh_registers"}, {"description", "Get CPU registers for a thread."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"threadId", {{"type", "integer"}, {"description", "Thread ID"}}}
+			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}}
 		 }}, {"required", json::array({"threadId"})}}}},
 
 		{{"name", "veh_read_memory"}, {"description", "Read memory from the target process. Returns hex dump."},
@@ -1264,7 +1264,7 @@ json McpServer::GetToolsList() {
 
 		{{"name", "veh_enum_locals"}, {"description", "Enumerate local variables and parameters for a stopped thread's stack frame. Returns variable names, types, addresses, and values."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"threadId", {{"type", "integer"}, {"description", "Thread ID (required)"}}},
+			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}},
 			{"instructionAddress", {{"type", "string"}, {"description", "RIP/EIP hex address of the frame (auto-detected from top frame if omitted)"}}},
 			{"frameBase", {{"type", "string"}, {"description", "RBP/EBP hex address (auto-detected from top frame if omitted)"}}}
 		 }}, {"required", json::array({"threadId"})}}}}
@@ -1285,6 +1285,19 @@ void McpServer::ResumeMainThread() {
 		LOG_ERROR("MCP: Failed to open main thread %u for resume: %u",
 			launchedMainThreadId_, GetLastError());
 	}
+}
+
+bool McpServer::IsTargetAlive() {
+	if (!targetProcess_) return false;
+	DWORD exitCode = 0;
+	if (!GetExitCodeProcess(targetProcess_, &exitCode)) return false;
+	return exitCode == STILL_ACTIVE;
+}
+
+std::string McpServer::IpcErrorMessage() {
+	if (!attached_) return "Not attached";
+	if (!IsTargetAlive()) return "Target process has exited";
+	return "IPC communication failed (pipe broken or timeout)";
 }
 
 } // namespace veh
