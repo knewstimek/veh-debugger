@@ -64,6 +64,11 @@ private:
 	std::atomic<bool> heartbeatRunning_{false};
 	std::atomic<uint64_t> lastRecvTime_{0};  // GetTickCount64
 
+	// 리더 스레드 시작 대기용
+	std::mutex readerReadyMutex_;
+	std::condition_variable readerReadyCv_;
+	bool readerReady_ = false;
+
 	// 응답 대기용
 	std::mutex responseMutex_;
 	std::condition_variable responseCv_;

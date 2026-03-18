@@ -222,7 +222,13 @@ bool PipeClient::SendAndReceive(IpcCommand cmd,
 void PipeClient::StartEventListener(EventCallback cb) {
 	eventCallback_ = std::move(cb);
 	running_ = true;
+	readerReady_ = false;
 	readerThread_ = std::thread(&PipeClient::ReaderThread, this);
+
+	// 리더 스레드가 실제로 시작될 때까지 대기
+	std::unique_lock<std::mutex> lock(readerReadyMutex_);
+	readerReadyCv_.wait_for(lock, std::chrono::seconds(3),
+		[this] { return readerReady_; });
 }
 
 void PipeClient::StopEventListener() {
@@ -251,6 +257,13 @@ void PipeClient::StopEventListener() {
 
 void PipeClient::ReaderThread() {
 	LOG_DEBUG("PipeClient reader thread started [overlapped]");
+
+	// 시작 시그널
+	{
+		std::lock_guard<std::mutex> lock(readerReadyMutex_);
+		readerReady_ = true;
+	}
+	readerReadyCv_.notify_one();
 
 	while (running_ && connected_) {
 		IpcHeader hdr;
