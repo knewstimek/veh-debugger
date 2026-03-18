@@ -2779,6 +2779,8 @@ std::string DapServer::GetDllPath() {
 
 bool DapServer::TryParseRegisterName(const std::string& name) {
 	std::string upper = name;
+	// $rax, $RAX 등 $ 접두어 허용 (GDB/LLDB 문법 호환)
+	if (!upper.empty() && upper[0] == '$') upper = upper.substr(1);
 	std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
 
 	static const char* regNames[] = {
@@ -2796,6 +2798,7 @@ bool DapServer::TryParseRegisterName(const std::string& name) {
 
 uint64_t DapServer::ResolveRegisterByName(const std::string& name, const RegisterSet& regs) {
 	std::string upper = name;
+	if (!upper.empty() && upper[0] == '$') upper = upper.substr(1);
 	std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
 
 	if (upper == "RAX" || upper == "EAX") return regs.rax;

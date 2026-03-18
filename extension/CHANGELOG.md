@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.61 (2026-03-18)
+
+### Improvements
+- **GDB/LLDB register syntax** -- `evaluate` now accepts `$rax`, `$rip` etc. in addition to `RAX`, `rip`. The `$` prefix is stripped before matching
+
 ## 1.0.6 (2026-03-18)
 
 ### Bug Fixes
