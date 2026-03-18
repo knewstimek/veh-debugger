@@ -192,27 +192,72 @@ static bool InstallClaudeMCPAdd(const std::string& claudePath, const std::string
 	return true;
 }
 
-// ~/.claude.json 의 프로젝트별 mcpServers 경로 업데이트
-static void UpdateClaudeProjectMCPServers(const std::string& newPath) {
+// ~/.claude.json 의 global + 프로젝트별 mcpServers 경로 업데이트
+static void UpdateClaudeJsonMCPServers(const std::string& newPath) {
 	std::string claudeJsonPath = GetHomePath() + "\\.claude.json";
 	json config = ReadJsonFile(claudeJsonPath);
 
-	if (!config.contains("projects") || !config["projects"].is_object()) {
-		return;
-	}
-
 	bool modified = false;
-	for (auto& [projPath, projConfig] : config["projects"].items()) {
-		if (!projConfig.is_object()) continue;
-		if (!projConfig.contains("mcpServers")) continue;
-		auto& servers = projConfig["mcpServers"];
-		if (!servers.is_object() || !servers.contains(SERVER_NAME)) continue;
 
-		auto& entry = servers[SERVER_NAME];
+	// global mcpServers (루트)
+	if (config.contains("mcpServers") && config["mcpServers"].is_object() &&
+	    config["mcpServers"].contains(SERVER_NAME)) {
+		auto& entry = config["mcpServers"][SERVER_NAME];
 		if (entry.is_object() && entry.contains("command")) {
 			std::string oldCmd = entry["command"].get<std::string>();
 			if (oldCmd != newPath) {
 				entry["command"] = newPath;
+				modified = true;
+			}
+		}
+	}
+
+	// 프로젝트별 mcpServers
+	if (config.contains("projects") && config["projects"].is_object()) {
+		for (auto& [projPath, projConfig] : config["projects"].items()) {
+			if (!projConfig.is_object()) continue;
+			if (!projConfig.contains("mcpServers")) continue;
+			auto& servers = projConfig["mcpServers"];
+			if (!servers.is_object() || !servers.contains(SERVER_NAME)) continue;
+
+			auto& entry = servers[SERVER_NAME];
+			if (entry.is_object() && entry.contains("command")) {
+				std::string oldCmd = entry["command"].get<std::string>();
+				if (oldCmd != newPath) {
+					entry["command"] = newPath;
+					modified = true;
+				}
+			}
+		}
+	}
+
+	if (modified) {
+		WriteJsonFile(claudeJsonPath, config);
+	}
+}
+
+// ~/.claude.json 에서 veh-debugger MCP 항목 제거 (global + 프로젝트별)
+static void RemoveFromClaudeJson() {
+	std::string claudeJsonPath = GetHomePath() + "\\.claude.json";
+	json config = ReadJsonFile(claudeJsonPath);
+
+	bool modified = false;
+
+	// global mcpServers
+	if (config.contains("mcpServers") && config["mcpServers"].is_object() &&
+	    config["mcpServers"].contains(SERVER_NAME)) {
+		config["mcpServers"].erase(SERVER_NAME);
+		modified = true;
+	}
+
+	// 프로젝트별 mcpServers
+	if (config.contains("projects") && config["projects"].is_object()) {
+		for (auto& [projPath, projConfig] : config["projects"].items()) {
+			if (!projConfig.is_object()) continue;
+			if (!projConfig.contains("mcpServers")) continue;
+			auto& servers = projConfig["mcpServers"];
+			if (servers.is_object() && servers.contains(SERVER_NAME)) {
+				servers.erase(SERVER_NAME);
 				modified = true;
 			}
 		}
@@ -454,7 +499,7 @@ bool InstallToAgent(const AgentConfig& agent, const std::string& serverPath) {
 		if (!claudePath.empty()) {
 			if (InstallClaudeMCPAdd(claudePath, serverPath)) {
 				printf("  %-20s [installed] (claude mcp add)\n", agent.displayName.c_str());
-				UpdateClaudeProjectMCPServers(normalizedPath);
+				UpdateClaudeJsonMCPServers(normalizedPath);
 				AddClaudePermission();
 				printf("  %-20s [permissions] -> %s\n", "", PERM_WILDCARD);
 				return true;
@@ -467,6 +512,7 @@ bool InstallToAgent(const AgentConfig& agent, const std::string& serverPath) {
 		// 폴백: settings.json 직접 수정
 		bool ok = InstallJson(agent.configPath, serverPath);
 		if (ok) {
+			UpdateClaudeJsonMCPServers(normalizedPath);
 			AddClaudePermission();
 			printf("  %-20s [installed] -> %s\n", agent.displayName.c_str(), agent.configPath.c_str());
 			printf("  %-20s [permissions] -> %s\n", "", PERM_WILDCARD);
@@ -488,6 +534,7 @@ bool UninstallFromAgent(const AgentConfig& agent) {
 			RunProcess(claudePath, "mcp remove " + std::string(SERVER_NAME), 10000);
 		}
 		UninstallJson(agent.configPath);
+		RemoveFromClaudeJson();
 		RemoveClaudePermission();
 		return true;
 	}
