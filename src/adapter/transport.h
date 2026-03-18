@@ -78,4 +78,19 @@ private:
 	bool wsaInitialized_ = false;
 };
 
+// MCP stdio transport (newline-delimited JSON, no Content-Length header)
+class McpStdioTransport : public Transport {
+public:
+	bool Start() override;
+	void Stop() override;
+	bool Send(const std::string& json) override;
+
+private:
+	void ReadThread();
+
+	std::thread readThread_;
+	std::atomic<bool> running_{false};
+	std::mutex writeMutex_;
+};
+
 } // namespace veh::dap

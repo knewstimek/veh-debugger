@@ -231,4 +231,70 @@ void TcpTransport::ReadThread() {
 	}
 }
 
+// --- McpStdioTransport (newline-delimited JSON) ---
+
+bool McpStdioTransport::Start() {
+#ifdef _WIN32
+	_setmode(_fileno(stdin), _O_BINARY);
+	_setmode(_fileno(stdout), _O_BINARY);
+	setvbuf(stdin, NULL, _IONBF, 0);
+#endif
+	running_ = true;
+	readThread_ = std::thread(&McpStdioTransport::ReadThread, this);
+	LOG_INFO("MCP stdio transport started");
+	return true;
+}
+
+void McpStdioTransport::Stop() {
+	running_ = false;
+	_close(_fileno(stdin));
+	if (readThread_.joinable()) {
+		readThread_.join();
+	}
+}
+
+bool McpStdioTransport::Send(const std::string& json) {
+	std::lock_guard<std::mutex> lock(writeMutex_);
+	// MCP: JSON + newline (no Content-Length header)
+	std::string msg = json + "\n";
+	size_t written = fwrite(msg.c_str(), 1, msg.size(), stdout);
+	fflush(stdout);
+	return written == msg.size();
+}
+
+void McpStdioTransport::ReadThread() {
+	// MCP stdio: one JSON object per line
+	std::string lineBuf;
+	int stdinFd = _fileno(stdin);
+	char buf[4096];
+
+	while (running_) {
+		int n = _read(stdinFd, buf, sizeof(buf));
+		if (n <= 0) {
+			LOG_INFO("MCP stdin EOF or error (n=%d), stopping", n);
+			running_ = false;
+			break;
+		}
+
+		lineBuf.append(buf, n);
+
+		// Extract complete lines
+		size_t pos;
+		while ((pos = lineBuf.find('\n')) != std::string::npos) {
+			std::string line = lineBuf.substr(0, pos);
+			lineBuf.erase(0, pos + 1);
+
+			// Trim \r if present
+			if (!line.empty() && line.back() == '\r') {
+				line.pop_back();
+			}
+
+			// Skip empty lines
+			if (line.empty()) continue;
+
+			if (callback_) callback_(line);
+		}
+	}
+}
+
 } // namespace veh::dap

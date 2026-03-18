@@ -139,6 +139,33 @@ Output: `build/bin/Release/` -> `veh-debug-adapter.exe`, `vcruntime_net.dll`, `v
 
 Deploy to: `~/.vscode/extensions/knewstimek.veh-debugger-{version}/bin/`
 
+## Logging & Diagnostics
+
+The release build produces **no log files by default**. Two opt-in mechanisms:
+
+### Runtime log (`--log`)
+Pass `--log=FILE` and optionally `--log-level=LEVEL` to the adapter:
+```bash
+veh-debug-adapter.exe --log=C:\tmp\adapter.log --log-level=debug
+```
+Levels: `debug`, `info` (default), `warn`, `error`.
+In VSCode, set `logFile` / `logLevel` in launch.json:
+```json
+{ "type": "veh", "logFile": "C:\\tmp\\adapter.log", "logLevel": "debug" }
+```
+
+### Compile-time trace (`VEH_DAP_TRACE`)
+Enabled via CMake flag - logs raw DAP request/response JSON to a fixed file:
+```bash
+cmake -B build -DVEH_DAP_TRACE=ON
+```
+Output: `C:\tmp\veh_dap_trace.log` (REQUEST, setBreakpoints, setInstructionBreakpoints)
+
+### DLL-side logging
+The DLL (`vcruntime_net.dll`) uses the same `Logger` class (default: stderr).
+Since the DLL runs inside the target process, stderr goes nowhere unless the target has a console.
+A few critical paths also use `OutputDebugStringW` - view with DebugView (Sysinternals).
+
 ## Test
 ```bash
 py -3 test/test_step.py        # F10 (StepOver) - 10 consecutive steps

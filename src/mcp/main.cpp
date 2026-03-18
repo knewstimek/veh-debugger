@@ -158,8 +158,8 @@ int main(int argc, char* argv[]) {
 
 	LOG_INFO("VEH MCP Server starting");
 
-	// MCP는 항상 stdin/stdout (StdioTransport)
-	veh::dap::StdioTransport transport;
+	// MCP는 줄바꿈 구분 JSON (Content-Length 프레이밍이 아닌 MCP 표준)
+	veh::dap::McpStdioTransport transport;
 	veh::McpServer server;
 	server.SetTransport(&transport);
 

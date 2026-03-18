@@ -103,13 +103,19 @@ void VehHandler::ResumeStoppedThread(uint32_t threadId, bool step) {
 void VehHandler::ResumeAllStoppedThreads() {
 	LOG_DEBUG("ResumeAllStoppedThreads");
 	{
+		std::lock_guard<std::mutex> lock(stepFlagMutex_);
+		stepFlags_.clear();
+	}
+	{
 		std::lock_guard<std::mutex> lock(contextMapMutex_);
 		stoppedContexts_.clear();
 	}
 	std::lock_guard<std::mutex> lock(eventMapMutex_);
 	for (auto& [tid, evt] : threadEvents_) {
 		SetEvent(evt);
+		CloseHandle(evt);
 	}
+	threadEvents_.clear();
 }
 
 bool VehHandler::GetStoppedContext(uint32_t threadId, CONTEXT& ctx) {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.6 (2026-03-18)
+
+### Bug Fixes
+- **MCP server not connecting to Claude Code** -- MCP stdio transport used DAP-style `Content-Length` framing instead of MCP-standard newline-delimited JSON. Claude Code could never parse the server's responses, showing "Failed to connect". Added `McpStdioTransport` class with correct framing
+- Fix `ResumeAllStoppedThreads` not closing event handles / clearing stepFlags (resource cleanup consistency with `ResumeStoppedThread`)
+
 ## 1.0.5 (2026-03-18)
 
 ### New Features
