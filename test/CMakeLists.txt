@@ -1,6 +1,0 @@
-cmake_minimum_required(VERSION 3.16)
-project(test_target C)
-add_executable(test_target test_target.c)
-# Debug: 최적화 비활성 + PDB 생성 (소스 레벨 디버깅 정확도)
-target_compile_options(test_target PRIVATE /Zi /Od)
-target_link_options(test_target PRIVATE /DEBUG /PDB:$<TARGET_FILE_DIR:test_target>/test_target.pdb)
