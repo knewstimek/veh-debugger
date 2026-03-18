@@ -463,8 +463,9 @@ void DapServer::OnSetBreakpoints(const Request& req) {
 		rb.hitCondition = bp.value("hitCondition", "");
 		rb.logMessage = bp.value("logMessage", "");
 
-		if (bp.contains("instructionReference")) {
-			rb.address = ParseAddress(bp["instructionReference"].get<std::string>());
+		if (bp.contains("instructionReference") || bp.contains("instruction_reference")) {
+			auto key = bp.contains("instructionReference") ? "instructionReference" : "instruction_reference";
+			rb.address = ParseAddress(bp[key].get<std::string>());
 		} else if (bp.contains("line")) {
 			rb.line = bp["line"].get<int>();
 			if (!sourceFile.empty() && rb.line > 0) {
@@ -710,6 +711,7 @@ void DapServer::OnSetInstructionBreakpoints(const Request& req) {
 
 	for (auto& bp : bps) {
 		std::string instrRef = bp.value("instructionReference", std::string(""));
+		if (instrRef.empty()) instrRef = bp.value("instruction_reference", std::string(""));
 		int64_t offset = bp.value("offset", (int64_t)0);
 		LOG_DEBUG("  bp instrRef='%s' offset=%lld raw=%s", instrRef.c_str(), offset, bp.dump().c_str());
 
