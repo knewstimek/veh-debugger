@@ -9,6 +9,51 @@
 
 namespace veh {
 
+// JSON args helper: accept both number and string for integer fields.
+// AI agents often send "threadId": "12345" instead of "threadId": 12345.
+static uint32_t JsonUint32(const json& args, const char* key, uint32_t defaultVal = 0) {
+	if (!args.contains(key)) return defaultVal;
+	const auto& v = args[key];
+	if (v.is_number()) return v.get<uint32_t>();
+	if (v.is_string()) {
+		const auto& s = v.get<std::string>();
+		if (s.empty() || s[0] == '-') return defaultVal;
+		try {
+			return static_cast<uint32_t>(std::stoul(s, nullptr, 0));
+		} catch (...) {
+			return defaultVal;
+		}
+	}
+	return defaultVal;
+}
+
+static int JsonInt(const json& args, const char* key, int defaultVal = 0) {
+	if (!args.contains(key)) return defaultVal;
+	const auto& v = args[key];
+	if (v.is_number()) return v.get<int>();
+	if (v.is_string()) {
+		try {
+			return std::stoi(v.get<std::string>(), nullptr, 0);
+		} catch (...) {
+			return defaultVal;
+		}
+	}
+	return defaultVal;
+}
+
+static bool JsonBool(const json& args, const char* key, bool defaultVal = false) {
+	if (!args.contains(key)) return defaultVal;
+	const auto& v = args[key];
+	if (v.is_boolean()) return v.get<bool>();
+	if (v.is_string()) {
+		auto s = v.get<std::string>();
+		return s == "true" || s == "1";
+	}
+	if (v.is_number_integer()) return v.get<int>() != 0;
+	if (v.is_number()) return v.get<double>() != 0.0;
+	return defaultVal;
+}
+
 McpServer::McpServer() {}
 McpServer::~McpServer() {
 	running_ = false;
@@ -331,7 +376,7 @@ json McpServer::ToolAttach(const json& args) {
 		pipeClient_.Disconnect();
 	}
 
-	uint32_t pid = args.value("pid", 0u);
+	uint32_t pid = JsonUint32(args, "pid");
 	if (pid == 0) return {{"error", "pid is required"}};
 
 	// CREATE_SUSPENDED detection (uninitialized loader -> CreateRemoteThread hangs)
@@ -428,7 +473,7 @@ json McpServer::ToolLaunch(const json& args) {
 		}
 	}
 
-	bool stopOnEntry = args.value("stopOnEntry", true);
+	bool stopOnEntry = JsonBool(args, "stopOnEntry", true);
 
 	// Check if program file exists
 	{
@@ -564,10 +609,10 @@ json McpServer::ToolSetBreakpoint(const json& args) {
 json McpServer::ToolRemoveBreakpoint(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 
-	if (!args.contains("id") || !args["id"].is_number_unsigned()) {
-		return {{"error", "id must be a valid unsigned integer"}};
+	uint32_t id = JsonUint32(args, "id");
+	if (!args.contains("id") || id == 0) {
+		return {{"error", "id is required (positive integer)"}};
 	}
-	uint32_t id = args["id"].get<uint32_t>();
 
 	RemoveBreakpointRequest req;
 	req.id = id;
@@ -590,7 +635,7 @@ json McpServer::ToolSetSourceBreakpoint(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	std::string source = args.value("source", "");
-	uint32_t line = args.value("line", 0u);
+	uint32_t line = JsonUint32(args, "line");
 	if (source.empty()) return {{"error", "source (file path) is required"}};
 	if (line == 0) return {{"error", "line is required"}};
 
@@ -728,7 +773,7 @@ json McpServer::ToolEvaluate(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	std::string expression = args.value("expression", "");
-	uint32_t threadId = args.value("threadId", 0u);
+	uint32_t threadId = JsonUint32(args, "threadId");
 	if (expression.empty()) return {{"error", "expression is required"}};
 
 	// Trim
@@ -808,7 +853,7 @@ json McpServer::ToolEvaluate(const json& args) {
 json McpServer::ToolSetRegister(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 
-	uint32_t threadId = args.value("threadId", 0u);
+	uint32_t threadId = JsonUint32(args, "threadId");
 	std::string name = args.value("name", "");
 	std::string valueStr = args.value("value", "");
 	if (threadId == 0) return {{"error", "threadId is required"}};
@@ -874,7 +919,7 @@ json McpServer::ToolTraceCallers(const json& args) {
 		return {{"error", "invalid address format"}};
 	}
 
-	int durationSec = args.value("duration_sec", 5);
+	int durationSec = JsonInt(args, "duration_sec", 5);
 	if (durationSec < 1) durationSec = 1;
 	if (durationSec > 60) durationSec = 60;
 
@@ -929,7 +974,7 @@ json McpServer::ToolSetDataBreakpoint(const json& args) {
 
 	std::string addrStr = args.value("address", "");
 	std::string typeStr = args.value("type", "write");
-	int size = args.value("size", 4);
+	int size = JsonInt(args, "size", 4);
 
 	if (addrStr.empty()) return {{"error", "address is required"}};
 
@@ -972,10 +1017,10 @@ json McpServer::ToolSetDataBreakpoint(const json& args) {
 json McpServer::ToolRemoveDataBreakpoint(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 
-	if (!args.contains("id") || !args["id"].is_number_unsigned()) {
-		return {{"error", "id must be a valid unsigned integer"}};
+	uint32_t id = JsonUint32(args, "id");
+	if (!args.contains("id") || id == 0) {
+		return {{"error", "id is required (positive integer)"}};
 	}
-	uint32_t id = args["id"].get<uint32_t>();
 
 	RemoveHwBreakpointRequest req;
 	req.id = id;
@@ -1001,9 +1046,9 @@ json McpServer::ToolContinue(const json& args) {
 	ResumeMainThread();
 	CleanupTempStepOverBp();
 
-	uint32_t threadId = args.value("threadId", 0u);
-	bool wait = args.value("wait", false);
-	int timeoutSec = args.value("timeout", 10);
+	uint32_t threadId = JsonUint32(args, "threadId");
+	bool wait = JsonBool(args, "wait");
+	int timeoutSec = JsonInt(args, "timeout", 10);
 	if (timeoutSec < 1) timeoutSec = 1;
 	if (timeoutSec > 300) timeoutSec = 300;
 
@@ -1054,7 +1099,7 @@ json McpServer::ToolStepIn(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 	ResumeMainThread();
 	CleanupTempStepOverBp();
-	uint32_t threadId = args.value("threadId", 0u);
+	uint32_t threadId = JsonUint32(args, "threadId");
 	if (threadId == 0) return {{"error", "threadId is required"}};
 
 	StepRequest req;
@@ -1068,7 +1113,7 @@ json McpServer::ToolStepIn(const json& args) {
 json McpServer::ToolStepOver(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 	ResumeMainThread();
-	uint32_t threadId = args.value("threadId", 0u);
+	uint32_t threadId = JsonUint32(args, "threadId");
 	if (threadId == 0) return {{"error", "threadId is required"}};
 
 	// Clean up any stale temp BP from previous step-over
@@ -1124,7 +1169,7 @@ json McpServer::ToolStepOver(const json& args) {
 json McpServer::ToolStepOut(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 	ResumeMainThread();
-	uint32_t threadId = args.value("threadId", 0u);
+	uint32_t threadId = JsonUint32(args, "threadId");
 	if (threadId == 0) return {{"error", "threadId is required"}};
 
 	StepRequest req;
@@ -1138,7 +1183,7 @@ json McpServer::ToolStepOut(const json& args) {
 json McpServer::ToolPause(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 
-	uint32_t threadId = args.value("threadId", 0u);
+	uint32_t threadId = JsonUint32(args, "threadId");
 	PauseRequest req;
 	req.threadId = threadId;
 	std::vector<uint8_t> respData;
@@ -1185,10 +1230,10 @@ json McpServer::ToolThreads(const json& args) {
 json McpServer::ToolStackTrace(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 
-	uint32_t threadId = args.value("threadId", 0u);
+	uint32_t threadId = JsonUint32(args, "threadId");
 	if (threadId == 0) return {{"error", "threadId is required"}};
 
-	int maxFrames = args.value("maxFrames", 20);
+	int maxFrames = JsonInt(args, "maxFrames", 20);
 	if (maxFrames <= 0 || maxFrames > 200) maxFrames = 20;
 
 	GetStackTraceRequest req;
@@ -1236,19 +1281,19 @@ json McpServer::ToolStackTrace(const json& args) {
 json McpServer::ToolEnumLocals(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 
-	uint32_t threadId = args.value("threadId", 0u);
+	uint32_t threadId = JsonUint32(args, "threadId");
 	if (threadId == 0) return {{"error", "threadId is required"}};
 
 	// instructionAddress (RIP) and frameBase (RBP) for SymSetContext
 	uint64_t instrAddr = 0, frameBase = 0;
 	if (args.contains("instructionAddress")) {
 		auto& v = args["instructionAddress"];
-		if (v.is_string()) instrAddr = std::strtoull(v.get<std::string>().c_str(), nullptr, 16);
+		if (v.is_string()) instrAddr = std::strtoull(v.get<std::string>().c_str(), nullptr, 0);
 		else if (v.is_number()) instrAddr = v.get<uint64_t>();
 	}
 	if (args.contains("frameBase")) {
 		auto& v = args["frameBase"];
-		if (v.is_string()) frameBase = std::strtoull(v.get<std::string>().c_str(), nullptr, 16);
+		if (v.is_string()) frameBase = std::strtoull(v.get<std::string>().c_str(), nullptr, 0);
 		else if (v.is_number()) frameBase = v.get<uint64_t>();
 	}
 
@@ -1349,7 +1394,7 @@ json McpServer::ToolEnumLocals(const json& args) {
 json McpServer::ToolRegisters(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 
-	uint32_t threadId = args.value("threadId", 0u);
+	uint32_t threadId = JsonUint32(args, "threadId");
 	if (threadId == 0) return {{"error", "threadId is required"}};
 
 	GetRegistersRequest req;
@@ -1408,7 +1453,7 @@ json McpServer::ToolReadMemory(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	std::string addrStr = args.value("address", "");
-	int size = args.value("size", 64);
+	int size = JsonInt(args, "size", 64);
 	if (addrStr.empty()) return {{"error", "address is required"}};
 	if (size <= 0 || size > 1048576) return {{"error", "size must be 1-1048576"}};
 
@@ -1535,7 +1580,7 @@ json McpServer::ToolDisassemble(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 
 	std::string addrStr = args.value("address", "");
-	int count = args.value("count", 20);
+	int count = JsonInt(args, "count", 20);
 	if (addrStr.empty()) return {{"error", "address is required"}};
 	if (count <= 0 || count > 500) count = 20;
 
