@@ -664,10 +664,15 @@ LaunchResult Injector::LaunchAndInject(
 	std::string cmdLine = "\"" + exePath + "\"";
 	if (!args.empty()) cmdLine += " " + args;
 
+	// DETACHED_PROCESS: prevent child from inheriting parent's console.
+	// Without this, child's printf/cout goes to parent's stdout pipe,
+	// corrupting MCP JSON-RPC transport (and potentially DAP transport).
+	// If DAP needs to capture child console output in the future,
+	// use STARTF_USESTDHANDLES with dedicated pipes instead of removing this flag.
 	if (!CreateProcessA(
 		exePath.c_str(),
 		cmdLine.data(),
-		nullptr, nullptr, FALSE, CREATE_SUSPENDED,
+		nullptr, nullptr, FALSE, CREATE_SUSPENDED | DETACHED_PROCESS,
 		nullptr,
 		workingDir.empty() ? nullptr : workingDir.c_str(),
 		&si, &pi))

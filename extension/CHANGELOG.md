@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.80 (2026-03-19)
+
+### Bug Fixes
+- **Transport closed root cause**: Child process stdout (printf/cout) leaked into MCP server's JSON-RPC pipe, corrupting transport. Fixed by adding `DETACHED_PROCESS` flag to CreateProcess (affects both MCP and DAP)
+- **continue(wait) hang on process exit**: condvar predicate now checks `!attached_` in addition to `bpHitOccurred_`, so process exit immediately wakes the wait instead of blocking until timeout
+- **stepOver hang on process exit**: Same condvar fix applied to `stepCv_` wait; ProcessMonitor and ProcessExited handler now also notify `stepCv_`
+- **ProcessMonitor always notifies**: Removed `attached_` guard from ProcessMonitor cleanup block -- even if another code path already set `attached_=false`, condvar notification is always sent to prevent deadlocks
+- **installer.cpp stdout leak**: Changed 7 `printf()` calls to `fprintf(stderr)` to prevent potential stdout pipe contamination in `--install` mode
+
 ## 1.0.79 (2026-03-19)
 
 ### Bug Fixes
