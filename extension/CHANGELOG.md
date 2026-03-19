@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.79 (2026-03-19)
+
+### Bug Fixes
+- **MCP Transport closed on target crash**: ProcessMonitor used detach() allowing pipe cleanup to race with concurrent tool calls, crashing the MCP server. Now uses SetEvent + join for safe cancellation
+- **MCP race condition**: Set attached_=false before pipe cleanup to block new tool calls immediately; signal bpHitCv_ before Disconnect so veh_continue(wait) exits cleanly
+
 ## 1.0.78 (2026-03-19)
 
 ### Bug Fixes
