@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.81 (2026-03-19)
+
+### Bug Fixes
+- **Pipe server self-suspend deadlock**: DLL pipe server thread appeared in `EnumerateThreads()` result, causing `GetContext()`/`SuspendThread()` to deadlock when called on it (internal thread registry + filtering)
+- **Stale response pipe contamination**: Fire-and-forget commands (Pause, Continue, Step) left unconsumed responses on the pipe, causing subsequent `SendAndReceive` queries to receive wrong data ("truncated data" error). Fixed by adding `expectedCommand_` check in ReaderThread to drop stale responses
+- **Pause response consumed**: Changed `ToolPause` from `SendCommand` (fire-and-forget) to `SendAndReceive` to properly consume the DLL response
+- **ReaderThread exit false-positive**: When reader thread exited (pipe disconnect), `SendAndReceive` returned `true` with empty data instead of `false`. Added `responseAborted_` flag for proper failure propagation
+- **GetOverlappedResult unchecked**: `AsyncReadExact`/`AsyncWriteExact` ignored `GetOverlappedResult` return value, potentially masking I/O errors
+- **Connect timeout handle leak**: `stopEvent_` handle leaked when `Connect()` timed out
+- **SetContext deadlock prevention**: Added `IsInternalThread()` guard to `SetContext()` and `SuspendThread()` (same as `GetContext()`)
+
 ## 1.0.80 (2026-03-19)
 
 ### Bug Fixes

@@ -58,12 +58,21 @@ std::vector<ThreadEntry> ThreadManager::EnumerateThreads() {
 				}
 			}
 
+			// Skip DLL internal threads (pipe server, heartbeat, etc.)
+			if (IsInternalThread(te.th32ThreadID)) continue;
+
 			result.push_back(std::move(entry));
 		} while (Thread32Next(snap, &te));
 	}
 
 	CloseHandle(snap);
-	LOG_DEBUG("Enumerated %zu threads in PID %lu", result.size(), pid);
+	size_t internalCount;
+	{
+		std::lock_guard<std::mutex> lock(internalMutex_);
+		internalCount = internalThreads_.size();
+	}
+	LOG_DEBUG("Enumerated %zu threads in PID %lu (excluding %zu internal)",
+		result.size(), pid, internalCount);
 	return result;
 }
 
@@ -78,6 +87,10 @@ HANDLE ThreadManager::OpenThread(uint32_t threadId) {
 }
 
 bool ThreadManager::SuspendThread(uint32_t threadId) {
+	if (IsInternalThread(threadId)) {
+		LOG_WARN("SuspendThread(%u) rejected: internal DLL thread (deadlock prevention)", threadId);
+		return false;
+	}
 	HANDLE h = OpenThread(threadId);
 	if (!h) return false;
 
@@ -110,7 +123,7 @@ bool ThreadManager::ResumeThread(uint32_t threadId) {
 }
 
 void ThreadManager::SuspendAllExcept(uint32_t excludeThreadId) {
-	auto threads = EnumerateThreads();
+	auto threads = EnumerateThreads(); // already excludes internal threads
 	for (const auto& t : threads) {
 		if (t.id != excludeThreadId) {
 			SuspendThread(t.id);
@@ -128,10 +141,15 @@ void ThreadManager::ResumeAll() {
 }
 
 bool ThreadManager::GetContext(uint32_t threadId, CONTEXT& ctx) {
+	// Prevent deadlock: never suspend DLL internal threads (pipe server, etc.)
+	if (IsInternalThread(threadId)) {
+		LOG_WARN("GetContext(%u) rejected: internal DLL thread (deadlock prevention)", threadId);
+		return false;
+	}
+
 	HANDLE h = OpenThread(threadId);
 	if (!h) return false;
 
-	// 스레드를 일시 중단해야 컨텍스트 정확성 보장
 	DWORD prev = ::SuspendThread(h);
 	if (prev == static_cast<DWORD>(-1)) {
 		LOG_ERROR("SuspendThread for GetContext(%u) failed: %lu", threadId, GetLastError());
@@ -154,6 +172,10 @@ bool ThreadManager::GetContext(uint32_t threadId, CONTEXT& ctx) {
 }
 
 bool ThreadManager::SetContext(uint32_t threadId, const CONTEXT& ctx) {
+	if (IsInternalThread(threadId)) {
+		LOG_WARN("SetContext(%u) rejected: internal DLL thread (deadlock prevention)", threadId);
+		return false;
+	}
 	HANDLE h = OpenThread(threadId);
 	if (!h) return false;
 
@@ -188,6 +210,23 @@ bool ThreadManager::SetSingleStep(uint32_t threadId) {
 
 	LOG_DEBUG("Set single-step (TF) for thread %u", threadId);
 	return true;
+}
+
+void ThreadManager::RegisterInternalThread(uint32_t threadId) {
+	std::lock_guard<std::mutex> lock(internalMutex_);
+	internalThreads_.insert(threadId);
+	LOG_DEBUG("Registered internal thread %u", threadId);
+}
+
+void ThreadManager::UnregisterInternalThread(uint32_t threadId) {
+	std::lock_guard<std::mutex> lock(internalMutex_);
+	internalThreads_.erase(threadId);
+	LOG_DEBUG("Unregistered internal thread %u", threadId);
+}
+
+bool ThreadManager::IsInternalThread(uint32_t threadId) {
+	std::lock_guard<std::mutex> lock(internalMutex_);
+	return internalThreads_.count(threadId) > 0;
 }
 
 } // namespace veh

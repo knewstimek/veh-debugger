@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <vector>
 #include <string>
+#include <set>
+#include <mutex>
 #include <windows.h>
 
 namespace veh {
@@ -28,8 +30,17 @@ public:
 	// Set trap flag for single-stepping
 	bool SetSingleStep(uint32_t threadId);
 
+	// DLL internal thread management (pipe server, heartbeat, etc.)
+	// These threads are excluded from EnumerateThreads results and
+	// protected from SuspendThread/GetContext to prevent deadlocks.
+	void RegisterInternalThread(uint32_t threadId);
+	void UnregisterInternalThread(uint32_t threadId);
+	bool IsInternalThread(uint32_t threadId);
+
 private:
 	HANDLE OpenThread(uint32_t threadId);
+	std::set<uint32_t> internalThreads_;
+	std::mutex internalMutex_;
 };
 
 } // namespace veh

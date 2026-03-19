@@ -174,7 +174,10 @@ void PipeServer::EmergencyCleanup() {
 }
 
 void PipeServer::ServerThread() {
-	LOG_INFO("Server thread started");
+	LOG_INFO("Server thread started (tid=%u)", GetCurrentThreadId());
+
+	// Register as internal thread to prevent deadlock from self-suspend
+	ThreadManager::Instance().RegisterInternalThread(GetCurrentThreadId());
 
 	// DbgHelp 심볼 엔진 초기화
 	StackWalker::Instance().Initialize();
@@ -279,6 +282,7 @@ void PipeServer::ServerThread() {
 	}
 
 	connected_ = false;
+	ThreadManager::Instance().UnregisterInternalThread(GetCurrentThreadId());
 	LOG_INFO("Server thread exiting");
 }
 

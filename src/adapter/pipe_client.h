@@ -77,6 +77,7 @@ private:
 	uint32_t responseCommand_ = 0;
 	bool waitingForResponse_ = false;
 	uint32_t expectedCommand_ = 0;
+	bool responseAborted_ = false;  // reader thread exit signal
 };
 
 } // namespace veh

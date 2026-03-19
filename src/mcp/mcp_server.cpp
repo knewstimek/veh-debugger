@@ -161,7 +161,7 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 		}},
 		{"serverInfo", {
 			{"name", "veh-debugger"},
-			{"version", "1.0.80"}
+			{"version", "1.0.81"}
 		}},
 		{"instructions",
 			"VEH Debugger - in-process debugger for Windows x86/x64 executables.\n"
@@ -1141,7 +1141,8 @@ json McpServer::ToolPause(const json& args) {
 	uint32_t threadId = args.value("threadId", 0u);
 	PauseRequest req;
 	req.threadId = threadId;
-	if (!pipeClient_.SendCommand(IpcCommand::Pause, &req, sizeof(req))) {
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::Pause, &req, sizeof(req), respData)) {
 		return {{"error", IpcErrorMessage()}};
 	}
 	return {{"success", true}, {"threadId", threadId}};
