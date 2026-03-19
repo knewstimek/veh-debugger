@@ -192,13 +192,16 @@ void McpServer::OnToolsList(const json& id, const json& params) {
 }
 
 void McpServer::OnToolsCall(const json& id, const json& params) {
-	std::string name = params.value("name", "");
-	json args = params.value("arguments", json::object());
+	// Run in a separate thread so blocking tools (veh_continue wait=true, veh_launch, etc.)
+	// don't block the reader thread and freeze the entire MCP server
+	std::thread([this, id, params]() {
+		std::string name = params.value("name", "");
+		json args = params.value("arguments", json::object());
 
-	LOG_INFO("Tool call: %s", name.c_str());
+		LOG_INFO("Tool call: %s", name.c_str());
 
-	try {
-		json result;
+		try {
+			json result;
 
 		if      (name == "veh_attach")                result = ToolAttach(args);
 		else if (name == "veh_launch")                result = ToolLaunch(args);
@@ -238,14 +241,15 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 				{{"type", "text"}, {"text", result.dump(2)}}
 			})}
 		});
-	} catch (const std::exception& e) {
-		SendResult(id, {
-			{"content", json::array({
-				{{"type", "text"}, {"text", std::string("Error: ") + e.what()}}
-			})},
-			{"isError", true}
-		});
-	}
+		} catch (const std::exception& e) {
+			SendResult(id, {
+				{"content", json::array({
+					{{"type", "text"}, {"text", std::string("Error: ") + e.what()}}
+				})},
+				{"isError", true}
+			});
+		}
+	}).detach();
 }
 
 // --- Helper: Check if process is in CREATE_SUSPENDED state (loader not initialized) ---
