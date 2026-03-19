@@ -331,7 +331,7 @@ json McpServer::ToolAttach(const json& args) {
 	}
 
 	// Named Pipe 연결
-	if (!pipeClient_.Connect(pid, 7000)) {
+	if (!pipeClient_.Connect(pid, 3500)) {
 		LOG_ERROR("Pipe connection failed after injection (pid=%u), DLL remains in target", pid);
 		return {{"error", "Pipe connection failed (timeout). DLL was injected but could not connect."}};
 	}
@@ -418,7 +418,7 @@ json McpServer::ToolLaunch(const json& args) {
 	launchedByUs_ = true;
 
 	// Named Pipe 연결
-	if (!pipeClient_.Connect(pid, 7000)) {
+	if (!pipeClient_.Connect(pid, 3500)) {
 		if (targetProcess_) {
 			TerminateProcess(targetProcess_, 1);
 			CloseHandle(targetProcess_);
