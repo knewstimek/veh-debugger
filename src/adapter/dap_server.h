@@ -215,6 +215,8 @@ private:
 	void StartProcessMonitor();
 	void StopProcessMonitor();
 	std::thread processMonitorThread_;
+	HANDLE monitorStopEvent_ = nullptr;
+	std::atomic<bool> terminated_{false};
 };
 
 } // namespace veh::dap
