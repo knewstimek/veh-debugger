@@ -162,7 +162,27 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 		{"serverInfo", {
 			{"name", "veh-debugger"},
 			{"version", "1.0.75"}
-		}}
+		}},
+		{"instructions",
+			"VEH Debugger - in-process debugger for Windows x86/x64 executables.\n"
+			"\n"
+			"## Typical workflow\n"
+			"1. veh_launch(program, stopOnEntry=true) -- launch and pause at entry point\n"
+			"2. veh_set_breakpoint / veh_set_source_breakpoint / veh_set_function_breakpoint -- set breakpoints\n"
+			"3. veh_continue(wait=true) -- resume and BLOCK until breakpoint hit (returns stop info)\n"
+			"4. veh_registers / veh_disassemble / veh_read_memory / veh_stack_trace -- inspect state\n"
+			"5. veh_step_over / veh_step_in / veh_step_out -- step (synchronous, waits for completion)\n"
+			"6. Repeat 3-5 as needed\n"
+			"7. veh_detach -- detach when done\n"
+			"\n"
+			"## Key points\n"
+			"- veh_continue(wait=true) blocks until stop event. Use this to detect breakpoint hits.\n"
+			"- veh_continue(wait=true, timeout=N) sets custom timeout (default 10s, max 300s).\n"
+			"- veh_step_in/veh_step_over/veh_step_out are synchronous (wait for completion automatically).\n"
+			"- Most inspection tools (registers, stack_trace, disassemble, read_memory, enum_locals) require the target to be stopped.\n"
+			"- veh_launch with stopOnEntry=true pauses at entry. First veh_continue resumes execution.\n"
+			"- veh_attach auto-detaches previous session. Cannot attach to CREATE_SUSPENDED processes.\n"
+		}
 	};
 	SendResult(id, result);
 }
@@ -939,13 +959,41 @@ json McpServer::ToolContinue(const json& args) {
 	CleanupTempStepOverBp();
 
 	uint32_t threadId = args.value("threadId", 0u);
+	bool wait = args.value("wait", false);
+	int timeoutSec = args.value("timeout", 10);
+	if (timeoutSec < 1) timeoutSec = 1;
+	if (timeoutSec > 300) timeoutSec = 300;
+
+	if (wait) {
+		std::lock_guard<std::mutex> lock(bpHitMutex_);
+		bpHitOccurred_ = false;
+	}
+
 	ContinueRequest req;
 	req.threadId = threadId;
 
 	if (!pipeClient_.SendCommand(IpcCommand::Continue, &req, sizeof(req))) {
 		return {{"error", IpcErrorMessage()}};
 	}
-	return {{"success", true}, {"threadId", threadId}};
+
+	if (!wait) {
+		return {{"success", true}, {"threadId", threadId}};
+	}
+
+	// Wait for breakpoint hit, step complete, pause, exception, or process exit
+	{
+		std::unique_lock<std::mutex> lock(bpHitMutex_);
+		if (!bpHitCv_.wait_for(lock, std::chrono::seconds(timeoutSec), [this]{ return bpHitOccurred_; })) {
+			return {{"timeout", true}, {"message", "No stop event within timeout. Process still running."}};
+		}
+		return {
+			{"stopped", true},
+			{"reason", bpHitStopReason_},
+			{"address", (std::ostringstream() << "0x" << std::hex << bpHitAddr_).str()},
+			{"threadId", bpHitThread_},
+			{"breakpointId", bpHitId_}
+		};
+	}
 }
 
 json McpServer::ToolStepIn(const json& args) {
@@ -1846,7 +1894,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 					e->address, e->threadId);
 				{
 					std::lock_guard<std::mutex> lock(eventMutex_);
-					pendingEvents_.push({"notifications/message", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
+					pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
 				}
 			} else {
 				// Look up BpMapping for condition/hitCondition/logMessage
@@ -1891,7 +1939,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 					// Log message output (if any)
 					std::lock_guard<std::mutex> lock(eventMutex_);
 					if (!logOutput.empty()) {
-						pendingEvents_.push({"notifications/message", {{"level", "info"}, {"logger", "logpoint"}, {"data", logOutput}}});
+						pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "logpoint"}, {"data", logOutput}}});
 					}
 					// Queue auto-continue for main thread (avoid reader thread deadlock)
 					pendingAutoContinue_.push(e->threadId);
@@ -1901,8 +1949,18 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 						e->breakpointId, e->address, e->threadId);
 					{
 						std::lock_guard<std::mutex> lock(eventMutex_);
-						pendingEvents_.push({"notifications/message", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
+						pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
 					}
+					// Signal wait mode
+					{
+						std::lock_guard<std::mutex> lock(bpHitMutex_);
+						bpHitOccurred_ = true;
+						bpHitId_ = e->breakpointId;
+						bpHitAddr_ = e->address;
+						bpHitThread_ = e->threadId;
+						bpHitStopReason_ = "breakpoint";
+					}
+					bpHitCv_.notify_all();
 				}
 			}
 		}
@@ -1916,7 +1974,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				e->address, e->threadId);
 			{
 				std::lock_guard<std::mutex> lock(eventMutex_);
-				pendingEvents_.push({"notifications/message", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
+				pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
 			}
 			// Signal synchronous waiters (ToolStepOver)
 			{
@@ -1935,8 +1993,19 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 		LOG_INFO("VEH DLL ready");
 		break;
 	case IpcEvent::Paused: {
-		std::lock_guard<std::mutex> lock(eventMutex_);
-		pendingEvents_.push({"notifications/message", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", "Target paused"}}});
+		{
+			std::lock_guard<std::mutex> lock(eventMutex_);
+			pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", "Target paused"}}});
+		}
+		{
+			std::lock_guard<std::mutex> lock(bpHitMutex_);
+			bpHitOccurred_ = true;
+			bpHitId_ = 0;
+			bpHitAddr_ = 0;
+			bpHitThread_ = 0;
+			bpHitStopReason_ = "pause";
+		}
+		bpHitCv_.notify_all();
 		break;
 	}
 	case IpcEvent::ProcessExited: {
@@ -1948,8 +2017,17 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 			attached_ = false;
 			{
 				std::lock_guard<std::mutex> lock(eventMutex_);
-				pendingEvents_.push({"notifications/message", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
+				pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
 			}
+			{
+				std::lock_guard<std::mutex> lock(bpHitMutex_);
+				bpHitOccurred_ = true;
+				bpHitId_ = 0;
+				bpHitAddr_ = 0;
+				bpHitThread_ = 0;
+				bpHitStopReason_ = "exit";
+			}
+			bpHitCv_.notify_all();
 		}
 		break;
 	}
@@ -1969,8 +2047,17 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				e->exceptionCode, e->address, e->threadId, e->description);
 			{
 				std::lock_guard<std::mutex> lock(eventMutex_);
-				pendingEvents_.push({"notifications/message", {{"level", "warning"}, {"logger", "veh-debugger"}, {"data", buf}}});
+				pendingEvents_.push({"notifications/logging", {{"level", "warning"}, {"logger", "veh-debugger"}, {"data", buf}}});
 			}
+			{
+				std::lock_guard<std::mutex> lock(bpHitMutex_);
+				bpHitOccurred_ = true;
+				bpHitId_ = 0;
+				bpHitAddr_ = e->address;
+				bpHitThread_ = e->threadId;
+				bpHitStopReason_ = "exception";
+			}
+			bpHitCv_.notify_all();
 		}
 		break;
 	}
@@ -2140,17 +2227,19 @@ json McpServer::GetToolsList() {
 			{"id", {{"type", "integer"}, {"description", "Data breakpoint ID"}}}
 		 }}, {"required", json::array({"id"})}}}},
 
-		{{"name", "veh_continue"}, {"description", "Continue execution. If threadId=0 or omitted, resumes all stopped threads."},
+		{{"name", "veh_continue"}, {"description", "Continue execution. Use wait=true to block until a breakpoint hit, exception, pause, or process exit occurs (returns stop reason, address, threadId). Default timeout 10s, configurable."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"threadId", {{"type", "integer"}, {"description", "Thread ID (0 = all)"}}}
+			{"threadId", {{"type", "integer"}, {"description", "Thread ID (0 = all, default: 0)"}}},
+			{"wait", {{"type", "boolean"}, {"description", "If true, block until target stops (breakpoint/exception/pause/exit). Default: false"}}},
+			{"timeout", {{"type", "integer"}, {"description", "Max seconds to wait when wait=true (1-300, default: 10)"}}}
 		 }}}}},
 
-		{{"name", "veh_step_in"}, {"description", "Single step into (execute one instruction, entering calls)."},
+		{{"name", "veh_step_in"}, {"description", "Single step into (execute one instruction, entering calls). Waits for completion and returns the new instruction pointer."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}}
 		 }}, {"required", json::array({"threadId"})}}}},
 
-		{{"name", "veh_step_over"}, {"description", "Step over (execute one instruction, skipping calls)."},
+		{{"name", "veh_step_over"}, {"description", "Step over (execute one instruction, skipping calls). Waits for completion and returns the new instruction pointer."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}}
 		 }}, {"required", json::array({"threadId"})}}}},

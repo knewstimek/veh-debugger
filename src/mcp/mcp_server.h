@@ -158,6 +158,15 @@ private:
 	uint64_t stepCompletedAddr_ = 0;
 	uint32_t stepCompletedThread_ = 0;
 
+	// Breakpoint hit synchronization (for veh_continue wait mode)
+	std::mutex bpHitMutex_;
+	std::condition_variable bpHitCv_;
+	bool bpHitOccurred_ = false;
+	uint32_t bpHitId_ = 0;
+	uint64_t bpHitAddr_ = 0;
+	uint32_t bpHitThread_ = 0;
+	std::string bpHitStopReason_;  // "breakpoint", "pause", "exception", "step", "exit"
+
 	// Event queue for thread-safe notification delivery
 	std::queue<std::pair<std::string, json>> pendingEvents_;
 	std::queue<uint32_t> pendingAutoContinue_; // threadIds to auto-continue (from condition/logpoint)
