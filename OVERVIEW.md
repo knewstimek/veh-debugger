@@ -18,7 +18,7 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 
 - **Adapter** (`src/adapter/`): DAP protocol handler, DLL injection, PDB symbol engine
 - **DLL** (`src/dll/`): VEH handler, breakpoint/stepping, pipe server, stack walking
-- **MCP** (`src/mcp/`): 19-tool MCP server for AI agents
+- **MCP** (`src/mcp/`): 26-tool MCP server for AI agents
 - **Common** (`src/common/`): IPC protocol definitions, logger
 
 ## Key Files
@@ -39,7 +39,7 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 | `src/dll/stack_walk.cpp/h` | StackWalk64 + DIA SDK local variable enumeration |
 | `src/common/ipc_protocol.h` | All IPC command/event/struct definitions (shared) |
 | `src/common/logger.h` | Logging utility |
-| `src/mcp/mcp_server.cpp/h` | MCP JSON-RPC server, 19 debugger tools |
+| `src/mcp/mcp_server.cpp/h` | MCP JSON-RPC server, 26 debugger tools |
 | `src/mcp/installer.cpp/h` | Auto-install to Claude/Cursor/Windsurf/Codex configs |
 
 ## IPC Protocol
@@ -174,3 +174,12 @@ py -3 test/test_bp_masking.py  # ReadMemory returns original bytes, not INT3
 ```
 
 Tests speak DAP protocol directly via stdin/stdout to the adapter process.
+
+### MCP Tests
+```bash
+py -3 test/test_mcp_launch.py       # MCP launch + detach
+py -3 test/test_mcp_stepover.py     # MCP StepOver CALL skip
+py -3 test/test_mcp_new_features.py # 8 new MCP tools (source BP, func BP, evaluate, etc.)
+py -3 test/test_mcp_deep.py         # 28 deep integration tests (value verification)
+py -3 test/test_mcp_trace_callers.py # TraceCallers tool
+```
