@@ -5,6 +5,19 @@
 #include "threads.h"
 #include "../common/logger.h"
 
+// __try/__except requires separate function (no C++ destructors allowed)
+static uint64_t ReadCallerFromStack(const CONTEXT* ctx) {
+	__try {
+#ifdef _WIN64
+		return *reinterpret_cast<uint64_t*>(ctx->Rsp);
+#else
+		return static_cast<uint64_t>(*reinterpret_cast<uint32_t*>(ctx->Esp));
+#endif
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		return 0;
+	}
+}
+
 namespace veh {
 
 // thread_local: 각 스레드마다 재활성화 대기 정보 보관
@@ -156,14 +169,24 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 
 		LOG_INFO("Breakpoint #%u hit at 0x%llX (tid=%u)", bp->id, addr, tid);
 
-		// 원본 바이트 복원 (INT3 → 원래 명령어)
+		// 원본 바이트 복원 (INT3 -> 원래 명령어)
 		BreakpointManager::Instance().Disable(bp->id);
 
-		// Trap Flag 설정 → 한 명령어 실행 후 SINGLE_STEP 예외 발생
+		// Trap Flag 설정 -> 한 명령어 실행 후 SINGLE_STEP 예외 발생
 		info->ContextRecord->EFlags |= 0x100;
 
 		// 싱글스텝 후 브레이크포인트 재활성화를 위해 기록
 		pendingRearm_ = {addr, tid, true, false};
+
+		// TraceCallers 모드: caller 수집 후 자동 continue (멈추지 않음)
+		if (traceAddress_.load(std::memory_order_relaxed) == addr) {
+			uint64_t caller = ReadCallerFromStack(info->ContextRecord);
+			// Lock-free ring buffer write (no mutex, no heap alloc in VEH)
+			uint32_t idx = traceWriteIdx_.fetch_add(1, std::memory_order_relaxed);
+			traceBuffer_[idx % kTraceBufferSize] = caller;
+			traceTotalHits_.fetch_add(1, std::memory_order_relaxed);
+			return EXCEPTION_CONTINUE_EXECUTION;
+		}
 
 		// 이벤트 콜백으로 어댑터에 알림
 		if (callback_) {
@@ -330,6 +353,34 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		// 우리가 처리하지 않는 예외 → 다음 핸들러로 전달
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
+}
+
+void VehHandler::StartTrace(uint64_t address) {
+	traceWriteIdx_.store(0, std::memory_order_relaxed);
+	traceTotalHits_.store(0, std::memory_order_relaxed);
+	traceAddress_.store(address, std::memory_order_release);
+	LOG_INFO("TraceCallers started at 0x%llX", address);
+}
+
+void VehHandler::StopTrace() {
+	traceAddress_.store(0, std::memory_order_release);
+	LOG_INFO("TraceCallers stopped");
+}
+
+std::unordered_map<uint64_t, uint32_t> VehHandler::GetTraceResults(uint32_t& totalHits) {
+	totalHits = traceTotalHits_.load(std::memory_order_acquire);
+	uint32_t writeIdx = traceWriteIdx_.load(std::memory_order_acquire);
+	uint32_t count = (writeIdx < kTraceBufferSize) ? writeIdx : kTraceBufferSize;
+
+	// Aggregate ring buffer into map
+	std::unordered_map<uint64_t, uint32_t> result;
+	for (uint32_t i = 0; i < count; i++) {
+		uint64_t caller = traceBuffer_[i];
+		if (caller != 0) {
+			result[caller]++;
+		}
+	}
+	return result;
 }
 
 } // namespace veh

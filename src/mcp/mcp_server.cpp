@@ -196,6 +196,7 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 		else if (name == "veh_evaluate")              result = ToolEvaluate(args);
 		else if (name == "veh_set_register")          result = ToolSetRegister(args);
 		else if (name == "veh_exception_info")        result = ToolExceptionInfo(args);
+		else if (name == "veh_trace_callers")         result = ToolTraceCallers(args);
 		else {
 			SendError(id, -32602, "Unknown tool: " + name);
 			return;
@@ -723,6 +724,67 @@ json McpServer::ToolExceptionInfo(const json& args) {
 		{"address", addrBuf},
 		{"threadId", lastException_.threadId},
 		{"description", lastException_.description}
+	};
+}
+
+json McpServer::ToolTraceCallers(const json& args) {
+	if (!attached_) return {{"error", NotAttachedMessage()}};
+
+	std::string addrStr = args.value("address", "");
+	if (addrStr.empty()) return {{"error", "address is required"}};
+
+	uint64_t addr;
+	if (!ParseAddress(addrStr, addr)) {
+		return {{"error", "invalid address format"}};
+	}
+
+	int durationSec = args.value("duration_sec", 5);
+	if (durationSec < 1) durationSec = 1;
+	if (durationSec > 60) durationSec = 60;
+
+	// Build IPC request
+	TraceCallersRequest req;
+	req.address = addr;
+	req.durationMs = static_cast<uint32_t>(durationSec) * 1000;
+
+	// Send TraceCallers command (blocking - DLL will sleep for durationMs)
+	std::vector<uint8_t> respData;
+	int timeoutMs = (durationSec + 10) * 1000;
+	if (!pipeClient_.SendAndReceive(IpcCommand::TraceCallers, &req, sizeof(req), respData, timeoutMs)) {
+		return {{"error", IpcErrorMessage()}};
+	}
+
+	// Parse response: TraceCallersResponse header + TraceCallerEntry[] array
+	if (respData.size() < sizeof(TraceCallersResponse)) {
+		return {{"error", "Invalid response from DLL"}};
+	}
+	const auto* hdr = reinterpret_cast<const TraceCallersResponse*>(respData.data());
+	if (hdr->status != IpcStatus::Ok) {
+		return {{"error", "TraceCallers failed (breakpoint could not be set)"}};
+	}
+
+	// Build result
+	json callers = json::array();
+	const auto* entries = reinterpret_cast<const TraceCallerEntry*>(respData.data() + sizeof(TraceCallersResponse));
+	size_t count = hdr->uniqueCallers;
+	if (count > 100000) count = 100000; // sanity cap
+	// Validate we have enough data
+	if (respData.size() >= sizeof(TraceCallersResponse) + count * sizeof(TraceCallerEntry)) {
+		for (size_t i = 0; i < count; i++) {
+			char buf[32];
+			snprintf(buf, sizeof(buf), "0x%llX", entries[i].callerAddress);
+			callers.push_back({
+				{"address", buf},
+				{"hitCount", entries[i].hitCount}
+			});
+		}
+	}
+
+	return {
+		{"totalHits", hdr->totalHits},
+		{"uniqueCallers", hdr->uniqueCallers},
+		{"durationSec", durationSec},
+		{"callers", callers}
 	};
 }
 
@@ -2086,7 +2148,13 @@ json McpServer::GetToolsList() {
 		 }}, {"required", json::array({"threadId", "name", "value"})}}}},
 
 		{{"name", "veh_exception_info"}, {"description", "Get information about the last exception that occurred in the target process."},
-		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}
+		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}},
+
+		{{"name", "veh_trace_callers"}, {"description", "Set a breakpoint at address, collect all callers (return addresses from stack) for duration_sec seconds, then remove the breakpoint and return unique caller list with hit counts. Like Cheat Engine's 'Find out what accesses this address' but for code."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"address", {{"type", "string"}, {"description", "Hex address to set breakpoint (e.g. '0x7FF600001000')"}}},
+			{"duration_sec", {{"type", "integer"}, {"description", "How long to collect callers in seconds (default: 5, max: 60)"}}}
+		 }}, {"required", json::array({"address"})}}}}
 	});
 }
 

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace veh {
 
@@ -47,6 +48,11 @@ public:
 	bool GetStoppedContext(uint32_t threadId, CONTEXT& ctx);
 	bool SetStoppedContext(uint32_t threadId, const CONTEXT& ctx);
 
+	// TraceCallers
+	void StartTrace(uint64_t address);
+	void StopTrace();
+	std::unordered_map<uint64_t, uint32_t> GetTraceResults(uint32_t& totalHits);
+
 private:
 	static LONG CALLBACK ExceptionHandler(PEXCEPTION_POINTERS info);
 	LONG HandleException(PEXCEPTION_POINTERS info);
@@ -69,6 +75,13 @@ private:
 	// Step 요청 플래그 (파이프 스레드 → VEH 스레드 전달)
 	std::mutex stepFlagMutex_;
 	std::unordered_map<uint32_t, bool> stepFlags_;
+
+	// TraceCallers 모드 (lock-free ring buffer - VEH 핸들러에서 안전하게 사용)
+	std::atomic<uint64_t> traceAddress_{0};   // 0 = trace 비활성
+	static constexpr uint32_t kTraceBufferSize = 65536;
+	std::atomic<uint32_t> traceWriteIdx_{0};
+	uint64_t traceBuffer_[kTraceBufferSize];   // lock-free ring buffer
+	std::atomic<uint32_t> traceTotalHits_{0};
 
 	// Track which address needs re-arming after single-step
 	struct PendingRearm {

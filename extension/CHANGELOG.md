@@ -2,11 +2,21 @@
 
 ## Unreleased
 
+## 1.0.73 (2026-03-19)
+
+### New MCP Tool (25 -> 26)
+- **veh_trace_callers** -- Trace all callers of a function for N seconds (like Cheat Engine's "Find out what accesses this address"). Returns unique caller addresses with hit counts
+
 ### Bug Fixes
 - **StartEventListener race condition**: Reader thread might not have entered its loop before SendAndReceive was called, causing condvar timeout. Now waits for reader thread ready signal before returning
+- **VEH trace lock-free**: Replaced mutex + unordered_map in VEH handler with lock-free ring buffer to prevent malloc deadlock when breakpoint hits inside heap allocator
+- **Trace BP race condition**: StopTrace before Remove to prevent threads from entering normal BP wait path during teardown
+- **RSP dereference protection**: Added SEH __try/__except around stack pointer read in trace mode to handle invalid RSP gracefully
+- **TraceCallers IPC pack alignment**: Moved TraceCallerEntry/TraceCallersResponse inside #pragma pack(1) scope to prevent array indexing mismatch
 
 ### Improvements
 - **snake_case instructionReference fallback**: Accept both `instructionReference` (DAP spec) and `instruction_reference` (snake_case) in setInstructionBreakpoints and setBreakpoints for non-standard DAP client compatibility
+- **Trace BP conflict protection**: Skip removing trace breakpoint if a user-set breakpoint already existed at the same address
 
 ## 1.0.72 (2026-03-18)
 

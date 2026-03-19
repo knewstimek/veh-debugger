@@ -868,6 +868,68 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		break;
 	}
 
+	case IpcCommand::TraceCallers: {
+		if (payloadSize < sizeof(TraceCallersRequest)) {
+			TraceCallersResponse resp{IpcStatus::InvalidArgs, 0, 0};
+			SendResponse(command, &resp, sizeof(resp));
+			return;
+		}
+		auto* req = reinterpret_cast<const TraceCallersRequest*>(payload);
+		LOG_INFO("TraceCallers: addr=0x%llX duration=%ums", req->address, req->durationMs);
+
+		// 기존 BP가 이 주소에 있는지 확인
+		auto& bpMgr = BreakpointManager::Instance();
+		bool wasExistingBp = bpMgr.FindByAddress(req->address).has_value();
+
+		// BP 설정 (기존 BP가 있으면 그 id를 재사용)
+		uint32_t bpId = bpMgr.Add(req->address);
+		if (!bpId) {
+			TraceCallersResponse resp{IpcStatus::Error, 0, 0};
+			SendResponse(command, &resp, sizeof(resp));
+			return;
+		}
+
+		// Trace 시작
+		auto& veh = VehHandler::Instance();
+		veh.StartTrace(req->address);
+
+		// duration 대기 (스레드가 이미 실행 중이면 BP 히트됨)
+		Sleep(req->durationMs);
+
+		// 1) 먼저 trace 모드 종료 (새 히트가 일반 BP 경로로 빠지지 않도록)
+		// 2) 그 다음 BP 제거 (기존 사용자 BP면 보존)
+		veh.StopTrace();
+		Sleep(10); // 진행 중인 VEH 핸들러 완료 대기
+		if (!wasExistingBp) {
+			bpMgr.Remove(bpId);
+		}
+
+		// 결과 수집
+		uint32_t totalHits = 0;
+		auto callers = veh.GetTraceResults(totalHits);
+
+		// 응답 구성
+		TraceCallersResponse resp;
+		resp.status = IpcStatus::Ok;
+		resp.totalHits = totalHits;
+		resp.uniqueCallers = static_cast<uint32_t>(callers.size());
+
+		std::vector<uint8_t> buf(sizeof(resp) + callers.size() * sizeof(TraceCallerEntry));
+		memcpy(buf.data(), &resp, sizeof(resp));
+
+		size_t idx = 0;
+		auto* entries = reinterpret_cast<TraceCallerEntry*>(buf.data() + sizeof(resp));
+		for (const auto& [caller, count] : callers) {
+			entries[idx].callerAddress = caller;
+			entries[idx].hitCount = count;
+			idx++;
+		}
+
+		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
+		LOG_INFO("TraceCallers: %u hits, %u unique callers", totalHits, resp.uniqueCallers);
+		break;
+	}
+
 	case IpcCommand::Detach: {
 		// Detach: 디버깅 상태만 정리하고 파이프 서버는 유지한다.
 		// connected_=false로 내부 커맨드 루프만 탈출 → 외부 루프에서 새 클라이언트 대기
