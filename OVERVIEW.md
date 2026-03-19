@@ -81,12 +81,16 @@ Named Pipe (`\\.\pipe\dotnet-diagnostic-{pid}`), binary framed:
 - **Main thread**: DAP request processing
 - **Reader thread**: Pipe IPC reader - receives events/responses from DLL
   - Events (>=0x1000): dispatched via callbacks (OnBreakpointHit, OnStepCompleted, etc.)
-  - Responses (<0x1000): signaled via condvar to waiting SendAndReceive caller
+  - Responses (<0x1000): matched by `expectedCommand_` and signaled via condvar; mismatched (stale) responses are dropped
+  - On reader thread exit: sets `responseAborted_` flag to wake up any blocked SendAndReceive caller
   - **CRITICAL**: Never call SendAndReceive from event callbacks (deadlock!)
+- **Note**: Pause uses `SendAndReceive` (waits for ack), not fire-and-forget `SendCommand`
 
 ### DLL (veh_handler)
 - **VEH handler thread**: Whichever thread hits the exception
 - **Pipe server thread**: Reads commands, dispatches handlers
+  - Registered as internal thread via `ThreadManager::RegisterInternalThread()`
+  - Filtered out of `EnumerateThreads`/`GetContext`/`SuspendThread`/`SetContext` (deadlock prevention)
 - **thread_local PendingRearm**: VEH state is per-thread; pipe server communicates via `stepFlags_` map
 
 ## Stepping Mechanism

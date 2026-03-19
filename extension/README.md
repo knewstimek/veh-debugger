@@ -81,6 +81,8 @@ veh-mcp-server.exe --install
 # Supported: claude-code, claude-desktop, cursor, windsurf, codex
 ```
 
+> **Tip**: Numeric arguments (`threadId`, `pid`, `address`, `size`, etc.) accept both numbers and strings, including hex format (e.g. `"0x401000"` or `4198400`). Boolean arguments accept `true`/`false` or `"true"`/`"false"`.
+
 ## Architecture
 
 ```
