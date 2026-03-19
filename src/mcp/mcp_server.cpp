@@ -371,6 +371,10 @@ json McpServer::ToolAttach(const json& args) {
 	pipeClient_.StartHeartbeat();
 
 	targetPid_ = pid;
+	targetProcess_ = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+	if (!targetProcess_) {
+		LOG_WARN("Cannot open process %u for monitoring, exit detection disabled", pid);
+	}
 	attached_ = true;
 	StartProcessMonitor();
 
@@ -485,6 +489,9 @@ json McpServer::ToolLaunch(const json& args) {
 json McpServer::ToolDetach(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 
+	// Set attached_ first to prevent ProcessMonitor from running cleanup concurrently
+	attached_ = false;
+
 	// 메인 스레드가 아직 suspended이면 resume (안 하면 프로세스가 좀비로 남음)
 	ResumeMainThread();
 	StopProcessMonitor();
@@ -498,9 +505,11 @@ json McpServer::ToolDetach(const json& args) {
 	}
 	pipeClient_.Disconnect();
 
-	swBreakpoints_.clear();
-	hwBreakpoints_.clear();
-	attached_ = false;
+	{
+		std::lock_guard<std::mutex> lock(bpMutex_);
+		swBreakpoints_.clear();
+		hwBreakpoints_.clear();
+	}
 	targetPid_ = 0;
 	launchedMainThreadId_ = 0;
 	mainThreadResumed_ = false;
@@ -2427,8 +2436,11 @@ void McpServer::StartProcessMonitor() {
 			bpHitCv_.notify_all();
 
 			// State cleanup
-			swBreakpoints_.clear();
-			hwBreakpoints_.clear();
+			{
+				std::lock_guard<std::mutex> lock(bpMutex_);
+				swBreakpoints_.clear();
+				hwBreakpoints_.clear();
+			}
 			if (targetProcess_) {
 				CloseHandle(targetProcess_);
 				targetProcess_ = nullptr;
