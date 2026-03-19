@@ -245,6 +245,8 @@ enabled = true
 | `veh_exception_info` | - | 마지막 예외 정보 조회 |
 | `veh_trace_callers` | `address, duration_sec?` | 함수 호출자 추적 (N초간 모든 caller 수집) |
 
+> **Tip**: 숫자 인자(`threadId`, `pid`, `address`, `size` 등)는 숫자와 문자열 모두 허용하며, hex 형식도 지원합니다 (예: `"0x401000"` 또는 `4198400`). 불리언 인자는 `true`/`false` 또는 `"true"`/`"false"` 모두 허용합니다.
+
 ### 커맨드라인 옵션
 
 **veh-mcp-server.exe**

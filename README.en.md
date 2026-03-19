@@ -170,15 +170,18 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` | JSON (`mcpServers`) |
 | Codex CLI | `~/.codex/config.toml` | TOML (`mcp_servers`) |
 
-**MCP Tools (19)**
+**MCP Tools (26)**
 
 | Tool | Args | Description |
 |------|------|-------------|
 | `veh_attach` | `pid` | Inject DLL + connect pipe |
 | `veh_launch` | `program, args?, stopOnEntry?` | Create process + inject |
 | `veh_detach` | - | Detach debugger |
-| `veh_set_breakpoint` | `address` | Software BP (hex address) |
+| `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?` | Software BP (conditional/logpoint supported) |
 | `veh_remove_breakpoint` | `id` | Remove software BP |
+| `veh_set_source_breakpoint` | `source, line, condition?, hitCondition?, logMessage?` | Source file + line BP (PDB required) |
+| `veh_set_function_breakpoint` | `name, condition?, hitCondition?, logMessage?` | Function name BP (PDB required) |
+| `veh_list_breakpoints` | - | List active SW/HW breakpoints |
 | `veh_set_data_breakpoint` | `address, type, size` | HW BP (write/readwrite/execute) |
 | `veh_remove_data_breakpoint` | `id` | Remove HW BP |
 | `veh_continue` | `threadId?` | Continue execution |
@@ -189,10 +192,16 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | `veh_threads` | - | List threads |
 | `veh_stack_trace` | `threadId, maxFrames?` | Stack trace |
 | `veh_registers` | `threadId` | Read registers |
+| `veh_set_register` | `threadId, name, value` | Modify register value |
+| `veh_evaluate` | `expression, threadId` | Evaluate register/memory/pointer |
 | `veh_read_memory` | `address, size` | Read memory (hex) |
 | `veh_write_memory` | `address, data` | Write memory (hex) |
 | `veh_modules` | - | List modules |
 | `veh_disassemble` | `address, count?` | Disassemble (Zydis) |
+| `veh_exception_info` | - | Last exception info |
+| `veh_trace_callers` | `address, duration_sec?` | Trace function callers (collect all callers for N seconds) |
+
+> **Tip**: Numeric arguments (`threadId`, `pid`, `address`, `size`, etc.) accept both numbers and strings, including hex format (e.g. `"0x401000"` or `4198400`). Boolean arguments accept `true`/`false` or `"true"`/`"false"`.
 
 ## DAP Commands
 
