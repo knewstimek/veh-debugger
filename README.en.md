@@ -24,7 +24,7 @@ No separate debugger GUI needed. **Everything works inside the VSCode debug pane
 
 - **VEH-based**: Uses VEH instead of Windows Debug API - bypasses PEB/NtQuery-based anti-debug checks (Themida, VMProtect, etc.)
 - **Full DAP support**: Works with VSCode, MCP debug tools, and any DAP-compatible client
-- **MCP tool server**: 19 tools for AI agents (Claude, Cursor, etc.) to directly control the debugger
+- **MCP tool server**: 26 tools for AI agents (Claude, Cursor, Codex, etc.) to directly control the debugger
 - **TCP mode**: Remote debugging via `--tcp --port=PORT`
 - **Remote access**: `--remote` / `--bind=0.0.0.0` for VM/network debugging
 - **32/64-bit**: Debug both x86 and x64 processes (WoW64 injection for 32-bit targets)
@@ -57,7 +57,7 @@ veh-debug-adapter.exe              veh-mcp-server.exe
 |-----------|------|
 | `veh-debugger.dll` (`vcruntime_net.dll`) | Injected into target. Registers VEH handler, manages breakpoints, queries threads/stack/memory |
 | `veh-debug-adapter.exe` | DAP protocol server. DLL injection, Named Pipe IPC, JSON-RPC processing |
-| `veh-mcp-server.exe` | MCP tool server. 19 tools for AI agents to directly control the debugger |
+| `veh-mcp-server.exe` | MCP tool server. 26 tools for AI agents to directly control the debugger |
 | VSCode Extension | launch.json schema, adapter path configuration (minimal wrapper) |
 
 ## Build
