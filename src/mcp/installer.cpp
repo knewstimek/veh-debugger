@@ -185,7 +185,7 @@ static bool InstallClaudeMCPAdd(const std::string& claudePath, const std::string
 	std::string addArgs = "mcp add --scope user " + std::string(SERVER_NAME) +
 	                      " \"" + normalizedPath + "\"";
 	if (!RunProcess(claudePath, addArgs)) {
-		printf("  [Claude Code] claude mcp add failed\n");
+		fprintf(stderr, "  [Claude Code] claude mcp add failed\n");
 		return false;
 	}
 
@@ -498,15 +498,15 @@ bool InstallToAgent(const AgentConfig& agent, const std::string& serverPath) {
 		std::string claudePath = FindClaudeCLI();
 		if (!claudePath.empty()) {
 			if (InstallClaudeMCPAdd(claudePath, serverPath)) {
-				printf("  %-20s [installed] (claude mcp add)\n", agent.displayName.c_str());
+				fprintf(stderr, "  %-20s [installed] (claude mcp add)\n", agent.displayName.c_str());
 				UpdateClaudeJsonMCPServers(normalizedPath);
 				AddClaudePermission();
-				printf("  %-20s [permissions] -> %s\n", "", PERM_WILDCARD);
+				fprintf(stderr, "  %-20s [permissions] -> %s\n", "", PERM_WILDCARD);
 				return true;
 			}
-			printf("  [Claude Code] claude mcp add failed, falling back to settings.json\n");
+			fprintf(stderr, "  [Claude Code] claude mcp add failed, falling back to settings.json\n");
 		} else {
-			printf("  [Claude Code] 'claude' CLI not found, writing settings.json directly\n");
+			fprintf(stderr, "  [Claude Code] 'claude' CLI not found, writing settings.json directly\n");
 		}
 
 		// 폴백: settings.json 직접 수정
@@ -514,8 +514,8 @@ bool InstallToAgent(const AgentConfig& agent, const std::string& serverPath) {
 		if (ok) {
 			UpdateClaudeJsonMCPServers(normalizedPath);
 			AddClaudePermission();
-			printf("  %-20s [installed] -> %s\n", agent.displayName.c_str(), agent.configPath.c_str());
-			printf("  %-20s [permissions] -> %s\n", "", PERM_WILDCARD);
+			fprintf(stderr, "  %-20s [installed] -> %s\n", agent.displayName.c_str(), agent.configPath.c_str());
+			fprintf(stderr, "  %-20s [permissions] -> %s\n", "", PERM_WILDCARD);
 		}
 		return ok;
 	}

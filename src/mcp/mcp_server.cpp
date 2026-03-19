@@ -161,7 +161,7 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 		}},
 		{"serverInfo", {
 			{"name", "veh-debugger"},
-			{"version", "1.0.79"}
+			{"version", "1.0.80"}
 		}},
 		{"instructions",
 			"VEH Debugger - in-process debugger for Windows x86/x64 executables.\n"
@@ -1026,8 +1026,19 @@ json McpServer::ToolContinue(const json& args) {
 	// Wait for breakpoint hit, step complete, pause, exception, or process exit
 	{
 		std::unique_lock<std::mutex> lock(bpHitMutex_);
-		if (!bpHitCv_.wait_for(lock, std::chrono::seconds(timeoutSec), [this]{ return bpHitOccurred_; })) {
+		if (!bpHitCv_.wait_for(lock, std::chrono::seconds(timeoutSec),
+				[this]{ return bpHitOccurred_ || !attached_; })) {
 			return {{"timeout", true}, {"message", "No stop event within timeout. Process still running."}};
+		}
+		// Process exited but bpHitOccurred_ wasn't set (race with ProcessMonitor)
+		if (!bpHitOccurred_ && !attached_) {
+			return {
+				{"stopped", true},
+				{"reason", "exit"},
+				{"address", "0x0"},
+				{"threadId", 0},
+				{"breakpointId", 0}
+			};
 		}
 		return {
 			{"stopped", true},
@@ -1098,8 +1109,12 @@ json McpServer::ToolStepOver(const json& args) {
 	// Wait for StepCompleted event (up to 5s)
 	{
 		std::unique_lock<std::mutex> lock(stepMutex_);
-		if (!stepCv_.wait_for(lock, std::chrono::seconds(5), [this]{ return stepCompleted_; })) {
+		if (!stepCv_.wait_for(lock, std::chrono::seconds(5),
+				[this]{ return stepCompleted_ || !attached_; })) {
 			return {{"error", "Step timed out"}};
+		}
+		if (!stepCompleted_ && !attached_) {
+			return {{"error", "Target process exited during step"}};
 		}
 	}
 
@@ -2071,6 +2086,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				bpHitStopReason_ = "exit";
 			}
 			bpHitCv_.notify_all();
+			stepCv_.notify_all(); // wake stepOver wait too
 		}
 		break;
 	}
@@ -2399,8 +2415,9 @@ void McpServer::StartProcessMonitor() {
 		CloseHandle(hWait);
 
 		// WAIT_OBJECT_0 = process exited, WAIT_OBJECT_0+1 = stop requested
-		if (result == WAIT_OBJECT_0 && attached_) {
-			// Set attached_ first to block new tool calls immediately
+		if (result == WAIT_OBJECT_0) {
+			// Always signal condvar first (even if another path already set attached_=false)
+			// This prevents continue(wait) from hanging until timeout
 			attached_ = false;
 
 			DWORD exitCode = 0;
@@ -2420,8 +2437,9 @@ void McpServer::StartProcessMonitor() {
 				bpHitId_ = 0;
 			}
 			bpHitCv_.notify_all();
+			stepCv_.notify_all(); // wake stepOver wait too
 
-			// Pipe cleanup (dead process -> broken pipe)
+			// Pipe cleanup (dead process -> broken pipe, skip if already disconnected)
 			pipeClient_.StopHeartbeat();
 			pipeClient_.StopEventListener();
 			pipeClient_.Disconnect();
