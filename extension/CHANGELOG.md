@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.78 (2026-03-19)
+
+### Bug Fixes
+- **MCP Connection closed on target crash**: ProcessMonitor now fully cleans up pipe state when target process exits, preventing stale pipe from breaking subsequent launch/attach
+- **MCP re-attach support**: `veh_attach` detects existing DLL pipe (WaitNamedPipeW) and skips injection, enabling detach -> re-attach to same PID
+- **MCP race conditions**: Fixed bpMutex_ missing on breakpoint clear, targetProcess_ double-close race between ProcessMonitor and ToolDetach
+- **DAP ProcessMonitor**: Added automatic crash detection for DAP adapter (sends terminated event on process exit)
+- **DAP ProcessMonitor thread safety**: StopProcessMonitor uses SetEvent + join instead of detach, preventing use-after-free on restart/cleanup
+- **DAP duplicate terminated event**: atomic flag prevents OnTerminate and ProcessMonitor from both sending terminated event
+
 ## 1.0.77 (2026-03-19)
 
 ### Bug Fixes
