@@ -4,6 +4,8 @@
 #include <iomanip>
 #include <algorithm>
 #include <filesystem>
+#include <TlHelp32.h>
+#include <Psapi.h>
 
 namespace veh {
 
@@ -159,7 +161,7 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 		}},
 		{"serverInfo", {
 			{"name", "veh-debugger"},
-			{"version", "1.0.74"}
+			{"version", "1.0.75"}
 		}}
 	};
 	SendResult(id, result);
@@ -226,15 +228,77 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 	}
 }
 
+// --- Helper: Check if process is in CREATE_SUSPENDED state (loader not initialized) ---
+// Distinguishes CREATE_SUSPENDED (can't inject) from SuspendThread (can inject):
+//   CREATE_SUSPENDED: all threads suspended + very few modules (ntdll only or ~3)
+//   SuspendThread: all threads suspended but loader initialized (many modules loaded)
+static bool IsProcessUninitializedSuspended(uint32_t pid) {
+	// Step 1: Check if all threads are suspended
+	HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+	if (snap == INVALID_HANDLE_VALUE) return false;
+
+	THREADENTRY32 te;
+	te.dwSize = sizeof(te);
+	bool foundAny = false;
+	bool allSuspended = true;
+
+	if (Thread32First(snap, &te)) {
+		do {
+			if (te.th32OwnerProcessID != pid) continue;
+			foundAny = true;
+			HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION | THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+			if (!hThread) { allSuspended = false; break; }
+			DWORD prevCount = SuspendThread(hThread);
+			if (prevCount == (DWORD)-1) {
+				CloseHandle(hThread);
+				allSuspended = false;
+				break;
+			}
+			ResumeThread(hThread);  // Undo our suspend
+			if (prevCount == 0) {
+				allSuspended = false;
+				CloseHandle(hThread);
+				break;
+			}
+			CloseHandle(hThread);
+		} while (Thread32Next(snap, &te));
+	}
+	CloseHandle(snap);
+
+	if (!foundAny || !allSuspended) return false;
+
+	// Step 2: Check module count - CREATE_SUSPENDED has very few modules (loader not run)
+	HANDLE hProc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+	if (!hProc) return false;  // Can't determine, assume not suspended
+
+	HMODULE modules[8];
+	DWORD needed = 0;
+	BOOL ok = EnumProcessModules(hProc, modules, sizeof(modules), &needed);
+	CloseHandle(hProc);
+
+	if (!ok) return true;  // EnumProcessModules fails on uninitialized process -> likely CREATE_SUSPENDED
+
+	DWORD moduleCount = needed / sizeof(HMODULE);
+	// CREATE_SUSPENDED: typically 1-3 modules (ntdll, possibly kernel32/kernelbase mapped but not init'd)
+	// Normal suspended: 10+ modules (fully initialized)
+	return moduleCount <= 4;
+}
+
 // --- Tool Implementations ---
 
 json McpServer::ToolAttach(const json& args) {
 	if (attached_) {
-		return {{"error", "Already attached. Detach first."}};
+		LOG_INFO("Auto-detaching from previous session (pid=%u) before new attach", targetPid_);
+		ToolDetach({});
 	}
 
 	uint32_t pid = args.value("pid", 0u);
 	if (pid == 0) return {{"error", "pid is required"}};
+
+	// CREATE_SUSPENDED detection (uninitialized loader -> CreateRemoteThread hangs)
+	if (IsProcessUninitializedSuspended(pid)) {
+		return {{"error", "Process appears to be in CREATE_SUSPENDED state (loader not initialized). DLL injection requires a running process. Resume the process first or use veh_launch instead."}};
+	}
 
 	// DLL 경로 결정 (pid 기반 비트니스 감지)
 	std::string dllPath = GetDllPath(pid);
@@ -267,7 +331,8 @@ json McpServer::ToolAttach(const json& args) {
 
 json McpServer::ToolLaunch(const json& args) {
 	if (attached_) {
-		return {{"error", "Already attached. Detach first."}};
+		LOG_INFO("Auto-detaching from previous session (pid=%u) before new launch", targetPid_);
+		ToolDetach({});
 	}
 
 	std::string program = args.value("program", "");
@@ -2015,12 +2080,12 @@ bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
 
 json McpServer::GetToolsList() {
 	return json::array({
-		{{"name", "veh_attach"}, {"description", "Attach to a running process by PID. Injects VEH debugger DLL."},
+		{{"name", "veh_attach"}, {"description", "Attach to a running process by PID. Injects VEH debugger DLL. Auto-detaches if already attached. Target process must be running (not CREATE_SUSPENDED)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"pid", {{"type", "integer"}, {"description", "Process ID to attach to"}}}
 		 }}, {"required", json::array({"pid"})}}}},
 
-		{{"name", "veh_launch"}, {"description", "Launch a program and attach the debugger."},
+		{{"name", "veh_launch"}, {"description", "Launch a program and attach the debugger. Auto-detaches if already attached. Handles CREATE_SUSPENDED internally."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"program", {{"type", "string"}, {"description", "Path to executable"}}},
 			{"args", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Command line arguments"}}},

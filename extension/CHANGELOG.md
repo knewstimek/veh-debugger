@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 1.0.75 (2026-03-19)
+
+### Bug Fixes
+- **MCP stderr pipe buffer block**: Redirect stderr fd to NUL in MCP mode. Some clients (e.g. Codex) have no stderr reader timeout, causing pipe buffer (~4KB) to fill, blocking server writes and stalling stdout responses ("Transport closed")
+- **veh_attach hangs on CREATE_SUSPENDED process**: Detect uninitialized suspended processes (thread suspend count + low module count) and return immediate error instead of blocking 12+ seconds on injection timeout
+
+### Improvements
+- **Auto-detach on re-attach/re-launch**: `veh_attach` and `veh_launch` now auto-detach from previous session instead of returning "Already attached" error
+- **Updated tool descriptions**: `veh_attach` description warns about CREATE_SUSPENDED processes; `veh_launch` clarifies it handles process creation internally
 
 ## 1.0.74 (2026-03-19)
 

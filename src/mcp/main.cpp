@@ -150,7 +150,12 @@ int main(int argc, char* argv[]) {
 	if (doInstall) return HandleInstall(targetAgent);
 	if (doUninstall) return HandleUninstall(targetAgent);
 
-	// 로깅 설정
+	// MCP mode: stderr goes to client's pipe. Some clients (e.g. Codex) have no
+	// reader timeout -> pipe buffer (~4KB) fills -> server's write() blocks ->
+	// stdout stalls -> "Transport closed". Redirect stderr fd itself to NUL.
+	freopen("NUL", "w", stderr);
+
+	// 로깅 설정 (Logger uses its own file handle, not stderr)
 	veh::Logger::Instance().SetLevel(logLevel);
 	if (!logFile.empty()) {
 		veh::Logger::Instance().SetFile(logFile);
