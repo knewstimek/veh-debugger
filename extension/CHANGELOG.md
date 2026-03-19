@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.0.74 (2026-03-19)
+
+### Bug Fixes
+- **MCP server stdin EOF zombie**: Server process did not exit when stdin was closed by the MCP client (e.g. Codex CLI "Transport closed"). Root cause: CRT `_read()` failed to detect broken pipe on Windows. Replaced with Win32 `PeekNamedPipe` + `ReadFile` and added `CloseCallback` to propagate transport shutdown to the server loop
+- **MCP stdout unbuffered**: Added `setvbuf(stdout, NULL, _IONBF, 0)` to ensure JSON-RPC responses are flushed immediately
+
 ## 1.0.73 (2026-03-19)
 
 ### New MCP Tool (25 -> 26)
