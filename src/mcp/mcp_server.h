@@ -118,6 +118,7 @@ private:
 	void StartProcessMonitor();
 	void StopProcessMonitor();
 	std::thread processMonitorThread_;
+	HANDLE monitorStopEvent_ = nullptr;
 
 	// Breakpoint tracking (with condition/hitCondition/logMessage support)
 	struct BpMapping {

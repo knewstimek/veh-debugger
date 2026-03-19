@@ -2391,17 +2391,35 @@ void McpServer::StartProcessMonitor() {
 		return;
 	}
 
-	processMonitorThread_ = std::thread([this, hWait]() {
-		DWORD result = WaitForSingleObject(hWait, INFINITE);
+	monitorStopEvent_ = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+
+	processMonitorThread_ = std::thread([this, hWait, stopEv = monitorStopEvent_]() {
+		HANDLE handles[2] = { hWait, stopEv };
+		DWORD result = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
 		CloseHandle(hWait);
 
+		// WAIT_OBJECT_0 = process exited, WAIT_OBJECT_0+1 = stop requested
 		if (result == WAIT_OBJECT_0 && attached_) {
+			// Set attached_ first to block new tool calls immediately
+			attached_ = false;
+
 			DWORD exitCode = 0;
 			if (targetProcess_) {
 				GetExitCodeProcess(targetProcess_, &exitCode);
 			}
 
 			LOG_INFO("MCP: Target process %u exited (code: %lu), cleaning up pipe/state", targetPid_, exitCode);
+
+			// bpHit condvar signal first (unblock veh_continue wait before pipe cleanup)
+			{
+				std::lock_guard<std::mutex> lock(bpHitMutex_);
+				bpHitOccurred_ = true;
+				bpHitStopReason_ = "exit";
+				bpHitThread_ = 0;
+				bpHitAddr_ = 0;
+				bpHitId_ = 0;
+			}
+			bpHitCv_.notify_all();
 
 			// Pipe cleanup (dead process -> broken pipe)
 			pipeClient_.StopHeartbeat();
@@ -2424,17 +2442,6 @@ void McpServer::StartProcessMonitor() {
 				pendingEvents_.push({"notification", params});
 			}
 
-			// bpHit condvar signal (unblock veh_continue wait)
-			{
-				std::lock_guard<std::mutex> lock(bpHitMutex_);
-				bpHitOccurred_ = true;
-				bpHitStopReason_ = "exit";
-				bpHitThread_ = 0;
-				bpHitAddr_ = 0;
-				bpHitId_ = 0;
-			}
-			bpHitCv_.notify_all();
-
 			// State cleanup
 			{
 				std::lock_guard<std::mutex> lock(bpMutex_);
@@ -2449,16 +2456,20 @@ void McpServer::StartProcessMonitor() {
 			launchedMainThreadId_ = 0;
 			mainThreadResumed_ = false;
 			launchedByUs_ = false;
-			attached_ = false;
 		}
 	});
 }
 
 void McpServer::StopProcessMonitor() {
+	if (monitorStopEvent_) {
+		SetEvent(monitorStopEvent_);
+	}
 	if (processMonitorThread_.joinable()) {
-		// 스레드가 WaitForSingleObject 중이면 프로세스 종료 시 자동 해제
-		// detach로 두면 됨 (프로세스가 이미 죽었거나 곧 죽을 거라)
-		processMonitorThread_.detach();
+		processMonitorThread_.join();
+	}
+	if (monitorStopEvent_) {
+		CloseHandle(monitorStopEvent_);
+		monitorStopEvent_ = nullptr;
 	}
 }
 
