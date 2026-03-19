@@ -308,12 +308,27 @@ static bool IsProcessUninitializedSuspended(uint32_t pid) {
 	return moduleCount <= 4;
 }
 
+// --- Helper: Check if VEH pipe exists for target PID (re-attach scenario) ---
+// Uses WaitNamedPipe with 0 timeout to probe without consuming the connection.
+static bool IsPipeAvailable(uint32_t pid) {
+	std::wstring pipeName = GetPipeName(pid);
+	// WaitNamedPipe returns TRUE if an instance is available, FALSE otherwise
+	// Timeout 0 = immediate check, does not consume the pipe instance
+	return WaitNamedPipeW(pipeName.c_str(), 0) != 0;
+}
+
 // --- Tool Implementations ---
 
 json McpServer::ToolAttach(const json& args) {
 	if (attached_) {
 		LOG_INFO("Auto-detaching from previous session (pid=%u) before new attach", targetPid_);
 		ToolDetach({});
+	} else if (pipeClient_.IsConnected()) {
+		// Process crashed/exited but pipe wasn't cleaned up
+		LOG_WARN("Stale pipe connection detected, cleaning up");
+		pipeClient_.StopHeartbeat();
+		pipeClient_.StopEventListener();
+		pipeClient_.Disconnect();
 	}
 
 	uint32_t pid = args.value("pid", 0u);
@@ -328,16 +343,25 @@ json McpServer::ToolAttach(const json& args) {
 	std::string dllPath = GetDllPath(pid);
 	if (dllPath.empty()) return {{"error", "DLL not found"}};
 
-	// DLL 인젝션
-	LOG_INFO("Injecting into PID %u: %s", pid, dllPath.c_str());
-	if (!Injector::InjectDll(pid, dllPath)) {
-		return {{"error", "DLL injection failed"}};
+	// Check if VEH pipe already exists (re-attach: DLL loaded, pipe server running)
+	bool pipeExists = IsPipeAvailable(pid);
+
+	if (pipeExists) {
+		LOG_INFO("Pipe already exists for PID %u, skipping injection (re-attach)", pid);
+	} else {
+		// DLL injection
+		LOG_INFO("Injecting into PID %u: %s", pid, dllPath.c_str());
+		if (!Injector::InjectDll(pid, dllPath)) {
+			return {{"error", "DLL injection failed. If you previously detached from this process, the DLL may already be loaded but the pipe server is no longer running. Restart the target process and try again."}};
+		}
 	}
 
-	// Named Pipe 연결
+	// Named Pipe connection
 	if (!pipeClient_.Connect(pid, 3500)) {
-		LOG_ERROR("Pipe connection failed after injection (pid=%u), DLL remains in target", pid);
-		return {{"error", "Pipe connection failed (timeout). DLL was injected but could not connect."}};
+		LOG_ERROR("Pipe connection failed (pid=%u)", pid);
+		return {{"error", "Pipe connection failed (timeout). " +
+			std::string(pipeExists ? "Pipe existed but connection failed - DLL may be in a stale state. " : "DLL was injected but pipe server did not start. ") +
+			"Try restarting the target process."}};
 	}
 
 	// 이벤트 리스너 시작
@@ -357,6 +381,12 @@ json McpServer::ToolLaunch(const json& args) {
 	if (attached_) {
 		LOG_INFO("Auto-detaching from previous session (pid=%u) before new launch", targetPid_);
 		ToolDetach({});
+	} else if (pipeClient_.IsConnected()) {
+		// Process crashed/exited but pipe wasn't cleaned up
+		LOG_WARN("Stale pipe connection detected, cleaning up");
+		pipeClient_.StopHeartbeat();
+		pipeClient_.StopEventListener();
+		pipeClient_.Disconnect();
 	}
 
 	std::string program = args.value("program", "");
@@ -2362,12 +2392,17 @@ void McpServer::StartProcessMonitor() {
 				GetExitCodeProcess(targetProcess_, &exitCode);
 			}
 
-			LOG_INFO("MCP: Target process %u exited (code: %lu)", targetPid_, exitCode);
+			LOG_INFO("MCP: Target process %u exited (code: %lu), cleaning up pipe/state", targetPid_, exitCode);
+
+			// Pipe cleanup (dead process -> broken pipe)
+			pipeClient_.StopHeartbeat();
+			pipeClient_.StopEventListener();
+			pipeClient_.Disconnect();
 
 			char buf[128];
 			snprintf(buf, sizeof(buf), "Target process exited (exit code: %lu)", exitCode);
 
-			// MCP notification 전송
+			// MCP notification
 			json params = {
 				{"event", "process_exited"},
 				{"pid", targetPid_},
@@ -2380,6 +2415,28 @@ void McpServer::StartProcessMonitor() {
 				pendingEvents_.push({"notification", params});
 			}
 
+			// bpHit condvar signal (unblock veh_continue wait)
+			{
+				std::lock_guard<std::mutex> lock(bpHitMutex_);
+				bpHitOccurred_ = true;
+				bpHitStopReason_ = "exit";
+				bpHitThread_ = 0;
+				bpHitAddr_ = 0;
+				bpHitId_ = 0;
+			}
+			bpHitCv_.notify_all();
+
+			// State cleanup
+			swBreakpoints_.clear();
+			hwBreakpoints_.clear();
+			if (targetProcess_) {
+				CloseHandle(targetProcess_);
+				targetProcess_ = nullptr;
+			}
+			targetPid_ = 0;
+			launchedMainThreadId_ = 0;
+			mainThreadResumed_ = false;
+			launchedByUs_ = false;
 			attached_ = false;
 		}
 	});
