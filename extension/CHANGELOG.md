@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+- **veh_launch/veh_attach pipe connect timeout**: Reduced from 7000ms to 3500ms to prevent MCP tool call timeout (-32000 Connection closed) on slow injection
+
 ## 1.0.76 (2026-03-19)
 
 ### New Features
