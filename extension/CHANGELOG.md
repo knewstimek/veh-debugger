@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.76 (2026-03-19)
+
+### New Features
+- **veh_continue wait mode**: `veh_continue(wait=true, timeout=N)` blocks until breakpoint hit, exception, pause, or process exit. Default timeout 10s, max 300s. Eliminates need for polling or notification handling
+- **MCP instructions field**: Initialize response includes workflow guide for AI agents (launch -> set BP -> continue(wait=true) -> inspect -> step -> repeat)
+
+### Improvements
+- **MCP standard notifications**: Changed `notifications/message` to `notifications/logging` (MCP spec compliance, 7 sites)
+- **Improved tool descriptions**: `veh_continue` documents wait/timeout params; `veh_step_in`/`veh_step_over` clarify synchronous behavior
+
 ## 1.0.75 (2026-03-19)
 
 ### Bug Fixes
