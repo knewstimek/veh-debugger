@@ -161,7 +161,7 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 		}},
 		{"serverInfo", {
 			{"name", "veh-debugger"},
-			{"version", "1.0.77"}
+			{"version", "1.0.78"}
 		}},
 		{"instructions",
 			"VEH Debugger - in-process debugger for Windows x86/x64 executables.\n"
