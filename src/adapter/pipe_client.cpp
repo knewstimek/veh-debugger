@@ -36,9 +36,9 @@ bool PipeClient::AsyncReadExact(void* buf, DWORD size, DWORD timeoutMs) {
 		DWORD wait = WaitForMultipleObjects(nEvents, events, FALSE, timeoutMs);
 
 		if (wait == WAIT_OBJECT_0) {
-			GetOverlappedResult(pipe_, &ov, &bytesRead, FALSE);
+			BOOL res = GetOverlappedResult(pipe_, &ov, &bytesRead, FALSE);
 			CloseHandle(ov.hEvent);
-			if (bytesRead == 0) return false;
+			if (!res || bytesRead == 0) return false;
 			totalRead += bytesRead;
 		} else {
 			CancelIoEx(pipe_, &ov);
@@ -80,9 +80,9 @@ bool PipeClient::AsyncWriteExact(const void* buf, DWORD size, DWORD timeoutMs) {
 		DWORD wait = WaitForMultipleObjects(nEvents, events, FALSE, timeoutMs);
 
 		if (wait == WAIT_OBJECT_0) {
-			GetOverlappedResult(pipe_, &ov, &bytesWritten, FALSE);
+			BOOL res = GetOverlappedResult(pipe_, &ov, &bytesWritten, FALSE);
 			CloseHandle(ov.hEvent);
-			if (bytesWritten == 0) return false;
+			if (!res || bytesWritten == 0) return false;
 			totalWritten += bytesWritten;
 		} else {
 			CancelIoEx(pipe_, &ov);
@@ -116,6 +116,8 @@ bool PipeClient::Connect(uint32_t targetPid, int timeoutMs) {
 			std::chrono::steady_clock::now() - start).count();
 		if (elapsed >= timeoutMs) {
 			LOG_ERROR("Pipe connect timeout (%dms) for PID %u", timeoutMs, targetPid);
+			CloseHandle(stopEvent_);
+			stopEvent_ = nullptr;
 			return false;
 		}
 
@@ -213,6 +215,12 @@ bool PipeClient::SendAndReceive(IpcCommand cmd,
 		return false;
 	}
 
+	if (responseAborted_) {
+		responseAborted_ = false;
+		LOG_WARN("SendAndReceive aborted for cmd 0x%04X (reader thread exited)", static_cast<uint32_t>(cmd));
+		return false;
+	}
+
 	response = std::move(responseData_);
 	return true;
 }
@@ -307,21 +315,25 @@ void PipeClient::ReaderThread() {
 			}
 		} else {
 			std::lock_guard<std::mutex> lock(responseMutex_);
-			if (waitingForResponse_) {
+			if (waitingForResponse_ && hdr.command == expectedCommand_) {
 				responseData_ = std::move(payload);
 				responseCommand_ = hdr.command;
 				responseReady_ = true;
 				responseCv_.notify_one();
+			} else if (waitingForResponse_) {
+				LOG_WARN("Stale response cmd=0x%04X (expected 0x%04X), dropping",
+					hdr.command, expectedCommand_);
 			} else {
 				LOG_WARN("Unexpected response for cmd 0x%04X (no waiter)", hdr.command);
 			}
 		}
 	}
 
-	// 종료 시 대기 중인 SendAndReceive 깨우기
+	// 종료 시 대기 중인 SendAndReceive 깨우기 (aborted 플래그로 실패 전달)
 	{
 		std::lock_guard<std::mutex> lock(responseMutex_);
 		if (waitingForResponse_) {
+			responseAborted_ = true;
 			responseReady_ = true;
 			responseCv_.notify_one();
 		}
