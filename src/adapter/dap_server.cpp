@@ -405,7 +405,9 @@ void DapServer::OnTerminate(const Request& req) {
 	}
 
 	// terminated 이벤트를 보내야 VSCode가 자동으로 disconnect를 이어서 보냄
-	SendEvent("terminated");
+	if (!terminated_.exchange(true)) {
+		SendEvent("terminated");
+	}
 }
 
 void DapServer::OnConfigurationDone(const Request& req) {
@@ -3317,10 +3319,15 @@ void DapServer::StartProcessMonitor() {
 		return;
 	}
 
-	processMonitorThread_ = std::thread([this, hWait]() {
-		DWORD result = WaitForSingleObject(hWait, INFINITE);
+	terminated_ = false;
+	monitorStopEvent_ = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+
+	processMonitorThread_ = std::thread([this, hWait, stopEv = monitorStopEvent_]() {
+		HANDLE handles[2] = { hWait, stopEv };
+		DWORD result = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
 		CloseHandle(hWait);
 
+		// WAIT_OBJECT_0 = process exited, WAIT_OBJECT_0+1 = stop requested
 		if (result == WAIT_OBJECT_0 && running_) {
 			DWORD exitCode = 0;
 			if (targetProcess_) {
@@ -3334,15 +3341,24 @@ void DapServer::StartProcessMonitor() {
 			pipeClient_.StopEventListener();
 			pipeClient_.Disconnect();
 
-			// Notify VSCode that the debuggee has terminated
-			SendEvent("terminated");
+			// Notify VSCode (only once)
+			if (!terminated_.exchange(true)) {
+				SendEvent("terminated");
+			}
 		}
 	});
 }
 
 void DapServer::StopProcessMonitor() {
+	if (monitorStopEvent_) {
+		SetEvent(monitorStopEvent_);
+	}
 	if (processMonitorThread_.joinable()) {
-		processMonitorThread_.detach();
+		processMonitorThread_.join();
+	}
+	if (monitorStopEvent_) {
+		CloseHandle(monitorStopEvent_);
+		monitorStopEvent_ = nullptr;
 	}
 }
 
