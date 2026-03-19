@@ -38,6 +38,14 @@ void McpServer::Run() {
 		OnMessage(msg);
 	});
 
+	// Wire up close callback so stdin EOF stops the server loop
+	auto* mcpTransport = dynamic_cast<dap::McpStdioTransport*>(transport_);
+	if (mcpTransport) {
+		mcpTransport->SetCloseCallback([this]() {
+			running_ = false;
+		});
+	}
+
 	if (!transport_->Start()) {
 		LOG_ERROR("Transport start failed");
 		return;

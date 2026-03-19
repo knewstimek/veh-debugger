@@ -85,12 +85,17 @@ public:
 	void Stop() override;
 	bool Send(const std::string& json) override;
 
+	// Called when stdin EOF is detected (reader thread exits)
+	using CloseCallback = std::function<void()>;
+	void SetCloseCallback(CloseCallback cb) { closeCallback_ = std::move(cb); }
+
 private:
 	void ReadThread();
 
 	std::thread readThread_;
 	std::atomic<bool> running_{false};
 	std::mutex writeMutex_;
+	CloseCallback closeCallback_;
 };
 
 } // namespace veh::dap

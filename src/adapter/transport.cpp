@@ -238,6 +238,7 @@ bool McpStdioTransport::Start() {
 	_setmode(_fileno(stdin), _O_BINARY);
 	_setmode(_fileno(stdout), _O_BINARY);
 	setvbuf(stdin, NULL, _IONBF, 0);
+	setvbuf(stdout, NULL, _IONBF, 0);
 #endif
 	running_ = true;
 	readThread_ = std::thread(&McpStdioTransport::ReadThread, this);
@@ -265,16 +266,34 @@ bool McpStdioTransport::Send(const std::string& json) {
 void McpStdioTransport::ReadThread() {
 	// MCP stdio: one JSON object per line
 	std::string lineBuf;
-	int stdinFd = _fileno(stdin);
+	HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
 	char buf[4096];
 
 	while (running_) {
-		int n = _read(stdinFd, buf, sizeof(buf));
-		if (n <= 0) {
-			LOG_INFO("MCP stdin EOF or error (n=%d), stopping", n);
+		DWORD avail = 0;
+		BOOL peekOk = PeekNamedPipe(hStdin, NULL, 0, NULL, &avail, NULL);
+		if (!peekOk) {
+			DWORD err = GetLastError();
+			LOG_INFO("MCP stdin pipe broken (PeekNamedPipe err=%u), stopping", (unsigned)err);
 			running_ = false;
+			if (closeCallback_) closeCallback_();
 			break;
 		}
+		if (avail == 0) {
+			Sleep(10);
+			continue;
+		}
+		DWORD bytesRead = 0;
+		DWORD toRead = (avail < sizeof(buf)) ? avail : sizeof(buf);
+		BOOL ok = ReadFile(hStdin, buf, toRead, &bytesRead, NULL);
+		if (!ok || bytesRead == 0) {
+			LOG_INFO("MCP stdin closed (ok=%d, read=%u, err=%u), stopping",
+				(int)ok, (unsigned)bytesRead, (unsigned)GetLastError());
+			running_ = false;
+			if (closeCallback_) closeCallback_();
+			break;
+		}
+		int n = (int)bytesRead;
 
 		lineBuf.append(buf, n);
 
