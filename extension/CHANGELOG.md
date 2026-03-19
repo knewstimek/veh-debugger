@@ -1,10 +1,10 @@
 # Changelog
 
-## Unreleased
+## 1.0.77 (2026-03-19)
 
 ### Bug Fixes
-- **MCP reader thread blocked by long-running tools**: Tool calls now run in a detached thread, so blocking tools (veh_continue wait=true, veh_launch, veh_attach) no longer freeze the entire MCP server
-- **veh_launch/veh_attach pipe connect timeout**: Reduced from 7000ms to 3500ms to prevent MCP tool call timeout (-32000 Connection closed) on slow injection
+- **MCP reader thread blocked by long-running tools**: Tool calls now run in a detached thread, so blocking tools (veh_continue wait=true, veh_launch, veh_attach) no longer freeze the entire MCP server (-32000 Connection closed)
+- **veh_launch/veh_attach pipe connect timeout**: Reduced from 7000ms to 3500ms
 
 ## 1.0.76 (2026-03-19)
 
