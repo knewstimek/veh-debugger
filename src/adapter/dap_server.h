@@ -210,6 +210,11 @@ private:
 	uint64_t ResolveRegisterByName(const std::string& name, const RegisterSet& regs);
 	bool TryParseRegisterName(const std::string& name);
 	std::string ExpandLogMessage(const std::string& msg, uint32_t threadId, const RegisterSet* cachedRegs = nullptr);
+
+	// Process exit monitor
+	void StartProcessMonitor();
+	void StopProcessMonitor();
+	std::thread processMonitorThread_;
 };
 
 } // namespace veh::dap

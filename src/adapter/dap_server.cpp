@@ -296,6 +296,8 @@ void DapServer::OnLaunch(const Request& req) {
 	resp.success = true;
 	SendResponse(resp);
 
+	StartProcessMonitor();
+
 	LOG_INFO("Launched process PID=%u, DLL injected", targetPid_);
 }
 
@@ -347,6 +349,8 @@ void DapServer::OnAttach(const Request& req) {
 
 	resp.success = true;
 	SendResponse(resp);
+
+	StartProcessMonitor();
 
 	LOG_INFO("Attached to PID=%u", targetPid_);
 }
@@ -2200,6 +2204,8 @@ void DapServer::OnRestart(const Request& req) {
 			symbolEngineReady_ = false;
 		}
 
+		StartProcessMonitor();
+
 		resp.success = true;
 		SendResponse(resp);
 	} else {
@@ -2252,6 +2258,8 @@ void DapServer::OnRestart(const Request& req) {
 			symbolEngineReady_ = false;
 			LOG_WARN("OnRestart: OpenProcess failed for pid %u: %u", targetPid_, GetLastError());
 		}
+
+		StartProcessMonitor();
 
 		resp.success = true;
 		SendResponse(resp);
@@ -3260,6 +3268,9 @@ void DapServer::ResumeMainThread() {
 }
 
 void DapServer::Cleanup(bool detachOnly) {
+	// 모니터 스레드 먼저 정리 (double-close 방지)
+	StopProcessMonitor();
+
 	// 메인 스레드가 아직 suspended이면 resume (안 하면 프로세스가 좀비로 남음)
 	ResumeMainThread();
 
@@ -3293,6 +3304,45 @@ void DapServer::Cleanup(bool detachOnly) {
 	if (targetProcess_) {
 		CloseHandle(targetProcess_);
 		targetProcess_ = nullptr;
+	}
+}
+
+void DapServer::StartProcessMonitor() {
+	StopProcessMonitor();
+	if (!targetProcess_) return;
+
+	HANDLE hWait = OpenProcess(SYNCHRONIZE, FALSE, targetPid_);
+	if (!hWait) {
+		LOG_WARN("Cannot open process %u for SYNCHRONIZE, exit monitor disabled", targetPid_);
+		return;
+	}
+
+	processMonitorThread_ = std::thread([this, hWait]() {
+		DWORD result = WaitForSingleObject(hWait, INFINITE);
+		CloseHandle(hWait);
+
+		if (result == WAIT_OBJECT_0 && running_) {
+			DWORD exitCode = 0;
+			if (targetProcess_) {
+				GetExitCodeProcess(targetProcess_, &exitCode);
+			}
+
+			LOG_INFO("DAP: Target process %u exited (code: %lu)", targetPid_, exitCode);
+
+			// Pipe cleanup
+			pipeClient_.StopHeartbeat();
+			pipeClient_.StopEventListener();
+			pipeClient_.Disconnect();
+
+			// Notify VSCode that the debuggee has terminated
+			SendEvent("terminated");
+		}
+	});
+}
+
+void DapServer::StopProcessMonitor() {
+	if (processMonitorThread_.joinable()) {
+		processMonitorThread_.detach();
 	}
 }
 
