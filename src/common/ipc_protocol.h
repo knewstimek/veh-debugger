@@ -59,6 +59,9 @@ enum class IpcCommand : uint32_t {
 	ResolveFunction        = 0x0041,
 	EnumLocals             = 0x0042,
 
+	// Tracing
+	TraceCallers           = 0x0050,
+
 	// Lifecycle
 	Heartbeat              = 0x00FE,
 	Detach                 = 0x00F0,
@@ -319,6 +322,24 @@ struct EnumLocalsResponse {
 	IpcStatus status;
 	uint32_t  count;
 	// followed by `count` LocalVariableInfo structs
+};
+
+// --- TraceCallers ---
+struct TraceCallersRequest {
+	uint64_t address;          // BP address to trace
+	uint32_t durationMs;       // how long to trace (ms)
+};
+
+struct TraceCallerEntry {
+	uint64_t callerAddress;    // return address ([RSP] at BP hit)
+	uint32_t hitCount;
+};
+
+struct TraceCallersResponse {
+	IpcStatus status;
+	uint32_t totalHits;        // total BP hits
+	uint32_t uniqueCallers;    // number of TraceCallerEntry following
+	// followed by: TraceCallerEntry[uniqueCallers]
 };
 
 #pragma pack(pop)
