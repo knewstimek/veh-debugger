@@ -32,8 +32,14 @@ static uint64_t ReadCallerFromStack(const CONTEXT* ctx) {
 
 namespace veh {
 
-// thread_local: 각 스레드마다 재활성화 대기 정보 보관
-thread_local VehHandler::PendingRearm VehHandler::pendingRearm_ = {0, 0, false, false};
+VehHandler::PendingRearm& VehHandler::GetPendingRearm() {
+	auto* p = static_cast<PendingRearm*>(TlsGetValue(pendingRearmTlsSlot_));
+	if (!p) {
+		p = static_cast<PendingRearm*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PendingRearm)));
+		TlsSetValue(pendingRearmTlsSlot_, p);
+	}
+	return *p;
+}
 
 VehHandler& VehHandler::Instance() {
 	static VehHandler instance;
@@ -46,10 +52,13 @@ bool VehHandler::Install() {
 		return true;
 	}
 
-	// 재진입 방지 TLS 슬롯 할당 (thread_local 사용 금지 -> TlsAlloc)
+	// TLS 슬롯 할당 (thread_local 사용 금지 -> TlsAlloc, ManualMap 호환)
 	reentryTlsSlot_ = TlsAlloc();
-	if (reentryTlsSlot_ == TLS_OUT_OF_INDEXES) {
+	pendingRearmTlsSlot_ = TlsAlloc();
+	if (reentryTlsSlot_ == TLS_OUT_OF_INDEXES || pendingRearmTlsSlot_ == TLS_OUT_OF_INDEXES) {
 		LOG_ERROR("TlsAlloc failed: %lu", GetLastError());
+		if (reentryTlsSlot_ != TLS_OUT_OF_INDEXES) { TlsFree(reentryTlsSlot_); reentryTlsSlot_ = TLS_OUT_OF_INDEXES; }
+		if (pendingRearmTlsSlot_ != TLS_OUT_OF_INDEXES) { TlsFree(pendingRearmTlsSlot_); pendingRearmTlsSlot_ = TLS_OUT_OF_INDEXES; }
 		return false;
 	}
 
@@ -79,10 +88,14 @@ void VehHandler::Uninstall() {
 		handler_ = nullptr;
 	}
 
-	// TLS 슬롯 해제
+	// TLS 슬롯 해제 (per-thread HeapAlloc 메모리는 프로세스 종료 시 OS 회수)
 	if (reentryTlsSlot_ != TLS_OUT_OF_INDEXES) {
 		TlsFree(reentryTlsSlot_);
 		reentryTlsSlot_ = TLS_OUT_OF_INDEXES;
+	}
+	if (pendingRearmTlsSlot_ != TLS_OUT_OF_INDEXES) {
+		TlsFree(pendingRearmTlsSlot_);
+		pendingRearmTlsSlot_ = TLS_OUT_OF_INDEXES;
 	}
 
 	// 이벤트 핸들 정리
@@ -136,7 +149,7 @@ void VehHandler::ResumeStoppedThread(uint32_t threadId, bool step) {
 	auto it = threadEvents_.find(threadId);
 	if (it != threadEvents_.end()) {
 		SetEvent(it->second);
-		CloseHandle(it->second);
+		// NOTE: CloseHandle은 VEH 핸들러(WaitForSingleObject 호출자)가 담당
 		threadEvents_.erase(it);
 	}
 }
@@ -157,7 +170,7 @@ void VehHandler::ResumeAllStoppedThreads(bool forDetach) {
 	std::lock_guard<std::mutex> lock(eventMapMutex_);
 	for (auto& [tid, evt] : threadEvents_) {
 		SetEvent(evt);
-		CloseHandle(evt);
+		// NOTE: CloseHandle은 VEH 핸들러(WaitForSingleObject 호출자)가 담당
 	}
 	threadEvents_.clear();
 }
@@ -195,6 +208,54 @@ struct TlsReentryGuard {
 	~TlsReentryGuard() { TlsSetValue(slot, nullptr); }
 };
 
+VehHandler::WaitResult VehHandler::NotifyAndWait(
+		PEXCEPTION_POINTERS info, uint32_t tid,
+		DebugEventType type, uint64_t addr, uint32_t bpId, DWORD code) {
+	if (!callback_) return WaitResult::NoCallback;
+
+	// 1) 예외 컨텍스트 저장 (stackTrace/레지스터 검사용)
+	{
+		std::lock_guard<std::mutex> lock(contextMapMutex_);
+		stoppedContexts_[tid] = *info->ContextRecord;
+	}
+
+	// 2) 이벤트 핸들을 callback 전에 생성 (IsThreadStopped race 방지)
+	HANDLE waitEvent = GetOrCreateThreadEvent(tid);
+	if (!waitEvent) {
+		// CreateEventW 실패 -- stoppedContexts_ 롤백, callback 호출하지 않음
+		std::lock_guard<std::mutex> lock(contextMapMutex_);
+		stoppedContexts_.erase(tid);
+		return WaitResult::NoCallback;
+	}
+
+	// 3) 콜백으로 어댑터에 알림
+	DebugEvent evt;
+	evt.type = type;
+	evt.threadId = tid;
+	evt.address = addr;
+	evt.breakpointId = bpId;
+	evt.exceptionCode = code;
+	evt.context = info->ContextRecord;
+	callback_(evt);
+
+	LOG_DEBUG("Thread %u waiting for continue signal (type=%d)", tid, (int)type);
+	WaitForSingleObject(waitEvent, INFINITE);
+	CloseHandle(waitEvent);
+	LOG_DEBUG("Thread %u resumed", tid);
+
+	// 5) 정지 중 수정된 컨텍스트 복원 / detach 판별
+	{
+		std::lock_guard<std::mutex> lock(contextMapMutex_);
+		auto ctxIt = stoppedContexts_.find(tid);
+		if (ctxIt != stoppedContexts_.end()) {
+			*info->ContextRecord = ctxIt->second;
+			stoppedContexts_.erase(ctxIt);
+			return WaitResult::Resumed;
+		}
+	}
+	return WaitResult::Detached;
+}
+
 LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 	if (!installed_) return EXCEPTION_CONTINUE_SEARCH;
 
@@ -225,7 +286,8 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		info->ContextRecord->EFlags |= 0x100;
 
 		// 싱글스텝 후 브레이크포인트 재활성화를 위해 기록
-		pendingRearm_ = {addr, tid, true, false};
+		auto& rearm = GetPendingRearm();
+		rearm = {addr, tid, true, false};
 
 		// TraceCallers 모드: caller 수집 후 자동 continue (멈추지 않음)
 		if (traceAddress_.load(std::memory_order_relaxed) == addr) {
@@ -240,55 +302,31 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 
-		// 이벤트 콜백으로 어댑터에 알림
-		if (callback_) {
-			// 예외 컨텍스트 저장 (stackTrace 등에서 사용)
-			{
-				std::lock_guard<std::mutex> lock(contextMapMutex_);
-				stoppedContexts_[tid] = *info->ContextRecord;
+		// 내부 스레드(pipe server) BP 투명 스킵 -- 데드락 방지
+		// 원본 바이트 복원 + TF는 이미 위에서 완료. rearm으로 single-step 후 BP 자동 재설치.
+		// callback/wait 없이 바로 실행 재개하여 IPC 파이프가 블록되지 않도록 함.
+		if (tid == internalTid_.load(std::memory_order_relaxed)) {
+			LOG_DEBUG("Internal thread %u hit BP #%u at 0x%llX -- transparent skip", tid, bp->id, addr);
+			return EXCEPTION_CONTINUE_EXECUTION;
+		}
+
+		{
+			auto result = NotifyAndWait(info, tid, DebugEventType::BreakpointHit, addr, bp->id, code);
+			if (result == WaitResult::Detached) {
+				// Detach: TF 제거 + rearm 취소 (VEH 해제 후 SINGLE_STEP 크래시 방지)
+				info->ContextRecord->EFlags &= ~0x100;
+				rearm = {0, 0, false, false};
+				LOG_DEBUG("Thread %u: forced resume (detach), TF cleared", tid);
+				return EXCEPTION_CONTINUE_EXECUTION;
 			}
-
-			DebugEvent evt;
-			evt.type = DebugEventType::BreakpointHit;
-			evt.threadId = tid;
-			evt.address = addr;
-			evt.breakpointId = bp->id;
-			evt.exceptionCode = code;
-			evt.context = info->ContextRecord;
-			callback_(evt);
-
-			// continue/step 시그널이 올 때까지 대기
-			HANDLE waitEvent = GetOrCreateThreadEvent(tid);
-			if (waitEvent) {
-				LOG_DEBUG("Thread %u waiting for continue signal", tid);
-				WaitForSingleObject(waitEvent, INFINITE);
-				LOG_DEBUG("Thread %u resumed", tid);
-
-				// 정지 중에 SetStoppedContext로 수정된 컨텍스트를 반영
-				{
-					std::lock_guard<std::mutex> lock(contextMapMutex_);
-					auto ctxIt = stoppedContexts_.find(tid);
-					if (ctxIt != stoppedContexts_.end()) {
-						*info->ContextRecord = ctxIt->second;
-						stoppedContexts_.erase(ctxIt);
-					} else {
-						// Forced resume (detach) -- TF 제거하여 VEH 해제 후 SINGLE_STEP 크래시 방지
-						info->ContextRecord->EFlags &= ~0x100;
-						pendingRearm_ = {0, 0, false, false};
-						LOG_DEBUG("Thread %u: forced resume (detach), TF cleared", tid);
-						return EXCEPTION_CONTINUE_EXECUTION;
-					}
-				}
-
-				// 파이프 스레드에서 설정한 step 플래그 확인
-				{
-					std::lock_guard<std::mutex> lock(stepFlagMutex_);
-					auto it = stepFlags_.find(tid);
-					if (it != stepFlags_.end() && it->second) {
-						pendingRearm_.stepRequested = true;
-						stepFlags_.erase(it);
-						LOG_DEBUG("Thread %u: step requested, will re-TF after rearm", tid);
-					}
+			if (result == WaitResult::Resumed) {
+				// step 플래그 확인 (rearm 후 다시 TF 설정)
+				std::lock_guard<std::mutex> lock(stepFlagMutex_);
+				auto it = stepFlags_.find(tid);
+				if (it != stepFlags_.end() && it->second) {
+					rearm.stepRequested = true;
+					stepFlags_.erase(it);
+					LOG_DEBUG("Thread %u: step requested, will re-TF after rearm", tid);
 				}
 			}
 		}
@@ -302,12 +340,13 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 
 	case EXCEPTION_SINGLE_STEP: { // 0x80000004 — TF 또는 HW BP
 		// 1) 소프트 브레이크포인트 재활성화 대기 중인 경우
-		if (pendingRearm_.active) {
-			BreakpointManager::Instance().RearmBreakpoint(pendingRearm_.address);
-			LOG_DEBUG("Rearmed breakpoint at 0x%llX", pendingRearm_.address);
-			bool wantStep = pendingRearm_.stepRequested;
-			pendingRearm_.active = false;
-			pendingRearm_.stepRequested = false;
+		auto& rearm = GetPendingRearm();
+		if (rearm.active) {
+			BreakpointManager::Instance().RearmBreakpoint(rearm.address);
+			LOG_DEBUG("Rearmed breakpoint at 0x%llX", rearm.address);
+			bool wantStep = rearm.stepRequested;
+			rearm.active = false;
+			rearm.stepRequested = false;
 
 			if (wantStep) {
 				// StepOver/StepIn 요청: rearm 후 다시 TF 설정 → 다음 SINGLE_STEP에서 StepCompleted
@@ -329,38 +368,11 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 					// DR6 해당 비트 클리어
 					info->ContextRecord->Dr6 &= ~(1ULL << slot);
 
-					if (callback_) {
-						{
-							std::lock_guard<std::mutex> lock(contextMapMutex_);
-							stoppedContexts_[tid] = *info->ContextRecord;
-						}
-
-						DebugEvent evt;
-						evt.type = DebugEventType::BreakpointHit;
-						evt.threadId = tid;
-						evt.address = addr;
-						evt.breakpointId = hwbp->id;
-						evt.exceptionCode = code;
-						callback_(evt);
-
-						HANDLE waitEvent = GetOrCreateThreadEvent(tid);
-						if (waitEvent) {
-							LOG_DEBUG("Thread %u (HW BP) waiting for continue signal", tid);
-							WaitForSingleObject(waitEvent, INFINITE);
-							LOG_DEBUG("Thread %u (HW BP) resumed", tid);
-							// Reflect any context modifications made during stop
-							{
-								std::lock_guard<std::mutex> lock(contextMapMutex_);
-								auto ctxIt = stoppedContexts_.find(tid);
-								if (ctxIt != stoppedContexts_.end()) {
-									*info->ContextRecord = ctxIt->second;
-									stoppedContexts_.erase(ctxIt);
-								} else {
-									// Forced resume (detach) -- 안전하게 계속 실행
-									LOG_DEBUG("Thread %u (HW BP): forced resume (detach)", tid);
-									return EXCEPTION_CONTINUE_EXECUTION;
-								}
-							}
+					{
+						auto result = NotifyAndWait(info, tid, DebugEventType::BreakpointHit, addr, hwbp->id, code);
+						if (result == WaitResult::Detached) {
+							LOG_DEBUG("Thread %u (HW BP): forced resume (detach)", tid);
+							return EXCEPTION_CONTINUE_EXECUTION;
 						}
 					}
 
@@ -376,49 +388,20 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		// 3) 일반 싱글스텝 완료 (StepInto/StepOver 요청에 의한)
 		LOG_DEBUG("Single step completed at 0x%llX (tid=%u)", addr, tid);
 
-		if (callback_) {
-			{
-				std::lock_guard<std::mutex> lock(contextMapMutex_);
-				stoppedContexts_[tid] = *info->ContextRecord;
+		{
+			auto result = NotifyAndWait(info, tid, DebugEventType::SingleStepComplete, addr, 0, code);
+			if (result == WaitResult::Detached) {
+				LOG_DEBUG("Thread %u (step): forced resume (detach)", tid);
+				return EXCEPTION_CONTINUE_EXECUTION;
 			}
-
-			DebugEvent evt;
-			evt.type = DebugEventType::SingleStepComplete;
-			evt.threadId = tid;
-			evt.address = addr;
-			evt.breakpointId = 0;
-			evt.exceptionCode = code;
-			callback_(evt);
-
-			HANDLE waitEvent = GetOrCreateThreadEvent(tid);
-			if (waitEvent) {
-				LOG_DEBUG("Thread %u (step) waiting for continue signal", tid);
-				WaitForSingleObject(waitEvent, INFINITE);
-				LOG_DEBUG("Thread %u (step) resumed", tid);
-
-				// Reflect any context modifications made during stop
-				{
-					std::lock_guard<std::mutex> lock(contextMapMutex_);
-					auto ctxIt = stoppedContexts_.find(tid);
-					if (ctxIt != stoppedContexts_.end()) {
-						*info->ContextRecord = ctxIt->second;
-						stoppedContexts_.erase(ctxIt);
-					} else {
-						// Forced resume (detach)
-						LOG_DEBUG("Thread %u (step): forced resume (detach)", tid);
-						return EXCEPTION_CONTINUE_EXECUTION;
-					}
-				}
-
+			if (result == WaitResult::Resumed) {
 				// step 플래그 확인 -- 연속 스텝 요청이면 TF 재설정
-				{
-					std::lock_guard<std::mutex> lock(stepFlagMutex_);
-					auto it = stepFlags_.find(tid);
-					if (it != stepFlags_.end() && it->second) {
-						info->ContextRecord->EFlags |= 0x100;
-						stepFlags_.erase(it);
-						LOG_DEBUG("Thread %u: consecutive step — TF set at 0x%llX", tid, addr);
-					}
+				std::lock_guard<std::mutex> lock(stepFlagMutex_);
+				auto it = stepFlags_.find(tid);
+				if (it != stepFlags_.end() && it->second) {
+					info->ContextRecord->EFlags |= 0x100;
+					stepFlags_.erase(it);
+					LOG_DEBUG("Thread %u: consecutive step -- TF set at 0x%llX", tid, addr);
 				}
 			}
 		}
@@ -450,38 +433,7 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		}
 
 		LOG_INFO("Exception 0x%08X at 0x%llX (tid=%u)", code, addr, tid);
-
-		// 컨텍스트 저장 (레지스터/스택 검사용)
-		{
-			std::lock_guard<std::mutex> lock(contextMapMutex_);
-			stoppedContexts_[tid] = *info->ContextRecord;
-		}
-
-		DebugEvent evt;
-		evt.type = DebugEventType::Exception;
-		evt.threadId = tid;
-		evt.address = addr;
-		evt.breakpointId = 0;
-		evt.exceptionCode = code;
-		evt.context = info->ContextRecord;
-		callback_(evt);
-
-		// continue 시그널 대기 (사용자가 상태 검사 가능)
-		HANDLE waitEvent = GetOrCreateThreadEvent(tid);
-		if (waitEvent) {
-			LOG_DEBUG("Thread %u (exception) waiting for continue signal", tid);
-			WaitForSingleObject(waitEvent, INFINITE);
-			LOG_DEBUG("Thread %u (exception) resumed", tid);
-
-			{
-				std::lock_guard<std::mutex> lock(contextMapMutex_);
-				auto ctxIt = stoppedContexts_.find(tid);
-				if (ctxIt != stoppedContexts_.end()) {
-					*info->ContextRecord = ctxIt->second;
-					stoppedContexts_.erase(ctxIt);
-				}
-			}
-		}
+		NotifyAndWait(info, tid, DebugEventType::Exception, addr, 0, code);
 
 		// OS SEH 체인에 전달 (프로세스 crash/SEH 핸들러가 처리)
 		return EXCEPTION_CONTINUE_SEARCH;

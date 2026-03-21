@@ -56,12 +56,20 @@ public:
 	void StopTrace();
 	std::unordered_map<uint64_t, uint32_t> GetTraceResults(uint32_t& totalHits);
 
-	// 내부 스레드 등록 (pipe server 등) -- trace_callers에서 스킵하기 위해
+	// 내부 스레드 등록 (pipe server 등) -- BP 투명 스킵 + trace_callers 스킵
 	void SetInternalThread(uint32_t tid) { internalTid_.store(tid, std::memory_order_relaxed); }
+
+	// NotifyAndWait 결과
+	enum class WaitResult { Resumed, Detached, NoCallback };
 
 private:
 	static LONG CALLBACK ExceptionHandler(PEXCEPTION_POINTERS info);
 	LONG HandleException(PEXCEPTION_POINTERS info);
+
+	// 공통 패턴: 컨텍스트 저장 -> 이벤트 생성 -> 콜백 -> 대기 -> 컨텍스트 복원
+	// 4개 예외 경로(BP, HW BP, step complete, exception)에서 공유
+	WaitResult NotifyAndWait(PEXCEPTION_POINTERS info, uint32_t tid,
+		DebugEventType type, uint64_t addr, uint32_t bpId, DWORD code);
 
 	// 스레드가 stopped 상태에서 대기할 이벤트 가져오기/생성
 	HANDLE GetOrCreateThreadEvent(uint32_t threadId);
@@ -93,14 +101,15 @@ private:
 	std::atomic<uint32_t> traceTotalHits_{0};
 	std::atomic<uint32_t> internalTid_{0};  // pipe server tid (trace skip)
 
-	// Track which address needs re-arming after single-step
+	// Track which address needs re-arming after single-step (per-thread)
 	struct PendingRearm {
 		uint64_t address;
 		uint32_t threadId;
 		bool     active;
 		bool     stepRequested;  // true면 rearm 후 다시 TF 설정하여 StepCompleted 발생
 	};
-	static thread_local PendingRearm pendingRearm_;
+	DWORD pendingRearmTlsSlot_ = TLS_OUT_OF_INDEXES;
+	PendingRearm& GetPendingRearm();
 };
 
 } // namespace veh
