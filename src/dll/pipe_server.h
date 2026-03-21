@@ -6,6 +6,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 #include "../common/ipc_protocol.h"
 
 namespace veh {
@@ -43,6 +44,9 @@ private:
 	HANDLE pipe_ = INVALID_HANDLE_VALUE;
 	HANDLE stopEvent_ = nullptr;
 	std::thread serverThread_;
+	std::mutex serverTidMutex_;
+	std::condition_variable serverTidCv_;
+	uint32_t serverTid_ = 0;
 	std::mutex writeMutex_;
 	std::atomic<bool> running_{false};
 	std::atomic<bool> connected_{false};

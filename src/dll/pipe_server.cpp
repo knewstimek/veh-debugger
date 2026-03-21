@@ -139,6 +139,15 @@ bool PipeServer::Start(uint32_t targetPid) {
 	running_ = true;
 	serverThread_ = std::thread(&PipeServer::ServerThread, this);
 
+	// 스레드 ID가 확정될 때까지 대기 후 등록 (race 방지)
+	// ServerThread 진입 시 serverTid_에 기록하고 serverTidReady_ 시그널
+	{
+		std::unique_lock<std::mutex> lk(serverTidMutex_);
+		serverTidCv_.wait(lk, [this] { return serverTid_ != 0; });
+		ThreadManager::Instance().RegisterInternalThread(serverTid_);
+		VehHandler::Instance().SetInternalThread(serverTid_);
+	}
+
 	LOG_INFO("PipeServer started: %ls [overlapped]", pipeName.c_str());
 	return true;
 }
@@ -153,6 +162,7 @@ void PipeServer::Stop() {
 	if (serverThread_.joinable()) {
 		serverThread_.join();
 	}
+	serverTid_ = 0;
 
 	if (connected_) {
 		DisconnectNamedPipe(pipe_);
@@ -176,9 +186,12 @@ void PipeServer::EmergencyCleanup() {
 void PipeServer::ServerThread() {
 	LOG_INFO("Server thread started (tid=%u)", GetCurrentThreadId());
 
-	// Register as internal thread to prevent deadlock from self-suspend
-	ThreadManager::Instance().RegisterInternalThread(GetCurrentThreadId());
-	VehHandler::Instance().SetInternalThread(GetCurrentThreadId());
+	// Start()에 스레드 ID 전달 (RegisterInternalThread race 방지)
+	{
+		std::lock_guard<std::mutex> lk(serverTidMutex_);
+		serverTid_ = GetCurrentThreadId();
+	}
+	serverTidCv_.notify_one();
 
 	// DbgHelp 심볼 엔진 초기화
 	StackWalker::Instance().Initialize();
