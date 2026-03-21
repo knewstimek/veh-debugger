@@ -1,9 +1,9 @@
 """BP masking test - ReadMemory should return original bytes, not INT3 (0xCC)"""
-import subprocess, json, sys, time, base64
+import subprocess, json, sys, time, base64, os
 
-ADAPTER = r"D:\News\Hack\Engine\VEHDebugger\for VSCode Extension\build\bin\Release\veh-debug-adapter.exe"
-TARGET = r"D:\News\Hack\Engine\VEHDebugger\for VSCode Extension\build\bin\Release\test_target.exe"
-SOURCE = r"D:\News\Hack\Engine\VEHDebugger\for VSCode Extension\test_target\main.cpp"
+ADAPTER = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-debug-adapter.exe")
+TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
+SOURCE = os.path.join(os.path.dirname(__file__), "..", "test_target", "main.cpp")
 
 proc = subprocess.Popen(
     [ADAPTER, "--log-level=debug"],

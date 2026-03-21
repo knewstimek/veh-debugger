@@ -20,6 +20,7 @@ InjectionMethod ParseInjectionMethod(const std::string& str);
 struct LaunchResult {
 	uint32_t pid = 0;
 	uint32_t mainThreadId = 0;
+	std::string error;  // 실패 시 상세 원인 (pid==0이면 참조)
 };
 
 class Injector {

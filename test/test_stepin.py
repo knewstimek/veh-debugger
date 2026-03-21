@@ -1,10 +1,10 @@
 """DAP StepIn Test - F11 동작 확인"""
-import subprocess, json, sys, time
+import subprocess, json, sys, time, os
 
-ADAPTER = r"D:\News\Hack\Engine\VEHDebugger\for VSCode Extension\build\bin\Release\veh-debug-adapter.exe"
-TARGET = r"D:\News\Hack\Engine\VEHDebugger\for VSCode Extension\build\bin\Release\test_target.exe"
-SOURCE = r"D:\News\Hack\Engine\VEHDebugger\for VSCode Extension\test_target\main.cpp"
-LOG = r"D:\News\Hack\Engine\VEHDebugger\for VSCode Extension\test\stepin-test-adapter.log"
+ADAPTER = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-debug-adapter.exe")
+TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
+SOURCE = os.path.join(os.path.dirname(__file__), "..", "test_target", "main.cpp")
+LOG = os.path.join(os.path.dirname(__file__), "stepin-test-adapter.log")
 
 proc = subprocess.Popen(
     [ADAPTER, f"--log={LOG}", "--log-level=debug"],

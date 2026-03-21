@@ -386,7 +386,9 @@ json McpServer::ToolAttach(const json& args) {
 
 	// DLL 경로 결정 (pid 기반 비트니스 감지)
 	std::string dllPath = GetDllPath(pid);
-	if (dllPath.empty()) return {{"error", "DLL not found"}};
+	if (dllPath.empty()) {
+		return {{"error", "VEH DLL not found. Ensure vcruntime_net.dll (x64) or vcruntime_net32.dll (x86) is in the same directory as veh-mcp-server.exe"}};
+	}
 
 	// Check if VEH pipe already exists (re-attach: DLL loaded, pipe server running)
 	bool pipeExists = IsPipeAvailable(pid);
@@ -485,11 +487,17 @@ json McpServer::ToolLaunch(const json& args) {
 
 	// PE 헤더에서 비트니스 확인 (아직 프로세스가 없으므로 파일 기반)
 	std::string dllPath = GetDllPathForExe(program);
-	if (dllPath.empty()) return {{"error", "DLL not found for: " + program}};
+	if (dllPath.empty()) {
+		return {{"error", "VEH DLL not found. Ensure vcruntime_net.dll (x64) or vcruntime_net32.dll (x86) is in the same directory as veh-mcp-server.exe"}};
+	}
 
 	auto launchResult = Injector::LaunchAndInject(program, argsStr, "", dllPath, InjectionMethod::CreateRemoteThread);
 	uint32_t pid = launchResult.pid;
-	if (pid == 0) return {{"error", "Launch failed: " + program}};
+	if (pid == 0) {
+		std::string msg = "Launch failed: " + program;
+		if (!launchResult.error.empty()) msg += " - " + launchResult.error;
+		return {{"error", msg}};
+	}
 
 	launchedMainThreadId_ = launchResult.mainThreadId;
 	mainThreadResumed_ = false;
@@ -2204,7 +2212,8 @@ std::string McpServer::ResolveDll(const std::string& dir, bool use32) {
 		if (std::filesystem::exists(path32)) return path32;
 	}
 
-	LOG_ERROR("DLL not found in %s", dir.c_str());
+	LOG_ERROR("DLL not found in %s (need %s)", dir.c_str(),
+		use32 ? "vcruntime_net32.dll (x86)" : "vcruntime_net.dll (x64)");
 	return "";
 }
 
@@ -2401,7 +2410,7 @@ json McpServer::GetToolsList() {
 			{"frameBase", {{"type", "string"}, {"description", "RBP/EBP hex address (auto-detected from top frame if omitted)"}}}
 		 }}, {"required", json::array({"threadId"})}}}},
 
-		{{"name", "veh_evaluate"}, {"description", "Evaluate an expression. Supports register names (RAX, RBX, etc.), hex addresses (0x...), and pointer dereference (*addr or [addr])."},
+		{{"name", "veh_evaluate"}, {"description", "Evaluate an expression. Supports register names (RAX, RBX, etc.), hex addresses (0x...), and pointer dereference (*addr or [addr]). For indirect calls (vtable dispatch), use veh_registers to get the register value, then *<address> to dereference the pointer chain."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"expression", {{"type", "string"}, {"description", "Expression to evaluate (register name, hex address, *addr for dereference)"}}},
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID for register context"}}}
