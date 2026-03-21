@@ -161,6 +161,18 @@ These WinAPI functions are replaced with inline TEB field access (no function ca
 - `TlsSetValue(index, val)` -> same TEB write
 - `GetLastError()` -> `TEB.LastError`
 
+### Development Rules (VEH handler path)
+**VEH handler + breakpoint.cpp PatchByte 경로에서 반드시 지켜야 할 규칙:**
+1. **WinAPI 직접 호출 금지** -- 사용자가 해당 함수에 BP를 걸면 VEH 재진입 crash
+   - syscall 필요 시: `SyscallResolver::Instance().XXX()` 사용 (ntdll 스텁 복사본)
+   - 새 syscall 추가 시: `syscall_resolver.h`에 typedef + 멤버, `CopyOneStub` entries에 추가
+2. **TEB 직접 접근 함수 사용** -- `syscall_resolver.h`에 정의됨:
+   - `SafeTlsGetValue(index)` / `SafeTlsSetValue(index, val)` -- TlsGetValue/SetValue 대체
+   - `SafeGetLastError()` -- GetLastError 대체
+   - `GetTebPtr()` -- TEB 포인터 획득
+   - GetCurrentThreadId: `__readgsdword(0x48)` (x64) / `__readfsdword(0x24)` (x86) 인라인
+3. **새 ntdll 함수 추가 절차**: `syscall_resolver.h`에 FnXxx typedef + pfnXxx_ 멤버 -> `Initialize()`의 entries 배열에 추가 -> 래퍼 함수 구현 (폴백 포함)
+
 ### Known Limitations
 - `std::mutex::lock()` (CRT) internally calls `RtlEnterCriticalSection` which may call `GetCurrentThreadId` -- cannot be replaced without removing mutex usage from VEH path
 - `KiUserExceptionDispatcher` (ntdll) is the OS exception dispatch entry point -- structurally impossible to bypass, but also impossible to safely BP (any debugger would infinite-loop)
