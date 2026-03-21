@@ -128,6 +128,11 @@ Records which code paths call a given function by placing a trace BP and collect
 - **x64**: `RtlVirtualUnwind` + `RtlLookupFunctionEntry` -- uses PE unwind tables (`.pdata`) to unwind one frame. Accurate regardless of BP position within the function. Both APIs are lock-free kernel functions, safe inside VEH handler.
 - **x86**: Reads `[ESP]` directly -- only accurate when BP is at function entry point (before prologue modifies ESP). No `.pdata` equivalent on x86; frame-pointer-based walking (`[EBP+4]`) is unreliable with `/Oy` (frame pointer omission, default in Release).
 
+### Internal Thread Exclusion
+- DLL's pipe server thread (`internalTid_`) is excluded from trace collection
+- Without this, the IPC thread hitting the trace BP would delay pipe command processing
+- Implemented via `atomic<uint32_t> internalTid_` check in VEH handler (lock-free)
+
 ### Design Constraints (VEH handler context)
 - No mutex, no heap allocation (deadlock risk if BP hits inside malloc/HeapAlloc)
 - Lock-free ring buffer: `traceBuffer_[65536]` + `atomic<uint32_t> traceWriteIdx_`
