@@ -22,7 +22,8 @@ set(DLL_DEFS
 set(DLL_OUTPUT_NAME "vcruntime_net")
 
 add_library(veh-debugger SHARED ${DLL_SOURCES})
-target_link_libraries(veh-debugger PRIVATE veh_common nlohmann_json dbghelp ntdll)
+target_link_libraries(veh-debugger PRIVATE veh_common nlohmann_json dbghelp ntdll delayimp)
+target_link_options(veh-debugger PRIVATE "/DELAYLOAD:dbghelp.dll")
 target_compile_definitions(veh-debugger PRIVATE ${DLL_DEFS} VEH_64BIT)
 set_target_properties(veh-debugger PROPERTIES OUTPUT_NAME ${DLL_OUTPUT_NAME})
 
