@@ -211,6 +211,18 @@ DWORD WINAPI InitThread(LPVOID) {
 			payload.threadId = event.threadId;
 			payload.exceptionCode = event.exceptionCode;
 			payload.address = event.address;
+			// Generate description from exception code
+			const char* desc = "Unknown exception";
+			switch (event.exceptionCode) {
+			case 0xC0000005: desc = "Access Violation"; break;
+			case 0xC0000094: desc = "Integer Divide by Zero"; break;
+			case 0xC0000096: desc = "Privileged Instruction"; break;
+			case 0xC000001D: desc = "Illegal Instruction"; break;
+			case 0xC000008C: desc = "Array Bounds Exceeded"; break;
+			case 0xC000008E: desc = "Float Divide by Zero"; break;
+			case 0x80000002: desc = "Datatype Misalignment"; break;
+			}
+			snprintf(payload.description, sizeof(payload.description), "%s", desc);
 			pipe.SendEvent(static_cast<uint32_t>(veh::IpcEvent::ExceptionOccurred),
 			               &payload, sizeof(payload));
 			break;
