@@ -402,9 +402,62 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
 
-	default:
-		// 우리가 처리하지 않는 예외 → 다음 핸들러로 전달
+	default: {
+		// Crash-like 예외만 캡처 (C++ throw, OutputDebugString 등은 무시)
+		bool shouldStop = false;
+		switch (code) {
+		case EXCEPTION_ACCESS_VIOLATION:       // 0xC0000005
+		case EXCEPTION_INT_DIVIDE_BY_ZERO:     // 0xC0000094
+		case EXCEPTION_PRIV_INSTRUCTION:       // 0xC0000096
+		case EXCEPTION_ILLEGAL_INSTRUCTION:    // 0xC000001D
+		case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:  // 0xC000008C
+		case EXCEPTION_FLT_DIVIDE_BY_ZERO:     // 0xC000008E
+		case EXCEPTION_DATATYPE_MISALIGNMENT:  // 0x80000002
+			shouldStop = true;
+			break;
+		}
+
+		if (!shouldStop || !callback_) {
+			return EXCEPTION_CONTINUE_SEARCH;
+		}
+
+		LOG_INFO("Exception 0x%08X at 0x%llX (tid=%u)", code, addr, tid);
+
+		// 컨텍스트 저장 (레지스터/스택 검사용)
+		{
+			std::lock_guard<std::mutex> lock(contextMapMutex_);
+			stoppedContexts_[tid] = *info->ContextRecord;
+		}
+
+		DebugEvent evt;
+		evt.type = DebugEventType::Exception;
+		evt.threadId = tid;
+		evt.address = addr;
+		evt.breakpointId = 0;
+		evt.exceptionCode = code;
+		evt.context = info->ContextRecord;
+		callback_(evt);
+
+		// continue 시그널 대기 (사용자가 상태 검사 가능)
+		HANDLE waitEvent = GetOrCreateThreadEvent(tid);
+		if (waitEvent) {
+			LOG_DEBUG("Thread %u (exception) waiting for continue signal", tid);
+			WaitForSingleObject(waitEvent, INFINITE);
+			LOG_DEBUG("Thread %u (exception) resumed", tid);
+
+			{
+				std::lock_guard<std::mutex> lock(contextMapMutex_);
+				auto ctxIt = stoppedContexts_.find(tid);
+				if (ctxIt != stoppedContexts_.end()) {
+					*info->ContextRecord = ctxIt->second;
+					stoppedContexts_.erase(ctxIt);
+				}
+			}
+		}
+
+		// OS SEH 체인에 전달 (프로세스 crash/SEH 핸들러가 처리)
 		return EXCEPTION_CONTINUE_SEARCH;
+	}
 	}
 }
 

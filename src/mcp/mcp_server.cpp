@@ -1138,9 +1138,21 @@ json McpServer::ToolContinue(const json& args) {
 	if (timeoutSec < 1) timeoutSec = 1;
 	if (timeoutSec > 300) timeoutSec = 300;
 
+	// stopOnEntry=false 등에서 프로세스 실행 중 이벤트(exception/BP)가
+	// veh_continue 호출 전에 발생할 수 있음. 캐시된 이벤트가 있으면 즉시 반환.
 	if (wait) {
 		std::lock_guard<std::mutex> lock(bpHitMutex_);
-		bpHitOccurred_ = false;
+		if (bpHitOccurred_) {
+			// 이미 발생한 이벤트 반환 (Continue 전송 안 함 - 스레드가 정지 상태)
+			bpHitOccurred_ = false;  // 소비
+			return {
+				{"stopped", true},
+				{"reason", bpHitStopReason_},
+				{"address", (std::ostringstream() << "0x" << std::hex << bpHitAddr_).str()},
+				{"threadId", bpHitThread_},
+				{"breakpointId", bpHitId_}
+			};
+		}
 	}
 
 	ContinueRequest req;
@@ -1161,8 +1173,9 @@ json McpServer::ToolContinue(const json& args) {
 				[this]{ return bpHitOccurred_ || !attached_; })) {
 			return {{"timeout", true}, {"message", "No stop event within timeout. Process still running."}};
 		}
+		bpHitOccurred_ = false;  // 소비
 		// Process exited but bpHitOccurred_ wasn't set (race with ProcessMonitor)
-		if (!bpHitOccurred_ && !attached_) {
+		if (!attached_ && bpHitStopReason_ != "exit") {
 			return {
 				{"stopped", true},
 				{"reason", "exit"},

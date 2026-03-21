@@ -16,6 +16,8 @@
 - **Wrong threadId step returns timeout instead of error**: Step commands on non-stopped threads blocked until timeout with no useful message. DLL now validates thread is stopped (`IsThreadStopped`) before stepping, returns `NotFound`. MCP reports descriptive error with threadId
 - **trace_callers on DLL internal thread**: Pipe server thread hitting trace BP caused IPC processing delays. VEH handler now skips caller collection for the internal IPC thread (`internalTid_` atomic check)
 - **Breakpoint rearm failure (single-hit only)**: `ResumeStoppedThread`/`ResumeAllStoppedThreads` erased `stoppedContexts_` before `SetEvent`, causing VEH handler to mistake normal continue for detach -- clearing TF and canceling rearm. INT3 was never reinstalled after first hit. Fixed by deferring context cleanup to VEH handler (after restore) and adding `forDetach` flag to `ResumeAllStoppedThreads`
+- **Exception not captured (ACCESS_VIOLATION etc.)**: VEH handler only handled INT3 and SINGLE_STEP, silently passing all other exceptions. Now catches crash-like exceptions (ACCESS_VIOLATION, INT_DIVIDE_BY_ZERO, ILLEGAL_INSTRUCTION, etc.), pauses the thread, and reports via IPC. DAP sends `stopped(reason=exception)`, MCP returns `reason: "exception"` from `veh_continue(wait=true)`. Exception details available via `exceptionInfo` / `veh_exception_info`
+- **MCP `veh_continue(wait=true)` race with running process**: When target was already running (e.g. `stopOnEntry=false`), events occurring before `veh_continue` call were lost -- `bpHitOccurred_` was reset to false, IPC Continue resumed the stopped thread prematurely. Now checks for cached events before resetting, returns immediately if an event already occurred
 
 ## 1.0.83 (2026-03-21)
 
