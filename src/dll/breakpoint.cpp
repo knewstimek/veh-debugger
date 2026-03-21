@@ -19,8 +19,14 @@ uint32_t BreakpointManager::Add(uint64_t address) {
 	auto addrIt = addressToId_.find(address);
 	if (addrIt != addressToId_.end()) {
 		auto bpIt = breakpoints_.find(addrIt->second);
-		if (bpIt != breakpoints_.end() && bpIt->second.enabled) {
-			return bpIt->second.id; // 이미 설정됨
+		if (bpIt != breakpoints_.end()) {
+			if (!bpIt->second.enabled) {
+				// disabled 상태면 재활성화
+				if (PatchByte(bpIt->second.address, 0xCC)) {
+					bpIt->second.enabled = true;
+				}
+			}
+			return bpIt->second.id; // 기존 BP id 반환 (중복 방지)
 		}
 	}
 

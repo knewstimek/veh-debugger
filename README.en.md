@@ -201,7 +201,7 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | `veh_modules` | - | List modules |
 | `veh_disassemble` | `address, count?` | Disassemble (Zydis) |
 | `veh_exception_info` | - | Last exception info |
-| `veh_trace_callers` | `address, duration_sec?` | Trace function callers (collect all callers for N seconds) |
+| `veh_trace_callers` | `address, duration_sec?` | Trace function callers (collect all callers for N seconds). x64: Uses RtlVirtualUnwind for accurate caller resolution even mid-function. x86: Uses [ESP] -- **accurate only when BP is at function entry** (may be inaccurate mid-function) |
 
 > **Tip**: Numeric arguments (`threadId`, `pid`, `address`, `size`, etc.) accept both numbers and strings, including hex format (e.g. `"0x401000"` or `4198400`). Boolean arguments accept `true`/`false` or `"true"`/`"false"`.
 

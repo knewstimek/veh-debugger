@@ -115,6 +115,46 @@ OnNext
 ### StepOut (Shift+F11)
 - Read return address from stack -> temp BP at return address -> Continue
 
+## TraceCallers
+
+Records which code paths call a given function by placing a trace BP and collecting callers.
+
+### Mechanism
+1. `StartTrace(address)` sets `traceAddress_` (atomic)
+2. INT3 hit at trace address -> VEH handler reads caller, writes to lock-free ring buffer, auto-continues (no stop)
+3. After `duration_sec`, `StopTrace()` + `GetTraceResults()` aggregates ring buffer into `{caller -> hitCount}` map
+
+### Caller Resolution (platform-dependent)
+- **x64**: `RtlVirtualUnwind` + `RtlLookupFunctionEntry` -- uses PE unwind tables (`.pdata`) to unwind one frame. Accurate regardless of BP position within the function. Both APIs are lock-free kernel functions, safe inside VEH handler.
+- **x86**: Reads `[ESP]` directly -- only accurate when BP is at function entry point (before prologue modifies ESP). No `.pdata` equivalent on x86; frame-pointer-based walking (`[EBP+4]`) is unreliable with `/Oy` (frame pointer omission, default in Release).
+
+### Design Constraints (VEH handler context)
+- No mutex, no heap allocation (deadlock risk if BP hits inside malloc/HeapAlloc)
+- Lock-free ring buffer: `traceBuffer_[65536]` + `atomic<uint32_t> traceWriteIdx_`
+- `__try/__except` wrapper for stack read (guard against invalid ESP/RSP)
+
+## Detach / Re-attach
+
+### Detach Flow
+1. `RemoveAll()` -- restore original bytes for all SW BPs
+2. `HwBreakpointManager::RemoveAll()` -- clear DR0-DR7
+3. `ResumeAllStoppedThreads()` -- signal all waiting threads
+4. `Uninstall()` -- remove VEH handler
+5. `ThreadManager::ResumeAll()` -- OS-level resume
+6. Pipe: `DisconnectNamedPipe` -> outer loop waits for new client
+
+### Forced Resume Safety
+When threads are stopped in the VEH handler (WaitForSingleObject) and detach occurs:
+- `ResumeAllStoppedThreads()` clears `stoppedContexts_` before signaling events
+- Woken threads detect missing context entry -> clear TF (Trap Flag) and `pendingRearm_`
+- Prevents SINGLE_STEP exception after VEH uninstall (which would crash the target)
+
+### Re-attach Flow
+1. New client connects to existing pipe
+2. `VehHandler::Install()` -- re-register VEH handler
+3. Ready event sent
+4. New BP commands work normally (clean BreakpointManager state)
+
 ## Concurrency Guards
 
 | Mutex | Protects |
