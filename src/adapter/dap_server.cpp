@@ -295,6 +295,13 @@ void DapServer::OnLaunch(const Request& req) {
 	});
 	pipeClient_.StartHeartbeat();
 
+	// 타겟 비트니스에 맞게 디스어셈블러 재생성
+	{
+		bool is64 = !Injector::IsExe32Bit(programPath_);
+		disassembler_ = veh::CreateDisassembler(is64);
+		LOG_INFO("Disassembler set to %s mode", is64 ? "x64" : "x86");
+	}
+
 	resp.success = true;
 	SendResponse(resp);
 
@@ -348,6 +355,15 @@ void DapServer::OnAttach(const Request& req) {
 		OnIpcEvent(eventId, payload, size);
 	});
 	pipeClient_.StartHeartbeat();
+
+	// 타겟 비트니스에 맞게 디스어셈블러 재생성
+	{
+		BOOL isWow64 = FALSE;
+		if (targetProcess_) IsWow64Process(targetProcess_, &isWow64);
+		bool is64 = (isWow64 == FALSE);
+		disassembler_ = veh::CreateDisassembler(is64);
+		LOG_INFO("Disassembler set to %s mode", is64 ? "x64" : "x86");
+	}
 
 	resp.success = true;
 	SendResponse(resp);
@@ -2208,6 +2224,14 @@ void DapServer::OnRestart(const Request& req) {
 			symbolEngineReady_ = false;
 		}
 
+		// 타겟 비트니스에 맞게 디스어셈블러 재생성
+		{
+			BOOL isWow64 = FALSE;
+			if (targetProcess_) IsWow64Process(targetProcess_, &isWow64);
+			bool is64 = (isWow64 == FALSE);
+			disassembler_ = veh::CreateDisassembler(is64);
+		}
+
 		StartProcessMonitor();
 
 		resp.success = true;
@@ -2270,6 +2294,12 @@ void DapServer::OnRestart(const Request& req) {
 		} else {
 			symbolEngineReady_ = false;
 			LOG_WARN("OnRestart: OpenProcess failed for pid %u: %u", targetPid_, GetLastError());
+		}
+
+		// 타겟 비트니스에 맞게 디스어셈블러 재생성
+		{
+			bool is64 = !Injector::IsExe32Bit(programPath_);
+			disassembler_ = veh::CreateDisassembler(is64);
 		}
 
 		StartProcessMonitor();
