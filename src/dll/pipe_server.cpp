@@ -178,6 +178,7 @@ void PipeServer::ServerThread() {
 
 	// Register as internal thread to prevent deadlock from self-suspend
 	ThreadManager::Instance().RegisterInternalThread(GetCurrentThreadId());
+	VehHandler::Instance().SetInternalThread(GetCurrentThreadId());
 
 	// DbgHelp 심볼 엔진 초기화
 	StackWalker::Instance().Initialize();
@@ -427,6 +428,11 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			return;
 		}
 		auto* req = reinterpret_cast<const StepRequest*>(payload);
+		if (!VehHandler::Instance().IsThreadStopped(req->threadId)) {
+			IpcStatus status = IpcStatus::NotFound;
+			SendResponse(command, &status, sizeof(status));
+			break;
+		}
 		// step=true: BP rearm 후 다시 TF 설정하여 StepCompleted 이벤트 발생
 		VehHandler::Instance().ResumeStoppedThread(req->threadId, /*step=*/true);
 		IpcStatus status = IpcStatus::Ok;
@@ -441,6 +447,11 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			return;
 		}
 		auto* req = reinterpret_cast<const StepRequest*>(payload);
+		if (!VehHandler::Instance().IsThreadStopped(req->threadId)) {
+			IpcStatus status = IpcStatus::NotFound;
+			SendResponse(command, &status, sizeof(status));
+			break;
+		}
 		// StepOut도 step=true (함수 리턴까지는 어댑터에서 반복 step으로 구현)
 		VehHandler::Instance().ResumeStoppedThread(req->threadId, /*step=*/true);
 		IpcStatus status = IpcStatus::Ok;

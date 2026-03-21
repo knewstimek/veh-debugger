@@ -143,6 +143,11 @@ void VehHandler::ResumeAllStoppedThreads() {
 	threadEvents_.clear();
 }
 
+bool VehHandler::IsThreadStopped(uint32_t threadId) {
+	std::lock_guard<std::mutex> lock(eventMapMutex_);
+	return threadEvents_.find(threadId) != threadEvents_.end();
+}
+
 bool VehHandler::GetStoppedContext(uint32_t threadId, CONTEXT& ctx) {
 	std::lock_guard<std::mutex> lock(contextMapMutex_);
 	auto it = stoppedContexts_.find(threadId);
@@ -192,11 +197,14 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 
 		// TraceCallers 모드: caller 수집 후 자동 continue (멈추지 않음)
 		if (traceAddress_.load(std::memory_order_relaxed) == addr) {
-			uint64_t caller = ReadCallerFromStack(info->ContextRecord);
-			// Lock-free ring buffer write (no mutex, no heap alloc in VEH)
-			uint32_t idx = traceWriteIdx_.fetch_add(1, std::memory_order_relaxed);
-			traceBuffer_[idx % kTraceBufferSize] = caller;
-			traceTotalHits_.fetch_add(1, std::memory_order_relaxed);
+			// 내부 스레드(pipe server)는 스킵 -- IPC 처리 지연/데드락 방지
+			if (tid != internalTid_.load(std::memory_order_relaxed)) {
+				uint64_t caller = ReadCallerFromStack(info->ContextRecord);
+				// Lock-free ring buffer write (no mutex, no heap alloc in VEH)
+				uint32_t idx = traceWriteIdx_.fetch_add(1, std::memory_order_relaxed);
+				traceBuffer_[idx % kTraceBufferSize] = caller;
+				traceTotalHits_.fetch_add(1, std::memory_order_relaxed);
+			}
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 

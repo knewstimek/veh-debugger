@@ -659,8 +659,16 @@ json McpServer::ToolRemoveBreakpoint(const json& args) {
 
 	RemoveBreakpointRequest req;
 	req.id = id;
-	if (!pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &req, sizeof(req))) {
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::RemoveBreakpoint, &req, sizeof(req), respData)) {
 		return {{"error", IpcErrorMessage()}};
+	}
+
+	if (respData.size() >= sizeof(IpcStatus)) {
+		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
+		if (status == IpcStatus::NotFound) {
+			return {{"error", "Breakpoint not found (id=" + std::to_string(id) + ")"}};
+		}
 	}
 
 	{
@@ -1094,8 +1102,16 @@ json McpServer::ToolRemoveDataBreakpoint(const json& args) {
 
 	RemoveHwBreakpointRequest req;
 	req.id = id;
-	if (!pipeClient_.SendCommand(IpcCommand::RemoveHwBreakpoint, &req, sizeof(req))) {
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::RemoveHwBreakpoint, &req, sizeof(req), respData)) {
 		return {{"error", IpcErrorMessage()}};
+	}
+
+	if (respData.size() >= sizeof(IpcStatus)) {
+		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
+		if (status == IpcStatus::NotFound) {
+			return {{"error", "Data breakpoint not found (id=" + std::to_string(id) + ")"}};
+		}
 	}
 
 	{
@@ -1174,8 +1190,15 @@ json McpServer::ToolStepIn(const json& args) {
 
 	StepRequest req;
 	req.threadId = threadId;
-	if (!pipeClient_.SendCommand(IpcCommand::StepInto, &req, sizeof(req))) {
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::StepInto, &req, sizeof(req), respData)) {
 		return {{"error", IpcErrorMessage()}};
+	}
+	if (respData.size() >= sizeof(IpcStatus)) {
+		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
+		if (status == IpcStatus::NotFound) {
+			return {{"error", "Thread " + std::to_string(threadId) + " is not stopped (not found or already running)"}};
+		}
 	}
 	return {{"success", true}, {"threadId", threadId}};
 }
@@ -1217,8 +1240,15 @@ json McpServer::ToolStepOver(const json& args) {
 
 	StepRequest req;
 	req.threadId = threadId;
-	if (!pipeClient_.SendCommand(IpcCommand::StepOver, &req, sizeof(req))) {
+	std::vector<uint8_t> stepResp;
+	if (!pipeClient_.SendAndReceive(IpcCommand::StepOver, &req, sizeof(req), stepResp)) {
 		return {{"error", IpcErrorMessage()}};
+	}
+	if (stepResp.size() >= sizeof(IpcStatus)) {
+		auto status = *reinterpret_cast<const IpcStatus*>(stepResp.data());
+		if (status == IpcStatus::NotFound) {
+			return {{"error", "Thread " + std::to_string(threadId) + " is not stopped (not found or already running)"}};
+		}
 	}
 
 	// Wait for StepCompleted event (up to 5s)
@@ -1226,7 +1256,7 @@ json McpServer::ToolStepOver(const json& args) {
 		std::unique_lock<std::mutex> lock(stepMutex_);
 		if (!stepCv_.wait_for(lock, std::chrono::seconds(5),
 				[this]{ return stepCompleted_ || !attached_; })) {
-			return {{"error", "Step timed out"}};
+			return {{"error", "Step timed out (threadId=" + std::to_string(threadId) + "). Thread may not be stopped or may be deadlocked."}};
 		}
 		if (!stepCompleted_ && !attached_) {
 			return {{"error", "Target process exited during step"}};
@@ -1244,8 +1274,15 @@ json McpServer::ToolStepOut(const json& args) {
 
 	StepRequest req;
 	req.threadId = threadId;
-	if (!pipeClient_.SendCommand(IpcCommand::StepOut, &req, sizeof(req))) {
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::StepOut, &req, sizeof(req), respData)) {
 		return {{"error", IpcErrorMessage()}};
+	}
+	if (respData.size() >= sizeof(IpcStatus)) {
+		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
+		if (status == IpcStatus::NotFound) {
+			return {{"error", "Thread " + std::to_string(threadId) + " is not stopped (not found or already running)"}};
+		}
 	}
 	return {{"success", true}, {"threadId", threadId}};
 }
@@ -2337,7 +2374,7 @@ json McpServer::GetToolsList() {
 		{{"name", "veh_detach"}, {"description", "Detach debugger from the target process."},
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}},
 
-		{{"name", "veh_set_breakpoint"}, {"description", "Set a software breakpoint (INT3) at an address."},
+		{{"name", "veh_set_breakpoint"}, {"description", "Set a software breakpoint (INT3) at an address. If the target is running (not stopped at a breakpoint), the BP is still set but may not fire if execution already passed the address (timing-dependent). Duplicate address returns existing BP id."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Hex address (e.g. 0x7FF600001000)"}}},
 			{"condition", {{"type", "string"}, {"description", "Condition expression (e.g. 'RAX==0x1000', 'RCX>5'). Supports registers, *memory, hex/dec constants."}}},
@@ -2467,7 +2504,7 @@ json McpServer::GetToolsList() {
 		{{"name", "veh_exception_info"}, {"description", "Get information about the last exception that occurred in the target process."},
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}},
 
-		{{"name", "veh_trace_callers"}, {"description", "Set a breakpoint at address, collect all callers (return addresses from stack) for duration_sec seconds, then remove the breakpoint and return unique caller list with hit counts. Like Cheat Engine's 'Find out what accesses this address' but for code."},
+		{{"name", "veh_trace_callers"}, {"description", "Set a breakpoint at address, collect all callers (return addresses from stack) for duration_sec seconds, then remove the breakpoint and return unique caller list with hit counts. Like Cheat Engine's 'Find out what accesses this address' but for code. x64: uses RtlVirtualUnwind for accurate caller resolution. x86: uses [ESP] (accurate only at function entry). Note: DLL-internal IPC thread is excluded from tracing to prevent deadlocks."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Hex address to set breakpoint (e.g. '0x7FF600001000')"}}},
 			{"duration_sec", {{"type", "integer"}, {"description", "How long to collect callers in seconds (default: 5, max: 60)"}}}
