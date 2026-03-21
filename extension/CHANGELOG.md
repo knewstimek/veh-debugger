@@ -12,6 +12,9 @@
 - **Re-attach crash after detach**: Threads stopped in VEH handler retained TF (Trap Flag) after forced resume during detach. After VEH uninstall, the pending SINGLE_STEP exception had no handler, crashing the target. VEH handler now clears TF and pendingRearm on forced resume (3 paths: BP hit, HW BP, StepComplete)
 - **Duplicate breakpoint at same address**: Setting a BP at an already-breakpointed address created a duplicate entry. Now returns existing BP id (re-enables if disabled). MCP `swBreakpoints_` list also deduplicates by id
 - **trace_callers wrong caller address (x64)**: `ReadCallerFromStack` read `[RSP]` which is only correct at function entry. Replaced with `RtlVirtualUnwind` for accurate caller resolution regardless of BP position within the function. x86 retains `[ESP]` (no PE unwind tables available)
+- **Nonexistent BP removal returns success**: `RemoveBreakpoint`/`RemoveHwBreakpoint` used fire-and-forget `SendCommand`, always reporting success even for invalid IDs. Changed to `SendAndReceive` with `NotFound` status check
+- **Wrong threadId step returns timeout instead of error**: Step commands on non-stopped threads blocked until timeout with no useful message. DLL now validates thread is stopped (`IsThreadStopped`) before stepping, returns `NotFound`. MCP reports descriptive error with threadId
+- **trace_callers on DLL internal thread**: Pipe server thread hitting trace BP caused IPC processing delays. VEH handler now skips caller collection for the internal IPC thread (`internalTid_` atomic check)
 
 ## 1.0.83 (2026-03-21)
 

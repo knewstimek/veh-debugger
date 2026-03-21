@@ -44,6 +44,9 @@ public:
 	void ResumeStoppedThread(uint32_t threadId, bool step = false);
 	void ResumeAllStoppedThreads();
 
+	// 스레드가 VEH 핸들러에서 정지(대기) 중인지 확인
+	bool IsThreadStopped(uint32_t threadId);
+
 	// 정지된 스레드의 예외 시점 컨텍스트 가져오기/설정하기
 	bool GetStoppedContext(uint32_t threadId, CONTEXT& ctx);
 	bool SetStoppedContext(uint32_t threadId, const CONTEXT& ctx);
@@ -52,6 +55,9 @@ public:
 	void StartTrace(uint64_t address);
 	void StopTrace();
 	std::unordered_map<uint64_t, uint32_t> GetTraceResults(uint32_t& totalHits);
+
+	// 내부 스레드 등록 (pipe server 등) -- trace_callers에서 스킵하기 위해
+	void SetInternalThread(uint32_t tid) { internalTid_.store(tid, std::memory_order_relaxed); }
 
 private:
 	static LONG CALLBACK ExceptionHandler(PEXCEPTION_POINTERS info);
@@ -82,6 +88,7 @@ private:
 	std::atomic<uint32_t> traceWriteIdx_{0};
 	uint64_t traceBuffer_[kTraceBufferSize];   // lock-free ring buffer
 	std::atomic<uint32_t> traceTotalHits_{0};
+	std::atomic<uint32_t> internalTid_{0};  // pipe server tid (trace skip)
 
 	// Track which address needs re-arming after single-step
 	struct PendingRearm {
