@@ -1,6 +1,7 @@
 #include <windows.h>
 #include "breakpoint.h"
 #include "memory.h"
+#include "syscall_resolver.h"
 #include "../common/logger.h"
 #include <cstring>
 
@@ -192,13 +193,22 @@ void BreakpointManager::MaskBreakpointsInBuffer(uint64_t startAddress, uint8_t* 
 	}
 }
 
-// VirtualProtect로 메모리 보호 변경 후 바이트 패치
+// NtProtectVirtualMemory 스텁 복사본으로 메모리 보호 변경 후 바이트 패치.
+// VirtualProtect 직접 호출을 피하여, 사용자가 VirtualProtect에 BP를 걸어도
+// VEH 핸들러 재진입 crash가 발생하지 않도록 한다.
 bool BreakpointManager::PatchByte(uint64_t address, uint8_t byte, uint8_t* original) {
 	auto* ptr = reinterpret_cast<uint8_t*>(address);
 
-	// 메모리 보호 변경
-	DWORD oldProtect = 0;
-	if (!VirtualProtect(ptr, 1, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+	// 메모리 보호 변경 (NtProtectVirtualMemory 스텁 복사본 사용)
+	auto& resolver = SyscallResolver::Instance();
+	PVOID base = ptr;
+	SIZE_T size = 1;
+	ULONG oldProtect = 0;
+
+	NTSTATUS status = resolver.ProtectVirtualMemory(
+		&base, &size, PAGE_EXECUTE_READWRITE, &oldProtect);
+	if (!NT_SUCCESS(status)) {
+		LOG_ERROR("PatchByte: NtProtectVirtualMemory failed at 0x%p: 0x%08X", ptr, status);
 		return false;
 	}
 
@@ -210,7 +220,7 @@ bool BreakpointManager::PatchByte(uint64_t address, uint8_t byte, uint8_t* origi
 	// 바이트 패치
 	*ptr = byte;
 
-	// 기록 검증 — 실제로 바이트가 변경되었는지 확인
+	// 기록 검증
 	uint8_t verify = *ptr;
 	if (verify != byte) {
 		LOG_ERROR("PatchByte VERIFY FAIL at 0x%p: wrote 0x%02X, read back 0x%02X", ptr, byte, verify);
@@ -219,12 +229,16 @@ bool BreakpointManager::PatchByte(uint64_t address, uint8_t byte, uint8_t* origi
 	}
 
 	// 보호 복원
-	if (!VirtualProtect(ptr, 1, oldProtect, &oldProtect)) {
-		LOG_WARN("VirtualProtect restore failed at 0x%p: %lu", ptr, GetLastError());
+	base = ptr;
+	size = 1;
+	status = resolver.ProtectVirtualMemory(
+		&base, &size, oldProtect, &oldProtect);
+	if (!NT_SUCCESS(status)) {
+		LOG_WARN("PatchByte: NtProtectVirtualMemory restore failed at 0x%p: 0x%08X", ptr, status);
 	}
 
-	// 명령어 캐시 플러시
-	FlushInstructionCache(GetCurrentProcess(), ptr, 1);
+	// 명령어 캐시 플러시 (스텁 복사본 사용)
+	resolver.FlushInstructionCache(ptr, 1);
 
 	return true;
 }

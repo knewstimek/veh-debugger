@@ -32,6 +32,7 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 | `src/adapter/transport.cpp/h` | DAP transport layer (stdin/stdout + TCP accept) |
 | `src/adapter/disassembler.h` | IDisassembler interface + Zydis/Simple backends |
 | `src/dll/veh_handler.cpp/h` | VEH exception handler (INT3, SINGLE_STEP, HW BP) |
+| `src/dll/syscall_resolver.cpp/h` | ntdll stub copy + TEB direct access (WinAPI BP immunity) |
 | `src/dll/breakpoint.cpp/h` | SW breakpoint management + MaskBreakpointsInBuffer |
 | `src/dll/hw_breakpoint.cpp/h` | Hardware breakpoint (DR0-DR3) management |
 | `src/dll/pipe_server.cpp/h` | Named Pipe IPC server (DLL side) |
@@ -91,7 +92,8 @@ Named Pipe (`\\.\pipe\dotnet-diagnostic-{pid}`), binary framed:
 - **Pipe server thread**: Reads commands, dispatches handlers
   - Registered as internal thread via `ThreadManager::RegisterInternalThread()`
   - Filtered out of `EnumerateThreads`/`GetContext`/`SuspendThread`/`SetContext` (deadlock prevention)
-- **thread_local PendingRearm**: VEH state is per-thread; pipe server communicates via `stepFlags_` map
+- **TlsAlloc PendingRearm**: VEH state is per-thread (TlsAlloc, ManualMap-safe); pipe server communicates via `stepFlags_` map
+- **SyscallResolver**: All WinAPI calls in VEH path replaced with ntdll stub copies (RWX page) + TEB direct reads. Immune to user BPs on VirtualProtect, FlushInstructionCache, GetCurrentThreadId, TlsGetValue etc.
 
 ## Stepping Mechanism
 
@@ -137,6 +139,31 @@ Records which code paths call a given function by placing a trace BP and collect
 - No mutex, no heap allocation (deadlock risk if BP hits inside malloc/HeapAlloc)
 - Lock-free ring buffer: `traceBuffer_[65536]` + `atomic<uint32_t> traceWriteIdx_`
 - `__try/__except` wrapper for stack read (guard against invalid ESP/RSP)
+
+## SyscallResolver (WinAPI BP Immunity)
+
+VEH handler path must not call any WinAPI that a user might set a breakpoint on.
+If VirtualProtect has a BP, the INT3 inside PatchByte triggers VEH reentry -> crash.
+
+### Solution: ntdll Stub Copy
+1. `Initialize()`: For each ntdll function (NtProtectVirtualMemory, NtFlushInstructionCache, NtWaitForSingleObject, NtCreateEvent, NtClose, NtSetEvent):
+   - `GetProcAddress` -> get original stub address
+   - `DecodeInsn` loop (built-in x86/x64 length decoder) -> find `ret` instruction -> determine stub size
+   - Extract SSN from `mov eax, imm32` (opcode 0xB8)
+   - `memcpy` stub to pre-allocated RWX page (VirtualAlloc PAGE_EXECUTE_READWRITE)
+2. Wrapper functions call the copied stubs instead of originals
+3. If stub copy fails, falls back to `GetProcAddress` direct call (ntdll, not kernel32)
+
+### TEB Direct Reads
+These WinAPI functions are replaced with inline TEB field access (no function call at all):
+- `GetCurrentThreadId()` -> `__readgsdword(0x48)` (x64) / `__readfsdword(0x24)` (x86)
+- `TlsGetValue(index)` -> `TEB.TlsSlots[index]` (index < 64) or `TEB.TlsExpansionSlots[index-64]`
+- `TlsSetValue(index, val)` -> same TEB write
+- `GetLastError()` -> `TEB.LastError`
+
+### Known Limitations
+- `std::mutex::lock()` (CRT) internally calls `RtlEnterCriticalSection` which may call `GetCurrentThreadId` -- cannot be replaced without removing mutex usage from VEH path
+- `KiUserExceptionDispatcher` (ntdll) is the OS exception dispatch entry point -- structurally impossible to bypass, but also impossible to safely BP (any debugger would infinite-loop)
 
 ## Detach / Re-attach
 
