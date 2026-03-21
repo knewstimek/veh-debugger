@@ -62,8 +62,8 @@ void VehHandler::Uninstall() {
 	if (!installed_) return;
 	installed_ = false;  // 먼저 설정하여 새 예외 진입 차단
 
-	// 대기 중인 모든 스레드 깨우기
-	ResumeAllStoppedThreads();
+	// 대기 중인 모든 스레드 깨우기 (detach이므로 TF/rearm 취소 유도)
+	ResumeAllStoppedThreads(true);
 
 	if (handler_) {
 		RemoveVectoredExceptionHandler(handler_);
@@ -112,10 +112,11 @@ void VehHandler::ResumeStoppedThread(uint32_t threadId, bool step) {
 		}
 	}
 
-	{
-		std::lock_guard<std::mutex> lock(contextMapMutex_);
-		stoppedContexts_.erase(threadId);
-	}
+	// NOTE: stoppedContexts_는 여기서 erase하지 않음!
+	// VEH 핸들러가 WaitForSingleObject에서 깨어난 뒤 context를 복원해야 하므로,
+	// erase는 VEH 핸들러 쪽에서 복원 완료 후 수행한다.
+	// (여기서 erase하면 VEH가 detach로 오판하여 TF/rearm을 취소하는 버그 발생)
+
 	std::lock_guard<std::mutex> lock(eventMapMutex_);
 	auto it = threadEvents_.find(threadId);
 	if (it != threadEvents_.end()) {
@@ -125,16 +126,19 @@ void VehHandler::ResumeStoppedThread(uint32_t threadId, bool step) {
 	}
 }
 
-void VehHandler::ResumeAllStoppedThreads() {
-	LOG_DEBUG("ResumeAllStoppedThreads");
+void VehHandler::ResumeAllStoppedThreads(bool forDetach) {
+	LOG_DEBUG("ResumeAllStoppedThreads(forDetach=%d)", forDetach);
 	{
 		std::lock_guard<std::mutex> lock(stepFlagMutex_);
 		stepFlags_.clear();
 	}
-	{
+	if (forDetach) {
+		// Detach: stoppedContexts_를 먼저 비워서 VEH 핸들러가 detach를 감지하게 함
+		// -> TF 클리어 + pendingRearm 취소 (VEH 해제 후 SINGLE_STEP 크래시 방지)
 		std::lock_guard<std::mutex> lock(contextMapMutex_);
 		stoppedContexts_.clear();
 	}
+	// Normal continue: stoppedContexts_를 유지 -- VEH 핸들러가 context 복원 후 자체 정리
 	std::lock_guard<std::mutex> lock(eventMapMutex_);
 	for (auto& [tid, evt] : threadEvents_) {
 		SetEvent(evt);
@@ -238,6 +242,7 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 					auto ctxIt = stoppedContexts_.find(tid);
 					if (ctxIt != stoppedContexts_.end()) {
 						*info->ContextRecord = ctxIt->second;
+						stoppedContexts_.erase(ctxIt);
 					} else {
 						// Forced resume (detach) -- TF 제거하여 VEH 해제 후 SINGLE_STEP 크래시 방지
 						info->ContextRecord->EFlags &= ~0x100;
@@ -321,6 +326,7 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 								auto ctxIt = stoppedContexts_.find(tid);
 								if (ctxIt != stoppedContexts_.end()) {
 									*info->ContextRecord = ctxIt->second;
+									stoppedContexts_.erase(ctxIt);
 								} else {
 									// Forced resume (detach) -- 안전하게 계속 실행
 									LOG_DEBUG("Thread %u (HW BP): forced resume (detach)", tid);
@@ -368,6 +374,7 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 					auto ctxIt = stoppedContexts_.find(tid);
 					if (ctxIt != stoppedContexts_.end()) {
 						*info->ContextRecord = ctxIt->second;
+						stoppedContexts_.erase(ctxIt);
 					} else {
 						// Forced resume (detach)
 						LOG_DEBUG("Thread %u (step): forced resume (detach)", tid);
