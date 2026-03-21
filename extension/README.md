@@ -55,6 +55,7 @@ Add to `.vscode/launch.json`:
 | `args` | string[] | Command line arguments |
 | `stopOnEntry` | boolean | Break at entry point |
 | `injectionMethod` | string | `auto` / `createRemoteThread` / `ntCreateThreadEx` / `threadHijack` / `queueUserApc` |
+| `runAsInvoker` | boolean | Bypass UAC elevation prompt (`__COMPAT_LAYER=RunAsInvoker`) |
 | `adapterPath` | string | Custom path to `veh-debug-adapter.exe` |
 | `adapterPort` | number | TCP port (0 = stdio mode) |
 | `logFile` | string | Log file path |

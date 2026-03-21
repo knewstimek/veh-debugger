@@ -114,6 +114,7 @@ npm run compile
 - `program`: 디버깅할 실행 파일 경로
 - `args`: 실행 인자 (선택)
 - `stopOnEntry`: 진입점에서 정지 여부
+- `runAsInvoker`: UAC 권한 상승 프롬프트 없이 현재 권한으로 실행 (기본: false)
 
 **실행 중인 프로세스에 붙기 (Attach)**
 ```json
