@@ -186,6 +186,12 @@ void PipeServer::EmergencyCleanup() {
 void PipeServer::ServerThread() {
 	LOG_INFO("Server thread started (tid=%u)", GetCurrentThreadId());
 
+	// 스레드 이름 설정 (필터링 우회 시에도 식별 가능)
+	typedef HRESULT(WINAPI* SetThreadDescription_t)(HANDLE, PCWSTR);
+	static auto pSetDesc = reinterpret_cast<SetThreadDescription_t>(
+		GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription"));
+	if (pSetDesc) pSetDesc(GetCurrentThread(), L"VEH IPC");
+
 	// Start()에 스레드 ID 전달 (RegisterInternalThread race 방지)
 	{
 		std::lock_guard<std::mutex> lk(serverTidMutex_);
