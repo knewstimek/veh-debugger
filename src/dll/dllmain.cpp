@@ -106,8 +106,32 @@ VOID CALLBACK DllNotificationCallback(
 	}
 }
 
+// 시스템 디렉토리에서 dbghelp.dll 강제 로드 (delay-loaded)
+// 타겟 폴더에 구버전 dbghelp.dll이 있어도 시스템 것을 사용
+static void PreloadSystemDbgHelp() {
+	HMODULE h = LoadLibraryExA("dbghelp.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+	if (!h) {
+		// 폴백: 시스템 디렉토리 경로 직접 구성
+		char sysDir[MAX_PATH];
+		UINT len = GetSystemDirectoryA(sysDir, MAX_PATH);
+		if (len > 0 && len < MAX_PATH - 16) {
+			strcat_s(sysDir, "\\dbghelp.dll");
+			h = LoadLibraryA(sysDir);
+		}
+	}
+	if (h) {
+		OutputDebugStringW(L"[VEHDebugger] System dbghelp.dll pre-loaded\n");
+	} else {
+		OutputDebugStringW(L"[VEHDebugger] WARNING: Failed to pre-load system dbghelp.dll\n");
+	}
+	// h를 FreeLibrary하지 않음 -- delay-load가 이미 로드된 모듈을 사용
+}
+
 // 초기화를 별도 스레드에서 수행 (DllMain loader lock 회피)
 DWORD WINAPI InitThread(LPVOID) {
+	// 시스템 dbghelp.dll 선로드 (타겟 폴더의 구버전 방지)
+	PreloadSystemDbgHelp();
+
 	// DLL 로그를 파일로 출력 (디버깅용)
 	char logPath[MAX_PATH];
 	snprintf(logPath, sizeof(logPath), "veh_dll_%u.log", GetCurrentProcessId());
