@@ -46,10 +46,19 @@ bool VehHandler::Install() {
 		return true;
 	}
 
+	// 재진입 방지 TLS 슬롯 할당 (thread_local 사용 금지 -> TlsAlloc)
+	reentryTlsSlot_ = TlsAlloc();
+	if (reentryTlsSlot_ == TLS_OUT_OF_INDEXES) {
+		LOG_ERROR("TlsAlloc failed: %lu", GetLastError());
+		return false;
+	}
+
 	// 첫 번째 핸들러로 등록 (1 = first handler)
 	handler_ = AddVectoredExceptionHandler(1, ExceptionHandler);
 	if (!handler_) {
 		LOG_ERROR("AddVectoredExceptionHandler failed: %lu", GetLastError());
+		TlsFree(reentryTlsSlot_);
+		reentryTlsSlot_ = TLS_OUT_OF_INDEXES;
 		return false;
 	}
 
@@ -68,6 +77,12 @@ void VehHandler::Uninstall() {
 	if (handler_) {
 		RemoveVectoredExceptionHandler(handler_);
 		handler_ = nullptr;
+	}
+
+	// TLS 슬롯 해제
+	if (reentryTlsSlot_ != TLS_OUT_OF_INDEXES) {
+		TlsFree(reentryTlsSlot_);
+		reentryTlsSlot_ = TLS_OUT_OF_INDEXES;
 	}
 
 	// 이벤트 핸들 정리
@@ -173,8 +188,21 @@ LONG CALLBACK VehHandler::ExceptionHandler(PEXCEPTION_POINTERS info) {
 	return Instance().HandleException(info);
 }
 
+// RAII guard for TLS reentry flag (all return paths auto-clear)
+struct TlsReentryGuard {
+	DWORD slot;
+	TlsReentryGuard(DWORD s) : slot(s) { TlsSetValue(slot, reinterpret_cast<LPVOID>(1)); }
+	~TlsReentryGuard() { TlsSetValue(slot, nullptr); }
+};
+
 LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 	if (!installed_) return EXCEPTION_CONTINUE_SEARCH;
+
+	// 재진입 방지: VEH 핸들러 안에서 호출한 API에 BP가 걸려도 재귀하지 않음
+	if (reentryTlsSlot_ != TLS_OUT_OF_INDEXES && TlsGetValue(reentryTlsSlot_)) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+	TlsReentryGuard reentryGuard(reentryTlsSlot_);
 
 	const DWORD code = info->ExceptionRecord->ExceptionCode;
 	const uint64_t addr = reinterpret_cast<uint64_t>(info->ExceptionRecord->ExceptionAddress);
