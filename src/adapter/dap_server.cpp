@@ -202,6 +202,7 @@ void DapServer::OnLaunch(const Request& req) {
 	std::string cwd = req.arguments.value("cwd", "");
 	stopOnEntry_ = req.arguments.value("stopOnEntry", false);
 	injectionMethod_ = ParseInjectionMethod(req.arguments.value("injectionMethod", "auto"));
+	runAsInvoker_ = req.arguments.value("runAsInvoker", false);
 
 	// args 배열을 공백 구분 문자열로 변환 (Windows CommandLineToArgvW 규칙)
 	std::string argStr;
@@ -251,7 +252,7 @@ void DapServer::OnLaunch(const Request& req) {
 	launchCwd_ = cwd;
 
 	std::string dllPath = GetDllPath();
-	auto result = Injector::LaunchAndInject(programPath_, argStr, cwd, dllPath, injectionMethod_);
+	auto result = Injector::LaunchAndInject(programPath_, argStr, cwd, dllPath, injectionMethod_, runAsInvoker_);
 
 	if (result.pid == 0) {
 		resp.success = false;
@@ -2227,7 +2228,7 @@ void DapServer::OnRestart(const Request& req) {
 
 		// 재시작 — 원래 launch 시의 args/cwd를 사용
 		std::string dllPath = GetDllPath();
-		auto relaunch = Injector::LaunchAndInject(programPath_, launchArgStr_, launchCwd_, dllPath, injectionMethod_);
+		auto relaunch = Injector::LaunchAndInject(programPath_, launchArgStr_, launchCwd_, dllPath, injectionMethod_, runAsInvoker_);
 
 		if (relaunch.pid == 0) {
 			resp.success = false;
