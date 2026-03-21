@@ -70,6 +70,9 @@ private:
 	DebugEventCallback callback_;
 	std::atomic<bool> installed_{false};
 
+	// VEH 재진입 방지 TLS 슬롯 (thread_local 금지 -> TlsAlloc 사용)
+	DWORD reentryTlsSlot_ = TLS_OUT_OF_INDEXES;
+
 	// 스레드별 대기 이벤트 (auto-reset)
 	std::mutex eventMapMutex_;
 	std::unordered_map<uint32_t, HANDLE> threadEvents_;
