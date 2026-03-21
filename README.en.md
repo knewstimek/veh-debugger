@@ -112,9 +112,11 @@ Add to `.vscode/launch.json`:
     "name": "VEH Debug - Launch",
     "program": "C:/path/to/target.exe",
     "args": ["arg1", "arg2"],
-    "stopOnEntry": true
+    "stopOnEntry": true,
+    "runAsInvoker": false
 }
 ```
+- `runAsInvoker`: Bypass UAC elevation prompt by running with current privileges (default: false)
 
 **Attach**
 ```json
