@@ -653,7 +653,8 @@ LaunchResult Injector::LaunchAndInject(
 	const std::string& args,
 	const std::string& workingDir,
 	const std::string& dllPath,
-	InjectionMethod method)
+	InjectionMethod method,
+	bool runAsInvoker)
 {
 	STARTUPINFOA si = {};
 	si.cb = sizeof(si);
@@ -665,6 +666,14 @@ LaunchResult Injector::LaunchAndInject(
 	// CreateProcessA의 lpCommandLine은 수정 가능한 버퍼여야 함 (MSDN 계약)
 	std::vector<char> cmdBuf(cmdLine.begin(), cmdLine.end());
 	cmdBuf.push_back('\0');
+
+	// runAsInvoker: UAC manifest에 requireAdministrator가 있는 exe를
+	// UAC 프롬프트 없이 현재 권한으로 실행 (__COMPAT_LAYER=RunAsInvoker)
+	// 현재 프로세스 환경에 임시로 설정 후 CreateProcess가 상속하게 함
+	if (runAsInvoker) {
+		SetEnvironmentVariableA("__COMPAT_LAYER", "RunAsInvoker");
+		LOG_INFO("RunAsInvoker enabled: bypassing UAC elevation prompt");
+	}
 
 	// DETACHED_PROCESS: prevent child from inheriting parent's console.
 	// Without this, child's printf/cout goes to parent's stdout pipe,
@@ -680,6 +689,8 @@ LaunchResult Injector::LaunchAndInject(
 		&si, &pi))
 	{
 		DWORD err = GetLastError();
+		// 환경변수 정리 (현재 프로세스 오염 방지)
+		if (runAsInvoker) SetEnvironmentVariableA("__COMPAT_LAYER", nullptr);
 		LOG_ERROR("CreateProcess failed for '%s': %u", exePath.c_str(), err);
 		LaunchResult fail;
 		fail.error = "CreateProcess failed (error " + std::to_string(err) + ")";
@@ -693,6 +704,9 @@ LaunchResult Injector::LaunchAndInject(
 			fail.error += ": not a valid executable (bad PE format)";
 		return fail;
 	}
+
+	// 환경변수 정리 (현재 프로세스 오염 방지)
+	if (runAsInvoker) SetEnvironmentVariableA("__COMPAT_LAYER", nullptr);
 
 	LOG_INFO("Process created (PID: %u, TID: %u) in suspended state",
 		pi.dwProcessId, pi.dwThreadId);

@@ -89,7 +89,7 @@
 									"queueUserApc"
 								],
 								"enumDescriptions": [
-									"Try all methods in order (CRT → NtCTE → Hijack → APC)",
+									"Try all methods in order (CRT -> NtCTE -> Hijack -> APC)",
 									"Classic CreateRemoteThread + LoadLibrary",
 									"ntdll!NtCreateThreadEx (bypasses user-mode CRT hooks)",
 									"Hijack existing thread context (no new thread created)",
@@ -97,6 +97,11 @@
 								],
 								"description": "DLL injection method",
 								"default": "auto"
+							},
+							"runAsInvoker": {
+								"type": "boolean",
+								"description": "Bypass UAC elevation prompt by running with current privileges (__COMPAT_LAYER=RunAsInvoker)",
+								"default": false
 							},
 							"adapterPort": {
 								"type": "number",

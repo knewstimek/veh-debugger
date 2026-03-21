@@ -35,7 +35,8 @@ public:
 		const std::string& args,
 		const std::string& workingDir,
 		const std::string& dllPath,
-		InjectionMethod method = InjectionMethod::Auto);
+		InjectionMethod method = InjectionMethod::Auto,
+		bool runAsInvoker = false);
 
 	// DLL 이젝트
 	static bool EjectDll(uint32_t pid, const std::string& dllName);

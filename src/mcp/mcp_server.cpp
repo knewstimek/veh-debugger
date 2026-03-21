@@ -476,6 +476,7 @@ json McpServer::ToolLaunch(const json& args) {
 	}
 
 	bool stopOnEntry = JsonBool(args, "stopOnEntry", true);
+	bool runAsInvoker = JsonBool(args, "runAsInvoker", false);
 
 	// Check if program file exists
 	{
@@ -491,7 +492,7 @@ json McpServer::ToolLaunch(const json& args) {
 		return {{"error", "VEH DLL not found. Ensure vcruntime_net.dll (x64) or vcruntime_net32.dll (x86) is in the same directory as veh-mcp-server.exe"}};
 	}
 
-	auto launchResult = Injector::LaunchAndInject(program, argsStr, "", dllPath, InjectionMethod::CreateRemoteThread);
+	auto launchResult = Injector::LaunchAndInject(program, argsStr, "", dllPath, InjectionMethod::CreateRemoteThread, runAsInvoker);
 	uint32_t pid = launchResult.pid;
 	if (pid == 0) {
 		std::string msg = "Launch failed: " + program;
@@ -2290,7 +2291,8 @@ json McpServer::GetToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"program", {{"type", "string"}, {"description", "Path to executable"}}},
 			{"args", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Command line arguments"}}},
-			{"stopOnEntry", {{"type", "boolean"}, {"description", "Stop at entry point (default: true)"}}}
+			{"stopOnEntry", {{"type", "boolean"}, {"description", "Stop at entry point (default: true)"}}},
+			{"runAsInvoker", {{"type", "boolean"}, {"description", "Bypass UAC elevation prompt by setting __COMPAT_LAYER=RunAsInvoker (default: false)"}}}
 		 }}, {"required", json::array({"program"})}}}},
 
 		{{"name", "veh_detach"}, {"description", "Detach debugger from the target process."},
