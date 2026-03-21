@@ -18,6 +18,12 @@
 - **Breakpoint rearm failure (single-hit only)**: `ResumeStoppedThread`/`ResumeAllStoppedThreads` erased `stoppedContexts_` before `SetEvent`, causing VEH handler to mistake normal continue for detach -- clearing TF and canceling rearm. INT3 was never reinstalled after first hit. Fixed by deferring context cleanup to VEH handler (after restore) and adding `forDetach` flag to `ResumeAllStoppedThreads`
 - **Exception not captured (ACCESS_VIOLATION etc.)**: VEH handler only handled INT3 and SINGLE_STEP, silently passing all other exceptions. Now catches crash-like exceptions (ACCESS_VIOLATION, INT_DIVIDE_BY_ZERO, ILLEGAL_INSTRUCTION, etc.), pauses the thread, and reports via IPC. DAP sends `stopped(reason=exception)`, MCP returns `reason: "exception"` from `veh_continue(wait=true)`. Exception details available via `exceptionInfo` / `veh_exception_info`
 - **MCP `veh_continue(wait=true)` race with running process**: When target was already running (e.g. `stopOnEntry=false`), events occurring before `veh_continue` call were lost -- `bpHitOccurred_` was reset to false, IPC Continue resumed the stopped thread prematurely. Now checks for cached events before resetting, returns immediately if an event already occurred
+- **Rapid consecutive step race condition**: VEH handler called `callback_` (sending IPC event) before creating the wait event handle (`GetOrCreateThreadEvent`). If the adapter responded fast enough with the next step command, `IsThreadStopped` returned false ("Thread not stopped"). Fixed by creating the wait event before firing the callback. Also fixed handle lifecycle: VEH handler now owns handle closure (was previously closed by `ResumeStoppedThread`, risking use-after-close)
+- **Internal thread BP deadlock**: Setting a breakpoint on functions used by the DLL pipe server thread (e.g. `Sleep`, `GetCurrentProcessId`) caused deadlock -- the pipe server thread stopped in VEH handler, blocking all IPC. VEH handler now detects internal thread BP hits and transparently skips them (restore original byte + TF + rearm, no callback/wait)
+
+### Improvements
+- **VEH handler `NotifyAndWait` refactor**: Extracted repeated stop/wait/resume pattern (context save, event create, callback, wait, context restore) from 4 exception paths into a single `NotifyAndWait` method with `WaitResult` enum
+- **`thread_local` replaced with `TlsAlloc`**: `PendingRearm` per-thread state changed from `thread_local` to `TlsAlloc`/`HeapAlloc` for ManualMap DLL injection compatibility
 
 ## 1.0.83 (2026-03-21)
 
