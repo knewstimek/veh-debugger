@@ -9,6 +9,18 @@
 static uint64_t ReadCallerFromStack(const CONTEXT* ctx) {
 	__try {
 #ifdef _WIN64
+		// RtlVirtualUnwind -- PE unwind 테이블로 정확한 caller 획득 (함수 중간 BP에서도 동작)
+		DWORD64 imageBase = 0;
+		PRUNTIME_FUNCTION rtFunc = RtlLookupFunctionEntry(ctx->Rip, &imageBase, nullptr);
+		if (rtFunc) {
+			CONTEXT tmpCtx = *ctx;
+			PVOID handlerData = nullptr;
+			DWORD64 establisherFrame = 0;
+			RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, ctx->Rip,
+				rtFunc, &tmpCtx, &handlerData, &establisherFrame, nullptr);
+			return tmpCtx.Rip;
+		}
+		// Leaf function (unwind info 없음) -- [RSP] 폴백
 		return *reinterpret_cast<uint64_t*>(ctx->Rsp);
 #else
 		return static_cast<uint64_t>(*reinterpret_cast<uint32_t*>(ctx->Esp));
@@ -218,6 +230,12 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 					auto ctxIt = stoppedContexts_.find(tid);
 					if (ctxIt != stoppedContexts_.end()) {
 						*info->ContextRecord = ctxIt->second;
+					} else {
+						// Forced resume (detach) -- TF 제거하여 VEH 해제 후 SINGLE_STEP 크래시 방지
+						info->ContextRecord->EFlags &= ~0x100;
+						pendingRearm_ = {0, 0, false, false};
+						LOG_DEBUG("Thread %u: forced resume (detach), TF cleared", tid);
+						return EXCEPTION_CONTINUE_EXECUTION;
 					}
 				}
 
@@ -295,6 +313,10 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 								auto ctxIt = stoppedContexts_.find(tid);
 								if (ctxIt != stoppedContexts_.end()) {
 									*info->ContextRecord = ctxIt->second;
+								} else {
+									// Forced resume (detach) -- 안전하게 계속 실행
+									LOG_DEBUG("Thread %u (HW BP): forced resume (detach)", tid);
+									return EXCEPTION_CONTINUE_EXECUTION;
 								}
 							}
 						}
@@ -338,10 +360,14 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 					auto ctxIt = stoppedContexts_.find(tid);
 					if (ctxIt != stoppedContexts_.end()) {
 						*info->ContextRecord = ctxIt->second;
+					} else {
+						// Forced resume (detach)
+						LOG_DEBUG("Thread %u (step): forced resume (detach)", tid);
+						return EXCEPTION_CONTINUE_EXECUTION;
 					}
 				}
 
-				// step 플래그 확인 — 연속 스텝 요청이면 TF 재설정
+				// step 플래그 확인 -- 연속 스텝 요청이면 TF 재설정
 				{
 					std::lock_guard<std::mutex> lock(stepFlagMutex_);
 					auto it = stepFlags_.find(tid);

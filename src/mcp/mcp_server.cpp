@@ -619,15 +619,28 @@ json McpServer::ToolSetBreakpoint(const json& args) {
 	if (respData.size() >= sizeof(SetBreakpointResponse)) {
 		auto* resp = reinterpret_cast<const SetBreakpointResponse*>(respData.data());
 		if (resp->status == IpcStatus::Ok) {
-			BpMapping bp;
-			bp.id = resp->id;
-			bp.address = addr;
-			bp.condition = args.value("condition", "");
-			bp.hitCondition = args.value("hitCondition", "");
-			bp.logMessage = args.value("logMessage", "");
 			{
 				std::lock_guard<std::mutex> lock(bpMutex_);
-				swBreakpoints_.push_back(bp);
+				// 같은 id가 이미 있으면 조건만 업데이트 (DLL 측 dedup으로 기존 id 반환)
+				bool found = false;
+				for (auto& existing : swBreakpoints_) {
+					if (existing.id == resp->id) {
+						existing.condition = args.value("condition", "");
+						existing.hitCondition = args.value("hitCondition", "");
+						existing.logMessage = args.value("logMessage", "");
+						found = true;
+						break;
+					}
+				}
+				if (!found) {
+					BpMapping bp;
+					bp.id = resp->id;
+					bp.address = addr;
+					bp.condition = args.value("condition", "");
+					bp.hitCondition = args.value("hitCondition", "");
+					bp.logMessage = args.value("logMessage", "");
+					swBreakpoints_.push_back(bp);
+				}
 			}
 			char buf[32]; snprintf(buf, sizeof(buf), "0x%llX", addr);
 			return {{"success", true}, {"id", resp->id}, {"address", buf}};
@@ -701,17 +714,31 @@ json McpServer::ToolSetSourceBreakpoint(const json& args) {
 		return {{"error", "Failed to set breakpoint at resolved address"}};
 	}
 
-	BpMapping bp;
-	bp.id = resp->id;
-	bp.address = resolved->address;
-	bp.source = source;
-	bp.line = line;
-	bp.condition = args.value("condition", "");
-	bp.hitCondition = args.value("hitCondition", "");
-	bp.logMessage = args.value("logMessage", "");
 	{
 		std::lock_guard<std::mutex> lock(bpMutex_);
-		swBreakpoints_.push_back(bp);
+		bool found = false;
+		for (auto& existing : swBreakpoints_) {
+			if (existing.id == resp->id) {
+				existing.source = source;
+				existing.line = line;
+				existing.condition = args.value("condition", "");
+				existing.hitCondition = args.value("hitCondition", "");
+				existing.logMessage = args.value("logMessage", "");
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			BpMapping bp;
+			bp.id = resp->id;
+			bp.address = resolved->address;
+			bp.source = source;
+			bp.line = line;
+			bp.condition = args.value("condition", "");
+			bp.hitCondition = args.value("hitCondition", "");
+			bp.logMessage = args.value("logMessage", "");
+			swBreakpoints_.push_back(bp);
+		}
 	}
 
 	char buf[32]; snprintf(buf, sizeof(buf), "0x%llX", resolved->address);
@@ -755,16 +782,29 @@ json McpServer::ToolSetFunctionBreakpoint(const json& args) {
 		return {{"error", "Failed to set breakpoint at resolved address"}};
 	}
 
-	BpMapping bp;
-	bp.id = resp->id;
-	bp.address = resolved->address;
-	bp.functionName = name;
-	bp.condition = args.value("condition", "");
-	bp.hitCondition = args.value("hitCondition", "");
-	bp.logMessage = args.value("logMessage", "");
 	{
 		std::lock_guard<std::mutex> lock(bpMutex_);
-		swBreakpoints_.push_back(bp);
+		bool found = false;
+		for (auto& existing : swBreakpoints_) {
+			if (existing.id == resp->id) {
+				existing.functionName = name;
+				existing.condition = args.value("condition", "");
+				existing.hitCondition = args.value("hitCondition", "");
+				existing.logMessage = args.value("logMessage", "");
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			BpMapping bp;
+			bp.id = resp->id;
+			bp.address = resolved->address;
+			bp.functionName = name;
+			bp.condition = args.value("condition", "");
+			bp.hitCondition = args.value("hitCondition", "");
+			bp.logMessage = args.value("logMessage", "");
+			swBreakpoints_.push_back(bp);
+		}
 	}
 
 	char buf[32]; snprintf(buf, sizeof(buf), "0x%llX", resolved->address);

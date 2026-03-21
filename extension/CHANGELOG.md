@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+- **HW breakpoint DR registers not applied**: Data breakpoints (`veh_set_data_breakpoint`) returned success and appeared in list, but DR0-DR7 were not actually set when target was stopped. VEH handler now applies current HW BPs to context before returning, and `ApplyHwBreakpointsToAllThreads` updates `stoppedContexts` directly for VEH-stopped threads
+- **Pause + Continue resume missing**: `pause` used OS `SuspendThread` but `continue` only signaled VEH events, leaving threads frozen. Continue now also calls `ResumeAll()` for OS-suspended threads
+- **Disassembler wrong mode for x86**: Disassembler always defaulted to x64 mode, showing `push rbp` instead of `push ebp` for x86 targets. Now auto-detects bitness on launch/attach (both MCP and DAP)
+- **dbghelp.dll conflict in target directories**: DLL injection failed when target folder contained old/incompatible `dbghelp.dll`. VEH DLL now uses `/DELAYLOAD:dbghelp.dll` and pre-loads from system directory
+- **x86 (WoW64) injection failure**: DLL bitness detection in DAP used process-based check before process creation (always returned x64). Added PE file-based detection (`IsExe32Bit`). Also fixed WoW64 `LoadLibraryA` resolve from existing x86 processes with cmd.exe fallback
+- **MCP injection method hardcoded**: MCP `veh_launch` always used `CreateRemoteThread`. Changed default to `Auto` and added `injectionMethod` parameter
+- **Re-attach crash after detach**: Threads stopped in VEH handler retained TF (Trap Flag) after forced resume during detach. After VEH uninstall, the pending SINGLE_STEP exception had no handler, crashing the target. VEH handler now clears TF and pendingRearm on forced resume (3 paths: BP hit, HW BP, StepComplete)
+- **Duplicate breakpoint at same address**: Setting a BP at an already-breakpointed address created a duplicate entry. Now returns existing BP id (re-enables if disabled). MCP `swBreakpoints_` list also deduplicates by id
+- **trace_callers wrong caller address (x64)**: `ReadCallerFromStack` read `[RSP]` which is only correct at function entry. Replaced with `RtlVirtualUnwind` for accurate caller resolution regardless of BP position within the function. x86 retains `[ESP]` (no PE unwind tables available)
+
 ## 1.0.83 (2026-03-21)
 
 ### Features
