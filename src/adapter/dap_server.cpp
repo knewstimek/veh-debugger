@@ -2806,8 +2806,14 @@ std::string DapServer::GetDllPath() {
 
 	std::filesystem::path dir = std::filesystem::path(exePathW).parent_path();
 
+	// 실행 중인 프로세스가 있으면 pid 기반 판별
 	if (targetPid_ != 0) {
 		return Injector::SelectDllForTarget(targetPid_, dir.string());
+	}
+
+	// 프로세스 생성 전 (launch)이면 PE 헤더 기반 판별
+	if (!programPath_.empty()) {
+		return Injector::SelectDllForExe(programPath_, dir.string());
 	}
 
 	return (dir / "vcruntime_net.dll").string();

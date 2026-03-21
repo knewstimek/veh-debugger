@@ -186,6 +186,82 @@ FARPROC Injector::GetRemoteLoadLibraryA(HANDLE process) {
 	return nullptr;
 }
 
+// WoW64 LoadLibraryA를 기존 x86 프로세스에서 resolve (CREATE_SUSPENDED 타겟은 32비트 모듈 미로드)
+// 폴백: SysWOW64\cmd.exe를 잠깐 띄워서 resolve
+FARPROC Injector::ResolveWow64LoadLibraryA() {
+	// 1단계: 실행 중인 WoW64 프로세스에서 찾기
+	HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snap != INVALID_HANDLE_VALUE) {
+		PROCESSENTRY32W pe = {};
+		pe.dwSize = sizeof(pe);
+		if (Process32FirstW(snap, &pe)) {
+			do {
+				if (pe.th32ProcessID == 0 || pe.th32ProcessID == 4) continue;
+				if (pe.th32ProcessID == GetCurrentProcessId()) continue;
+
+				HANDLE proc = OpenProcess(
+					PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pe.th32ProcessID);
+				if (!proc) continue;
+
+				BOOL isWow64 = FALSE;
+				::IsWow64Process(proc, &isWow64);
+				if (isWow64) {
+					LOG_INFO("[WoW64] Resolving LoadLibraryA from existing process PID=%u (%ls)",
+						pe.th32ProcessID, pe.szExeFile);
+					FARPROC addr = GetRemoteLoadLibraryA(proc);
+					CloseHandle(proc);
+					if (addr) {
+						CloseHandle(snap);
+						return addr;
+					}
+				} else {
+					CloseHandle(proc);
+				}
+			} while (Process32NextW(snap, &pe));
+		}
+		CloseHandle(snap);
+	}
+
+	// 2단계: WoW64 프로세스가 없으면 SysWOW64\cmd.exe를 잠깐 띄워서 resolve
+	LOG_INFO("[WoW64] No existing WoW64 process found, spawning SysWOW64\\cmd.exe...");
+	char cmdPath[MAX_PATH];
+	GetSystemWow64DirectoryA(cmdPath, MAX_PATH);
+	strcat_s(cmdPath, "\\cmd.exe");
+
+	STARTUPINFOA si = {};
+	si.cb = sizeof(si);
+	PROCESS_INFORMATION pi = {};
+	char cmdLine[] = "cmd.exe /c exit";
+	if (!CreateProcessA(cmdPath, cmdLine, nullptr, nullptr, FALSE,
+		CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+		LOG_ERROR("[WoW64] Failed to spawn cmd.exe: %u", GetLastError());
+		return nullptr;
+	}
+
+	// cmd.exe 초기화 대기 (kernel32 로드될 때까지)
+	WaitForInputIdle(pi.hProcess, 3000);
+	Sleep(100);
+
+	HANDLE proc = OpenProcess(
+		PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pi.dwProcessId);
+	FARPROC addr = nullptr;
+	if (proc) {
+		addr = GetRemoteLoadLibraryA(proc);
+		CloseHandle(proc);
+	}
+
+	TerminateProcess(pi.hProcess, 0);
+	CloseHandle(pi.hThread);
+	CloseHandle(pi.hProcess);
+
+	if (addr) {
+		LOG_INFO("[WoW64] LoadLibraryA resolved via cmd.exe: 0x%p", addr);
+	} else {
+		LOG_ERROR("[WoW64] Failed to resolve LoadLibraryA from cmd.exe");
+	}
+	return addr;
+}
+
 // --- 방식 1: CreateRemoteThread ---
 
 bool Injector::InjectViaCreateRemoteThread(HANDLE process, LPVOID remoteStr, FARPROC loadLib) {
@@ -310,6 +386,10 @@ bool Injector::InjectViaThreadHijack(HANDLE process, uint32_t pid, LPVOID remote
 
 		// WoW64 프로세스의 32비트 LoadLibraryA 주소
 		FARPROC loadLib = GetRemoteLoadLibraryA(process);
+		if (!loadLib) {
+			LOG_INFO("[Hijack] Target modules not initialized, resolving from other WoW64 process...");
+			loadLib = ResolveWow64LoadLibraryA();
+		}
 		if (!loadLib) {
 			LOG_ERROR("[Hijack] Failed to find 32-bit LoadLibraryA");
 			ResumeThread(thread);
@@ -586,6 +666,11 @@ bool Injector::InjectDll(uint32_t pid, const std::string& dllPath, InjectionMeth
 		LOG_INFO("Target is WoW64 (32-bit), resolving 32-bit LoadLibraryA...");
 		loadLib = GetRemoteLoadLibraryA(process);
 		if (!loadLib) {
+			// CREATE_SUSPENDED 상태에서 32비트 모듈 미로드 -- 다른 WoW64 프로세스에서 resolve
+			LOG_INFO("Target modules not initialized, resolving from other WoW64 process...");
+			loadLib = ResolveWow64LoadLibraryA();
+		}
+		if (!loadLib) {
 			LOG_ERROR("Failed to resolve 32-bit LoadLibraryA for WoW64 target");
 			FreeRemoteString(process, remoteStr);
 			CloseHandle(process);
@@ -791,6 +876,47 @@ std::string Injector::SelectDllForTarget(uint32_t pid, const std::string& dllDir
 		auto path32 = fs::path(dllDir) / "vcruntime_net32.dll";
 		if (fs::exists(path32)) {
 			LOG_INFO("Target is 32-bit (WoW64), using 32-bit payload");
+			return path32.string();
+		}
+		LOG_WARN("32-bit DLL not found: %s", path32.string().c_str());
+	}
+
+	return (fs::path(dllDir) / "vcruntime_net.dll").string();
+}
+
+bool Injector::IsExe32Bit(const std::string& exePath) {
+	HANDLE hFile = CreateFileA(exePath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+		nullptr, OPEN_EXISTING, 0, nullptr);
+	if (hFile == INVALID_HANDLE_VALUE) return false;
+
+	bool is32 = false;
+	IMAGE_DOS_HEADER dosHeader;
+	DWORD bytesRead;
+	if (ReadFile(hFile, &dosHeader, sizeof(dosHeader), &bytesRead, nullptr) &&
+		bytesRead == sizeof(dosHeader) && dosHeader.e_magic == IMAGE_DOS_SIGNATURE) {
+		if (SetFilePointer(hFile, dosHeader.e_lfanew, nullptr, FILE_BEGIN) != INVALID_SET_FILE_POINTER) {
+			DWORD ntSig;
+			if (ReadFile(hFile, &ntSig, sizeof(ntSig), &bytesRead, nullptr) &&
+				bytesRead == sizeof(ntSig) && ntSig == IMAGE_NT_SIGNATURE) {
+				IMAGE_FILE_HEADER fileHeader;
+				if (ReadFile(hFile, &fileHeader, sizeof(fileHeader), &bytesRead, nullptr) &&
+					bytesRead == sizeof(fileHeader)) {
+					is32 = (fileHeader.Machine == IMAGE_FILE_MACHINE_I386);
+				}
+			}
+		}
+	}
+	CloseHandle(hFile);
+	return is32;
+}
+
+std::string Injector::SelectDllForExe(const std::string& exePath, const std::string& dllDir) {
+	namespace fs = std::filesystem;
+
+	if (IsExe32Bit(exePath)) {
+		auto path32 = fs::path(dllDir) / "vcruntime_net32.dll";
+		if (fs::exists(path32)) {
+			LOG_INFO("Target exe is 32-bit, using 32-bit payload");
 			return path32.string();
 		}
 		LOG_WARN("32-bit DLL not found: %s", path32.string().c_str());
