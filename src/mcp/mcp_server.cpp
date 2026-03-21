@@ -428,10 +428,10 @@ json McpServer::ToolAttach(const json& args) {
 	// 타겟 비트니스에 맞게 디스어셈블러 재생성
 	{
 		BOOL isWow64 = FALSE;
-		HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-		if (hProc) {
-			IsWow64Process(hProc, &isWow64);
-			CloseHandle(hProc);
+		if (targetProcess_) {
+			IsWow64Process(targetProcess_, &isWow64);
+		} else {
+			LOG_WARN("Cannot determine target bitness (OpenProcess failed), defaulting to x64");
 		}
 		bool is64 = (isWow64 == FALSE);
 		disassembler_ = CreateDisassembler(is64);
