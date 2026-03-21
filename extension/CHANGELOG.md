@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.82 (2026-03-21)
+
+### Bug Fixes
+- **Auto+APC double-free**: When `Auto` injection fell back to `QueueUserAPC`, `remoteStr` was freed twice (once internally by APC, once by cleanup). Added `apcUsed` flag to track APC-internal memory ownership
+- **ThreadHijack shellcode free timing**: Freeing shellcode memory before confirming DLL load could crash the target (shellcode still executing). Now only freed after module load is confirmed
+- **OnRestart orphan process**: If pipe connection failed after successful relaunch, the new process was left alive with no way to terminate. Now calls `TerminateProcess` on pipe connect failure
+- **OnRestart targetPid_ stale**: `targetPid_` was assigned before checking relaunch success, leaving stale state on failure. Now assigned only after success
+- **CreateProcessA mutable buffer**: `lpCommandLine` must point to a writable buffer per MSDN contract. Changed from `string::data()` to `vector<char>`
+
+### Improvements
+- **Launch error diagnostics**: Added `LaunchResult.error` field with detailed `GetLastError` info (file not found, access denied, bad PE format, etc.). Propagated to both MCP and DAP error responses
+- **DLL not found messages**: Now specify exact DLL name per architecture (`vcruntime_net.dll` for x64, `vcruntime_net32.dll` for x86)
+- **veh_evaluate description**: Added guidance for indirect call tracing (vtable dispatch via register dereference)
+
+### Tests
+- Converted 5 test files from hardcoded absolute paths to relative paths
+- Added `test_launch_errors.py` (10 tests for error diagnostics)
+- Added `test_crackme_debug.py` (12 tests for real-world debugging scenarios)
+- Removed deprecated `test_register_syntax.py` v1
+
 ## 1.0.81 (2026-03-19)
 
 ### Bug Fixes
