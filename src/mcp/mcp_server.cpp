@@ -477,6 +477,7 @@ json McpServer::ToolLaunch(const json& args) {
 
 	bool stopOnEntry = JsonBool(args, "stopOnEntry", true);
 	bool runAsInvoker = JsonBool(args, "runAsInvoker", false);
+	InjectionMethod injMethod = ParseInjectionMethod(args.value("injectionMethod", "auto"));
 
 	// Check if program file exists
 	{
@@ -492,7 +493,7 @@ json McpServer::ToolLaunch(const json& args) {
 		return {{"error", "VEH DLL not found. Ensure vcruntime_net.dll (x64) or vcruntime_net32.dll (x86) is in the same directory as veh-mcp-server.exe"}};
 	}
 
-	auto launchResult = Injector::LaunchAndInject(program, argsStr, "", dllPath, InjectionMethod::CreateRemoteThread, runAsInvoker);
+	auto launchResult = Injector::LaunchAndInject(program, argsStr, "", dllPath, injMethod, runAsInvoker);
 	uint32_t pid = launchResult.pid;
 	if (pid == 0) {
 		std::string msg = "Launch failed: " + program;
@@ -2241,30 +2242,7 @@ std::string McpServer::GetDllPathForExe(const std::string& exePath) {
 	std::string dir = GetExeDir();
 	if (dir.empty()) return "";
 
-	// PE 헤더에서 비트니스 감지 (파일 기반)
-	bool use32 = false;
-	HANDLE hFile = CreateFileA(exePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-	                           OPEN_EXISTING, 0, nullptr);
-	if (hFile != INVALID_HANDLE_VALUE) {
-		IMAGE_DOS_HEADER dosHeader;
-		DWORD bytesRead;
-		if (ReadFile(hFile, &dosHeader, sizeof(dosHeader), &bytesRead, nullptr) &&
-		    bytesRead == sizeof(dosHeader) && dosHeader.e_magic == IMAGE_DOS_SIGNATURE) {
-			if (SetFilePointer(hFile, dosHeader.e_lfanew, nullptr, FILE_BEGIN) != INVALID_SET_FILE_POINTER) {
-				DWORD ntSig;
-				if (ReadFile(hFile, &ntSig, sizeof(ntSig), &bytesRead, nullptr) &&
-				    bytesRead == sizeof(ntSig) && ntSig == IMAGE_NT_SIGNATURE) {
-					IMAGE_FILE_HEADER fileHeader;
-					if (ReadFile(hFile, &fileHeader, sizeof(fileHeader), &bytesRead, nullptr) &&
-					    bytesRead == sizeof(fileHeader)) {
-						use32 = (fileHeader.Machine == IMAGE_FILE_MACHINE_I386);
-					}
-				}
-			}
-		}
-		CloseHandle(hFile);
-	}
-
+	bool use32 = Injector::IsExe32Bit(exePath);
 	return ResolveDll(dir, use32);
 }
 
@@ -2292,7 +2270,8 @@ json McpServer::GetToolsList() {
 			{"program", {{"type", "string"}, {"description", "Path to executable"}}},
 			{"args", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Command line arguments"}}},
 			{"stopOnEntry", {{"type", "boolean"}, {"description", "Stop at entry point (default: true)"}}},
-			{"runAsInvoker", {{"type", "boolean"}, {"description", "Bypass UAC elevation prompt by setting __COMPAT_LAYER=RunAsInvoker (default: false)"}}}
+			{"runAsInvoker", {{"type", "boolean"}, {"description", "Bypass UAC elevation prompt by setting __COMPAT_LAYER=RunAsInvoker (default: false)"}}},
+			{"injectionMethod", {{"type", "string"}, {"enum", json::array({"auto", "createRemoteThread", "ntCreateThreadEx", "threadHijack", "queueUserApc"})}, {"description", "DLL injection method (default: auto). Auto tries all methods in order."}}}
 		 }}, {"required", json::array({"program"})}}}},
 
 		{{"name", "veh_detach"}, {"description", "Detach debugger from the target process."},

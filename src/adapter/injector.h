@@ -41,11 +41,15 @@ public:
 	// DLL 이젝트
 	static bool EjectDll(uint32_t pid, const std::string& dllName);
 
-	// WoW64 감지
+	// WoW64 감지 (실행 중인 프로세스)
 	static bool IsWow64Process(uint32_t pid);
+
+	// PE 파일 비트니스 감지 (파일 기반, 프로세스 생성 전 사용)
+	static bool IsExe32Bit(const std::string& exePath);
 
 	// 비트니스에 맞는 DLL 자동 선택
 	static std::string SelectDllForTarget(uint32_t pid, const std::string& dllDir);
+	static std::string SelectDllForExe(const std::string& exePath, const std::string& dllDir);
 
 private:
 	static bool EnableDebugPrivilege();
@@ -56,6 +60,8 @@ private:
 
 	// WoW64 원격 프로세스에서 32비트 LoadLibraryA 주소 찾기
 	static FARPROC GetRemoteLoadLibraryA(HANDLE process);
+	// 기존 WoW64 프로세스에서 LoadLibraryA resolve (폴백: cmd.exe 생성)
+	static FARPROC ResolveWow64LoadLibraryA();
 
 	// 개별 인젝션 방식
 	static bool InjectViaCreateRemoteThread(HANDLE process, LPVOID remoteStr, FARPROC loadLib);
