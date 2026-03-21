@@ -407,6 +407,13 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		} else {
 			VehHandler::Instance().ResumeStoppedThread(req->threadId);
 		}
+		// Pause (OS SuspendThread) 로 정지된 스레드도 resume
+		// (VEH resume과 별개 -- Pause는 OS-level, Continue는 양쪽 모두 해제)
+		if (req->threadId == 0) {
+			ThreadManager::Instance().ResumeAll();
+		} else {
+			ThreadManager::Instance().ResumeThread(req->threadId);
+		}
 		IpcStatus status = IpcStatus::Ok;
 		SendResponse(command, &status, sizeof(status));
 		break;
@@ -992,10 +999,20 @@ void PipeServer::ApplyHwBreakpointsToAllThreads() {
 	for (const auto& t : threads) {
 		if (t.id == currentTid) continue; // pipe server 스레드 자신은 skip
 
+		// VEH 핸들러에서 정지된 스레드는 stoppedContexts에 직접 반영
+		// (SetThreadContext로는 VEH resume 시 info->ContextRecord에 의해 덮어씌워짐)
+		CONTEXT stoppedCtx;
+		if (VehHandler::Instance().GetStoppedContext(t.id, stoppedCtx)) {
+			HwBreakpointManager::Instance().ClearFromContext(stoppedCtx);
+			HwBreakpointManager::Instance().ApplyToContext(stoppedCtx);
+			VehHandler::Instance().SetStoppedContext(t.id, stoppedCtx);
+			continue;
+		}
+
+		// 실행 중인 스레드는 SetThreadContext로 적용
 		CONTEXT ctx;
 		if (!ThreadManager::Instance().GetContext(t.id, ctx)) continue;
 
-		// 기존 DR 값 클리어 후 현재 HW BP 목록으로 재설정
 		HwBreakpointManager::Instance().ClearFromContext(ctx);
 		HwBreakpointManager::Instance().ApplyToContext(ctx);
 

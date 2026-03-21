@@ -234,6 +234,10 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 			}
 		}
 
+		// HW BP를 context에 반영 (정지 중 설정/제거된 HW BP가 DR 레지스터에 적용됨)
+		HwBreakpointManager::Instance().ClearFromContext(*info->ContextRecord);
+		HwBreakpointManager::Instance().ApplyToContext(*info->ContextRecord);
+
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
 
@@ -296,6 +300,10 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 						}
 					}
 
+					// HW BP를 context에 반영
+					HwBreakpointManager::Instance().ClearFromContext(*info->ContextRecord);
+					HwBreakpointManager::Instance().ApplyToContext(*info->ContextRecord);
+
 					return EXCEPTION_CONTINUE_EXECUTION;
 				}
 			}
@@ -345,6 +353,10 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 				}
 			}
 		}
+
+		// HW BP를 context에 반영
+		HwBreakpointManager::Instance().ClearFromContext(*info->ContextRecord);
+		HwBreakpointManager::Instance().ApplyToContext(*info->ContextRecord);
 
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
