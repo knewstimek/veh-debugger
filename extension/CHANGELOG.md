@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.90 (2026-03-22)
+
 ### Bug Fixes
 - **HW breakpoint DR registers not applied**: Data breakpoints (`veh_set_data_breakpoint`) returned success and appeared in list, but DR0-DR7 were not actually set when target was stopped. VEH handler now applies current HW BPs to context before returning, and `ApplyHwBreakpointsToAllThreads` updates `stoppedContexts` directly for VEH-stopped threads
 - **Pause + Continue resume missing**: `pause` used OS `SuspendThread` but `continue` only signaled VEH events, leaving threads frozen. Continue now also calls `ResumeAll()` for OS-suspended threads
