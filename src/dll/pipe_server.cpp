@@ -959,7 +959,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		LOG_INFO("Detach requested");
 		BreakpointManager::Instance().RemoveAll();
 		HwBreakpointManager::Instance().RemoveAll();
-		VehHandler::Instance().ResumeAllStoppedThreads();
+		VehHandler::Instance().ResumeAllStoppedThreads(true);  // forDetach=true
 		VehHandler::Instance().Uninstall();
 		ThreadManager::Instance().ResumeAll();
 		IpcStatus status = IpcStatus::Ok;

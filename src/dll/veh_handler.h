@@ -42,7 +42,7 @@ public:
 
 	// 스레드 재개 시그널 (continue/step 명령에서 호출)
 	void ResumeStoppedThread(uint32_t threadId, bool step = false);
-	void ResumeAllStoppedThreads();
+	void ResumeAllStoppedThreads(bool forDetach = false);
 
 	// 스레드가 VEH 핸들러에서 정지(대기) 중인지 확인
 	bool IsThreadStopped(uint32_t threadId);
