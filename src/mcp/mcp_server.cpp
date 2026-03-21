@@ -425,6 +425,19 @@ json McpServer::ToolAttach(const json& args) {
 	attached_ = true;
 	StartProcessMonitor();
 
+	// 타겟 비트니스에 맞게 디스어셈블러 재생성
+	{
+		BOOL isWow64 = FALSE;
+		HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+		if (hProc) {
+			IsWow64Process(hProc, &isWow64);
+			CloseHandle(hProc);
+		}
+		bool is64 = (isWow64 == FALSE);
+		disassembler_ = CreateDisassembler(is64);
+		LOG_INFO("Disassembler set to %s mode", is64 ? "x64" : "x86");
+	}
+
 	return {{"success", true}, {"pid", pid}, {"message", "Attached to process"}};
 }
 
@@ -530,6 +543,13 @@ json McpServer::ToolLaunch(const json& args) {
 	targetPid_ = pid;
 	attached_ = true;
 	StartProcessMonitor();
+
+	// 타겟 비트니스에 맞게 디스어셈블러 재생성
+	{
+		bool is64 = !Injector::IsExe32Bit(program);
+		disassembler_ = CreateDisassembler(is64);
+		LOG_INFO("Disassembler set to %s mode", is64 ? "x64" : "x86");
+	}
 
 	// stopOnEntry=false: 즉시 메인 스레드 resume (DAP의 configurationDone과 동일)
 	// stopOnEntry=true: 에이전트가 veh_continue 호출 시 resume
