@@ -24,6 +24,8 @@
 ### Improvements
 - **VEH handler `NotifyAndWait` refactor**: Extracted repeated stop/wait/resume pattern (context save, event create, callback, wait, context restore) from 4 exception paths into a single `NotifyAndWait` method with `WaitResult` enum
 - **`thread_local` replaced with `TlsAlloc`**: `PendingRearm` per-thread state changed from `thread_local` to `TlsAlloc`/`HeapAlloc` for ManualMap DLL injection compatibility
+- **SyscallResolver -- VEH handler WinAPI BP immunity**: VEH handler path no longer calls any WinAPI that could have user breakpoints set on it. All critical syscalls (`NtProtectVirtualMemory`, `NtFlushInstructionCache`, `NtWaitForSingleObject`, `NtCreateEvent`, `NtClose`, `NtSetEvent`) are copied from ntdll stubs to an RWX page at init time. Stub parsing uses a built-in x86/x64 instruction length decoder (no Zydis dependency in DLL). `GetCurrentThreadId`, `TlsGetValue`, `TlsSetValue`, `GetLastError` replaced with TEB direct reads (`__readgsqword`/`__readfsdword`). TLS expansion slots (index 64-1088) also handled via TEB pointer
+- **Shutdown leak-safe**: `SyscallResolver::Shutdown()` intentionally does not `VirtualFree` the exec page -- threads woken during `Uninstall` may still be executing copied stubs. OS reclaims on process exit
 
 ## 1.0.83 (2026-03-21)
 

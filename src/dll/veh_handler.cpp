@@ -3,6 +3,7 @@
 #include "breakpoint.h"
 #include "hw_breakpoint.h"
 #include "threads.h"
+#include "syscall_resolver.h"
 #include "../common/logger.h"
 
 // __try/__except requires separate function (no C++ destructors allowed)
@@ -33,10 +34,16 @@ static uint64_t ReadCallerFromStack(const CONTEXT* ctx) {
 namespace veh {
 
 VehHandler::PendingRearm& VehHandler::GetPendingRearm() {
-	auto* p = static_cast<PendingRearm*>(TlsGetValue(pendingRearmTlsSlot_));
+	auto* p = static_cast<PendingRearm*>(SafeTlsGetValue(pendingRearmTlsSlot_));
 	if (!p) {
+		// HeapAlloc은 VEH 경로 첫 호출 시 1회만, 이후 캐시됨
 		p = static_cast<PendingRearm*>(HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PendingRearm)));
-		TlsSetValue(pendingRearmTlsSlot_, p);
+		if (!p) {
+			// HeapAlloc 실패 시 정적 폴백 (메모리 극한 상황, 프로세스당 1개면 충분)
+			static PendingRearm fallback = {0, 0, false, false};
+			return fallback;
+		}
+		SafeTlsSetValue(pendingRearmTlsSlot_, p);
 	}
 	return *p;
 }
@@ -50,6 +57,12 @@ bool VehHandler::Install() {
 	if (installed_) {
 		LOG_WARN("VEH handler already installed");
 		return true;
+	}
+
+	// SyscallResolver 초기화 (VEH 등록 전에 수행)
+	// ntdll 스텁 복사본 생성 -- PatchByte에서 VirtualProtect 대신 사용
+	if (!SyscallResolver::Instance().Initialize()) {
+		LOG_WARN("SyscallResolver init failed -- PatchByte will use ntdll direct call fallback");
 	}
 
 	// TLS 슬롯 할당 (thread_local 사용 금지 -> TlsAlloc, ManualMap 호환)
@@ -88,6 +101,9 @@ void VehHandler::Uninstall() {
 		handler_ = nullptr;
 	}
 
+	// SyscallResolver 정리 (실행 가능 페이지 해제)
+	SyscallResolver::Instance().Shutdown();
+
 	// TLS 슬롯 해제 (per-thread HeapAlloc 메모리는 프로세스 종료 시 OS 회수)
 	if (reentryTlsSlot_ != TLS_OUT_OF_INDEXES) {
 		TlsFree(reentryTlsSlot_);
@@ -98,14 +114,8 @@ void VehHandler::Uninstall() {
 		pendingRearmTlsSlot_ = TLS_OUT_OF_INDEXES;
 	}
 
-	// 이벤트 핸들 정리
-	{
-		std::lock_guard<std::mutex> lock(eventMapMutex_);
-		for (auto& [tid, evt] : threadEvents_) {
-			CloseHandle(evt);
-		}
-		threadEvents_.clear();
-	}
+	// NOTE: threadEvents_는 ResumeAllStoppedThreads(true)에서 이미 clear 완료.
+	// 깨어난 스레드가 NotifyAndWait에서 NtClose를 호출하므로 여기서 추가 정리 불요.
 
 	LOG_INFO("VEH handler uninstalled");
 }
@@ -118,9 +128,11 @@ HANDLE VehHandler::GetOrCreateThreadEvent(uint32_t threadId) {
 	std::lock_guard<std::mutex> lock(eventMapMutex_);
 	auto it = threadEvents_.find(threadId);
 	if (it != threadEvents_.end()) return it->second;
-	HANDLE evt = CreateEventW(nullptr, FALSE, FALSE, nullptr); // auto-reset
-	if (!evt) {
-		LOG_ERROR("CreateEventW failed for thread %u: %lu", threadId, GetLastError());
+	HANDLE evt = nullptr;
+	auto& resolver = SyscallResolver::Instance();
+	NTSTATUS status = resolver.CreateEvent(&evt);
+	if (!NT_SUCCESS(status) || !evt) {
+		LOG_ERROR("NtCreateEvent failed for thread %u: 0x%08X", threadId, status);
 		return nullptr;
 	}
 	threadEvents_[threadId] = evt;
@@ -148,8 +160,8 @@ void VehHandler::ResumeStoppedThread(uint32_t threadId, bool step) {
 	std::lock_guard<std::mutex> lock(eventMapMutex_);
 	auto it = threadEvents_.find(threadId);
 	if (it != threadEvents_.end()) {
-		SetEvent(it->second);
-		// NOTE: CloseHandle은 VEH 핸들러(WaitForSingleObject 호출자)가 담당
+		SyscallResolver::Instance().SetEvent(it->second);
+		// NOTE: NtClose는 VEH 핸들러(NtWaitForSingleObject 호출자)가 담당
 		threadEvents_.erase(it);
 	}
 }
@@ -169,8 +181,8 @@ void VehHandler::ResumeAllStoppedThreads(bool forDetach) {
 	// Normal continue: stoppedContexts_를 유지 -- VEH 핸들러가 context 복원 후 자체 정리
 	std::lock_guard<std::mutex> lock(eventMapMutex_);
 	for (auto& [tid, evt] : threadEvents_) {
-		SetEvent(evt);
-		// NOTE: CloseHandle은 VEH 핸들러(WaitForSingleObject 호출자)가 담당
+		SyscallResolver::Instance().SetEvent(evt);
+		// NOTE: NtClose는 VEH 핸들러(NtWaitForSingleObject 호출자)가 담당
 	}
 	threadEvents_.clear();
 }
@@ -202,10 +214,11 @@ LONG CALLBACK VehHandler::ExceptionHandler(PEXCEPTION_POINTERS info) {
 }
 
 // RAII guard for TLS reentry flag (all return paths auto-clear)
+// SafeTlsSetValue 사용 -- TEB 직접 접근으로 BP 재진입 방지
 struct TlsReentryGuard {
 	DWORD slot;
-	TlsReentryGuard(DWORD s) : slot(s) { TlsSetValue(slot, reinterpret_cast<LPVOID>(1)); }
-	~TlsReentryGuard() { TlsSetValue(slot, nullptr); }
+	TlsReentryGuard(DWORD s) : slot(s) { SafeTlsSetValue(slot, reinterpret_cast<LPVOID>(1)); }
+	~TlsReentryGuard() { SafeTlsSetValue(slot, nullptr); }
 };
 
 VehHandler::WaitResult VehHandler::NotifyAndWait(
@@ -239,8 +252,9 @@ VehHandler::WaitResult VehHandler::NotifyAndWait(
 	callback_(evt);
 
 	LOG_DEBUG("Thread %u waiting for continue signal (type=%d)", tid, (int)type);
-	WaitForSingleObject(waitEvent, INFINITE);
-	CloseHandle(waitEvent);
+	auto& resolver = SyscallResolver::Instance();
+	resolver.WaitForSingleObject(waitEvent, nullptr);  // nullptr = INFINITE
+	resolver.Close(waitEvent);
 	LOG_DEBUG("Thread %u resumed", tid);
 
 	// 5) 정지 중 수정된 컨텍스트 복원 / detach 판별
@@ -260,14 +274,20 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 	if (!installed_) return EXCEPTION_CONTINUE_SEARCH;
 
 	// 재진입 방지: VEH 핸들러 안에서 호출한 API에 BP가 걸려도 재귀하지 않음
-	if (reentryTlsSlot_ != TLS_OUT_OF_INDEXES && TlsGetValue(reentryTlsSlot_)) {
+	if (reentryTlsSlot_ != TLS_OUT_OF_INDEXES && SafeTlsGetValue(reentryTlsSlot_)) {
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
 	TlsReentryGuard reentryGuard(reentryTlsSlot_);
 
 	const DWORD code = info->ExceptionRecord->ExceptionCode;
 	const uint64_t addr = reinterpret_cast<uint64_t>(info->ExceptionRecord->ExceptionAddress);
-	const uint32_t tid = GetCurrentThreadId();
+	// TEB direct read -- GetCurrentThreadId() 대신 사용
+	// (사용자가 GetCurrentThreadId에 BP 걸면 VEH 재진입 crash 방지)
+#ifdef _WIN64
+	const uint32_t tid = __readgsdword(0x48);  // GS:[0x48] = TEB.ClientId.UniqueThread
+#else
+	const uint32_t tid = __readfsdword(0x24);  // FS:[0x24] = TEB.ClientId.UniqueThread
+#endif
 
 	switch (code) {
 	case EXCEPTION_BREAKPOINT: { // 0x80000003 — INT3 히트

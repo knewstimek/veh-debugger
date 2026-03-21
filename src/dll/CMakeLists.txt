@@ -7,6 +7,7 @@ set(DLL_SOURCES
     threads.cpp
     stack_walk.cpp
     pipe_server.cpp
+    syscall_resolver.cpp
 )
 
 set(DLL_DEFS
