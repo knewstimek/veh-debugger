@@ -1,8 +1,8 @@
 """Test edge cases for setBreakpoints on PDB-less binary."""
-import subprocess, json, sys, time
+import subprocess, json, sys, time, os
 
-ADAPTER = r"D:\News\Hack\Engine\VEHDebugger\for VSCode Extension\build\bin\Release\veh-debug-adapter.exe"
-TARGET = r"D:\News\Hack\Engine\VEHDebugger\for VSCode Extension\test\challenges\crackme\bin\crackme_x64.exe"
+ADAPTER = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-debug-adapter.exe")
+TARGET = os.path.join(os.path.dirname(__file__), "challenges", "crackme", "crackme_x64.exe")
 
 proc = subprocess.Popen(
     [ADAPTER, "--log-level=debug"],

@@ -470,10 +470,14 @@ bool Injector::InjectViaThreadHijack(HANDLE process, uint32_t pid, LPVOID remote
 		if (!found) {
 			LOG_WARN("[Hijack] DLL '%s' not detected in module list after 2s", dllFileName);
 		}
-	}
 
-	// 셸코드 메모리 해제 (실행 완료 후)
-	VirtualFreeEx(process, shellMem, 0, MEM_RELEASE);
+		// 셸코드 메모리 해제 (DLL 로드 확인 후에만 -- 미확인 시 아직 실행 중일 수 있음)
+		if (found) {
+			VirtualFreeEx(process, shellMem, 0, MEM_RELEASE);
+		} else {
+			LOG_WARN("[Hijack] Skipping shellcode free (may still be executing)");
+		}
+	}
 
 	LOG_INFO("[Hijack] Thread %u hijacked, LoadLibrary should have executed", targetTid);
 	return true;
@@ -591,6 +595,8 @@ bool Injector::InjectDll(uint32_t pid, const std::string& dllPath, InjectionMeth
 		loadLib = GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryA");
 	}
 
+	bool apcUsed = false;  // APC 내부에서 remoteStr을 자체 관리하므로 추적 필요
+
 	if (method == InjectionMethod::Auto) {
 		// 순서대로 시도
 		LOG_INFO("Auto injection: trying methods in order...");
@@ -610,6 +616,7 @@ bool Injector::InjectDll(uint32_t pid, const std::string& dllPath, InjectionMeth
 		if (!success) {
 			LOG_INFO("Trying QueueUserAPC...");
 			success = InjectViaQueueUserAPC(process, pid, remoteStr, loadLib);
+			if (success) apcUsed = true;
 		}
 	} else {
 		switch (method) {
@@ -630,19 +637,10 @@ bool Injector::InjectDll(uint32_t pid, const std::string& dllPath, InjectionMeth
 		}
 	}
 
-	// APC 방식은 비동기이므로 remoteStr을 바로 해제하면 안 됨
-	if (method != InjectionMethod::QueueUserAPC &&
-		!(method == InjectionMethod::Auto && !success)) {
-		// 일반 방식은 LoadLibrary 완료 후 해제
-		// APC는 타이밍 이슈로 유지 (메모리 누수 감수)
-	}
-
-	if (!success) {
-		FreeRemoteString(process, remoteStr);
-	}
-	// 성공 시에도 remoteStr은 타겟 프로세스가 사용 완료했으므로 해제 가능
-	// 단, APC 방식은 비동기라 바로 해제하면 안 됨
-	if (success && method != InjectionMethod::QueueUserAPC) {
+	// remoteStr 해제:
+	// - APC 방식(직접 지정 또는 Auto 폴백)은 내부에서 자체 관리 (found 시 해제, 아니면 유지)
+	// - 그 외 방식은 여기서 해제 (성공/실패 무관, LoadLibrary 동기 완료 후이므로 안전)
+	if (!apcUsed && method != InjectionMethod::QueueUserAPC) {
 		FreeRemoteString(process, remoteStr);
 	}
 
@@ -664,6 +662,10 @@ LaunchResult Injector::LaunchAndInject(
 	std::string cmdLine = "\"" + exePath + "\"";
 	if (!args.empty()) cmdLine += " " + args;
 
+	// CreateProcessA의 lpCommandLine은 수정 가능한 버퍼여야 함 (MSDN 계약)
+	std::vector<char> cmdBuf(cmdLine.begin(), cmdLine.end());
+	cmdBuf.push_back('\0');
+
 	// DETACHED_PROCESS: prevent child from inheriting parent's console.
 	// Without this, child's printf/cout goes to parent's stdout pipe,
 	// corrupting MCP JSON-RPC transport (and potentially DAP transport).
@@ -671,25 +673,38 @@ LaunchResult Injector::LaunchAndInject(
 	// use STARTF_USESTDHANDLES with dedicated pipes instead of removing this flag.
 	if (!CreateProcessA(
 		exePath.c_str(),
-		cmdLine.data(),
+		cmdBuf.data(),
 		nullptr, nullptr, FALSE, CREATE_SUSPENDED | DETACHED_PROCESS,
 		nullptr,
 		workingDir.empty() ? nullptr : workingDir.c_str(),
 		&si, &pi))
 	{
-		LOG_ERROR("CreateProcess failed for '%s': %u", exePath.c_str(), GetLastError());
-		return {};
+		DWORD err = GetLastError();
+		LOG_ERROR("CreateProcess failed for '%s': %u", exePath.c_str(), err);
+		LaunchResult fail;
+		fail.error = "CreateProcess failed (error " + std::to_string(err) + ")";
+		if (err == ERROR_FILE_NOT_FOUND)
+			fail.error += ": executable not found";
+		else if (err == ERROR_PATH_NOT_FOUND)
+			fail.error += ": path not found";
+		else if (err == ERROR_ACCESS_DENIED)
+			fail.error += ": access denied";
+		else if (err == ERROR_BAD_EXE_FORMAT)
+			fail.error += ": not a valid executable (bad PE format)";
+		return fail;
 	}
 
 	LOG_INFO("Process created (PID: %u, TID: %u) in suspended state",
 		pi.dwProcessId, pi.dwThreadId);
 
 	if (!InjectDll(pi.dwProcessId, dllPath, method)) {
-		LOG_ERROR("DLL injection failed, terminating process");
+		LOG_ERROR("DLL injection failed for '%s', terminating process %u", dllPath.c_str(), pi.dwProcessId);
 		TerminateProcess(pi.hProcess, 1);
 		CloseHandle(pi.hThread);
 		CloseHandle(pi.hProcess);
-		return {};
+		LaunchResult fail;
+		fail.error = "DLL injection failed: " + dllPath;
+		return fail;
 	}
 
 	// 메인 스레드는 항상 suspended 상태로 유지 — configurationDone 이후 resume

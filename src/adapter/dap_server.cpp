@@ -256,6 +256,7 @@ void DapServer::OnLaunch(const Request& req) {
 	if (result.pid == 0) {
 		resp.success = false;
 		resp.message = "Failed to launch and inject: " + programPath_;
+		if (!result.error.empty()) resp.message += " - " + result.error;
 		SendResponse(resp);
 		return;
 	}
@@ -2227,18 +2228,27 @@ void DapServer::OnRestart(const Request& req) {
 		// 재시작 — 원래 launch 시의 args/cwd를 사용
 		std::string dllPath = GetDllPath();
 		auto relaunch = Injector::LaunchAndInject(programPath_, launchArgStr_, launchCwd_, dllPath, injectionMethod_);
-		targetPid_ = relaunch.pid;
-		launchedMainThreadId_ = relaunch.mainThreadId;
-		mainThreadResumed_ = false;
 
-		if (targetPid_ == 0) {
+		if (relaunch.pid == 0) {
 			resp.success = false;
 			resp.message = "Failed to relaunch";
+			if (!relaunch.error.empty()) resp.message += " - " + relaunch.error;
 			SendResponse(resp);
 			return;
 		}
 
+		targetPid_ = relaunch.pid;
+		launchedMainThreadId_ = relaunch.mainThreadId;
+		mainThreadResumed_ = false;
+
 		if (!pipeClient_.Connect(targetPid_, 3000)) {
+			// 새로 launch한 프로세스 종료 (고아 방지)
+			HANDLE proc = OpenProcess(PROCESS_TERMINATE, FALSE, targetPid_);
+			if (proc) {
+				TerminateProcess(proc, 1);
+				CloseHandle(proc);
+			}
+			targetPid_ = 0;
 			resp.success = false;
 			resp.message = "Failed to connect pipe after relaunch";
 			SendResponse(resp);
