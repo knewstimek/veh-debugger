@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.83 (2026-03-21)
+
+### Features
+- **runAsInvoker option**: Bypass UAC elevation prompt by running target with current privileges (`__COMPAT_LAYER=RunAsInvoker`). Available in DAP (`launch.json`), MCP (`veh_launch`), and VSCode UI. Default: `false`
+
 ## 1.0.82 (2026-03-21)
 
 ### Bug Fixes
