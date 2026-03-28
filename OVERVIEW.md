@@ -18,7 +18,7 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 
 - **Adapter** (`src/adapter/`): DAP protocol handler, DLL injection, PDB symbol engine
 - **DLL** (`src/dll/`): VEH handler, breakpoint/stepping, pipe server, stack walking
-- **MCP** (`src/mcp/`): 26-tool MCP server for AI agents
+- **MCP** (`src/mcp/`): 30-tool MCP server for AI agents
 - **Common** (`src/common/`): IPC protocol definitions, logger
 
 ## Key Files
@@ -40,7 +40,7 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 | `src/dll/stack_walk.cpp/h` | StackWalk64 + DIA SDK local variable enumeration |
 | `src/common/ipc_protocol.h` | All IPC command/event/struct definitions (shared) |
 | `src/common/logger.h` | Logging utility |
-| `src/mcp/mcp_server.cpp/h` | MCP JSON-RPC server, 26 debugger tools |
+| `src/mcp/mcp_server.cpp/h` | MCP JSON-RPC server, 30 debugger tools |
 | `src/mcp/installer.cpp/h` | Auto-install to Claude/Cursor/Windsurf/Codex configs |
 
 ## IPC Protocol

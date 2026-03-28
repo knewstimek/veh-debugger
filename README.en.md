@@ -24,7 +24,7 @@ No separate debugger GUI needed. **Everything works inside the VSCode debug pane
 
 - **VEH-based**: Uses VEH instead of Windows Debug API - bypasses PEB/NtQuery-based anti-debug checks (Themida, VMProtect, etc.)
 - **Full DAP support**: Works with VSCode, MCP debug tools, and any DAP-compatible client
-- **MCP tool server**: 26 tools for AI agents (Claude, Cursor, Codex, etc.) to directly control the debugger
+- **MCP tool server**: 30 tools for AI agents (Claude, Cursor, Codex, etc.) to directly control the debugger
 - **TCP mode**: Remote debugging via `--tcp --port=PORT`
 - **Remote access**: `--remote` / `--bind=0.0.0.0` for VM/network debugging
 - **32/64-bit**: Debug both x86 and x64 processes (WoW64 injection for 32-bit targets)
@@ -57,7 +57,7 @@ veh-debug-adapter.exe              veh-mcp-server.exe
 |-----------|------|
 | `veh-debugger.dll` (`vcruntime_net.dll`) | Injected into target. Registers VEH handler, manages breakpoints, queries threads/stack/memory |
 | `veh-debug-adapter.exe` | DAP protocol server. DLL injection, Named Pipe IPC, JSON-RPC processing |
-| `veh-mcp-server.exe` | MCP tool server. 26 tools for AI agents to directly control the debugger |
+| `veh-mcp-server.exe` | MCP tool server. 30 tools for AI agents to directly control the debugger |
 | VSCode Extension | launch.json schema, adapter path configuration (minimal wrapper) |
 
 ## Build
@@ -172,7 +172,7 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` | JSON (`mcpServers`) |
 | Codex CLI | `~/.codex/config.toml` | TOML (`mcp_servers`) |
 
-**MCP Tools (26)**
+**MCP Tools (30)**
 
 | Tool | Args | Description |
 |------|------|-------------|
@@ -195,9 +195,13 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | `veh_stack_trace` | `threadId, maxFrames?` | Stack trace |
 | `veh_registers` | `threadId` | Read registers |
 | `veh_set_register` | `threadId, name, value` | Modify register value |
-| `veh_evaluate` | `expression, threadId` | Evaluate register/memory/pointer |
+| `veh_evaluate` | `expression, threadId` | Evaluate register/memory/pointer/segment (`[reg+offset]`, `gs:[0x60]`, etc.) |
 | `veh_read_memory` | `address, size` | Read memory (hex) |
 | `veh_write_memory` | `address, data` | Write memory (hex) |
+| `veh_dump_memory` | `address, size, output_path` | Dump memory to binary file (up to 64MB) |
+| `veh_allocate_memory` | `size?, protection?` | Allocate memory in target (VirtualAlloc) |
+| `veh_free_memory` | `address` | Free allocated memory (VirtualFree) |
+| `veh_execute_shellcode` | `shellcode, timeout_ms?` | Execute shellcode (alloc RWX + copy + CreateThread + wait + free) |
 | `veh_modules` | - | List modules |
 | `veh_disassemble` | `address, count?` | Disassemble (Zydis) |
 | `veh_exception_info` | - | Last exception info |
