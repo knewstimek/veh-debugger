@@ -68,6 +68,10 @@ private:
 	json ToolSetRegister(const json& args);
 	json ToolExceptionInfo(const json& args);
 	json ToolTraceCallers(const json& args);
+	json ToolDumpMemory(const json& args);
+	json ToolAllocateMemory(const json& args);
+	json ToolFreeMemory(const json& args);
+	json ToolExecuteShellcode(const json& args);
 
 	// Tool list definition
 	json GetToolsList();
@@ -167,6 +171,7 @@ private:
 	uint64_t bpHitAddr_ = 0;
 	uint32_t bpHitThread_ = 0;
 	std::string bpHitStopReason_;  // "breakpoint", "pause", "exception", "step", "exit"
+	std::string bpHitType_;        // "software", "hardware", "" (unknown)
 
 	// Event queue for thread-safe notification delivery
 	std::queue<std::pair<std::string, json>> pendingEvents_;

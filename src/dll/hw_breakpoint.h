@@ -54,7 +54,7 @@ private:
 	bool slotUsed_[4] = {};
 	std::unordered_map<uint32_t, uint8_t> idToSlot_;
 	std::mutex mutex_;
-	uint32_t nextId_ = 1;
+	uint32_t nextId_ = 10001;  // HW BP IDs start at 10001 to avoid collision with SW BP IDs
 };
 
 } // namespace veh

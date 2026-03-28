@@ -206,7 +206,7 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 		}},
 		{"serverInfo", {
 			{"name", "veh-debugger"},
-			{"version", "1.0.90"}
+			{"version", "1.0.91"}
 		}},
 		{"instructions",
 			"VEH Debugger - in-process debugger for Windows x86/x64 executables.\n"
@@ -275,6 +275,10 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 		else if (name == "veh_set_register")          result = ToolSetRegister(args);
 		else if (name == "veh_exception_info")        result = ToolExceptionInfo(args);
 		else if (name == "veh_trace_callers")         result = ToolTraceCallers(args);
+		else if (name == "veh_dump_memory")           result = ToolDumpMemory(args);
+		else if (name == "veh_allocate_memory")       result = ToolAllocateMemory(args);
+		else if (name == "veh_free_memory")           result = ToolFreeMemory(args);
+		else if (name == "veh_execute_shellcode")     result = ToolExecuteShellcode(args);
 		else {
 			SendError(id, -32602, "Unknown tool: " + name);
 			return;
@@ -900,32 +904,173 @@ json McpServer::ToolEvaluate(const json& args) {
 		return {{"error", "Failed to read memory at " + expression}};
 	}
 
-	// 3) *addr or [addr] -> pointer dereference
-	if (!expression.empty() && (expression[0] == '*' || expression[0] == '[')) {
-		std::string addrStr = expression.substr(1);
-		if (!addrStr.empty() && addrStr.back() == ']') addrStr.pop_back();
-		while (!addrStr.empty() && addrStr.front() == ' ') addrStr.erase(addrStr.begin());
-		try {
-			uint64_t addr = std::stoull(addrStr, nullptr, 0);
-			ReadMemoryRequest readReq;
-			readReq.address = addr;
-			readReq.size = 8;
-			std::vector<uint8_t> respData;
-			if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)
-				&& respData.size() >= sizeof(IpcStatus) + 8) {
-				auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
-				if (status == IpcStatus::Ok) {
-					uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
-					char buf[32];
-					snprintf(buf, sizeof(buf), "0x%016llX", val);
-					return {{"value", buf}, {"type", "pointer"}};
+	// 3) gs:[offset] or fs:[offset] -> segment register base + offset dereference
+	//    x64: GS base = TEB address; x86: FS base = TEB address
+	//    gs:[0x60] = PEB pointer, gs:[0x30] = TEB self-reference, etc.
+	{
+		std::string upper = expression;
+		std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+		bool isGs = (upper.substr(0, 4) == "GS:[");
+		bool isFs = (upper.substr(0, 4) == "FS:[");
+		if (isGs || isFs) {
+			std::string offsetStr = expression.substr(4);
+			if (!offsetStr.empty() && offsetStr.back() == ']') offsetStr.pop_back();
+			while (!offsetStr.empty() && offsetStr.front() == ' ') offsetStr.erase(offsetStr.begin());
+			try {
+				uint64_t offset = std::stoull(offsetStr, nullptr, 0);
+				// Get TEB address via NtQueryInformationThread
+				if (threadId == 0) return {{"error", "threadId is required for segment register evaluation"}};
+				HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION, FALSE, threadId);
+				if (!hThread) return {{"error", "Failed to open thread"}};
+
+				// THREAD_BASIC_INFORMATION contains TEB address
+				typedef struct {
+					LONG ExitStatus;
+					PVOID TebBaseAddress;
+					struct { HANDLE UniqueProcess; HANDLE UniqueThread; } ClientId;
+					ULONG_PTR AffinityMask;
+					LONG Priority;
+					LONG BasePriority;
+				} THREAD_BASIC_INFORMATION;
+
+				typedef LONG(NTAPI* NtQueryInformationThread_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+				auto NtQueryInformationThread = reinterpret_cast<NtQueryInformationThread_t>(
+					GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
+				if (!NtQueryInformationThread) { CloseHandle(hThread); return {{"error", "NtQueryInformationThread not found"}}; }
+
+				// x64: gs=TEB, x86: fs=TEB. Reject wrong combination.
+				BOOL isWow64 = FALSE;
+				IsWow64Process(targetProcess_ ? targetProcess_ : GetCurrentProcess(), &isWow64);
+				if ((!isWow64 && isFs) || (isWow64 && isGs)) {
+					CloseHandle(hThread);
+					return {{"error", isFs ? "fs:[] is x86 only (use gs:[] for x64)" : "gs:[] is x64 only (use fs:[] for x86)"}};
 				}
-			}
-		} catch (...) {}
-		return {{"error", "Failed to read memory"}};
+
+				THREAD_BASIC_INFORMATION tbi = {};
+				LONG ntStatus = NtQueryInformationThread(hThread, 0/*ThreadBasicInformation*/, &tbi, sizeof(tbi), nullptr);
+				CloseHandle(hThread);
+
+				if (ntStatus != 0) return {{"error", "NtQueryInformationThread failed"}};
+
+				uint64_t tebAddr = reinterpret_cast<uint64_t>(tbi.TebBaseAddress);
+				uint64_t targetAddr = tebAddr + offset;
+
+				// Read pointer-sized value at TEB + offset
+				ReadMemoryRequest readReq;
+				readReq.address = targetAddr;
+				readReq.size = 8;
+				std::vector<uint8_t> respData;
+				if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)
+					&& respData.size() >= sizeof(IpcStatus) + 8) {
+					auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
+					if (status == IpcStatus::Ok) {
+						uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
+						char buf[80];
+						snprintf(buf, sizeof(buf), "0x%016llX (TEB=0x%llX + 0x%llX)", val, tebAddr, offset);
+						return {{"value", buf}, {"type", "segment"}, {"tebAddress", (std::ostringstream() << "0x" << std::hex << tebAddr).str()}};
+					}
+				}
+				return {{"error", "Failed to read memory at segment base + offset"}};
+			} catch (...) {}
+			return {{"error", "Invalid offset in segment expression"}};
+		}
 	}
 
-	return {{"error", "Use register name (RAX, RCX, ...), 0x<address>, or *<address> to evaluate"}};
+	// 4) *expr or [expr] -> pointer dereference with register+offset support
+	//    Supported: *0x1234, [0x1234], [RAX], [RAX+0x10], [RAX-8], [RAX+RBX]
+	if (!expression.empty() && (expression[0] == '*' || expression[0] == '[')) {
+		std::string inner = expression.substr(1);
+		if (!inner.empty() && inner.back() == ']') inner.pop_back();
+		while (!inner.empty() && inner.front() == ' ') inner.erase(inner.begin());
+		while (!inner.empty() && inner.back() == ' ') inner.pop_back();
+
+		// Try to resolve as address expression (reg+offset, reg-offset, reg+reg, or plain value)
+		uint64_t addr = 0;
+		bool resolved = false;
+		try {
+			addr = std::stoull(inner, nullptr, 0);
+			resolved = true;
+		} catch (...) {}
+
+		if (!resolved && threadId != 0) {
+			// Parse reg+offset or reg-offset
+			GetRegistersRequest regReq;
+			regReq.threadId = threadId;
+			std::vector<uint8_t> regResp;
+			if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), regResp)
+				&& regResp.size() >= sizeof(GetRegistersResponse)) {
+				auto* rr = reinterpret_cast<const GetRegistersResponse*>(regResp.data());
+
+				// Find + or - operator (skip leading chars that are part of register names)
+				size_t opPos = std::string::npos;
+				char opChar = 0;
+				for (size_t i = 1; i < inner.size(); i++) {
+					if (inner[i] == '+' || inner[i] == '-') {
+						opPos = i;
+						opChar = inner[i];
+						break;
+					}
+				}
+
+				if (opPos != std::string::npos) {
+					std::string lhs = inner.substr(0, opPos);
+					std::string rhs = inner.substr(opPos + 1);
+					while (!lhs.empty() && lhs.back() == ' ') lhs.pop_back();
+					while (!rhs.empty() && rhs.front() == ' ') rhs.erase(rhs.begin());
+
+					uint64_t lhsVal = 0, rhsVal = 0;
+					bool lhsOk = false, rhsOk = false;
+
+					if (TryParseRegisterName(lhs)) {
+						lhsVal = ResolveRegisterByName(lhs, rr->regs);
+						lhsOk = true;
+					} else {
+						try { lhsVal = std::stoull(lhs, nullptr, 0); lhsOk = true; } catch (...) {}
+					}
+
+					if (TryParseRegisterName(rhs)) {
+						rhsVal = ResolveRegisterByName(rhs, rr->regs);
+						rhsOk = true;
+					} else {
+						try { rhsVal = std::stoull(rhs, nullptr, 0); rhsOk = true; } catch (...) {}
+					}
+
+					if (lhsOk && rhsOk) {
+						addr = (opChar == '+') ? (lhsVal + rhsVal) : (lhsVal - rhsVal);
+						resolved = true;
+					}
+				} else {
+					// Single register name
+					if (TryParseRegisterName(inner)) {
+						addr = ResolveRegisterByName(inner, rr->regs);
+						resolved = true;
+					}
+				}
+			}
+		}
+
+		if (!resolved) return {{"error", "Cannot parse address expression: " + inner}};
+
+		ReadMemoryRequest readReq;
+		readReq.address = addr;
+		readReq.size = 8;
+		std::vector<uint8_t> respData;
+		if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)
+			&& respData.size() >= sizeof(IpcStatus) + 8) {
+			auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
+			if (status == IpcStatus::Ok) {
+				uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
+				char buf[64];
+				snprintf(buf, sizeof(buf), "0x%016llX", val);
+				char addrBuf[32];
+				snprintf(addrBuf, sizeof(addrBuf), "0x%llX", addr);
+				return {{"value", buf}, {"address", addrBuf}, {"type", "pointer"}};
+			}
+		}
+		return {{"error", "Failed to read memory at computed address"}};
+	}
+
+	return {{"error", "Supported: register (RAX), 0x<addr>, [addr], [reg+offset], gs:[offset], fs:[offset]"}};
 }
 
 json McpServer::ToolSetRegister(const json& args) {
@@ -1145,13 +1290,15 @@ json McpServer::ToolContinue(const json& args) {
 		if (bpHitOccurred_) {
 			// 이미 발생한 이벤트 반환 (Continue 전송 안 함 - 스레드가 정지 상태)
 			bpHitOccurred_ = false;  // 소비
-			return {
+			json ret = {
 				{"stopped", true},
 				{"reason", bpHitStopReason_},
 				{"address", (std::ostringstream() << "0x" << std::hex << bpHitAddr_).str()},
 				{"threadId", bpHitThread_},
 				{"breakpointId", bpHitId_}
 			};
+			if (!bpHitType_.empty()) ret["breakpointType"] = bpHitType_;
+			return ret;
 		}
 	}
 
@@ -1184,13 +1331,15 @@ json McpServer::ToolContinue(const json& args) {
 				{"breakpointId", 0}
 			};
 		}
-		return {
+		json ret = {
 			{"stopped", true},
 			{"reason", bpHitStopReason_},
 			{"address", (std::ostringstream() << "0x" << std::hex << bpHitAddr_).str()},
 			{"threadId", bpHitThread_},
 			{"breakpointId", bpHitId_}
 		};
+		if (!bpHitType_.empty()) ret["breakpointType"] = bpHitType_;
+		return ret;
 	}
 }
 
@@ -1658,6 +1807,178 @@ json McpServer::ToolWriteMemory(const json& args) {
 		}
 	}
 	return {{"error", "Memory write failed (address may be invalid, read-only, or inaccessible)"}};
+}
+
+json McpServer::ToolDumpMemory(const json& args) {
+	if (!attached_) return {{"error", NotAttachedMessage()}};
+
+	std::string addrStr = args.value("address", "");
+	int size = JsonInt(args, "size", 4096);
+	std::string outputPath = args.value("output_path", "");
+	if (addrStr.empty()) return {{"error", "address is required"}};
+	if (outputPath.empty()) return {{"error", "output_path is required"}};
+	if (size <= 0 || size > 64 * 1024 * 1024) return {{"error", "size must be 1-67108864 (64MB)"}};
+
+	uint64_t addr;
+	if (!ParseAddress(addrStr, addr)) {
+		return {{"error", "invalid address format"}};
+	}
+
+	// Open output file
+	FILE* fp = fopen(outputPath.c_str(), "wb");
+	if (!fp) {
+		return {{"error", "Cannot open output file: " + outputPath}};
+	}
+
+	// Read in chunks of 1MB via IPC
+	const uint32_t chunkSize = 1024 * 1024;
+	uint64_t totalWritten = 0;
+	uint64_t remaining = static_cast<uint64_t>(size);
+	uint64_t currentAddr = addr;
+
+	while (remaining > 0) {
+		uint32_t toRead = static_cast<uint32_t>((remaining > chunkSize) ? chunkSize : remaining);
+		ReadMemoryRequest req;
+		req.address = currentAddr;
+		req.size = toRead;
+
+		std::vector<uint8_t> respData;
+		if (!pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &req, sizeof(req), respData)
+			|| respData.size() < sizeof(IpcStatus)) {
+			fclose(fp);
+			return {{"error", "IPC error during read"}, {"bytesWritten", totalWritten}};
+		}
+
+		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
+		if (status != IpcStatus::Ok) {
+			fclose(fp);
+			if (totalWritten > 0) {
+				return {{"partial", true}, {"bytesWritten", totalWritten},
+				        {"error", "Memory read failed at offset " + std::to_string(totalWritten)}};
+			}
+			return {{"error", "Memory read failed at starting address"}};
+		}
+
+		const uint8_t* data = respData.data() + sizeof(IpcStatus);
+		size_t dataLen = respData.size() - sizeof(IpcStatus);
+		fwrite(data, 1, dataLen, fp);
+		totalWritten += dataLen;
+		currentAddr += dataLen;
+		if (dataLen > remaining) break;  // guard against unsigned underflow
+		remaining -= dataLen;
+	}
+
+	fclose(fp);
+	char addrBuf[20];
+	snprintf(addrBuf, sizeof(addrBuf), "0x%llX", addr);
+	return {{"success", true}, {"address", addrBuf}, {"size", totalWritten}, {"output_path", outputPath}};
+}
+
+json McpServer::ToolAllocateMemory(const json& args) {
+	if (!attached_) return {{"error", NotAttachedMessage()}};
+
+	int size = JsonInt(args, "size", 4096);
+	std::string protStr = args.value("protection", "rwx");
+	if (size <= 0 || size > 64 * 1024 * 1024) return {{"error", "size must be 1-67108864"}};
+
+	uint32_t protection = PAGE_EXECUTE_READWRITE;
+	if (protStr == "rw") protection = PAGE_READWRITE;
+	else if (protStr == "rx") protection = PAGE_EXECUTE_READ;
+	else if (protStr == "r") protection = PAGE_READONLY;
+
+	AllocateMemoryRequest req;
+	req.size = static_cast<uint32_t>(size);
+	req.protection = protection;
+
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::AllocateMemory, &req, sizeof(req), respData)) {
+		return {{"error", IpcErrorMessage()}};
+	}
+	if (respData.size() < sizeof(AllocateMemoryResponse)) return {{"error", "Invalid response"}};
+
+	auto* resp = reinterpret_cast<const AllocateMemoryResponse*>(respData.data());
+	if (resp->status != IpcStatus::Ok || resp->address == 0) {
+		return {{"error", "VirtualAlloc failed in target process"}};
+	}
+
+	char buf[20];
+	snprintf(buf, sizeof(buf), "0x%llX", resp->address);
+	return {{"success", true}, {"address", buf}, {"size", size}, {"protection", protStr}};
+}
+
+json McpServer::ToolFreeMemory(const json& args) {
+	if (!attached_) return {{"error", NotAttachedMessage()}};
+
+	std::string addrStr = args.value("address", "");
+	if (addrStr.empty()) return {{"error", "address is required"}};
+
+	uint64_t addr;
+	if (!ParseAddress(addrStr, addr)) return {{"error", "invalid address format"}};
+
+	FreeMemoryRequest req;
+	req.address = addr;
+	req.size = 0;
+
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::FreeMemory, &req, sizeof(req), respData)) {
+		return {{"error", IpcErrorMessage()}};
+	}
+	if (respData.size() >= sizeof(IpcStatus)) {
+		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
+		if (status == IpcStatus::Ok) return {{"success", true}};
+	}
+	return {{"error", "VirtualFree failed"}};
+}
+
+json McpServer::ToolExecuteShellcode(const json& args) {
+	if (!attached_) return {{"error", NotAttachedMessage()}};
+
+	std::string codeHex = args.value("shellcode", "");
+	if (codeHex.empty()) return {{"error", "shellcode (hex string) is required"}};
+	int timeoutMs = JsonInt(args, "timeout_ms", 5000);
+	if (timeoutMs < 0) timeoutMs = 0;
+	if (timeoutMs > 60000) timeoutMs = 60000;
+
+	// Parse hex
+	std::vector<uint8_t> bytes;
+	std::string clean;
+	for (char c : codeHex) {
+		if (std::isxdigit(c)) clean += c;
+	}
+	if (clean.size() % 2 != 0) return {{"error", "Invalid hex string (odd length)"}};
+	for (size_t i = 0; i < clean.size(); i += 2) {
+		bytes.push_back(static_cast<uint8_t>(std::stoi(clean.substr(i, 2), nullptr, 16)));
+	}
+	if (bytes.empty()) return {{"error", "Empty shellcode"}};
+	if (bytes.size() > 1024 * 1024) return {{"error", "Shellcode too large (max 1MB)"}};
+
+	// Build IPC payload: ExecuteShellcodeRequest + code bytes
+	std::vector<uint8_t> payload(sizeof(ExecuteShellcodeRequest) + bytes.size());
+	auto* req = reinterpret_cast<ExecuteShellcodeRequest*>(payload.data());
+	req->size = static_cast<uint32_t>(bytes.size());
+	req->timeoutMs = static_cast<uint32_t>(timeoutMs);
+	memcpy(payload.data() + sizeof(ExecuteShellcodeRequest), bytes.data(), bytes.size());
+
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::ExecuteShellcode, payload.data(),
+	                                 static_cast<uint32_t>(payload.size()), respData)) {
+		return {{"error", IpcErrorMessage()}};
+	}
+	if (respData.size() < sizeof(ExecuteShellcodeResponse)) return {{"error", "Invalid response"}};
+
+	auto* resp = reinterpret_cast<const ExecuteShellcodeResponse*>(respData.data());
+	if (resp->status != IpcStatus::Ok) {
+		return {{"error", "Shellcode execution failed (alloc or thread creation error)"}};
+	}
+
+	char addrBuf[20];
+	snprintf(addrBuf, sizeof(addrBuf), "0x%llX", resp->allocatedAddress);
+	return {
+		{"success", true},
+		{"exitCode", resp->exitCode},
+		{"allocatedAddress", addrBuf},
+		{"fireAndForget", (timeoutMs == 0)}
+	};
 }
 
 json McpServer::ToolModules(const json& args) {
@@ -2175,6 +2496,11 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 						std::lock_guard<std::mutex> lock(eventMutex_);
 						pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
 					}
+					// Determine BP type (SW IDs < 10001, HW IDs >= 10001)
+					std::string bpType;
+					if (e->breakpointId >= 10001) bpType = "hardware";
+					else if (e->breakpointId > 0) bpType = "software";
+
 					// Signal wait mode
 					{
 						std::lock_guard<std::mutex> lock(bpHitMutex_);
@@ -2183,6 +2509,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 						bpHitAddr_ = e->address;
 						bpHitThread_ = e->threadId;
 						bpHitStopReason_ = "breakpoint";
+						bpHitType_ = bpType;
 					}
 					bpHitCv_.notify_all();
 				}
@@ -2501,7 +2828,7 @@ json McpServer::GetToolsList() {
 			{"frameBase", {{"type", "string"}, {"description", "RBP/EBP hex address (auto-detected from top frame if omitted)"}}}
 		 }}, {"required", json::array({"threadId"})}}}},
 
-		{{"name", "veh_evaluate"}, {"description", "Evaluate an expression. Supports register names (RAX, RBX, etc.), hex addresses (0x...), and pointer dereference (*addr or [addr]). For indirect calls (vtable dispatch), use veh_registers to get the register value, then *<address> to dereference the pointer chain."},
+		{{"name", "veh_evaluate"}, {"description", "Evaluate an expression. Supports: register names (RAX, RBX, etc.), hex addresses (0x...), pointer dereference (*addr, [addr], [RAX+0x10], [RAX-8], [RAX+RBX]), and segment registers (gs:[0x60] for PEB, fs:[0x30] for TEB on x86)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"expression", {{"type", "string"}, {"description", "Expression to evaluate (register name, hex address, *addr for dereference)"}}},
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID for register context"}}}
@@ -2521,7 +2848,31 @@ json McpServer::GetToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Hex address to set breakpoint (e.g. '0x7FF600001000')"}}},
 			{"duration_sec", {{"type", "integer"}, {"description", "How long to collect callers in seconds (default: 5, max: 60)"}}}
-		 }}, {"required", json::array({"address"})}}}}
+		 }}, {"required", json::array({"address"})}}}},
+
+		{{"name", "veh_dump_memory"}, {"description", "Dump memory to a binary file. Reads in 1MB chunks, supports up to 64MB. Avoids token overhead of hex string encoding."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"address", {{"type", "string"}, {"description", "Hex start address"}}},
+			{"size", {{"type", "integer"}, {"description", "Bytes to dump (default: 4096, max: 64MB)"}}},
+			{"output_path", {{"type", "string"}, {"description", "Output file path for the binary dump"}}}
+		 }}, {"required", json::array({"address", "output_path"})}}}},
+
+		{{"name", "veh_allocate_memory"}, {"description", "Allocate memory pages in the target process via VirtualAlloc."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"size", {{"type", "integer"}, {"description", "Allocation size in bytes (default: 4096)"}}},
+			{"protection", {{"type", "string"}, {"enum", json::array({"rwx", "rw", "rx", "r"})}, {"description", "Memory protection (default: rwx = PAGE_EXECUTE_READWRITE)"}}}
+		 }}}}},
+
+		{{"name", "veh_free_memory"}, {"description", "Free previously allocated memory pages in the target process via VirtualFree."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"address", {{"type", "string"}, {"description", "Hex address of the allocation to free"}}}
+		 }}, {"required", json::array({"address"})}}}},
+
+		{{"name", "veh_execute_shellcode"}, {"description", "Execute shellcode in the target process. Allocates RWX page, copies code, creates thread, waits for completion, frees page. Set timeout_ms=0 for fire-and-forget (page not freed)."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"shellcode", {{"type", "string"}, {"description", "Hex-encoded shellcode bytes (e.g. 'C3' for ret, '33C0C3' for xor eax,eax; ret)"}}},
+			{"timeout_ms", {{"type", "integer"}, {"description", "Max wait time in ms (default: 5000, max: 60000). 0 = fire-and-forget (don't wait, don't free)."}}}
+		 }}, {"required", json::array({"shellcode"})}}}}
 	});
 }
 

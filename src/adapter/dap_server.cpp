@@ -1637,39 +1637,152 @@ void DapServer::OnEvaluate(const Request& req) {
 		} catch (...) {}
 	}
 
-	// 3) *addr / [addr] 문법 — 메모리 읽기
-	if (!expression.empty() && (expression[0] == '*' || expression[0] == '[')) {
-		std::string addrStr = expression.substr(1);
-		if (!addrStr.empty() && addrStr.back() == ']') addrStr.pop_back();
+	// 3) gs:[offset] / fs:[offset] — segment register base + offset dereference
+	{
+		std::string upper = expression;
+		std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+		bool isGs = (upper.substr(0, 4) == "GS:[");
+		bool isFs = (upper.substr(0, 4) == "FS:[");
+		if (isGs || isFs) {
+			std::string offsetStr = expression.substr(4);
+			if (!offsetStr.empty() && offsetStr.back() == ']') offsetStr.pop_back();
+			while (!offsetStr.empty() && offsetStr.front() == ' ') offsetStr.erase(offsetStr.begin());
+			try {
+				uint64_t offset = std::stoull(offsetStr, nullptr, 0);
+				HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION, FALSE, threadId);
+				if (hThread) {
+					typedef struct {
+						LONG ExitStatus;
+						PVOID TebBaseAddress;
+						struct { HANDLE UniqueProcess; HANDLE UniqueThread; } ClientId;
+						ULONG_PTR AffinityMask;
+						LONG Priority;
+						LONG BasePriority;
+					} THREAD_BASIC_INFORMATION;
+					typedef LONG(NTAPI* NtQueryInformationThread_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+					auto NtQueryInformationThread = reinterpret_cast<NtQueryInformationThread_t>(
+						GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
+					if (!NtQueryInformationThread) { CloseHandle(hThread); throw std::runtime_error("NtQueryInformationThread not found"); }
+					// x64: gs=TEB, x86: fs=TEB. Reject wrong combination.
+					BOOL isWow64 = FALSE;
+					IsWow64Process(targetProcess_ ? targetProcess_ : GetCurrentProcess(), &isWow64);
+					if ((!isWow64 && isFs) || (isWow64 && isGs)) { CloseHandle(hThread); throw std::runtime_error(isFs ? "fs:[] is x86 only" : "gs:[] is x64 only"); }
+					THREAD_BASIC_INFORMATION tbi = {};
+					LONG ntStatus = NtQueryInformationThread(hThread, 0, &tbi, sizeof(tbi), nullptr);
+					CloseHandle(hThread);
+					if (ntStatus == 0) {
+						uint64_t tebAddr = reinterpret_cast<uint64_t>(tbi.TebBaseAddress);
+						uint64_t targetAddr = tebAddr + offset;
+						ReadMemoryRequest readReq;
+						readReq.address = targetAddr;
+						readReq.size = 8;
+						std::vector<uint8_t> respData;
+						if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)
+							&& respData.size() >= sizeof(IpcStatus) + 8
+							&& *reinterpret_cast<const IpcStatus*>(respData.data()) == IpcStatus::Ok) {
+							uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
+							char buf[80];
+							snprintf(buf, sizeof(buf), "0x%016llX (TEB=0x%llX + 0x%llX)", val, tebAddr, offset);
+							resp.success = true;
+							resp.body = {{"result", buf}, {"type", "segment"}, {"variablesReference", 0}};
+							SendResponse(resp);
+							return;
+						}
+					}
+				}
+			} catch (...) {}
+		}
+	}
 
+	// 4) *expr / [expr] — pointer dereference with register+offset support
+	//    Supports: *0x1234, [0x1234], [RAX], [RAX+0x10], [RAX-8], [RAX+RBX]
+	if (!expression.empty() && (expression[0] == '*' || expression[0] == '[')) {
+		std::string inner = expression.substr(1);
+		if (!inner.empty() && inner.back() == ']') inner.pop_back();
+		while (!inner.empty() && inner.front() == ' ') inner.erase(inner.begin());
+		while (!inner.empty() && inner.back() == ' ') inner.pop_back();
+
+		uint64_t addr = 0;
+		bool resolved = false;
 		try {
-			uint64_t addr = std::stoull(addrStr, nullptr, 0);
+			addr = std::stoull(inner, nullptr, 0);
+			resolved = true;
+		} catch (...) {}
+
+		if (!resolved && threadId != 0) {
+			GetRegistersRequest regReq;
+			regReq.threadId = threadId;
+			std::vector<uint8_t> regResp;
+			if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), regResp)
+				&& regResp.size() >= sizeof(GetRegistersResponse)) {
+				auto* rr = reinterpret_cast<const GetRegistersResponse*>(regResp.data());
+
+				size_t opPos = std::string::npos;
+				char opChar = 0;
+				for (size_t i = 1; i < inner.size(); i++) {
+					if (inner[i] == '+' || inner[i] == '-') {
+						opPos = i;
+						opChar = inner[i];
+						break;
+					}
+				}
+
+				if (opPos != std::string::npos) {
+					std::string lhs = inner.substr(0, opPos);
+					std::string rhs = inner.substr(opPos + 1);
+					while (!lhs.empty() && lhs.back() == ' ') lhs.pop_back();
+					while (!rhs.empty() && rhs.front() == ' ') rhs.erase(rhs.begin());
+
+					uint64_t lhsVal = 0, rhsVal = 0;
+					bool lhsOk = false, rhsOk = false;
+
+					if (TryParseRegisterName(lhs)) {
+						lhsVal = ResolveRegisterByName(lhs, rr->regs);
+						lhsOk = true;
+					} else {
+						try { lhsVal = std::stoull(lhs, nullptr, 0); lhsOk = true; } catch (...) {}
+					}
+					if (TryParseRegisterName(rhs)) {
+						rhsVal = ResolveRegisterByName(rhs, rr->regs);
+						rhsOk = true;
+					} else {
+						try { rhsVal = std::stoull(rhs, nullptr, 0); rhsOk = true; } catch (...) {}
+					}
+
+					if (lhsOk && rhsOk) {
+						addr = (opChar == '+') ? (lhsVal + rhsVal) : (lhsVal - rhsVal);
+						resolved = true;
+					}
+				} else {
+					if (TryParseRegisterName(inner)) {
+						addr = ResolveRegisterByName(inner, rr->regs);
+						resolved = true;
+					}
+				}
+			}
+		}
+
+		if (resolved) {
 			ReadMemoryRequest readReq;
 			readReq.address = addr;
 			readReq.size = 8;
-
 			std::vector<uint8_t> respData;
-			if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)) {
-				if (respData.size() >= sizeof(IpcStatus) + 8 &&
-					*reinterpret_cast<const IpcStatus*>(respData.data()) == IpcStatus::Ok) {
-					uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
-					char buf[32];
-					snprintf(buf, sizeof(buf), "0x%016llX", val);
-					resp.success = true;
-					resp.body = {
-						{"result", buf},
-						{"type", "uint64"},
-						{"variablesReference", 0},
-					};
-					SendResponse(resp);
-					return;
-				}
+			if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)
+				&& respData.size() >= sizeof(IpcStatus) + 8
+				&& *reinterpret_cast<const IpcStatus*>(respData.data()) == IpcStatus::Ok) {
+				uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
+				char buf[32];
+				snprintf(buf, sizeof(buf), "0x%016llX", val);
+				resp.success = true;
+				resp.body = {{"result", buf}, {"type", "uint64"}, {"variablesReference", 0}};
+				SendResponse(resp);
+				return;
 			}
-		} catch (...) {}
+		}
 	}
 
 	resp.success = false;
-	resp.message = "Use register name (RAX, RCX, ...) or *<address> / 0x<address> to evaluate.";
+	resp.message = "Supported: register (RAX), 0x<addr>, [addr], [reg+offset], gs:[offset], fs:[offset]";
 	SendResponse(resp);
 }
 
