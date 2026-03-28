@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 1.0.91 (2026-03-29)
+
+### New Features (MCP: 26 -> 30 tools)
+- **veh_dump_memory**: Dump memory to binary file (up to 64MB, chunked 1MB reads). Avoids hex string token overhead that made large reads impractical
+- **veh_allocate_memory**: Allocate memory pages in target process with selectable protection (rwx/rw/rx/r)
+- **veh_free_memory**: Free previously allocated memory pages
+- **veh_execute_shellcode**: All-in-one shellcode execution -- allocates RWX page, copies code, creates thread, waits for completion, frees page. Supports fire-and-forget mode (timeout_ms=0) for persistent patches
+
+### Enhancements
+- **Evaluate expressions (MCP + DAP)**: Both `veh_evaluate` and VSCode Debug Console now support complex expressions:
+  - `[reg+offset]` / `[reg-offset]` -- e.g. `[RSP+0x8]`, `[RBP-0x20]`
+  - `[reg+reg]` -- e.g. `[RAX+RBX]`
+  - `[reg]` -- e.g. `[RSP]` (single register dereference)
+  - `gs:[offset]` -- TEB-relative access on x64, e.g. `gs:[0x60]` for PEB pointer
+  - `fs:[offset]` -- TEB-relative access on x86 (WoW64)
+  - Architecture validation: `fs:[]` rejected on x64, `gs:[]` rejected on x86
+- **BP ID separation**: HW breakpoint IDs now start at 10001 (SW BPs start at 1), eliminating ID collision between software and hardware breakpoints
+- **breakpointType in veh_continue**: Response now includes `"breakpointType": "software"|"hardware"` when stopped at a breakpoint, removing ambiguity
+
+### Bug Fixes
+- **ExecuteShellcode crash on timeout**: TerminateThread followed by immediate VirtualFree could crash if thread hadn't fully terminated. Added WaitForSingleObject after TerminateThread to guarantee thread death before freeing code page
+- **DumpMemory unsigned underflow guard**: Prevented potential infinite loop when DLL returns more data than requested
+
 ## 1.0.90 (2026-03-22)
 
 ### Bug Fixes

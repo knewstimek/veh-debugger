@@ -63,4 +63,62 @@ bool MemoryManager::RestoreProtection(uint64_t address, uint32_t size, DWORD old
 	return VirtualProtect(ptr, size, oldProtect, &dummy) != FALSE;
 }
 
+uint64_t MemoryManager::Allocate(uint32_t size, uint32_t protection) {
+	void* ptr = VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, protection);
+	return reinterpret_cast<uint64_t>(ptr);
+}
+
+bool MemoryManager::Free(uint64_t address, uint32_t /*size*/) {
+	auto* ptr = reinterpret_cast<LPVOID>(address);
+	return VirtualFree(ptr, 0, MEM_RELEASE) != FALSE;
+}
+
+bool MemoryManager::ExecuteShellcode(const uint8_t* code, uint32_t size, uint32_t timeoutMs,
+                                     uint64_t& allocAddr, uint32_t& exitCode) {
+	// 1. Allocate RWX page
+	void* mem = VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+	if (!mem) return false;
+	allocAddr = reinterpret_cast<uint64_t>(mem);
+
+	// 2. Copy shellcode
+	memcpy(mem, code, size);
+	FlushInstructionCache(GetCurrentProcess(), mem, size);
+
+	// 3. Execute via CreateThread
+	HANDLE hThread = CreateThread(nullptr, 0,
+		reinterpret_cast<LPTHREAD_START_ROUTINE>(mem), nullptr, 0, nullptr);
+	if (!hThread) {
+		VirtualFree(mem, 0, MEM_RELEASE);
+		allocAddr = 0;
+		return false;
+	}
+
+	if (timeoutMs == 0) {
+		// Fire-and-forget: don't wait, don't free (caller manages)
+		CloseHandle(hThread);
+		exitCode = 0;
+		return true;
+	}
+
+	// 4. Wait for completion
+	DWORD waitResult = WaitForSingleObject(hThread, timeoutMs);
+	if (waitResult == WAIT_OBJECT_0) {
+		DWORD code32 = 0;
+		GetExitCodeThread(hThread, &code32);
+		exitCode = code32;
+	} else {
+		// Timeout - terminate thread, then wait for actual termination
+		TerminateThread(hThread, 0xDEAD);
+		WaitForSingleObject(hThread, 5000);  // wait for thread to actually die
+		exitCode = 0xDEAD;
+	}
+	CloseHandle(hThread);
+
+	// 5. Free RWX page (safe: thread is guaranteed dead at this point)
+	VirtualFree(mem, 0, MEM_RELEASE);
+	allocAddr = 0;
+
+	return (waitResult == WAIT_OBJECT_0);
+}
+
 } // namespace veh

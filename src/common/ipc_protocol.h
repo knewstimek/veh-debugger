@@ -62,6 +62,11 @@ enum class IpcCommand : uint32_t {
 	// Tracing
 	TraceCallers           = 0x0050,
 
+	// Memory management
+	AllocateMemory         = 0x0060,
+	FreeMemory             = 0x0061,
+	ExecuteShellcode       = 0x0062,
+
 	// Lifecycle
 	Heartbeat              = 0x00FE,
 	Detach                 = 0x00F0,
@@ -322,6 +327,33 @@ struct EnumLocalsResponse {
 	IpcStatus status;
 	uint32_t  count;
 	// followed by `count` LocalVariableInfo structs
+};
+
+// --- Memory management ---
+struct AllocateMemoryRequest {
+	uint32_t size;
+	uint32_t protection;  // PAGE_EXECUTE_READWRITE etc.
+};
+
+struct AllocateMemoryResponse {
+	IpcStatus status;
+	uint64_t  address;
+};
+
+struct FreeMemoryRequest {
+	uint64_t address;
+	uint32_t size;
+};
+
+struct ExecuteShellcodeRequest {
+	uint32_t size;        // shellcode byte count (follows this struct)
+	uint32_t timeoutMs;   // max wait time (0 = fire-and-forget)
+};
+
+struct ExecuteShellcodeResponse {
+	IpcStatus status;
+	uint64_t  allocatedAddress;  // RWX page address (freed if not fire-and-forget)
+	uint32_t  exitCode;          // thread exit code
 };
 
 // --- TraceCallers ---

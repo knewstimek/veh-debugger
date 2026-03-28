@@ -971,6 +971,57 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		break;
 	}
 
+	case IpcCommand::AllocateMemory: {
+		if (payloadSize < sizeof(AllocateMemoryRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const AllocateMemoryRequest*>(payload);
+		AllocateMemoryResponse resp;
+		resp.address = MemoryManager::Instance().Allocate(req->size, req->protection);
+		resp.status = resp.address ? IpcStatus::Ok : IpcStatus::Error;
+		SendResponse(command, &resp, sizeof(resp));
+		break;
+	}
+
+	case IpcCommand::FreeMemory: {
+		if (payloadSize < sizeof(FreeMemoryRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const FreeMemoryRequest*>(payload);
+		bool ok = MemoryManager::Instance().Free(req->address, req->size);
+		IpcStatus status = ok ? IpcStatus::Ok : IpcStatus::Error;
+		SendResponse(command, &status, sizeof(status));
+		break;
+	}
+
+	case IpcCommand::ExecuteShellcode: {
+		if (payloadSize < sizeof(ExecuteShellcodeRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const ExecuteShellcodeRequest*>(payload);
+		const uint8_t* code = payload + sizeof(ExecuteShellcodeRequest);
+		uint32_t codeSize = payloadSize - sizeof(ExecuteShellcodeRequest);
+		if (codeSize != req->size) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		ExecuteShellcodeResponse resp;
+		resp.allocatedAddress = 0;
+		resp.exitCode = 0;
+		bool ok = MemoryManager::Instance().ExecuteShellcode(
+			code, codeSize, req->timeoutMs, resp.allocatedAddress, resp.exitCode);
+		resp.status = ok ? IpcStatus::Ok : IpcStatus::Error;
+		SendResponse(command, &resp, sizeof(resp));
+		break;
+	}
+
 	case IpcCommand::Detach: {
 		// Detach: 디버깅 상태만 정리하고 파이프 서버는 유지한다.
 		// connected_=false로 내부 커맨드 루프만 탈출 → 외부 루프에서 새 클라이언트 대기
