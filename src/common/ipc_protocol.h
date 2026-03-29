@@ -135,6 +135,7 @@ struct RemoveHwBreakpointRequest {
 
 struct ContinueRequest {
 	uint32_t threadId;
+	uint8_t  passException;  // 1 = pass exception to SEH (EXCEPTION_CONTINUE_SEARCH)
 };
 
 struct StepRequest {
@@ -354,6 +355,9 @@ struct ExecuteShellcodeResponse {
 	IpcStatus status;
 	uint64_t  allocatedAddress;  // RWX page address (freed if not fire-and-forget)
 	uint32_t  exitCode;          // thread exit code
+	uint8_t   crashed;           // 1 if shellcode thread crashed
+	uint32_t  exceptionCode;     // exception code if crashed
+	uint64_t  exceptionAddress;  // crash address if crashed
 };
 
 // --- TraceCallers ---

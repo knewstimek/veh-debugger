@@ -139,16 +139,21 @@ HANDLE VehHandler::GetOrCreateThreadEvent(uint32_t threadId) {
 	return evt;
 }
 
-void VehHandler::ResumeStoppedThread(uint32_t threadId, bool step) {
-	LOG_DEBUG("ResumeStoppedThread(%u, step=%d)", threadId, step);
+void VehHandler::ResumeStoppedThread(uint32_t threadId, bool step, bool passException) {
+	LOG_DEBUG("ResumeStoppedThread(%u, step=%d, passEx=%d)", threadId, step, passException);
 
-	// step 플래그 설정 (VEH 핸들러 스레드에서 읽음)
+	// step + passException 플래그 설정 (VEH 핸들러 스레드에서 읽음)
 	{
 		std::lock_guard<std::mutex> lock(stepFlagMutex_);
 		if (step) {
 			stepFlags_[threadId] = true;
 		} else {
 			stepFlags_.erase(threadId);
+		}
+		if (passException) {
+			passExceptionFlags_[threadId] = true;
+		} else {
+			passExceptionFlags_.erase(threadId);
 		}
 	}
 
@@ -289,6 +294,11 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 	const uint32_t tid = __readfsdword(0x24);  // FS:[0x24] = TEB.ClientId.UniqueThread
 #endif
 
+	// 셸코드 스레드: 모든 예외를 VEH에서 무시 (SEH/__except가 처리)
+	if (IsShellcodeThread(tid)) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
+
 	switch (code) {
 	case EXCEPTION_BREAKPOINT: { // 0x80000003 — INT3 히트
 		auto bp = BreakpointManager::Instance().FindByAddress(addr);
@@ -348,6 +358,22 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 					stepFlags_.erase(it);
 					LOG_DEBUG("Thread %u: step requested, will re-TF after rearm", tid);
 				}
+			}
+		}
+
+		// pass_exception: 예외를 SEH로 전달 (CFF/난독화 INT3 등)
+		{
+			std::lock_guard<std::mutex> lock(stepFlagMutex_);
+			auto pit = passExceptionFlags_.find(tid);
+			if (pit != passExceptionFlags_.end() && pit->second) {
+				passExceptionFlags_.erase(pit);
+				// BP를 다시 활성화 (Disable로 원본 복원했으므로)
+				BreakpointManager::Instance().Enable(bp->id);
+				// TF 제거, rearm 취소
+				info->ContextRecord->EFlags &= ~0x100;
+				rearm = {0, 0, false, false};
+				LOG_DEBUG("Thread %u: pass_exception, forwarding to SEH", tid);
+				return EXCEPTION_CONTINUE_SEARCH;
 			}
 		}
 
@@ -487,6 +513,21 @@ std::unordered_map<uint64_t, uint32_t> VehHandler::GetTraceResults(uint32_t& tot
 		}
 	}
 	return result;
+}
+
+void VehHandler::RegisterShellcodeThread(uint32_t tid) {
+	std::lock_guard<std::mutex> lock(shellcodeThreadMutex_);
+	shellcodeThreads_.insert(tid);
+}
+
+void VehHandler::UnregisterShellcodeThread(uint32_t tid) {
+	std::lock_guard<std::mutex> lock(shellcodeThreadMutex_);
+	shellcodeThreads_.erase(tid);
+}
+
+bool VehHandler::IsShellcodeThread(uint32_t tid) {
+	std::lock_guard<std::mutex> lock(shellcodeThreadMutex_);
+	return shellcodeThreads_.count(tid) > 0;
 }
 
 } // namespace veh
