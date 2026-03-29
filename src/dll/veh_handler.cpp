@@ -2,6 +2,7 @@
 #include "veh_handler.h"
 #include "breakpoint.h"
 #include "hw_breakpoint.h"
+#include "memory.h"
 #include "threads.h"
 #include "syscall_resolver.h"
 #include "../common/logger.h"
@@ -415,6 +416,29 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 					// DR6 해당 비트 클리어
 					info->ContextRecord->Dr6 &= ~(1ULL << slot);
 
+					// TraceMemory: if this is our temp HW BP, record result and skip NotifyAndWait
+					if (traceMem_.active.load(std::memory_order_relaxed) && hwbp->id == traceMem_.hwBpId) {
+						// Read new value at watched address
+						uint64_t newVal = 0;
+						auto newData = MemoryManager::Instance().Read(traceMem_.watchAddress, traceMem_.watchSize);
+						if (!newData.empty()) memcpy(&newVal, newData.data(), (traceMem_.watchSize > 8) ? 8 : traceMem_.watchSize);
+
+						traceMem_.found = true;
+						traceMem_.threadId = tid;
+						traceMem_.instructionAddress = addr;
+						traceMem_.newValue = newVal;
+						traceMem_.active.store(false, std::memory_order_relaxed);
+						traceMem_.done.store(true, std::memory_order_release);
+						LOG_INFO("TraceMemory: write detected at 0x%llX by tid=%u (0x%llX -> 0x%llX)",
+							traceMem_.watchAddress, tid, traceMem_.oldValue, newVal);
+
+						// Remove temp HW BP and continue execution
+						HwBreakpointManager::Instance().Remove(hwbp->id);
+						HwBreakpointManager::Instance().ClearFromContext(*info->ContextRecord);
+						HwBreakpointManager::Instance().ApplyToContext(*info->ContextRecord);
+						return EXCEPTION_CONTINUE_EXECUTION;
+					}
+
 					{
 						auto result = NotifyAndWait(info, tid, DebugEventType::BreakpointHit, addr, hwbp->id, code);
 						if (result == WaitResult::Detached) {
@@ -435,10 +459,8 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		// 3) TraceRegister: check register condition, loop internally if not met
 		if (traceReg_.active.load(std::memory_order_relaxed) && tid == traceReg_.threadId) {
 			traceReg_.stepsExecuted++;
-			const uint64_t* regBase = &info->ContextRecord->Rax;
-			// RegisterSet layout: rax=0, rbx=1, ..., rip=16, rflags=17
-			// CONTEXT layout is different, map regIndex to CONTEXT field
 			uint64_t curVal = 0;
+#ifdef _WIN64
 			switch (traceReg_.regIndex) {
 				case 0: curVal = info->ContextRecord->Rax; break;
 				case 1: curVal = info->ContextRecord->Rbx; break;
@@ -460,6 +482,21 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 				case 17: curVal = info->ContextRecord->EFlags; break;
 				default: curVal = 0; break;
 			}
+#else
+			switch (traceReg_.regIndex) {
+				case 0: curVal = info->ContextRecord->Eax; break;
+				case 1: curVal = info->ContextRecord->Ebx; break;
+				case 2: curVal = info->ContextRecord->Ecx; break;
+				case 3: curVal = info->ContextRecord->Edx; break;
+				case 4: curVal = info->ContextRecord->Esi; break;
+				case 5: curVal = info->ContextRecord->Edi; break;
+				case 6: curVal = info->ContextRecord->Ebp; break;
+				case 7: curVal = info->ContextRecord->Esp; break;
+				case 16: curVal = info->ContextRecord->Eip; break;
+				case 17: curVal = info->ContextRecord->EFlags; break;
+				default: curVal = 0; break;
+			}
+#endif
 
 			bool conditionMet = false;
 			switch (traceReg_.mode) {
@@ -476,10 +513,11 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 				traceReg_.newValue = curVal;
 				traceReg_.active.store(false, std::memory_order_relaxed);
 				traceReg_.done.store(true, std::memory_order_release);
-				// Stop: let NotifyAndWait handle the rest (thread pauses)
 				LOG_INFO("TraceRegister: %s after %u steps at 0x%llX (0x%llX -> 0x%llX)",
 					conditionMet ? "found" : "max_steps", traceReg_.stepsExecuted, addr,
 					traceReg_.initialValue, curVal);
+				// Fall through to NotifyAndWait -- thread pauses, pipe_server reads done flag
+				// This is intentional: thread must be stopped for subsequent inspection
 			} else {
 				// Continue stepping: set TF again
 				info->ContextRecord->EFlags |= 0x100;
@@ -599,12 +637,12 @@ void VehHandler::StartTraceRegister(uint32_t threadId, uint32_t regIndex, uint32
 	traceReg_.oldValue = 0;
 	traceReg_.newValue = 0;
 	traceReg_.done.store(false, std::memory_order_relaxed);
-	traceReg_.active.store(true, std::memory_order_release);
 
-	// Read initial register value from stopped context
+	// Read initial register value BEFORE activating trace (race fix)
 	CONTEXT ctx;
 	if (GetStoppedContext(threadId, ctx)) {
 		uint64_t val = 0;
+#ifdef _WIN64
 		switch (regIndex) {
 			case 0: val = ctx.Rax; break; case 1: val = ctx.Rbx; break;
 			case 2: val = ctx.Rcx; break; case 3: val = ctx.Rdx; break;
@@ -616,8 +654,20 @@ void VehHandler::StartTraceRegister(uint32_t threadId, uint32_t regIndex, uint32
 			case 14: val = ctx.R14; break; case 15: val = ctx.R15; break;
 			case 16: val = ctx.Rip; break; case 17: val = ctx.EFlags; break;
 		}
+#else
+		switch (regIndex) {
+			case 0: val = ctx.Eax; break; case 1: val = ctx.Ebx; break;
+			case 2: val = ctx.Ecx; break; case 3: val = ctx.Edx; break;
+			case 4: val = ctx.Esi; break; case 5: val = ctx.Edi; break;
+			case 6: val = ctx.Ebp; break; case 7: val = ctx.Esp; break;
+			case 16: val = ctx.Eip; break; case 17: val = ctx.EFlags; break;
+		}
+#endif
 		traceReg_.initialValue = val;
 	}
+
+	// Activate trace AFTER initialValue is set, BEFORE resume
+	traceReg_.active.store(true, std::memory_order_release);
 
 	// Resume thread with step (TF set)
 	ResumeStoppedThread(threadId, true);
