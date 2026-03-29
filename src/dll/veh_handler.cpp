@@ -176,6 +176,7 @@ void VehHandler::ResumeAllStoppedThreads(bool forDetach) {
 	{
 		std::lock_guard<std::mutex> lock(stepFlagMutex_);
 		stepFlags_.clear();
+		passExceptionFlags_.clear();
 	}
 	if (forDetach) {
 		// Detach: stoppedContexts_를 먼저 비워서 VEH 핸들러가 detach를 감지하게 함

@@ -11,7 +11,7 @@
 - **trace_callers auto-resume**: Automatically resumes stopped process before tracing, pauses after collection
 
 ### Enhancements
-- **veh_dump_memory**: Response now includes `fileSize` and `verified` fields for file integrity confirmation
+- **veh_dump_memory**: Response now includes `sha256` checksum, `fileSize`, and `verified` fields for file integrity confirmation
 - **Shellcode SEH wrapper**: Shellcode threads are wrapped in __try/__except and registered with VEH handler to prevent exception leakage to the debugger event queue
 
 ## 1.0.91 (2026-03-29)

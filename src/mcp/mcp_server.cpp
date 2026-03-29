@@ -1151,7 +1151,7 @@ json McpServer::ToolTraceCallers(const json& args) {
 	// Auto-resume: trace needs the process running to collect hits.
 	// Resume all stopped threads before tracing, pause again after.
 	ResumeMainThread();
-	ContinueRequest contReq;
+	ContinueRequest contReq = {};
 	contReq.threadId = 0;
 	pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 
@@ -1173,6 +1173,12 @@ json McpServer::ToolTraceCallers(const json& args) {
 	// Auto-pause after collection
 	PauseRequest pauseReq; pauseReq.threadId = 0;
 	pipeClient_.SendCommand(IpcCommand::Pause, &pauseReq, sizeof(pauseReq));
+
+	// Drain stale events from auto-resume period (BP hits during trace, pause event)
+	{
+		std::lock_guard<std::mutex> lock(bpHitMutex_);
+		bpHitOccurred_ = false;
+	}
 
 	// Parse response: TraceCallersResponse header + TraceCallerEntry[] array
 	if (respData.size() < sizeof(TraceCallersResponse)) {
@@ -1798,6 +1804,7 @@ json McpServer::ToolWriteMemory(const json& args) {
 	// Batch mode: patches array [{address, data}, ...]
 	if (args.contains("patches") && args["patches"].is_array()) {
 		const auto& patches = args["patches"];
+		if (patches.size() > 1000) return {{"error", "Too many patches (max 1000)"}};
 		int succeeded = 0, failed = 0;
 		json errors = json::array();
 		for (const auto& patch : patches) {
@@ -2389,7 +2396,7 @@ bool McpServer::SetTempBpAndContinue(uint64_t address) {
 				std::lock_guard<std::mutex> lock(eventMutex_);
 				tempStepOverBpId_ = resp->id;
 			}
-			ContinueRequest contReq;
+			ContinueRequest contReq = {};
 			contReq.threadId = 0;
 			pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 			return true;

@@ -98,7 +98,10 @@ static DWORD SafeCallShellcode(ShellcodeContext* ctx) {
 }
 
 static DWORD WINAPI ShellcodeThreadProc(LPVOID param) {
-	return SafeCallShellcode(reinterpret_cast<ShellcodeContext*>(param));
+	DWORD result = SafeCallShellcode(reinterpret_cast<ShellcodeContext*>(param));
+	// Always unregister (covers fire-and-forget + normal paths; erase is idempotent)
+	VehHandler::Instance().UnregisterShellcodeThread(GetCurrentThreadId());
+	return result;
 }
 
 bool MemoryManager::ExecuteShellcode(const uint8_t* code, uint32_t size, uint32_t timeoutMs,

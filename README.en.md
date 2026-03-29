@@ -186,7 +186,7 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | `veh_list_breakpoints` | - | List active SW/HW breakpoints |
 | `veh_set_data_breakpoint` | `address, type, size` | HW BP (write/readwrite/execute) |
 | `veh_remove_data_breakpoint` | `id` | Remove HW BP |
-| `veh_continue` | `threadId?` | Continue execution |
+| `veh_continue` | `threadId?, wait?, timeout?, pass_exception?` | Continue execution. `pass_exception=true` forwards exception to SEH (for CFF debugging) |
 | `veh_step_in` | `threadId` | Step Into |
 | `veh_step_over` | `threadId` | Step Over |
 | `veh_step_out` | `threadId` | Step Out |
@@ -197,7 +197,7 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | `veh_set_register` | `threadId, name, value` | Modify register value |
 | `veh_evaluate` | `expression, threadId` | Evaluate register/memory/pointer/segment (`[reg+offset]`, `gs:[0x60]`, etc.) |
 | `veh_read_memory` | `address, size` | Read memory (hex) |
-| `veh_write_memory` | `address, data` | Write memory (hex) |
+| `veh_write_memory` | `address, data` or `patches` | Write memory. Batch: `patches=[{address,data},...]` |
 | `veh_dump_memory` | `address, size, output_path` | Dump memory to binary file (up to 64MB) |
 | `veh_allocate_memory` | `size?, protection?` | Allocate memory in target (VirtualAlloc) |
 | `veh_free_memory` | `address` | Free allocated memory (VirtualFree) |
