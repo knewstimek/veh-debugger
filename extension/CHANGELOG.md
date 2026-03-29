@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.94 (2026-03-29)
+
 ### New Features
 - **veh_batch**: Execute multiple debugger commands in a single MCP call. Supports `$N` variable references (e.g. `$0.registers.rsp`), and control flow: `if`/`else`, `loop`/`until`/`max`, `for_each`/`as`/`do`. Reduces agent round-trips from N turns to 1
 
