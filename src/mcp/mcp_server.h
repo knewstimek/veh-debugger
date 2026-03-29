@@ -38,7 +38,7 @@ private:
 		void OnResourcesList(const json& id, const json& params);
 		void OnResourceTemplatesList(const json& id, const json& params);
 
-	// Tool implementations (31 tools)
+	// Tool implementations (31 tools + veh_batch)
 	json ToolAttach(const json& args);
 	json ToolLaunch(const json& args);
 	json ToolDetach(const json& args);
@@ -70,6 +70,7 @@ private:
 	json ToolAllocateMemory(const json& args);
 	json ToolFreeMemory(const json& args);
 	json ToolExecuteShellcode(const json& args);
+	json ToolBatch(const json& args);
 
 	// Tool list definition
 	json GetToolsList();
