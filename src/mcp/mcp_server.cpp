@@ -1146,6 +1146,13 @@ json McpServer::ToolTraceCallers(const json& args) {
 	if (durationSec < 1) durationSec = 1;
 	if (durationSec > 60) durationSec = 60;
 
+	// Auto-resume: trace needs the process running to collect hits.
+	// Resume all stopped threads before tracing, pause again after.
+	ResumeMainThread();
+	ContinueRequest contReq;
+	contReq.threadId = 0;
+	pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+
 	// Build IPC request
 	TraceCallersRequest req;
 	req.address = addr;
@@ -1155,8 +1162,15 @@ json McpServer::ToolTraceCallers(const json& args) {
 	std::vector<uint8_t> respData;
 	int timeoutMs = (durationSec + 10) * 1000;
 	if (!pipeClient_.SendAndReceive(IpcCommand::TraceCallers, &req, sizeof(req), respData, timeoutMs)) {
+		// Pause before returning error
+		PauseRequest pauseReq; pauseReq.threadId = 0;
+		pipeClient_.SendCommand(IpcCommand::Pause, &pauseReq, sizeof(pauseReq));
 		return {{"error", IpcErrorMessage()}};
 	}
+
+	// Auto-pause after collection
+	PauseRequest pauseReq; pauseReq.threadId = 0;
+	pipeClient_.SendCommand(IpcCommand::Pause, &pauseReq, sizeof(pauseReq));
 
 	// Parse response: TraceCallersResponse header + TraceCallerEntry[] array
 	if (respData.size() < sizeof(TraceCallersResponse)) {
@@ -2844,7 +2858,7 @@ json McpServer::GetToolsList() {
 		{{"name", "veh_exception_info"}, {"description", "Get information about the last exception that occurred in the target process."},
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}},
 
-		{{"name", "veh_trace_callers"}, {"description", "Set a breakpoint at address, collect all callers (return addresses from stack) for duration_sec seconds, then remove the breakpoint and return unique caller list with hit counts. Like Cheat Engine's 'Find out what accesses this address' but for code. x64: uses RtlVirtualUnwind for accurate caller resolution. x86: uses [ESP] (accurate only at function entry). Note: DLL-internal IPC thread is excluded from tracing to prevent deadlocks."},
+		{{"name", "veh_trace_callers"}, {"description", "Profile who calls a function: sets BP at address, auto-resumes process, collects all unique callers with hit counts for duration_sec seconds, then pauses and returns results. Useful for call graph analysis and finding hot callers. x64: uses RtlVirtualUnwind for accurate caller resolution. x86: uses [ESP] (accurate only at function entry). Process is automatically resumed before tracing and paused after."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Hex address to set breakpoint (e.g. '0x7FF600001000')"}}},
 			{"duration_sec", {{"type", "integer"}, {"description", "How long to collect callers in seconds (default: 5, max: 60)"}}}
