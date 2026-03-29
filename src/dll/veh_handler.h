@@ -78,6 +78,22 @@ public:
 	void StartTraceRegister(uint32_t threadId, uint32_t regIndex, uint32_t maxSteps,
 	                         uint8_t mode, uint64_t compareValue);
 
+	// TraceMemory: VEH signals when HW BP hits (same pattern as traceReg_)
+	struct TraceMemState {
+		std::atomic<bool> active{false};
+		uint32_t hwBpId = 0;        // temp HW BP to watch for
+		uint64_t watchAddress = 0;
+		uint32_t watchSize = 0;
+		// Results
+		std::atomic<bool> done{false};
+		bool found = false;
+		uint32_t threadId = 0;
+		uint64_t instructionAddress = 0;
+		uint64_t oldValue = 0;
+		uint64_t newValue = 0;
+	};
+	TraceMemState traceMem_;
+
 	// 내부 스레드 등록 (pipe server 등) -- BP 투명 스킵 + trace_callers 스킵
 	void SetInternalThread(uint32_t tid) { internalTid_.store(tid, std::memory_order_relaxed); }
 

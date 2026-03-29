@@ -1035,7 +1035,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			return;
 		}
 		auto* req = reinterpret_cast<const TraceRegisterRequest*>(payload);
-		if (req->maxSteps == 0 || req->maxSteps > 100000) {
+		if (req->maxSteps == 0 || req->maxSteps > 100000 || req->regIndex > 17) {
 			IpcStatus status = IpcStatus::InvalidArgs;
 			SendResponse(command, &status, sizeof(status));
 			return;
@@ -1065,7 +1065,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		} else {
 			resp.status = IpcStatus::Error;
 			resp.found = 0;
-			resp.stepsExecuted = state.stepsExecuted;
+			resp.stepsExecuted = 0;  // don't read non-atomic from racing VEH thread
 			resp.address = 0;
 			resp.oldValue = 0;
 			resp.newValue = 0;
@@ -1090,7 +1090,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			memcpy(&oldVal, initData.data(), (req->size > 8) ? 8 : req->size);
 		}
 
-		// Use temp HW data breakpoint (write) to catch modification
+		// Set temp HW data breakpoint (write)
 		HwBreakSize bpSize = HwBreakSize::Dword;
 		switch (req->size) {
 			case 1: bpSize = HwBreakSize::Byte; break;
@@ -1100,72 +1100,54 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 		uint32_t bpId = HwBreakpointManager::Instance().Add(req->address, HwBreakType::Write, bpSize);
 		if (bpId == 0) {
-			TraceMemoryResponse resp;
-			resp.status = IpcStatus::Error; // no free DR slot
-			resp.found = 0;
+			TraceMemoryResponse resp = {};
+			resp.status = IpcStatus::Error;
 			SendResponse(command, &resp, sizeof(resp));
 			return;
 		}
 		ApplyHwBreakpointsToAllThreads();
 
+		// Setup VEH trace state (VEH handler checks this on HW BP hit)
+		auto& tm = VehHandler::Instance().traceMem_;
+		tm.hwBpId = bpId;
+		tm.watchAddress = req->address;
+		tm.watchSize = req->size;
+		tm.oldValue = oldVal;
+		tm.found = false;
+		tm.done.store(false, std::memory_order_relaxed);
+		tm.active.store(true, std::memory_order_release);
+
 		// Resume all stopped threads
 		VehHandler::Instance().ResumeAllStoppedThreads();
+		ThreadManager::Instance().ResumeAll();
 
-		// Wait for BP hit or timeout
-		// The HW BP hit will pause the thread via VEH handler (NotifyAndWait)
-		// We poll stoppedContexts to detect when a thread stops
+		// Poll done flag (VEH handler sets it on HW BP hit)
 		uint32_t timeoutMs = req->timeoutMs;
 		if (timeoutMs == 0) timeoutMs = 10000;
 		if (timeoutMs > 60000) timeoutMs = 60000;
-
-		TraceMemoryResponse resp = {};
 		int elapsed = 0;
-		while (elapsed < (int)timeoutMs) {
+		while (!tm.done.load(std::memory_order_acquire) && elapsed < (int)timeoutMs) {
 			Sleep(10);
 			elapsed += 10;
-			// Check if any thread stopped at our HW BP
-			// VEH handler will have stored context for the stopped thread
-			auto hwbp = HwBreakpointManager::Instance().FindById(bpId);
-			if (!hwbp) break; // removed externally
-
-			// Check if a thread is stopped (simple check via IsThreadStopped)
-			// We need to find which thread stopped - check all threads
-			HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-			if (snap != INVALID_HANDLE_VALUE) {
-				THREADENTRY32 te; te.dwSize = sizeof(te);
-				DWORD pid = GetCurrentProcessId();
-				if (Thread32First(snap, &te)) {
-					do {
-						if (te.th32OwnerProcessID == pid && VehHandler::Instance().IsThreadStopped(te.th32ThreadID)) {
-							CONTEXT ctx;
-							if (VehHandler::Instance().GetStoppedContext(te.th32ThreadID, ctx)) {
-								// Check if stopped at HW BP (DR6)
-								if (ctx.Dr6 & 0xF) {
-									resp.found = 1;
-									resp.threadId = te.th32ThreadID;
-									resp.instructionAddress = ctx.Rip;
-									// Read new value
-									uint64_t newVal = 0;
-									auto newData = MemoryManager::Instance().Read(req->address, req->size);
-									if (!newData.empty()) memcpy(&newVal, newData.data(), (req->size > 8) ? 8 : req->size);
-									resp.oldValue = oldVal;
-									resp.newValue = newVal;
-									break;
-								}
-							}
-						}
-					} while (Thread32Next(snap, &te));
-				}
-				CloseHandle(snap);
-			}
-			if (resp.found) break;
 		}
 
-		// Cleanup: remove temp HW BP
-		HwBreakpointManager::Instance().Remove(bpId);
-		ApplyHwBreakpointsToAllThreads();
+		TraceMemoryResponse resp = {};
+		if (tm.done.load(std::memory_order_acquire)) {
+			resp.status = IpcStatus::Ok;
+			resp.found = tm.found ? 1 : 0;
+			resp.threadId = tm.threadId;
+			resp.instructionAddress = tm.instructionAddress;
+			resp.oldValue = tm.oldValue;
+			resp.newValue = tm.newValue;
+		} else {
+			// Timeout: cleanup
+			tm.active.store(false, std::memory_order_relaxed);
+			HwBreakpointManager::Instance().Remove(bpId);
+			ApplyHwBreakpointsToAllThreads();
+			resp.status = IpcStatus::Ok;
+			resp.found = 0;
+		}
 
-		resp.status = IpcStatus::Ok;
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}
