@@ -412,8 +412,16 @@ json McpServer::ToolSetBreakpoint(const json& args) {
 		}
 	}
 
+	// Store action if provided
+	if (args.contains("action") && args["action"].is_array()) {
+		std::lock_guard<std::mutex> lock(session_.GetBpMutex());
+		bpActions_[bpResult.id] = args["action"];
+	}
+
 	char buf[32]; snprintf(buf, sizeof(buf), "0x%llX", addr);
-	return {{"success", true}, {"id", bpResult.id}, {"address", buf}};
+	json ret = {{"success", true}, {"id", bpResult.id}, {"address", buf}};
+	if (args.contains("action")) ret["hasAction"] = true;
+	return ret;
 }
 
 json McpServer::ToolRemoveBreakpoint(const json& args) {
@@ -435,6 +443,7 @@ json McpServer::ToolRemoveBreakpoint(const json& args) {
 			std::remove_if(bps.begin(), bps.end(),
 				[id](const SwBpInfo& bp) { return bp.id == id; }),
 			bps.end());
+		bpActions_.erase(id);
 	}
 
 	return {{"success", true}, {"id", id}};
@@ -742,6 +751,19 @@ json McpServer::ToolContinue(const json& args) {
 	int timeoutSec = JsonInt(args, "timeout", 10);
 	if (timeoutSec < 1) timeoutSec = 1;
 	if (timeoutSec > 300) timeoutSec = 300;
+
+	// Update exception filter
+	if (args.contains("ignore_exceptions") && args["ignore_exceptions"].is_array()) {
+		std::lock_guard<std::mutex> lock(filterMutex_);
+		ignoreExceptionCodes_.clear();
+		for (auto& v : args["ignore_exceptions"]) {
+			if (v.is_number()) ignoreExceptionCodes_.push_back(v.get<uint32_t>());
+			else if (v.is_string()) {
+				try { ignoreExceptionCodes_.push_back(static_cast<uint32_t>(std::stoull(v.get<std::string>(), nullptr, 0))); }
+				catch (...) {}
+			}
+		}
+	}
 
 	// Check for cached stop event before sending Continue
 	if (wait && !passException) {
@@ -1656,18 +1678,45 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 					}
 					pendingAutoContinue_.push(e->threadId);
 				} else {
-					char buf[128];
-					snprintf(buf, sizeof(buf), "Breakpoint #%u hit at 0x%llX (thread %u)",
-						e->breakpointId, e->address, e->threadId);
+					// Check for BP action (auto-execute commands on hit)
+					json action;
 					{
-						std::lock_guard<std::mutex> lock(eventMutex_);
-						pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
+						std::lock_guard<std::mutex> lock(session_.GetBpMutex());
+						auto ait = bpActions_.find(e->breakpointId);
+						if (ait != bpActions_.end()) action = ait->second;
 					}
-					std::string bpType;
-					if (e->breakpointId >= 10001) bpType = "hardware";
-					else if (e->breakpointId > 0) bpType = "software";
 
-					session_.SignalStop("breakpoint", e->address, e->threadId, e->breakpointId, bpType);
+					if (!action.empty() && action.is_array()) {
+						// Execute action via BatchExecutor, then auto-continue
+						char buf[128];
+						snprintf(buf, sizeof(buf), "BP #%u action executing at 0x%llX (thread %u)",
+							e->breakpointId, e->address, e->threadId);
+						{
+							std::lock_guard<std::mutex> lock(eventMutex_);
+							pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
+						}
+						BatchExecutor executor(session_);
+						executor.Execute(action);
+						// Auto-continue after action
+						{
+							std::lock_guard<std::mutex> lock(eventMutex_);
+							pendingAutoContinue_.push(e->threadId);
+						}
+					} else {
+						// Normal stop
+						char buf[128];
+						snprintf(buf, sizeof(buf), "Breakpoint #%u hit at 0x%llX (thread %u)",
+							e->breakpointId, e->address, e->threadId);
+						{
+							std::lock_guard<std::mutex> lock(eventMutex_);
+							pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
+						}
+						std::string bpType;
+						if (e->breakpointId >= 10001) bpType = "hardware";
+						else if (e->breakpointId > 0) bpType = "software";
+
+						session_.SignalStop("breakpoint", e->address, e->threadId, e->breakpointId, bpType);
+					}
 				}
 			}
 		}
@@ -1731,6 +1780,28 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				lastException_.address = e->address;
 				lastException_.description = e->description;
 			}
+
+			// Check exception filter: auto-pass if code is in ignore list
+			bool autoPass = false;
+			{
+				std::lock_guard<std::mutex> lock(filterMutex_);
+				for (auto code : ignoreExceptionCodes_) {
+					if (code == e->exceptionCode) { autoPass = true; break; }
+				}
+			}
+			if (autoPass) {
+				char buf[384];
+				snprintf(buf, sizeof(buf), "Exception 0x%08X auto-passed (filter) at 0x%llX (thread %u)",
+					e->exceptionCode, e->address, e->threadId);
+				{
+					std::lock_guard<std::mutex> lock(eventMutex_);
+					pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
+				}
+				// Auto-continue with pass_exception=true
+				session_.Continue(e->threadId, true);
+				break;
+			}
+
 			char buf[384];
 			snprintf(buf, sizeof(buf), "Exception 0x%08X at 0x%llX (thread %u): %s",
 				e->exceptionCode, e->address, e->threadId, e->description);
@@ -1820,12 +1891,13 @@ json McpServer::GetToolsList() {
 		{{"name", "veh_detach"}, {"description", "Detach debugger from the target process."},
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}},
 
-		{{"name", "veh_set_breakpoint"}, {"description", "Set a software breakpoint (INT3) at an address. If the target is running (not stopped at a breakpoint), the BP is still set but may not fire if execution already passed the address (timing-dependent). Duplicate address returns existing BP id."},
+		{{"name", "veh_set_breakpoint"}, {"description", "Set a software breakpoint (INT3) at an address. Supports module+RVA (e.g. 'crackme.exe+0x1000'). Duplicate address returns existing BP id. Use 'action' to auto-execute commands on hit (no agent intervention needed)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"address", {{"type", "string"}, {"description", "Hex address (e.g. 0x7FF600001000)"}}},
-			{"condition", {{"type", "string"}, {"description", "Condition expression (e.g. 'RAX==0x1000', 'RCX>5'). Supports registers, *memory, hex/dec constants."}}},
+			{"address", {{"type", "string"}, {"description", "Address: hex (0x7FF600001000) or module+RVA (crackme.exe+0x1000)"}}},
+			{"condition", {{"type", "string"}, {"description", "Condition expression (e.g. 'RAX==0x1000', 'RCX>5'). BP only fires when true."}}},
 			{"hitCondition", {{"type", "string"}, {"description", "Hit count threshold. BP fires only on Nth hit (e.g. '5' = fire on 5th hit)."}}},
-			{"logMessage", {{"type", "string"}, {"description", "Log message template (logpoint). Use {expr} for interpolation (e.g. 'x={RAX}'). Does NOT stop execution."}}}
+			{"logMessage", {{"type", "string"}, {"description", "Log message template (logpoint). Use {expr} for interpolation (e.g. 'x={RAX}'). Does NOT stop execution."}}},
+			{"action", {{"type", "array"}, {"description", "Auto-execute on BP hit (same format as veh_batch steps). After action, auto-continues. Example: [{\"tool\":\"veh_set_register\",\"args\":{\"threadId\":0,\"name\":\"RAX\",\"value\":\"1\"}},{\"tool\":\"veh_continue\"}]"}}}
 		 }}, {"required", json::array({"address"})}}}},
 
 		{{"name", "veh_remove_breakpoint"}, {"description", "Remove a software breakpoint by ID."},
@@ -1870,7 +1942,8 @@ json McpServer::GetToolsList() {
 			{"threadId", {{"type", "integer"}, {"description", "Thread ID (0 = all, default: 0)"}}},
 			{"wait", {{"type", "boolean"}, {"description", "If true, block until target stops (breakpoint/exception/pause/exit). Default: false"}}},
 			{"timeout", {{"type", "integer"}, {"description", "Max seconds to wait when wait=true (1-300, default: 10)"}}},
-			{"pass_exception", {{"type", "boolean"}, {"description", "If true, pass the current exception to the process's SEH handler instead of handling it. Use for CFF/obfuscated code with INT3. Default: false"}}}
+			{"pass_exception", {{"type", "boolean"}, {"description", "If true, pass the current exception to the process's SEH handler instead of handling it. Use for CFF/obfuscated code with INT3. Default: false"}}},
+			{"ignore_exceptions", {{"type", "array"}, {"items", {{"type", "integer"}}}, {"description", "Exception codes to auto-pass to SEH (persistent until changed). E.g. [2147483651] for INT3 (0x80000003). Filters exceptions while catching real crashes."}}}
 		 }}}}},
 
 		{{"name", "veh_step_in"}, {"description", "Single step into (execute one instruction, entering calls). Waits for completion and returns the new instruction pointer."},

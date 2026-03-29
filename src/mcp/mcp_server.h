@@ -6,6 +6,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <queue>
+#include <unordered_map>
 #include "adapter/transport.h"
 #include "debug_session.h"
 #include "common/ipc_protocol.h"
@@ -123,6 +124,13 @@ private:
 	std::queue<uint32_t> pendingAutoContinue_; // threadIds to auto-continue (from condition/logpoint)
 	std::mutex eventMutex_;
 	void FlushEvents();
+
+	// Exception filter: codes to auto-pass to SEH (set by veh_continue ignore_exceptions)
+	std::vector<uint32_t> ignoreExceptionCodes_;
+	std::mutex filterMutex_;
+
+	// BP actions: breakpoint ID -> action steps (executed on hit, then auto-continue)
+	std::unordered_map<uint32_t, json> bpActions_;  // guarded by session_.GetBpMutex()
 };
 
 } // namespace veh
