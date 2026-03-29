@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.0.95 (2026-03-30)
+
+### New Features
+- **Module+RVA address syntax**: All address parameters now accept `module.exe+0x1000` format (e.g. `crackme.exe+0x40900`). Eliminates manual ASLR base calculation. Works in all tools and veh_batch
+- **mainModule in launch/attach**: Response now includes main module name, base address, and size. Saves a veh_modules round-trip
+- **ignore_exceptions filter**: `veh_continue(ignore_exceptions=[0x80000003])` auto-passes listed exception codes to SEH while catching real crashes. Persistent until changed. Enables CFF/obfuscated binary debugging
+- **BP action**: `veh_set_breakpoint(action=[...])` auto-executes batch steps on hit, then auto-continues. Eliminates per-hit agent round-trips. Same format as veh_batch steps
+
 ## 1.0.94 (2026-03-29)
 
 ### New Features

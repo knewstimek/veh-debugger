@@ -222,14 +222,14 @@ enabled = true
 | `veh_attach` | `pid` | 프로세스에 DLL 인젝션 + 파이프 연결 |
 | `veh_launch` | `program, args?, stopOnEntry?` | 프로세스 생성 + 인젝션 |
 | `veh_detach` | - | 디버거 분리 |
-| `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?` | 소프트웨어 BP (조건부/로그포인트 지원) |
+| `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?, action?` | 소프트웨어 BP. `action`으로 히트 시 자동 실행 (veh_batch 형식) |
 | `veh_remove_breakpoint` | `id` | 소프트웨어 BP 제거 |
 | `veh_set_source_breakpoint` | `source, line, condition?, hitCondition?, logMessage?` | 소스 파일+줄번호 BP (PDB 필요) |
 | `veh_set_function_breakpoint` | `name, condition?, hitCondition?, logMessage?` | 함수명 BP (PDB 필요) |
 | `veh_list_breakpoints` | - | 활성 SW/HW BP 목록 조회 |
 | `veh_set_data_breakpoint` | `address, type, size` | HW BP (write/readwrite/execute) |
 | `veh_remove_data_breakpoint` | `id` | HW BP 제거 |
-| `veh_continue` | `threadId?, wait?, timeout?, pass_exception?` | 실행 계속. `pass_exception=true`로 예외를 SEH에 전달 (CFF 디버깅용) |
+| `veh_continue` | `threadId?, wait?, timeout?, pass_exception?, ignore_exceptions?` | 실행 계속. `ignore_exceptions=[0x80000003]`으로 특정 예외만 SEH 전달 |
 | `veh_step_in` | `threadId` | Step Into |
 | `veh_step_over` | `threadId` | Step Over |
 | `veh_step_out` | `threadId` | Step Out |
@@ -251,7 +251,7 @@ enabled = true
 | `veh_batch` | `steps` | 다중 명령 일괄 실행 (`$N` 결과 참조, if/loop/for_each 제어 흐름) |
 | `veh_trace_callers` | `address, duration_sec?` | 함수 호출자 프로파일링 (자동 resume -> N초간 caller 수집 -> 자동 pause). 유니크 caller별 히트 카운트 반환. x64: RtlVirtualUnwind (정확). x86: [ESP] (함수 진입점에서만 정확) |
 
-> **Tip**: 숫자 인자(`threadId`, `pid`, `address`, `size` 등)는 숫자와 문자열 모두 허용하며, hex 형식도 지원합니다 (예: `"0x401000"` 또는 `4198400`). 불리언 인자는 `true`/`false` 또는 `"true"`/`"false"` 모두 허용합니다.
+> **Tip**: 주소 인자는 hex (`"0x401000"`), 10진수 (`4198400`), **모듈+RVA** (`"crackme.exe+0x1000"`) 모두 허용합니다. 모듈+RVA는 ASLR 계산 없이 사용 가능합니다.
 
 ### 커맨드라인 옵션
 
