@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### New Features
+- **veh_batch**: Execute multiple debugger commands in a single MCP call. Supports `$N` variable references (e.g. `$0.registers.rsp`), and control flow: `if`/`else`, `loop`/`until`/`max`, `for_each`/`as`/`do`. Reduces agent round-trips from N turns to 1
+
+### Architecture
+- **DebugSession class**: Extracted pure C++ API from McpServer (no JSON dependency). MCP tools and veh_batch both delegate to DebugSession
+
 ## 1.0.93 (2026-03-29)
 
 ### Bug Fixes

@@ -24,7 +24,7 @@ MCP(Model Context Protocol) 도구 서버를 내장하여 **Claude, Cursor, Wind
 
 - **VEH 기반**: Windows Debug API 대신 VEH를 사용하여 안티디버그 우회에 유리
 - **DAP 전체 지원**: VSCode, MCP debug 도구 등 모든 DAP 호환 클라이언트에서 사용 가능
-- **MCP 도구 서버**: AI 에이전트(Claude, Codex 등)가 직접 디버거를 제어하는 30개 도구 제공
+- **MCP 도구 서버**: AI 에이전트(Claude, Codex 등)가 직접 디버거를 제어하는 31개 도구 제공
 - **TCP 모드**: `--tcp --port=PORT`로 원격 디버깅/MCP 연동 지원
 - **원격 접속**: `--remote` / `--bind=0.0.0.0`으로 VM/네트워크 너머 디버깅
 - **32/64비트 지원**: x86/x64 프로세스 모두 디버깅 가능 (별도 32비트 DLL 빌드)
@@ -51,7 +51,7 @@ veh-debug-adapter.exe              veh-mcp-server.exe
 |---------|------|
 | `veh-debugger.dll` (`vcruntime_net.dll`) | 타겟 프로세스에 인젝션. VEH 핸들러 등록, 브레이크포인트 관리, 스레드/스택/메모리 조회 |
 | `veh-debug-adapter.exe` | DAP 프로토콜 서버. DLL 인젝션, Named Pipe 통신, JSON-RPC 처리 |
-| `veh-mcp-server.exe` | MCP 도구 서버. AI 에이전트가 30개 도구로 디버거 직접 제어 |
+| `veh-mcp-server.exe` | MCP 도구 서버. AI 에이전트가 31개 도구로 디버거 직접 제어 |
 | VSCode Extension | launch.json 스키마 정의, 어댑터 경로 설정 (최소 래퍼) |
 
 ## 빌드
@@ -215,7 +215,7 @@ enabled = true
 
 설정 후 에이전트/IDE를 재시작하면 활성화됩니다.
 
-**MCP 도구 목록 (30개)**
+**MCP 도구 목록 (31개)**
 
 | 도구 | 인자 | 설명 |
 |------|------|------|
@@ -248,6 +248,7 @@ enabled = true
 | `veh_modules` | - | 모듈 목록 |
 | `veh_disassemble` | `address, count?` | 디스어셈블리 (Zydis) |
 | `veh_exception_info` | - | 마지막 예외 정보 조회 |
+| `veh_batch` | `steps` | 다중 명령 일괄 실행 (`$N` 결과 참조, if/loop/for_each 제어 흐름) |
 | `veh_trace_callers` | `address, duration_sec?` | 함수 호출자 프로파일링 (자동 resume -> N초간 caller 수집 -> 자동 pause). 유니크 caller별 히트 카운트 반환. x64: RtlVirtualUnwind (정확). x86: [ESP] (함수 진입점에서만 정확) |
 
 > **Tip**: 숫자 인자(`threadId`, `pid`, `address`, `size` 등)는 숫자와 문자열 모두 허용하며, hex 형식도 지원합니다 (예: `"0x401000"` 또는 `4198400`). 불리언 인자는 `true`/`false` 또는 `"true"`/`"false"` 모두 허용합니다.

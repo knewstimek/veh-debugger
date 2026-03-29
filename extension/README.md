@@ -17,7 +17,7 @@ Windows debugger based on **VEH (Vectored Exception Handler)** instead of the Wi
 - **Log points** — Log `{RAX}`, `{*0x7FF600}` to Debug Console without stopping execution
 - **4 injection methods** — CreateRemoteThread, NtCreateThreadEx, Thread Hijack, QueueUserAPC
 - **TCP remote mode** — Debug across VMs or network
-- **MCP tool server** — 30 tools for AI agent integration (Claude, Cursor, Codex, etc.)
+- **MCP tool server** — 31 tools for AI agent integration (Claude, Cursor, Codex, etc.)
 
 ## Quick Start
 
