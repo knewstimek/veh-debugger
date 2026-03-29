@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.0.92 (2026-03-29)
+
+### New Features
+- **pass_exception (veh_continue)**: Forward exceptions to process's own SEH handler instead of swallowing them. Enables debugging CFF/obfuscated binaries that use INT3 or structured exceptions for control flow. `veh_continue(pass_exception=true)`
+- **Batch write (veh_write_memory)**: Patch multiple addresses in a single call with `patches` array. `veh_write_memory({patches: [{address, data}, ...]})`
+- **Shellcode crash reporting**: veh_execute_shellcode now returns crash details (exceptionCode, exceptionAddress) when shellcode crashes, instead of polluting the next veh_continue with stale exceptions
+- **trace_callers auto-resume**: Automatically resumes stopped process before tracing, pauses after collection
+
+### Enhancements
+- **veh_dump_memory**: Response now includes `fileSize` and `verified` fields for file integrity confirmation
+- **Shellcode SEH wrapper**: Shellcode threads are wrapped in __try/__except and registered with VEH handler to prevent exception leakage to the debugger event queue
+
 ## 1.0.91 (2026-03-29)
 
 ### New Features (MCP: 26 -> 30 tools)

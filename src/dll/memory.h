@@ -20,10 +20,12 @@ public:
 	uint64_t Allocate(uint32_t size, uint32_t protection);
 	bool Free(uint64_t address, uint32_t size);
 
-	// Execute shellcode: alloc RWX -> copy -> CreateThread -> wait -> free
+	// Execute shellcode: alloc RWX -> copy -> CreateThread (SEH-wrapped) -> wait -> free
 	// Returns thread exit code. Sets allocAddr to the RWX page address.
+	// Crash info: if shellcode crashes, crashed=true with exception details.
 	bool ExecuteShellcode(const uint8_t* code, uint32_t size, uint32_t timeoutMs,
-	                      uint64_t& allocAddr, uint32_t& exitCode);
+	                      uint64_t& allocAddr, uint32_t& exitCode,
+	                      bool& crashed, uint32_t& exceptionCode, uint64_t& exceptionAddress);
 };
 
 } // namespace veh

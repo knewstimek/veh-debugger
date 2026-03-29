@@ -5,6 +5,7 @@
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace veh {
@@ -41,7 +42,7 @@ public:
 	bool IsInstalled() const { return handler_ != nullptr; }
 
 	// 스레드 재개 시그널 (continue/step 명령에서 호출)
-	void ResumeStoppedThread(uint32_t threadId, bool step = false);
+	void ResumeStoppedThread(uint32_t threadId, bool step = false, bool passException = false);
 	void ResumeAllStoppedThreads(bool forDetach = false);
 
 	// 스레드가 VEH 핸들러에서 정지(대기) 중인지 확인
@@ -58,6 +59,11 @@ public:
 
 	// 내부 스레드 등록 (pipe server 등) -- BP 투명 스킵 + trace_callers 스킵
 	void SetInternalThread(uint32_t tid) { internalTid_.store(tid, std::memory_order_relaxed); }
+
+	// 셸코드 스레드 등록/해제 -- VEH 핸들러가 예외를 무시 (CONTINUE_SEARCH)
+	void RegisterShellcodeThread(uint32_t tid);
+	void UnregisterShellcodeThread(uint32_t tid);
+	bool IsShellcodeThread(uint32_t tid);
 
 	// NotifyAndWait 결과
 	enum class WaitResult { Resumed, Detached, NoCallback };
@@ -89,9 +95,16 @@ private:
 	std::mutex contextMapMutex_;
 	std::unordered_map<uint32_t, CONTEXT> stoppedContexts_;
 
-	// Step 요청 플래그 (파이프 스레드 → VEH 스레드 전달)
+	// Step 요청 플래그 (파이프 스레드 -> VEH 스레드 전달)
 	std::mutex stepFlagMutex_;
 	std::unordered_map<uint32_t, bool> stepFlags_;
+
+	// Pass exception 플래그 (continue 시 EXCEPTION_CONTINUE_SEARCH 반환)
+	std::unordered_map<uint32_t, bool> passExceptionFlags_;
+
+	// 셸코드 스레드 셋 (VEH가 예외 무시)
+	std::mutex shellcodeThreadMutex_;
+	std::unordered_set<uint32_t> shellcodeThreads_;
 
 	// TraceCallers 모드 (lock-free ring buffer - VEH 핸들러에서 안전하게 사용)
 	std::atomic<uint64_t> traceAddress_{0};   // 0 = trace 비활성

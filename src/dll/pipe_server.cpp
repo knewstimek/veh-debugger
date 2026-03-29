@@ -415,17 +415,18 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 	}
 
 	case IpcCommand::Continue: {
-		if (payloadSize < sizeof(ContinueRequest)) {
+		if (payloadSize < sizeof(uint32_t)) {  // backward compat: at least threadId
 			IpcStatus status = IpcStatus::InvalidArgs;
 			SendResponse(command, &status, sizeof(status));
 			return;
 		}
 		auto* req = reinterpret_cast<const ContinueRequest*>(payload);
+		bool passEx = (payloadSize >= sizeof(ContinueRequest)) ? (req->passException != 0) : false;
 		// VEH 핸들러에서 대기 중인 스레드를 깨운다
 		if (req->threadId == 0) {
 			VehHandler::Instance().ResumeAllStoppedThreads();
 		} else {
-			VehHandler::Instance().ResumeStoppedThread(req->threadId);
+			VehHandler::Instance().ResumeStoppedThread(req->threadId, false, passEx);
 		}
 		// Pause (OS SuspendThread) 로 정지된 스레드도 resume
 		// (VEH resume과 별개 -- Pause는 OS-level, Continue는 양쪽 모두 해제)
@@ -1012,12 +1013,17 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			SendResponse(command, &status, sizeof(status));
 			return;
 		}
-		ExecuteShellcodeResponse resp;
-		resp.allocatedAddress = 0;
-		resp.exitCode = 0;
+		ExecuteShellcodeResponse resp = {};
+		bool crashed = false;
+		uint32_t exCode = 0;
+		uint64_t exAddr = 0;
 		bool ok = MemoryManager::Instance().ExecuteShellcode(
-			code, codeSize, req->timeoutMs, resp.allocatedAddress, resp.exitCode);
+			code, codeSize, req->timeoutMs, resp.allocatedAddress, resp.exitCode,
+			crashed, exCode, exAddr);
 		resp.status = ok ? IpcStatus::Ok : IpcStatus::Error;
+		resp.crashed = crashed ? 1 : 0;
+		resp.exceptionCode = exCode;
+		resp.exceptionAddress = exAddr;
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}

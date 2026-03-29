@@ -6,6 +6,8 @@
 #include <filesystem>
 #include <TlHelp32.h>
 #include <Psapi.h>
+#include <wincrypt.h>
+#pragma comment(lib, "advapi32.lib")
 
 namespace veh {
 
@@ -206,7 +208,7 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 		}},
 		{"serverInfo", {
 			{"name", "veh-debugger"},
-			{"version", "1.0.91"}
+			{"version", "1.0.92"}
 		}},
 		{"instructions",
 			"VEH Debugger - in-process debugger for Windows x86/x64 executables.\n"
@@ -1293,13 +1295,14 @@ json McpServer::ToolContinue(const json& args) {
 
 	uint32_t threadId = JsonUint32(args, "threadId");
 	bool wait = JsonBool(args, "wait");
+	bool passException = JsonBool(args, "pass_exception");
 	int timeoutSec = JsonInt(args, "timeout", 10);
 	if (timeoutSec < 1) timeoutSec = 1;
 	if (timeoutSec > 300) timeoutSec = 300;
 
 	// stopOnEntry=false 등에서 프로세스 실행 중 이벤트(exception/BP)가
 	// veh_continue 호출 전에 발생할 수 있음. 캐시된 이벤트가 있으면 즉시 반환.
-	if (wait) {
+	if (wait && !passException) {
 		std::lock_guard<std::mutex> lock(bpHitMutex_);
 		if (bpHitOccurred_) {
 			// 이미 발생한 이벤트 반환 (Continue 전송 안 함 - 스레드가 정지 상태)
@@ -1318,6 +1321,7 @@ json McpServer::ToolContinue(const json& args) {
 
 	ContinueRequest req;
 	req.threadId = threadId;
+	req.passException = passException ? 1 : 0;
 
 	if (!pipeClient_.SendCommand(IpcCommand::Continue, &req, sizeof(req))) {
 		return {{"error", IpcErrorMessage()}};
@@ -1774,9 +1778,65 @@ json McpServer::ToolReadMemory(const json& args) {
 	return {{"address", addrBuf}, {"size", dataLen}, {"hex", oss.str()}};
 }
 
+// Helper: parse hex string to bytes
+static bool ParseHexBytes(const std::string& hexStr, std::vector<uint8_t>& out) {
+	std::string clean;
+	for (char c : hexStr) {
+		if (std::isxdigit(c)) clean += c;
+	}
+	if (clean.size() % 2 != 0) return false;
+	out.clear();
+	for (size_t i = 0; i < clean.size(); i += 2) {
+		out.push_back(static_cast<uint8_t>(std::stoi(clean.substr(i, 2), nullptr, 16)));
+	}
+	return true;
+}
+
 json McpServer::ToolWriteMemory(const json& args) {
 	if (!attached_) return {{"error", NotAttachedMessage()}};
 
+	// Batch mode: patches array [{address, data}, ...]
+	if (args.contains("patches") && args["patches"].is_array()) {
+		const auto& patches = args["patches"];
+		int succeeded = 0, failed = 0;
+		json errors = json::array();
+		for (const auto& patch : patches) {
+			std::string pAddr = patch.value("address", "");
+			std::string pData = patch.value("data", "");
+			uint64_t addr;
+			if (pAddr.empty() || !ParseAddress(pAddr, addr)) {
+				failed++;
+				errors.push_back({{"address", pAddr}, {"error", "invalid address"}});
+				continue;
+			}
+			std::vector<uint8_t> bytes;
+			if (!ParseHexBytes(pData, bytes) || bytes.empty()) {
+				failed++;
+				errors.push_back({{"address", pAddr}, {"error", "invalid hex data"}});
+				continue;
+			}
+			std::vector<uint8_t> payload(sizeof(WriteMemoryRequest) + bytes.size());
+			auto* req = reinterpret_cast<WriteMemoryRequest*>(payload.data());
+			req->address = addr;
+			req->size = static_cast<uint32_t>(bytes.size());
+			memcpy(payload.data() + sizeof(WriteMemoryRequest), bytes.data(), bytes.size());
+			std::vector<uint8_t> respData;
+			if (pipeClient_.SendAndReceive(IpcCommand::WriteMemory, payload.data(),
+			                                static_cast<uint32_t>(payload.size()), respData)
+				&& respData.size() >= sizeof(IpcStatus)
+				&& *reinterpret_cast<const IpcStatus*>(respData.data()) == IpcStatus::Ok) {
+				succeeded++;
+			} else {
+				failed++;
+				errors.push_back({{"address", pAddr}, {"error", "write failed"}});
+			}
+		}
+		json ret = {{"success", failed == 0}, {"succeeded", succeeded}, {"failed", failed}};
+		if (!errors.empty()) ret["errors"] = errors;
+		return ret;
+	}
+
+	// Single mode (existing behavior)
 	std::string addrStr = args.value("address", "");
 	std::string dataHex = args.value("data", "");
 	if (addrStr.empty()) return {{"error", "address is required"}};
@@ -1787,21 +1847,12 @@ json McpServer::ToolWriteMemory(const json& args) {
 		return {{"error", "invalid address format"}};
 	}
 
-	// hex 문자열 → 바이트 변환
 	std::vector<uint8_t> bytes;
-	std::string clean;
-	for (char c : dataHex) {
-		if (std::isxdigit(c)) clean += c;
-	}
-	if (clean.size() % 2 != 0) return {{"error", "Invalid hex string"}};
-	for (size_t i = 0; i < clean.size(); i += 2) {
-		bytes.push_back(static_cast<uint8_t>(std::stoi(clean.substr(i, 2), nullptr, 16)));
-	}
+	if (!ParseHexBytes(dataHex, bytes)) return {{"error", "Invalid hex string"}};
 	if (bytes.size() > 1048576) {
 		return {{"error", "data too large (max 1MB)"}};
 	}
 
-	// IPC 패킷: WriteMemoryRequest + data
 	std::vector<uint8_t> payload(sizeof(WriteMemoryRequest) + bytes.size());
 	auto* req = reinterpret_cast<WriteMemoryRequest*>(payload.data());
 	req->address = addr;
@@ -1885,7 +1936,43 @@ json McpServer::ToolDumpMemory(const json& args) {
 	fclose(fp);
 	char addrBuf[20];
 	snprintf(addrBuf, sizeof(addrBuf), "0x%llX", addr);
-	return {{"success", true}, {"address", addrBuf}, {"size", totalWritten}, {"output_path", outputPath}};
+
+	// Verify file: size + SHA256 checksum
+	FILE* verify = fopen(outputPath.c_str(), "rb");
+	uint64_t fileSize = 0;
+	std::string sha256hex;
+	if (verify) {
+		// Compute SHA256 using Windows CryptoAPI
+		_fseeki64(verify, 0, SEEK_END);
+		fileSize = _ftelli64(verify);
+		_fseeki64(verify, 0, SEEK_SET);
+
+		HCRYPTPROV hProv = 0; HCRYPTHASH hHash = 0;
+		if (CryptAcquireContextW(&hProv, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
+			if (CryptCreateHash(hProv, CALG_SHA_256, 0, 0, &hHash)) {
+				uint8_t buf[65536];
+				size_t bytesRead;
+				while ((bytesRead = fread(buf, 1, sizeof(buf), verify)) > 0) {
+					CryptHashData(hHash, buf, static_cast<DWORD>(bytesRead), 0);
+				}
+				DWORD hashLen = 32; uint8_t hash[32];
+				if (CryptGetHashParam(hHash, HP_HASHVAL, hash, &hashLen, 0)) {
+					char hex[65];
+					for (DWORD i = 0; i < hashLen; i++) snprintf(hex + i * 2, 3, "%02x", hash[i]);
+					sha256hex = hex;
+				}
+				CryptDestroyHash(hHash);
+			}
+			CryptReleaseContext(hProv, 0);
+		}
+		fclose(verify);
+	}
+
+	json ret = {{"success", true}, {"address", addrBuf}, {"size", totalWritten},
+	            {"output_path", outputPath}, {"fileSize", fileSize},
+	            {"verified", fileSize == totalWritten}};
+	if (!sha256hex.empty()) ret["sha256"] = sha256hex;
+	return ret;
 }
 
 json McpServer::ToolAllocateMemory(const json& args) {
@@ -1987,12 +2074,22 @@ json McpServer::ToolExecuteShellcode(const json& args) {
 
 	char addrBuf[20];
 	snprintf(addrBuf, sizeof(addrBuf), "0x%llX", resp->allocatedAddress);
-	return {
+	json ret = {
 		{"success", true},
 		{"exitCode", resp->exitCode},
 		{"allocatedAddress", addrBuf},
 		{"fireAndForget", (timeoutMs == 0)}
 	};
+	if (resp->crashed) {
+		char exAddrBuf[20];
+		snprintf(exAddrBuf, sizeof(exAddrBuf), "0x%llX", resp->exceptionAddress);
+		char exCodeBuf[12];
+		snprintf(exCodeBuf, sizeof(exCodeBuf), "0x%08X", resp->exceptionCode);
+		ret["crashed"] = true;
+		ret["exceptionCode"] = exCodeBuf;
+		ret["exceptionAddress"] = exAddrBuf;
+	}
+	return ret;
 }
 
 json McpServer::ToolModules(const json& args) {
@@ -2773,11 +2870,12 @@ json McpServer::GetToolsList() {
 			{"id", {{"type", "integer"}, {"description", "Data breakpoint ID"}}}
 		 }}, {"required", json::array({"id"})}}}},
 
-		{{"name", "veh_continue"}, {"description", "Continue execution. Use wait=true to block until a breakpoint hit, exception, pause, or process exit occurs (returns stop reason, address, threadId). Default timeout 10s, configurable."},
+		{{"name", "veh_continue"}, {"description", "Continue execution. Use wait=true to block until a breakpoint hit, exception, pause, or process exit occurs (returns stop reason, address, threadId). Use pass_exception=true to forward the current exception to the process's own SEH handler (for CFF/obfuscated INT3, etc.). Default timeout 10s, configurable."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "Thread ID (0 = all, default: 0)"}}},
 			{"wait", {{"type", "boolean"}, {"description", "If true, block until target stops (breakpoint/exception/pause/exit). Default: false"}}},
-			{"timeout", {{"type", "integer"}, {"description", "Max seconds to wait when wait=true (1-300, default: 10)"}}}
+			{"timeout", {{"type", "integer"}, {"description", "Max seconds to wait when wait=true (1-300, default: 10)"}}},
+			{"pass_exception", {{"type", "boolean"}, {"description", "If true, pass the current exception to the process's SEH handler instead of handling it. Use for CFF/obfuscated code with INT3. Default: false"}}}
 		 }}}}},
 
 		{{"name", "veh_step_in"}, {"description", "Single step into (execute one instruction, entering calls). Waits for completion and returns the new instruction pointer."},
@@ -2820,11 +2918,12 @@ json McpServer::GetToolsList() {
 			{"size", {{"type", "integer"}, {"description", "Bytes to read (default: 64, max: 1MB)"}}}
 		 }}, {"required", json::array({"address"})}}}},
 
-		{{"name", "veh_write_memory"}, {"description", "Write memory to the target process."},
+		{{"name", "veh_write_memory"}, {"description", "Write memory to the target process. Single mode: address+data. Batch mode: patches array for multi-address patching in one call."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"address", {{"type", "string"}, {"description", "Hex address"}}},
-			{"data", {{"type", "string"}, {"description", "Hex bytes to write (e.g. '90 90 90' or '909090')"}}}
-		 }}, {"required", json::array({"address", "data"})}}}},
+			{"address", {{"type", "string"}, {"description", "Hex address (single mode)"}}},
+			{"data", {{"type", "string"}, {"description", "Hex bytes to write (single mode, e.g. '90 90 90')"}}},
+			{"patches", {{"type", "array"}, {"items", {{"type", "object"}, {"properties", {{"address", {{"type", "string"}}}, {"data", {{"type", "string"}}}}}}}, {"description", "Batch mode: [{address, data}, ...]. Overrides address/data if provided."}}}
+		 }}}}},
 
 		{{"name", "veh_modules"}, {"description", "List loaded modules (DLLs) in the target process."},
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}},
