@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.0.93 (2026-03-29)
+
+### Bug Fixes
+- **trace_callers stale event drain**: After auto-resume/pause, cached stop events from the tracing period are now cleared. Prevents false stop on next `veh_continue(wait=true)`
+- **Shellcode fire-and-forget self-cleanup**: Shellcode thread now unregisters from VEH on exit (prevents tid reuse causing BP skip)
+- **ContinueRequest zero-init**: Fixed uninitialized `passException` field that could randomly forward exceptions to SEH
+- **ResumeAllStoppedThreads**: Now clears `passExceptionFlags` to prevent stale flags from previous sessions
+- **Batch write size limit**: Added 1000-patch cap to prevent long IPC blocking
+
 ## 1.0.92 (2026-03-29)
 
 ### New Features
