@@ -309,7 +309,14 @@ json McpServer::ToolAttach(const json& args) {
 	});
 	session_.StartProcessMonitor();
 
-	return {{"success", true}, {"pid", pid}, {"message", "Attached to process"}};
+	json ret = {{"success", true}, {"pid", pid}, {"message", "Attached to process"}};
+	// Include main module info (saves a veh_modules round-trip)
+	auto modules = session_.GetModules();
+	if (!modules.empty()) {
+		char buf[20]; snprintf(buf, sizeof(buf), "0x%llX", modules[0].baseAddress);
+		ret["mainModule"] = {{"name", modules[0].name}, {"baseAddress", buf}, {"size", modules[0].size}};
+	}
+	return ret;
 }
 
 json McpServer::ToolLaunch(const json& args) {
@@ -348,8 +355,14 @@ json McpServer::ToolLaunch(const json& args) {
 	});
 	session_.StartProcessMonitor();
 
-	return {{"success", true}, {"pid", result.pid}, {"message",
+	json ret = {{"success", true}, {"pid", result.pid}, {"message",
 		opts.stopOnEntry ? "Launched and attached (stopped on entry)" : "Launched and attached"}};
+	auto modules = session_.GetModules();
+	if (!modules.empty()) {
+		char buf[20]; snprintf(buf, sizeof(buf), "0x%llX", modules[0].baseAddress);
+		ret["mainModule"] = {{"name", modules[0].name}, {"baseAddress", buf}, {"size", modules[0].size}};
+	}
+	return ret;
 }
 
 json McpServer::ToolDetach(const json& args) {
@@ -1741,6 +1754,42 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 // --- Helpers ---
 
 bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
+	// Module+RVA syntax: "crackme.exe+0x1000" or "ntdll.dll+0x5000"
+	auto plusPos = addrStr.find('+');
+	if (plusPos != std::string::npos && plusPos > 0) {
+		std::string modulePart = addrStr.substr(0, plusPos);
+		std::string offsetPart = addrStr.substr(plusPos + 1);
+
+		// Check if the part before '+' looks like a module name (contains '.' or non-hex chars)
+		bool looksLikeModule = false;
+		for (char c : modulePart) {
+			if (c == '.' || c == '_' || c == '-') { looksLikeModule = true; break; }
+			if (std::isalpha(c) && !std::isxdigit(c)) { looksLikeModule = true; break; }
+		}
+
+		if (looksLikeModule && session_.IsAttached()) {
+			// Resolve module base
+			auto modules = session_.GetModules();
+			// Case-insensitive match
+			std::string modLower = modulePart;
+			std::transform(modLower.begin(), modLower.end(), modLower.begin(), ::tolower);
+
+			for (auto& m : modules) {
+				std::string nameLower = m.name;
+				std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+				if (nameLower == modLower) {
+					try {
+						uint64_t offset = std::stoull(offsetPart, nullptr, 0);
+						out = m.baseAddress + offset;
+						return true;
+					} catch (...) { return false; }
+				}
+			}
+			return false;  // module not found
+		}
+	}
+
+	// Plain hex/decimal address
 	try {
 		size_t pos;
 		out = std::stoull(addrStr, &pos, 0);
