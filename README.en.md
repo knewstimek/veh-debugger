@@ -179,14 +179,14 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | `veh_attach` | `pid` | Inject DLL + connect pipe |
 | `veh_launch` | `program, args?, stopOnEntry?` | Create process + inject |
 | `veh_detach` | - | Detach debugger |
-| `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?` | Software BP (conditional/logpoint supported) |
+| `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?, action?` | Software BP. `action` auto-executes on hit (veh_batch format) |
 | `veh_remove_breakpoint` | `id` | Remove software BP |
 | `veh_set_source_breakpoint` | `source, line, condition?, hitCondition?, logMessage?` | Source file + line BP (PDB required) |
 | `veh_set_function_breakpoint` | `name, condition?, hitCondition?, logMessage?` | Function name BP (PDB required) |
 | `veh_list_breakpoints` | - | List active SW/HW breakpoints |
 | `veh_set_data_breakpoint` | `address, type, size` | HW BP (write/readwrite/execute) |
 | `veh_remove_data_breakpoint` | `id` | Remove HW BP |
-| `veh_continue` | `threadId?, wait?, timeout?, pass_exception?` | Continue execution. `pass_exception=true` forwards exception to SEH (for CFF debugging) |
+| `veh_continue` | `threadId?, wait?, timeout?, pass_exception?, ignore_exceptions?` | Continue. `ignore_exceptions=[0x80000003]` auto-passes specific exceptions to SEH |
 | `veh_step_in` | `threadId` | Step Into |
 | `veh_step_over` | `threadId` | Step Over |
 | `veh_step_out` | `threadId` | Step Out |
@@ -208,7 +208,7 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | `veh_batch` | `steps` | Execute multiple commands in one call ($N variable refs, if/loop/for_each control flow) |
 | `veh_trace_callers` | `address, duration_sec?` | Profile function callers (auto-resume -> collect for N seconds -> auto-pause). Returns unique callers with hit counts. x64: RtlVirtualUnwind (accurate). x86: [ESP] (accurate only at function entry) |
 
-> **Tip**: Numeric arguments (`threadId`, `pid`, `address`, `size`, etc.) accept both numbers and strings, including hex format (e.g. `"0x401000"` or `4198400`). Boolean arguments accept `true`/`false` or `"true"`/`"false"`.
+> **Tip**: Address arguments accept hex (`"0x401000"`), decimal (`4198400`), or **module+RVA** (`"crackme.exe+0x1000"`). Module+RVA eliminates manual ASLR base calculation.
 
 ## DAP Commands
 
