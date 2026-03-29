@@ -7,9 +7,7 @@
 #include <condition_variable>
 #include <queue>
 #include "adapter/transport.h"
-#include "adapter/pipe_client.h"
-#include "adapter/injector.h"
-#include "adapter/disassembler.h"
+#include "debug_session.h"
 #include "common/ipc_protocol.h"
 #include <nlohmann/json.hpp>
 
@@ -40,7 +38,7 @@ private:
 		void OnResourcesList(const json& id, const json& params);
 		void OnResourceTemplatesList(const json& id, const json& params);
 
-	// Tool implementations (26 tools)
+	// Tool implementations (31 tools)
 	json ToolAttach(const json& args);
 	json ToolLaunch(const json& args);
 	json ToolDetach(const json& args);
@@ -85,62 +83,18 @@ private:
 	bool SetTempBpAndContinue(uint64_t address);
 	void CleanupTempStepOverBp();
 
-	// Condition/evaluate helpers (ported from DAP adapter)
-	static bool TryParseRegisterName(const std::string& name);
-	static uint64_t ResolveRegisterByName(const std::string& name, const RegisterSet& regs);
-	static uint32_t GetRegisterIndex(const std::string& name);
+	// Condition/evaluate helpers (MCP-level logic)
 	bool EvaluateCondition(const std::string& condition, uint32_t threadId, const RegisterSet* cachedRegs);
 	std::string ExpandLogMessage(const std::string& msg, uint32_t threadId, const RegisterSet* cachedRegs);
 
 	// Helper
-	std::string GetExeDir();
-	std::string ResolveDll(const std::string& dir, bool use32);
-	std::string GetDllPath(uint32_t pid);
-	std::string GetDllPathForExe(const std::string& exePath);
 	bool ParseAddress(const std::string& addrStr, uint64_t& out);
-	bool IsTargetAlive();
 	std::string NotAttachedMessage();
 	std::string IpcErrorMessage();
 
 	dap::Transport* transport_ = nullptr;
-	PipeClient pipeClient_;
-	std::unique_ptr<IDisassembler> disassembler_ = CreateDisassembler();
+	DebugSession session_;
 	std::atomic<bool> running_{false};
-
-	// Session state
-	uint32_t targetPid_ = 0;
-	HANDLE targetProcess_ = nullptr;
-	std::atomic<bool> attached_{false};
-	std::atomic<bool> launchedByUs_{false};
-	uint32_t launchedMainThreadId_ = 0;
-	bool mainThreadResumed_ = false;
-
-	// OS-level resume (CREATE_SUSPENDED -> ResumeThread)
-	void ResumeMainThread();
-
-	// Process exit monitor
-	void StartProcessMonitor();
-	void StopProcessMonitor();
-	std::thread processMonitorThread_;
-	HANDLE monitorStopEvent_ = nullptr;
-
-	// Breakpoint tracking (with condition/hitCondition/logMessage support)
-	struct BpMapping {
-		uint32_t id;
-		uint64_t address;
-		std::string condition;
-		std::string hitCondition;
-		std::string logMessage;
-		uint32_t hitCount = 0;
-		// Source info (for source breakpoints)
-		std::string source;
-		uint32_t line = 0;
-		std::string functionName;
-	};
-	std::vector<BpMapping> swBreakpoints_;
-	std::mutex bpMutex_; // protects swBreakpoints_ (accessed from reader thread)
-	struct HwBpMapping { uint32_t id; uint64_t address; uint8_t type; uint8_t size; };
-	std::vector<HwBpMapping> hwBreakpoints_;
 
 	// Last exception info (cached from ExceptionOccurred event)
 	struct {
@@ -162,16 +116,6 @@ private:
 	bool stepCompleted_ = false;
 	uint64_t stepCompletedAddr_ = 0;
 	uint32_t stepCompletedThread_ = 0;
-
-	// Breakpoint hit synchronization (for veh_continue wait mode)
-	std::mutex bpHitMutex_;
-	std::condition_variable bpHitCv_;
-	bool bpHitOccurred_ = false;
-	uint32_t bpHitId_ = 0;
-	uint64_t bpHitAddr_ = 0;
-	uint32_t bpHitThread_ = 0;
-	std::string bpHitStopReason_;  // "breakpoint", "pause", "exception", "step", "exit"
-	std::string bpHitType_;        // "software", "hardware", "" (unknown)
 
 	// Event queue for thread-safe notification delivery
 	std::queue<std::pair<std::string, json>> pendingEvents_;
