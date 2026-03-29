@@ -229,7 +229,7 @@ enabled = true
 | `veh_list_breakpoints` | - | 활성 SW/HW BP 목록 조회 |
 | `veh_set_data_breakpoint` | `address, type, size` | HW BP (write/readwrite/execute) |
 | `veh_remove_data_breakpoint` | `id` | HW BP 제거 |
-| `veh_continue` | `threadId?` | 실행 계속 |
+| `veh_continue` | `threadId?, wait?, timeout?, pass_exception?` | 실행 계속. `pass_exception=true`로 예외를 SEH에 전달 (CFF 디버깅용) |
 | `veh_step_in` | `threadId` | Step Into |
 | `veh_step_over` | `threadId` | Step Over |
 | `veh_step_out` | `threadId` | Step Out |
@@ -240,7 +240,7 @@ enabled = true
 | `veh_set_register` | `threadId, name, value` | 레지스터 값 변경 |
 | `veh_evaluate` | `expression, threadId` | 레지스터/메모리/포인터/세그먼트 평가 (`[reg+offset]`, `gs:[0x60]` 등) |
 | `veh_read_memory` | `address, size` | 메모리 읽기 (hex) |
-| `veh_write_memory` | `address, data` | 메모리 쓰기 (hex) |
+| `veh_write_memory` | `address, data` 또는 `patches` | 메모리 쓰기. 배치: `patches=[{address,data},...]` |
 | `veh_dump_memory` | `address, size, output_path` | 메모리를 바이너리 파일로 덤프 (최대 64MB) |
 | `veh_allocate_memory` | `size?, protection?` | 타겟 프로세스에 메모리 할당 (VirtualAlloc) |
 | `veh_free_memory` | `address` | 할당된 메모리 해제 (VirtualFree) |
