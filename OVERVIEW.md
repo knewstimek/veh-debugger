@@ -40,7 +40,8 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 | `src/dll/stack_walk.cpp/h` | StackWalk64 + DIA SDK local variable enumeration |
 | `src/common/ipc_protocol.h` | All IPC command/event/struct definitions (shared) |
 | `src/common/logger.h` | Logging utility |
-| `src/mcp/mcp_server.cpp/h` | MCP JSON-RPC server, 30 debugger tools |
+| `src/mcp/debug_session.cpp/h` | DebugSession class - pure C++ IPC wrapper, no JSON dependency. Used by MCP (and future veh_batch) |
+| `src/mcp/mcp_server.cpp/h` | MCP JSON-RPC server, 30 debugger tools (delegates to DebugSession) |
 | `src/mcp/installer.cpp/h` | Auto-install to Claude/Cursor/Windsurf/Codex configs |
 
 ## IPC Protocol
@@ -64,6 +65,8 @@ Named Pipe (`\\.\pipe\dotnet-diagnostic-{pid}`), binary framed:
 | 0x0020-0x0024 | State queries (Threads, StackTrace, Registers, SetRegister) |
 | 0x0030-0x0031 | Memory read/write |
 | 0x0040-0x0042 | PDB symbol resolution (SourceLine, Function, EnumLocals) |
+| 0x0050 | TraceCallers (lock-free ring buffer collection) |
+| 0x0060-0x0062 | Memory management (AllocateMemory, FreeMemory, ExecuteShellcode) |
 | 0x00F0/0x00FF | Lifecycle (Detach, Shutdown) |
 
 ### Key Events
