@@ -417,7 +417,7 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 					info->ContextRecord->Dr6 &= ~(1ULL << slot);
 
 					// TraceMemory: if this is our temp HW BP, record result and skip NotifyAndWait
-					if (traceMem_.active.load(std::memory_order_relaxed) && hwbp->id == traceMem_.hwBpId) {
+					if (traceMem_.active.load(std::memory_order_acquire) && hwbp->id == traceMem_.hwBpId) {
 						// Read new value at watched address
 						uint64_t newVal = 0;
 						auto newData = MemoryManager::Instance().Read(traceMem_.watchAddress, traceMem_.watchSize);
