@@ -1028,6 +1028,148 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		break;
 	}
 
+	case IpcCommand::TraceRegister: {
+		if (payloadSize < sizeof(TraceRegisterRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const TraceRegisterRequest*>(payload);
+		if (req->maxSteps == 0 || req->maxSteps > 100000) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+
+		// Start trace (VEH handler does the stepping loop internally)
+		VehHandler::Instance().StartTraceRegister(
+			req->threadId, req->regIndex, req->maxSteps, req->mode, req->compareValue);
+
+		// Wait for VEH handler to signal completion
+		auto& state = VehHandler::Instance().traceReg_;
+		int waitMs = 0;
+		int maxWaitMs = static_cast<int>(req->maxSteps) * 10 + 5000; // generous timeout
+		while (!state.done.load(std::memory_order_acquire) && waitMs < maxWaitMs) {
+			Sleep(10);
+			waitMs += 10;
+		}
+
+		TraceRegisterResponse resp;
+		if (state.done.load(std::memory_order_acquire)) {
+			resp.status = IpcStatus::Ok;
+			resp.found = state.found ? 1 : 0;
+			resp.stepsExecuted = state.stepsExecuted;
+			resp.address = state.resultAddress;
+			resp.oldValue = state.oldValue;
+			resp.newValue = state.newValue;
+		} else {
+			resp.status = IpcStatus::Error;
+			resp.found = 0;
+			resp.stepsExecuted = state.stepsExecuted;
+			resp.address = 0;
+			resp.oldValue = 0;
+			resp.newValue = 0;
+			state.active.store(false, std::memory_order_relaxed);
+		}
+		SendResponse(command, &resp, sizeof(resp));
+		break;
+	}
+
+	case IpcCommand::TraceMemory: {
+		if (payloadSize < sizeof(TraceMemoryRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const TraceMemoryRequest*>(payload);
+
+		// Read initial value
+		uint64_t oldVal = 0;
+		auto initData = MemoryManager::Instance().Read(req->address, req->size);
+		if (!initData.empty()) {
+			memcpy(&oldVal, initData.data(), (req->size > 8) ? 8 : req->size);
+		}
+
+		// Use temp HW data breakpoint (write) to catch modification
+		HwBreakSize bpSize = HwBreakSize::Dword;
+		switch (req->size) {
+			case 1: bpSize = HwBreakSize::Byte; break;
+			case 2: bpSize = HwBreakSize::Word; break;
+			case 4: bpSize = HwBreakSize::Dword; break;
+			case 8: bpSize = HwBreakSize::Qword; break;
+		}
+		uint32_t bpId = HwBreakpointManager::Instance().Add(req->address, HwBreakType::Write, bpSize);
+		if (bpId == 0) {
+			TraceMemoryResponse resp;
+			resp.status = IpcStatus::Error; // no free DR slot
+			resp.found = 0;
+			SendResponse(command, &resp, sizeof(resp));
+			return;
+		}
+		ApplyHwBreakpointsToAllThreads();
+
+		// Resume all stopped threads
+		VehHandler::Instance().ResumeAllStoppedThreads();
+
+		// Wait for BP hit or timeout
+		// The HW BP hit will pause the thread via VEH handler (NotifyAndWait)
+		// We poll stoppedContexts to detect when a thread stops
+		uint32_t timeoutMs = req->timeoutMs;
+		if (timeoutMs == 0) timeoutMs = 10000;
+		if (timeoutMs > 60000) timeoutMs = 60000;
+
+		TraceMemoryResponse resp = {};
+		int elapsed = 0;
+		while (elapsed < (int)timeoutMs) {
+			Sleep(10);
+			elapsed += 10;
+			// Check if any thread stopped at our HW BP
+			// VEH handler will have stored context for the stopped thread
+			auto hwbp = HwBreakpointManager::Instance().FindById(bpId);
+			if (!hwbp) break; // removed externally
+
+			// Check if a thread is stopped (simple check via IsThreadStopped)
+			// We need to find which thread stopped - check all threads
+			HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+			if (snap != INVALID_HANDLE_VALUE) {
+				THREADENTRY32 te; te.dwSize = sizeof(te);
+				DWORD pid = GetCurrentProcessId();
+				if (Thread32First(snap, &te)) {
+					do {
+						if (te.th32OwnerProcessID == pid && VehHandler::Instance().IsThreadStopped(te.th32ThreadID)) {
+							CONTEXT ctx;
+							if (VehHandler::Instance().GetStoppedContext(te.th32ThreadID, ctx)) {
+								// Check if stopped at HW BP (DR6)
+								if (ctx.Dr6 & 0xF) {
+									resp.found = 1;
+									resp.threadId = te.th32ThreadID;
+									resp.instructionAddress = ctx.Rip;
+									// Read new value
+									uint64_t newVal = 0;
+									auto newData = MemoryManager::Instance().Read(req->address, req->size);
+									if (!newData.empty()) memcpy(&newVal, newData.data(), (req->size > 8) ? 8 : req->size);
+									resp.oldValue = oldVal;
+									resp.newValue = newVal;
+									break;
+								}
+							}
+						}
+					} while (Thread32Next(snap, &te));
+				}
+				CloseHandle(snap);
+			}
+			if (resp.found) break;
+		}
+
+		// Cleanup: remove temp HW BP
+		HwBreakpointManager::Instance().Remove(bpId);
+		ApplyHwBreakpointsToAllThreads();
+
+		resp.status = IpcStatus::Ok;
+		SendResponse(command, &resp, sizeof(resp));
+		break;
+	}
+
 	case IpcCommand::Detach: {
 		// Detach: 디버깅 상태만 정리하고 파이프 서버는 유지한다.
 		// connected_=false로 내부 커맨드 루프만 탈출 → 외부 루프에서 새 클라이언트 대기

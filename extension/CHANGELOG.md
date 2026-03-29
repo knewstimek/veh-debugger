@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### New Features (MCP: 31 -> 33 tools)
+- **veh_trace_register**: Trace register changes by single-stepping inside the DLL (zero IPC overhead per step). Returns the instruction that caused the change, old/new values. Modes: `changed`, `equals`, `not_equals`
+- **veh_trace_memory**: Trace memory writes using a temporary hardware data breakpoint. Returns the writing instruction, thread ID, old/new values. Fast (no stepping, uses DR0-DR3)
+
 ## 1.0.95 (2026-03-30)
 
 ### New Features

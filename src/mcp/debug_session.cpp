@@ -1015,6 +1015,57 @@ TraceResult DebugSession::TraceCallers(uint64_t address, uint32_t durationSec) {
 	return result;
 }
 
+// --- Dynamic tracing ---
+
+DebugSession::TraceRegResult DebugSession::TraceRegister(uint32_t threadId, uint32_t regIndex,
+                                                          uint32_t maxSteps, uint8_t mode, uint64_t compareValue) {
+	TraceRegResult result;
+	TraceRegisterRequest req;
+	req.threadId = threadId;
+	req.regIndex = regIndex;
+	req.maxSteps = maxSteps;
+	req.mode = mode;
+	req.compareValue = compareValue;
+
+	int timeoutMs = static_cast<int>(maxSteps) * 10 + 10000;
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::TraceRegister, &req, sizeof(req), respData, timeoutMs)) {
+		return result;
+	}
+	if (respData.size() < sizeof(TraceRegisterResponse)) return result;
+	auto* resp = reinterpret_cast<const TraceRegisterResponse*>(respData.data());
+	result.ok = (resp->status == IpcStatus::Ok);
+	result.found = resp->found != 0;
+	result.stepsExecuted = resp->stepsExecuted;
+	result.address = resp->address;
+	result.oldValue = resp->oldValue;
+	result.newValue = resp->newValue;
+	return result;
+}
+
+DebugSession::TraceMemResult DebugSession::TraceMemoryWrite(uint64_t address, uint32_t size, uint32_t timeoutMs) {
+	TraceMemResult result;
+	TraceMemoryRequest req;
+	req.address = address;
+	req.size = size;
+	req.timeoutMs = timeoutMs;
+
+	int ipcTimeout = static_cast<int>(timeoutMs) + 10000;
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::TraceMemory, &req, sizeof(req), respData, ipcTimeout)) {
+		return result;
+	}
+	if (respData.size() < sizeof(TraceMemoryResponse)) return result;
+	auto* resp = reinterpret_cast<const TraceMemoryResponse*>(respData.data());
+	result.ok = (resp->status == IpcStatus::Ok);
+	result.found = resp->found != 0;
+	result.threadId = resp->threadId;
+	result.instructionAddress = resp->instructionAddress;
+	result.oldValue = resp->oldValue;
+	result.newValue = resp->newValue;
+	return result;
+}
+
 // --- PDB resolve ---
 
 uint64_t DebugSession::ResolveSourceLine(const std::string& file, uint32_t line) {

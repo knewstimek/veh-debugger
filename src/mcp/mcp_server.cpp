@@ -261,6 +261,8 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 		else if (name == "veh_free_memory")           result = ToolFreeMemory(args);
 		else if (name == "veh_execute_shellcode")     result = ToolExecuteShellcode(args);
 		else if (name == "veh_batch")                 result = ToolBatch(args);
+		else if (name == "veh_trace_register")        result = ToolTraceRegister(args);
+		else if (name == "veh_trace_memory")          result = ToolTraceMemory(args);
 		else {
 			SendError(id, -32602, "Unknown tool: " + name);
 			return;
@@ -1334,6 +1336,105 @@ json McpServer::ToolBatch(const json& args) {
 	return executor.Execute(steps);
 }
 
+json McpServer::ToolTraceRegister(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+
+	uint32_t threadId = JsonUint32(args, "threadId");
+	std::string regName = args.value("register", "");
+	int maxSteps = JsonInt(args, "max_steps", 10000);
+	std::string modeStr = args.value("mode", "changed");
+	std::string compStr = args.value("value", "");
+
+	if (threadId == 0) return {{"error", "threadId is required"}};
+	if (regName.empty()) return {{"error", "register name is required"}};
+	if (maxSteps < 1) maxSteps = 1;
+	if (maxSteps > 100000) maxSteps = 100000;
+
+	uint32_t regIndex = DebugSession::GetRegisterIndex(regName);
+	if (regIndex == UINT32_MAX) return {{"error", "Unknown register: " + regName}};
+
+	uint8_t mode = 0;
+	if (modeStr == "equals") mode = 1;
+	else if (modeStr == "not_equals") mode = 2;
+
+	uint64_t compareValue = 0;
+	if (!compStr.empty()) {
+		try { compareValue = std::stoull(compStr, nullptr, 0); } catch (...) {}
+	}
+
+	auto r = session_.TraceRegister(threadId, regIndex, maxSteps, mode, compareValue);
+	if (!r.ok) return {{"error", "TraceRegister failed (thread may not be stopped)"}};
+
+	char addrBuf[20]; snprintf(addrBuf, sizeof(addrBuf), "0x%llX", r.address);
+	char oldBuf[20]; snprintf(oldBuf, sizeof(oldBuf), "0x%llX", r.oldValue);
+	char newBuf[20]; snprintf(newBuf, sizeof(newBuf), "0x%llX", r.newValue);
+
+	json ret = {
+		{"found", r.found},
+		{"stepsExecuted", r.stepsExecuted},
+		{"address", addrBuf},
+		{"register", regName},
+		{"oldValue", oldBuf},
+		{"newValue", newBuf}
+	};
+
+	// Add disassembly of the instruction that caused the change
+	if (r.found && r.address) {
+		auto insns = session_.Disassemble(r.address, 1);
+		if (!insns.empty()) {
+			ret["instruction"] = insns[0].mnemonic;
+		}
+	}
+
+	return ret;
+}
+
+json McpServer::ToolTraceMemory(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+
+	std::string addrStr = args.value("address", "");
+	if (addrStr.empty()) return {{"error", "address is required"}};
+
+	uint64_t addr;
+	if (!ParseAddress(addrStr, addr)) return {{"error", "invalid address format"}};
+
+	int size = JsonInt(args, "size", 4);
+	if (size != 1 && size != 2 && size != 4 && size != 8) return {{"error", "size must be 1, 2, 4, or 8"}};
+
+	int timeoutMs = JsonInt(args, "timeout_ms", 10000);
+	if (timeoutMs < 100) timeoutMs = 100;
+	if (timeoutMs > 60000) timeoutMs = 60000;
+
+	auto r = session_.TraceMemoryWrite(addr, size, timeoutMs);
+	if (!r.ok) return {{"error", "TraceMemory failed"}};
+
+	char instrBuf[20]; snprintf(instrBuf, sizeof(instrBuf), "0x%llX", r.instructionAddress);
+	char oldBuf[20]; snprintf(oldBuf, sizeof(oldBuf), "0x%llX", r.oldValue);
+	char newBuf[20]; snprintf(newBuf, sizeof(newBuf), "0x%llX", r.newValue);
+	char addrBuf2[20]; snprintf(addrBuf2, sizeof(addrBuf2), "0x%llX", addr);
+
+	json ret = {
+		{"found", r.found},
+		{"address", addrBuf2},
+		{"threadId", r.threadId}
+	};
+
+	if (r.found) {
+		ret["instructionAddress"] = instrBuf;
+		ret["oldValue"] = oldBuf;
+		ret["newValue"] = newBuf;
+		// Disassemble the writing instruction
+		if (r.instructionAddress) {
+			auto insns = session_.Disassemble(r.instructionAddress, 1);
+			if (!insns.empty()) ret["instruction"] = insns[0].mnemonic;
+		}
+	} else {
+		ret["timeout"] = true;
+	}
+
+	return ret;
+}
+
 json McpServer::ToolModules(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
@@ -2068,7 +2169,23 @@ json McpServer::GetToolsList() {
 		},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"steps", {{"type", "array"}, {"description", "Array of steps. Each step is {tool, args} or {if, then, else} or {loop, until, max} or {for_each, as, do}"}}}
-		 }}, {"required", json::array({"steps"})}}}}
+		 }}, {"required", json::array({"steps"})}}}},
+
+		{{"name", "veh_trace_register"}, {"description", "Trace a register: single-steps internally (inside DLL, zero IPC overhead per step) until the register meets a condition. Returns the instruction that caused the change. Much faster than manual step+check loops."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (must be stopped)"}}},
+			{"register", {{"type", "string"}, {"description", "Register name (RAX, RBX, RCX, etc.)"}}},
+			{"mode", {{"type", "string"}, {"enum", json::array({"changed", "equals", "not_equals"})}, {"description", "Condition: 'changed' (any change), 'equals' (== value), 'not_equals' (!= value). Default: changed"}}},
+			{"value", {{"type", "string"}, {"description", "Compare value for equals/not_equals mode (hex or decimal)"}}},
+			{"max_steps", {{"type", "integer"}, {"description", "Max instructions to step (default: 10000, max: 100000)"}}}
+		 }}, {"required", json::array({"threadId", "register"})}}}},
+
+		{{"name", "veh_trace_memory"}, {"description", "Trace memory writes: sets a temporary hardware data breakpoint, resumes the process, and waits for any thread to write to the address. Returns the writing instruction, thread ID, and old/new values. Uses DR0-DR3 (1 slot occupied during trace)."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"address", {{"type", "string"}, {"description", "Memory address to watch (hex or module+RVA)"}}},
+			{"size", {{"type", "integer"}, {"enum", json::array({1, 2, 4, 8})}, {"description", "Watch size in bytes (default: 4)"}}},
+			{"timeout_ms", {{"type", "integer"}, {"description", "Max wait time in ms (default: 10000, max: 60000)"}}}
+		 }}, {"required", json::array({"address"})}}}}
 	});
 }
 
