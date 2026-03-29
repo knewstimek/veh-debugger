@@ -1,4 +1,5 @@
 #include "mcp_server.h"
+#include "batch_executor.h"
 #include "common/logger.h"
 #include <sstream>
 #include <iomanip>
@@ -259,6 +260,7 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 		else if (name == "veh_allocate_memory")       result = ToolAllocateMemory(args);
 		else if (name == "veh_free_memory")           result = ToolFreeMemory(args);
 		else if (name == "veh_execute_shellcode")     result = ToolExecuteShellcode(args);
+		else if (name == "veh_batch")                 result = ToolBatch(args);
 		else {
 			SendError(id, -32602, "Unknown tool: " + name);
 			return;
@@ -1285,6 +1287,18 @@ json McpServer::ToolExecuteShellcode(const json& args) {
 	return ret;
 }
 
+json McpServer::ToolBatch(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+
+	json steps = args.value("steps", json::array());
+	if (!steps.is_array() || steps.empty()) {
+		return {{"error", "steps (array) is required"}};
+	}
+
+	BatchExecutor executor(session_);
+	return executor.Execute(steps);
+}
+
 json McpServer::ToolModules(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
@@ -1917,7 +1931,22 @@ json McpServer::GetToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"shellcode", {{"type", "string"}, {"description", "Hex-encoded shellcode bytes (e.g. 'C3' for ret, '33C0C3' for xor eax,eax; ret)"}}},
 			{"timeout_ms", {{"type", "integer"}, {"description", "Max wait time in ms (default: 5000, max: 60000). 0 = fire-and-forget (don't wait, don't free)."}}}
-		 }}, {"required", json::array({"shellcode"})}}}}
+		 }}, {"required", json::array({"shellcode"})}}}},
+
+		{{"name", "veh_batch"}, {"description",
+			"Execute multiple debugger commands in a single call, reducing round-trips. "
+			"Supports sequential execution, variable references ($N for step N result, $N.key for nested access), "
+			"and control flow (if/loop/for_each). Uses existing tool names and args format.\n"
+			"\nExamples:\n"
+			"  Sequential: {steps: [{tool: \"veh_registers\", args: {threadId: 1234}}, {tool: \"veh_read_memory\", args: {address: \"$0.registers.rsp\", size: 8}}]}\n"
+			"  Batch patch: {steps: [{tool: \"veh_write_memory\", args: {patches: [{address: \"0x1000\", data: \"90\"}, {address: \"0x2000\", data: \"90\"}]}}]}\n"
+			"  Loop: {steps: [{loop: [{tool: \"veh_step_over\", args: {threadId: 1}}, {tool: \"veh_registers\", args: {threadId: 1}}], until: \"$registers.rax!=0\", max: 100}]}\n"
+			"  If: {steps: [{tool: \"veh_registers\", args: {threadId: 1}}, {if: \"$0.registers.rax==0\", then: [{tool: \"veh_write_memory\", args: {address: \"0x1000\", data: \"90\"}}]}]}\n"
+			"  For-each: {steps: [{for_each: [\"0x1000\",\"0x2000\",\"0x3000\"], as: \"$addr\", do: [{tool: \"veh_write_memory\", args: {address: \"$addr\", data: \"90\"}}]}]}"
+		},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"steps", {{"type", "array"}, {"description", "Array of steps. Each step is {tool, args} or {if, then, else} or {loop, until, max} or {for_each, as, do}"}}}
+		 }}, {"required", json::array({"steps"})}}}}
 	});
 }
 
