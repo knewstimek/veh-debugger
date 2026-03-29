@@ -432,7 +432,62 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 			}
 		}
 
-		// 3) 일반 싱글스텝 완료 (StepInto/StepOver 요청에 의한)
+		// 3) TraceRegister: check register condition, loop internally if not met
+		if (traceReg_.active.load(std::memory_order_relaxed) && tid == traceReg_.threadId) {
+			traceReg_.stepsExecuted++;
+			const uint64_t* regBase = &info->ContextRecord->Rax;
+			// RegisterSet layout: rax=0, rbx=1, ..., rip=16, rflags=17
+			// CONTEXT layout is different, map regIndex to CONTEXT field
+			uint64_t curVal = 0;
+			switch (traceReg_.regIndex) {
+				case 0: curVal = info->ContextRecord->Rax; break;
+				case 1: curVal = info->ContextRecord->Rbx; break;
+				case 2: curVal = info->ContextRecord->Rcx; break;
+				case 3: curVal = info->ContextRecord->Rdx; break;
+				case 4: curVal = info->ContextRecord->Rsi; break;
+				case 5: curVal = info->ContextRecord->Rdi; break;
+				case 6: curVal = info->ContextRecord->Rbp; break;
+				case 7: curVal = info->ContextRecord->Rsp; break;
+				case 8: curVal = info->ContextRecord->R8; break;
+				case 9: curVal = info->ContextRecord->R9; break;
+				case 10: curVal = info->ContextRecord->R10; break;
+				case 11: curVal = info->ContextRecord->R11; break;
+				case 12: curVal = info->ContextRecord->R12; break;
+				case 13: curVal = info->ContextRecord->R13; break;
+				case 14: curVal = info->ContextRecord->R14; break;
+				case 15: curVal = info->ContextRecord->R15; break;
+				case 16: curVal = info->ContextRecord->Rip; break;
+				case 17: curVal = info->ContextRecord->EFlags; break;
+				default: curVal = 0; break;
+			}
+
+			bool conditionMet = false;
+			switch (traceReg_.mode) {
+				case 0: conditionMet = (curVal != traceReg_.initialValue); break; // changed
+				case 1: conditionMet = (curVal == traceReg_.compareValue); break; // equals
+				case 2: conditionMet = (curVal != traceReg_.compareValue); break; // not_equals
+			}
+
+			if (conditionMet || traceReg_.stepsExecuted >= traceReg_.maxSteps) {
+				// Done: store results and signal
+				traceReg_.found = conditionMet;
+				traceReg_.resultAddress = addr;
+				traceReg_.oldValue = traceReg_.initialValue;
+				traceReg_.newValue = curVal;
+				traceReg_.active.store(false, std::memory_order_relaxed);
+				traceReg_.done.store(true, std::memory_order_release);
+				// Stop: let NotifyAndWait handle the rest (thread pauses)
+				LOG_INFO("TraceRegister: %s after %u steps at 0x%llX (0x%llX -> 0x%llX)",
+					conditionMet ? "found" : "max_steps", traceReg_.stepsExecuted, addr,
+					traceReg_.initialValue, curVal);
+			} else {
+				// Continue stepping: set TF again
+				info->ContextRecord->EFlags |= 0x100;
+				return EXCEPTION_CONTINUE_EXECUTION;
+			}
+		}
+
+		// 4) 일반 싱글스텝 완료 (StepInto/StepOver 요청에 의한)
 		LOG_DEBUG("Single step completed at 0x%llX (tid=%u)", addr, tid);
 
 		{
@@ -529,6 +584,43 @@ void VehHandler::UnregisterShellcodeThread(uint32_t tid) {
 bool VehHandler::IsShellcodeThread(uint32_t tid) {
 	std::lock_guard<std::mutex> lock(shellcodeThreadMutex_);
 	return shellcodeThreads_.count(tid) > 0;
+}
+
+void VehHandler::StartTraceRegister(uint32_t threadId, uint32_t regIndex, uint32_t maxSteps,
+                                     uint8_t mode, uint64_t compareValue) {
+	traceReg_.threadId = threadId;
+	traceReg_.regIndex = regIndex;
+	traceReg_.maxSteps = maxSteps;
+	traceReg_.mode = mode;
+	traceReg_.compareValue = compareValue;
+	traceReg_.stepsExecuted = 0;
+	traceReg_.found = false;
+	traceReg_.resultAddress = 0;
+	traceReg_.oldValue = 0;
+	traceReg_.newValue = 0;
+	traceReg_.done.store(false, std::memory_order_relaxed);
+	traceReg_.active.store(true, std::memory_order_release);
+
+	// Read initial register value from stopped context
+	CONTEXT ctx;
+	if (GetStoppedContext(threadId, ctx)) {
+		uint64_t val = 0;
+		switch (regIndex) {
+			case 0: val = ctx.Rax; break; case 1: val = ctx.Rbx; break;
+			case 2: val = ctx.Rcx; break; case 3: val = ctx.Rdx; break;
+			case 4: val = ctx.Rsi; break; case 5: val = ctx.Rdi; break;
+			case 6: val = ctx.Rbp; break; case 7: val = ctx.Rsp; break;
+			case 8: val = ctx.R8; break;  case 9: val = ctx.R9; break;
+			case 10: val = ctx.R10; break; case 11: val = ctx.R11; break;
+			case 12: val = ctx.R12; break; case 13: val = ctx.R13; break;
+			case 14: val = ctx.R14; break; case 15: val = ctx.R15; break;
+			case 16: val = ctx.Rip; break; case 17: val = ctx.EFlags; break;
+		}
+		traceReg_.initialValue = val;
+	}
+
+	// Resume thread with step (TF set)
+	ResumeStoppedThread(threadId, true);
 }
 
 } // namespace veh

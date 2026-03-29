@@ -57,6 +57,27 @@ public:
 	void StopTrace();
 	std::unordered_map<uint64_t, uint32_t> GetTraceResults(uint32_t& totalHits);
 
+	// TraceRegister: single-step loop inside VEH, no IPC per step
+	struct TraceRegState {
+		std::atomic<bool> active{false};
+		uint32_t threadId = 0;
+		uint32_t regIndex = 0;
+		uint32_t maxSteps = 0;
+		uint8_t mode = 0;          // 0=changed, 1=equals, 2=not_equals
+		uint64_t compareValue = 0;
+		uint64_t initialValue = 0;
+		// Results (written by VEH thread, read by pipe thread)
+		std::atomic<bool> done{false};
+		bool found = false;
+		uint32_t stepsExecuted = 0;
+		uint64_t resultAddress = 0;
+		uint64_t oldValue = 0;
+		uint64_t newValue = 0;
+	};
+	TraceRegState traceReg_;
+	void StartTraceRegister(uint32_t threadId, uint32_t regIndex, uint32_t maxSteps,
+	                         uint8_t mode, uint64_t compareValue);
+
 	// 내부 스레드 등록 (pipe server 등) -- BP 투명 스킵 + trace_callers 스킵
 	void SetInternalThread(uint32_t tid) { internalTid_.store(tid, std::memory_order_relaxed); }
 

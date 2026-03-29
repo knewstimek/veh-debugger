@@ -193,6 +193,29 @@ public:
 	EvalResult Evaluate(const std::string& expression, uint32_t threadId);
 	TraceResult TraceCallers(uint64_t address, uint32_t durationSec);
 
+	// Register trace: step internally until register condition met
+	struct TraceRegResult {
+		bool ok = false;
+		bool found = false;
+		uint32_t stepsExecuted = 0;
+		uint64_t address = 0;
+		uint64_t oldValue = 0;
+		uint64_t newValue = 0;
+	};
+	TraceRegResult TraceRegister(uint32_t threadId, uint32_t regIndex, uint32_t maxSteps,
+	                              uint8_t mode, uint64_t compareValue);
+
+	// Memory trace: HW BP to catch writes to an address
+	struct TraceMemResult {
+		bool ok = false;
+		bool found = false;
+		uint32_t threadId = 0;
+		uint64_t instructionAddress = 0;
+		uint64_t oldValue = 0;
+		uint64_t newValue = 0;
+	};
+	TraceMemResult TraceMemoryWrite(uint64_t address, uint32_t size, uint32_t timeoutMs);
+
 	// --- Resolve (PDB) ---
 	uint64_t ResolveSourceLine(const std::string& file, uint32_t line);
 	uint64_t ResolveFunction(const std::string& name);

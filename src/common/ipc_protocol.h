@@ -67,6 +67,10 @@ enum class IpcCommand : uint32_t {
 	FreeMemory             = 0x0061,
 	ExecuteShellcode       = 0x0062,
 
+	// Dynamic tracing
+	TraceRegister          = 0x0070,
+	TraceMemory            = 0x0071,
+
 	// Lifecycle
 	Heartbeat              = 0x00FE,
 	Detach                 = 0x00F0,
@@ -328,6 +332,39 @@ struct EnumLocalsResponse {
 	IpcStatus status;
 	uint32_t  count;
 	// followed by `count` LocalVariableInfo structs
+};
+
+// --- Dynamic tracing ---
+struct TraceRegisterRequest {
+	uint32_t threadId;
+	uint32_t regIndex;     // RegisterSet offset (0=rax, 1=rbx, ..., 16=rip)
+	uint32_t maxSteps;     // max single-steps before giving up
+	uint8_t  mode;         // 0=changed, 1=equals compareValue, 2=not_equals compareValue
+	uint64_t compareValue; // for mode 1/2
+};
+
+struct TraceRegisterResponse {
+	IpcStatus status;
+	uint8_t  found;         // 1 if condition met, 0 if max steps reached
+	uint32_t stepsExecuted;
+	uint64_t address;       // instruction address that triggered the condition
+	uint64_t oldValue;
+	uint64_t newValue;
+};
+
+struct TraceMemoryRequest {
+	uint64_t address;       // memory address to watch
+	uint32_t size;          // 1, 2, 4, or 8 bytes
+	uint32_t timeoutMs;     // max wait time
+};
+
+struct TraceMemoryResponse {
+	IpcStatus status;
+	uint8_t  found;
+	uint32_t threadId;      // thread that wrote to the address
+	uint64_t instructionAddress;  // instruction that triggered the write
+	uint64_t oldValue;
+	uint64_t newValue;
 };
 
 // --- Memory management ---

@@ -712,6 +712,47 @@ json BatchExecutor::DispatchTool(const std::string& name, const json& args) {
 		if (!r.ok) return {{"error", "SetBreakpoint failed"}};
 		return {{"success", true}, {"id", r.id}, {"address", ToHex(addr)}};
 	}
+	if (name == "veh_trace_register") {
+		uint32_t tid = uint32Arg("threadId");
+		std::string regName = args.value("register", "");
+		uint32_t regIdx = DebugSession::GetRegisterIndex(regName);
+		if (regIdx == UINT32_MAX) return {{"error", "Unknown register: " + regName}};
+		int maxSteps = intArg("max_steps", 10000);
+		std::string modeStr = args.value("mode", "changed");
+		uint8_t mode = 0;
+		if (modeStr == "equals") mode = 1;
+		else if (modeStr == "not_equals") mode = 2;
+		uint64_t cmpVal = 0;
+		std::string valStr = args.value("value", "");
+		if (!valStr.empty()) { try { cmpVal = ParseHexOrDec(valStr); } catch (...) {} }
+		auto r = session_.TraceRegister(tid, regIdx, maxSteps, mode, cmpVal);
+		if (!r.ok) return {{"error", "TraceRegister failed"}};
+		json ret = {{"found", r.found}, {"stepsExecuted", r.stepsExecuted},
+		            {"address", ToHex(r.address)}, {"oldValue", ToHex(r.oldValue)}, {"newValue", ToHex(r.newValue)}};
+		if (r.found && r.address) {
+			auto insns = session_.Disassemble(r.address, 1);
+			if (!insns.empty()) ret["instruction"] = insns[0].mnemonic;
+		}
+		return ret;
+	}
+	if (name == "veh_trace_memory") {
+		uint64_t addr = hexArg("address");
+		int sz = intArg("size", 4);
+		int tms = intArg("timeout_ms", 10000);
+		auto r = session_.TraceMemoryWrite(addr, sz, tms);
+		if (!r.ok) return {{"error", "TraceMemory failed"}};
+		json ret = {{"found", r.found}, {"address", ToHex(addr)}, {"threadId", r.threadId}};
+		if (r.found) {
+			ret["instructionAddress"] = ToHex(r.instructionAddress);
+			ret["oldValue"] = ToHex(r.oldValue);
+			ret["newValue"] = ToHex(r.newValue);
+			if (r.instructionAddress) {
+				auto insns = session_.Disassemble(r.instructionAddress, 1);
+				if (!insns.empty()) ret["instruction"] = insns[0].mnemonic;
+			}
+		}
+		return ret;
+	}
 	if (name == "veh_attach" || name == "veh_launch" || name == "veh_detach") {
 		return {{"error", name + " is not available in batch mode (session lifecycle)"}};
 	}
