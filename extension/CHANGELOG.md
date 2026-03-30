@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 1.0.99 (2026-03-30)
+
+### Added
+- **veh_trace_calls**: Runtime call/jmp target monitoring (35th tool). Sets breakpoints on call sites, runs the program naturally, and collects actual target addresses with API names in a lock-free ring buffer. Enables 100% accurate IAT reconstruction
+
+### Improved
+- **veh_resolve_imports** major rewrite:
+  - `follow_exceptions`: passes non-SINGLE_STEP exceptions to SEH for exception-based obfuscated thunks (Themida/VMProtect style)
+  - UEF safety net: prevents process crash when SEH does not handle the exception
+  - Call stub: proper x64 calling convention (16-byte alignment + 32-byte shadow space)
+  - Diagnostic trace log: returns last 16 RIP addresses + exception codes on failure
+  - `target_modules` / `system_only`: module filtering to eliminate false positives from packer DLLs
+  - Static analysis engine: follows direct jmp/call/ret/indirect[mem] without CPU execution
+  - DR register cleanup: zeros DR0-DR7 before trace to prevent anti-debug detection
+  - SymFromAddr validation: verifies function entry point (displacement <= 0x100)
+  - IsExecutableAddr check: validates static follow targets are in executable memory
+
+### Fixed
+- `traceCalls` active flag load: `memory_order_relaxed` -> `acquire` (data race)
+- `AnalyzeFlow` prefix loop buffer overread (missing bounds check)
+- `AnalyzeFlow` REX/legacy prefix parse order (Intel SDM compliance)
+- `pendingInt3Addr`/`pendingInt3Byte` changed to `std::atomic` (data race)
+- UEF only installed when `parkStub` allocation succeeds
+
 ## 1.0.98 (2026-03-30)
 
 ### New Features (MCP: 33 -> 34 tools)
