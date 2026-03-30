@@ -1069,19 +1069,29 @@ DebugSession::TraceMemResult DebugSession::TraceMemoryWrite(uint64_t address, ui
 // --- Import resolution ---
 
 std::vector<DebugSession::ImportEntry> DebugSession::ResolveImports(
-	uint32_t threadId, const std::vector<uint64_t>& thunks, uint32_t maxStepsPerThunk, bool followExceptions) {
+	uint32_t threadId, const std::vector<uint64_t>& thunks, uint32_t maxStepsPerThunk,
+	bool followExceptions, bool systemOnly, const std::vector<std::string>& targetModules) {
 
 	std::vector<ImportEntry> result;
 	if (thunks.empty()) return result;
 
-	std::vector<uint8_t> payload(sizeof(ResolveImportRequest) + thunks.size() * sizeof(uint64_t));
+	uint8_t tmCount = static_cast<uint8_t>(targetModules.size() > 255 ? 255 : targetModules.size());
+	size_t payloadSize = sizeof(ResolveImportRequest) + thunks.size() * sizeof(uint64_t) + tmCount * 64;
+	std::vector<uint8_t> payload(payloadSize, 0);
 	auto* req = reinterpret_cast<ResolveImportRequest*>(payload.data());
 	req->threadId = threadId;
 	req->count = static_cast<uint32_t>(thunks.size());
 	req->maxStepsPerThunk = maxStepsPerThunk;
 	req->followExceptions = followExceptions ? 1 : 0;
-	memset(req->reserved, 0, sizeof(req->reserved));
+	req->systemOnly = systemOnly ? 1 : 0;
+	req->targetModuleCount = tmCount;
+	req->reserved = 0;
 	memcpy(payload.data() + sizeof(ResolveImportRequest), thunks.data(), thunks.size() * sizeof(uint64_t));
+	// Append target module names (64 bytes each, null-terminated)
+	char* modDest = reinterpret_cast<char*>(payload.data() + sizeof(ResolveImportRequest) + thunks.size() * sizeof(uint64_t));
+	for (uint8_t m = 0; m < tmCount; m++) {
+		strncpy(modDest + m * 64, targetModules[m].c_str(), 63);
+	}
 
 	int timeoutMs = static_cast<int>(thunks.size()) * maxStepsPerThunk / 10 + 30000;
 	std::vector<uint8_t> respData;

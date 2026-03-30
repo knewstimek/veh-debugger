@@ -1504,7 +1504,19 @@ json McpServer::ToolResolveImports(const json& args) {
 	if (args.contains("follow_exceptions") && args["follow_exceptions"].is_boolean())
 		followExceptions = args["follow_exceptions"].get<bool>();
 
-	auto results = session_.ResolveImports(threadId, thunks, maxSteps, followExceptions);
+	bool systemOnly = false;
+	if (args.contains("system_only") && args["system_only"].is_boolean())
+		systemOnly = args["system_only"].get<bool>();
+
+	std::vector<std::string> targetModules;
+	if (args.contains("target_modules") && args["target_modules"].is_array()) {
+		for (auto& m : args["target_modules"]) {
+			if (m.is_string()) targetModules.push_back(m.get<std::string>());
+		}
+	}
+
+	auto results = session_.ResolveImports(threadId, thunks, maxSteps,
+		followExceptions, systemOnly, targetModules);
 
 	json arr = json::array();
 	int resolved = 0;
@@ -2302,7 +2314,9 @@ json McpServer::GetToolsList() {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (must be stopped at breakpoint)"}}},
 			{"addresses", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Array of thunk addresses (hex or module+RVA)"}}},
 			{"max_steps", {{"type", "integer"}, {"description", "Max steps per thunk (default: 1000, max: 10000)"}}},
-			{"follow_exceptions", {{"type", "boolean"}, {"description", "Pass non-SINGLE_STEP exceptions to SEH during trace (for exception-based obfuscated thunks). Default: false"}}}
+			{"follow_exceptions", {{"type", "boolean"}, {"description", "Pass non-SINGLE_STEP exceptions to SEH during trace (for exception-based obfuscated thunks). Default: false"}}},
+			{"system_only", {{"type", "boolean"}, {"description", "Only resolve to system DLLs (C:\\Windows\\System32). Filters out packer/runtime DLLs. Default: false"}}},
+			{"target_modules", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Only resolve to these specific modules (e.g. [\"kernel32\", \"ntdll\"]). Overrides system_only."}}}
 		 }}, {"required", json::array({"threadId", "addresses"})}}}}
 	});
 }

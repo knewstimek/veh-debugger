@@ -374,8 +374,11 @@ struct ResolveImportRequest {
 	uint32_t count;        // number of thunk addresses (follows this struct)
 	uint32_t maxStepsPerThunk;  // max steps per import (default 1000)
 	uint8_t  followExceptions;  // 1 = pass non-SINGLE_STEP exceptions to SEH, keep TF for trace
-	uint8_t  reserved[3];
+	uint8_t  systemOnly;        // 1 = only resolve to system DLLs (Windows dir)
+	uint8_t  targetModuleCount; // number of target module names (0 = all non-exe)
+	uint8_t  reserved;
 	// followed by: uint64_t thunkAddresses[count]
+	// followed by: char targetModules[targetModuleCount][64]  (null-terminated names)
 };
 
 struct ResolveImportEntry {
