@@ -210,7 +210,7 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | `veh_resolve_imports` | `threadId, addresses, max_steps?, follow_exceptions?, system_only?, target_modules?` | Batch-resolve obfuscated imports (step from thunk to DLL, up to 2000) |
 | `veh_batch` | `steps` | Execute multiple commands in one call ($N variable refs, if/loop/for_each control flow) |
 | `veh_trace_callers` | `address, duration_sec?` | Profile function callers (auto-resume -> collect for N seconds -> auto-pause). Returns unique callers with hit counts. x64: RtlVirtualUnwind (accurate). x86: [ESP] (accurate only at function entry) |
-| `veh_trace_calls` | `addresses, duration_sec?` | Monitor where call/jmp instructions go at runtime. Sets BPs on call sites, runs program for N seconds, collects actual targets with API names. For IAT reconstruction on packed binaries. |
+| `veh_trace_calls` | `addresses, duration_sec?, resolve?, system_only?` | Monitor where call/jmp instructions go at runtime. Sets BPs on call sites, runs program for N seconds, collects actual targets with API names. `resolve=true`: follow thunks/trampolines in natural call context to final API (handles exception-based obfuscation). `system_only=true`: return only system DLL targets. For IAT reconstruction on packed binaries. |
 
 > **Tip**: Address arguments accept hex (`"0x401000"`), decimal (`4198400`), or **module+RVA** (`"crackme.exe+0x1000"`). Module+RVA eliminates manual ASLR base calculation.
 
