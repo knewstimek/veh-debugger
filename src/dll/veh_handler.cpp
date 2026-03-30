@@ -488,14 +488,11 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 			tl.exceptionCode = 0;  // normal single-step
 			importResolve_.traceLogIdx++;
 			bool inDll = false;
-			// Check if RIP is in any module range (but not the main exe)
+			// Check if RIP is in a target module (filtered by target_modules/system_only)
 			for (auto& mr : importResolve_.moduleRanges) {
-				if (addr >= mr.base && addr < mr.end) {
-					// Skip if it's the main exe itself
-					if (mr.base != importResolve_.exeBase) {
-						inDll = true;
-						break;
-					}
+				if (addr >= mr.base && addr < mr.end && mr.isTarget) {
+					inDll = true;
+					break;
 				}
 			}
 

@@ -102,7 +102,10 @@ public:
 		bool followExceptions = false;    // pass non-SINGLE_STEP to SEH, keep TF
 		uint32_t maxExceptionPasses = 50; // safety limit per thunk
 		// Module ranges for "is RIP in a DLL?" check
-		struct ModRange { uint64_t base; uint64_t end; };
+		struct ModRange {
+			uint64_t base; uint64_t end;
+			bool isTarget;  // true = valid resolve target (filtered by target_modules/system_only)
+		};
 		std::vector<ModRange> moduleRanges;
 		uint64_t exeBase = 0;
 		uint64_t exeEnd = 0;

@@ -1192,6 +1192,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		if (maxSteps == 0) maxSteps = 1000;
 		if (maxSteps > 10000) maxSteps = 10000;
 		bool followExceptions = (req->followExceptions != 0);
+		bool systemOnly = (req->systemOnly != 0);
 
 		const uint64_t* thunks = reinterpret_cast<const uint64_t*>(
 			payload + sizeof(ResolveImportRequest));
@@ -1201,7 +1202,30 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			return;
 		}
 
-		// Build module range table for RIP-in-DLL check
+		// Parse target module names (after thunk addresses)
+		std::vector<std::string> targetModules;
+		if (req->targetModuleCount > 0) {
+			const char* modData = reinterpret_cast<const char*>(
+				payload + sizeof(ResolveImportRequest) + count * sizeof(uint64_t));
+			size_t modDataSize = payloadSize - sizeof(ResolveImportRequest) - count * sizeof(uint64_t);
+			for (uint8_t m = 0; m < req->targetModuleCount && modDataSize >= 64; m++) {
+				char buf[65] = {};
+				memcpy(buf, modData + m * 64, 64);
+				// Lowercase for case-insensitive matching
+				for (char* p = buf; *p; p++) *p = static_cast<char>(tolower(*p));
+				targetModules.push_back(buf);
+			}
+		}
+
+		// Get Windows system directory for system_only filter
+		wchar_t sysDir[MAX_PATH] = {};
+		if (systemOnly) {
+			GetSystemDirectoryW(sysDir, MAX_PATH);
+			// Ensure lowercase for comparison
+			for (wchar_t* p = sysDir; *p; p++) *p = towlower(*p);
+		}
+
+		// Build module range table with isTarget filter
 		auto& ir = VehHandler::Instance().importResolve_;
 		ir.moduleRanges.clear();
 		{
@@ -1213,12 +1237,34 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 					do {
 						uint64_t base = reinterpret_cast<uint64_t>(me.modBaseAddr);
 						uint64_t end = base + me.modBaseSize;
-						ir.moduleRanges.push_back({base, end});
+
+						bool isTarget = true;  // default: all non-exe modules
 						if (first) {
 							ir.exeBase = base;
 							ir.exeEnd = end;
+							isTarget = false;  // main exe is never a target
 							first = false;
+						} else if (!targetModules.empty()) {
+							// Filter: only modules in target list
+							char modName[256] = {};
+							WideCharToMultiByte(CP_ACP, 0, me.szModule, -1, modName, sizeof(modName), nullptr, nullptr);
+							for (char* p = modName; *p; p++) *p = static_cast<char>(tolower(*p));
+							// Remove .dll extension for matching
+							char* dot = strrchr(modName, '.');
+							std::string nameNoExt(modName, dot ? dot : modName + strlen(modName));
+							isTarget = false;
+							for (auto& tm : targetModules) {
+								if (tm == modName || tm == nameNoExt) { isTarget = true; break; }
+							}
+						} else if (systemOnly) {
+							// Filter: only system DLLs (path under Windows system dir)
+							wchar_t modPath[MAX_PATH];
+							wcscpy_s(modPath, me.szExePath);
+							for (wchar_t* p = modPath; *p; p++) *p = towlower(*p);
+							isTarget = (wcsstr(modPath, sysDir) == modPath);
 						}
+
+						ir.moduleRanges.push_back({base, end, isTarget});
 					} while (Module32NextW(snap, &me));
 				}
 				CloseHandle(snap);

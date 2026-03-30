@@ -229,7 +229,9 @@ public:
 		struct TraceEntry { uint64_t address; uint32_t excCode; };
 		std::vector<TraceEntry> trace;
 	};
-	std::vector<ImportEntry> ResolveImports(uint32_t threadId, const std::vector<uint64_t>& thunks, uint32_t maxStepsPerThunk = 1000, bool followExceptions = false);
+	std::vector<ImportEntry> ResolveImports(uint32_t threadId, const std::vector<uint64_t>& thunks,
+		uint32_t maxStepsPerThunk = 1000, bool followExceptions = false,
+		bool systemOnly = false, const std::vector<std::string>& targetModules = {});
 
 	// --- Resolve (PDB) ---
 	uint64_t ResolveSourceLine(const std::string& file, uint32_t line);
