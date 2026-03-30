@@ -1232,16 +1232,18 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			ir.parkStub = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 			if (ir.parkStub) {
 				memset(ir.parkStub, 0x90, 4096);  // fill with NOPs
+				prevUEF = SetUnhandledExceptionFilter(ImportResolveUEF);
 			}
-			prevUEF = SetUnhandledExceptionFilter(ImportResolveUEF);
+			// If VirtualAlloc failed, parkStub=NULL -> UEF not installed -> follow_exceptions
+			// still works (SEH pass-through) but unhandled exceptions will crash as before
 		}
 
 		// Save original context
 		CONTEXT origCtx;
 		if (!VehHandler::Instance().GetStoppedContext(req->threadId, origCtx)) {
-			if (followExceptions) {
+			if (followExceptions && ir.parkStub) {
 				SetUnhandledExceptionFilter(prevUEF);
-				if (ir.parkStub) { VirtualFree(ir.parkStub, 0, MEM_RELEASE); ir.parkStub = nullptr; }
+				VirtualFree(ir.parkStub, 0, MEM_RELEASE); ir.parkStub = nullptr;
 			}
 			IpcStatus status = IpcStatus::Error;
 			SendResponse(command, &status, sizeof(status));
@@ -1365,9 +1367,9 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 
 		// Cleanup UEF + parkStub
-		if (followExceptions) {
+		if (followExceptions && ir.parkStub) {
 			SetUnhandledExceptionFilter(prevUEF);
-			if (ir.parkStub) { VirtualFree(ir.parkStub, 0, MEM_RELEASE); ir.parkStub = nullptr; }
+			VirtualFree(ir.parkStub, 0, MEM_RELEASE); ir.parkStub = nullptr;
 		}
 
 		SendResponse(command, respBuf.data(), static_cast<uint32_t>(respBuf.size()));
