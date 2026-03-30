@@ -7,6 +7,7 @@
 #include "threads.h"
 #include "stack_walk.h"
 #include "memory.h"
+#include "syscall_resolver.h"
 #include "../common/ipc_protocol.h"
 #include "../common/logger.h"
 
@@ -14,6 +15,170 @@
 #include <dbghelp.h>
 #include <cstring>
 #pragma comment(lib, "dbghelp.lib")
+
+// ---------------------------------------------------------------------------
+// Import resolve: static instruction flow analysis (no Zydis needed)
+// ---------------------------------------------------------------------------
+
+// Safe memory read (__try must be in function without C++ destructors)
+static bool SafeReadMem(uint64_t addr, void* buf, size_t len) {
+	__try {
+		memcpy(buf, reinterpret_cast<const void*>(addr), len);
+		return true;
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+}
+
+static uint64_t ReadPtr(uint64_t addr) {
+#ifdef _WIN64
+	uint64_t val = 0;
+	if (SafeReadMem(addr, &val, 8)) return val;
+#else
+	uint32_t val = 0;
+	if (SafeReadMem(addr, &val, 4)) return val;
+#endif
+	return 0;
+}
+
+static uint64_t RegFromCtx(const CONTEXT& ctx, uint8_t idx) {
+#ifdef _WIN64
+	switch (idx) {
+		case 0: return ctx.Rax; case 1: return ctx.Rcx; case 2: return ctx.Rdx; case 3: return ctx.Rbx;
+		case 4: return ctx.Rsp; case 5: return ctx.Rbp; case 6: return ctx.Rsi; case 7: return ctx.Rdi;
+		case 8: return ctx.R8;  case 9: return ctx.R9;  case 10: return ctx.R10; case 11: return ctx.R11;
+		case 12: return ctx.R12; case 13: return ctx.R13; case 14: return ctx.R14; case 15: return ctx.R15;
+	}
+#else
+	switch (idx) {
+		case 0: return ctx.Eax; case 1: return ctx.Ecx; case 2: return ctx.Edx; case 3: return ctx.Ebx;
+		case 4: return ctx.Esp; case 5: return ctx.Ebp; case 6: return ctx.Esi; case 7: return ctx.Edi;
+	}
+#endif
+	return 0;
+}
+
+enum class FlowType { DirectJump, DirectCall, IndirectBranch, Return, Conditional, Unknown };
+
+struct InsnFlow {
+	FlowType type = FlowType::Unknown;
+	uint8_t  length = 0;
+	uint64_t target = 0;
+	bool     resolved = false;
+	uint16_t retImm = 0;  // for ret imm16
+};
+
+static InsnFlow AnalyzeFlow(uint64_t rip, const CONTEXT& ctx) {
+	InsnFlow f;
+	uint8_t code[16] = {};
+	if (!SafeReadMem(rip, code, 16)) return f;
+
+	uint8_t* p = code;
+	uint8_t rex = 0;
+
+#ifdef _WIN64
+	if (*p >= 0x40 && *p <= 0x4F) rex = *p++;
+#endif
+	// Skip legacy prefixes
+	while (*p == 0x66 || *p == 0x67 || *p == 0xF2 || *p == 0xF3 ||
+	       *p == 0x2E || *p == 0x3E || *p == 0x26 || *p == 0x36 ||
+	       *p == 0x64 || *p == 0x65) p++;
+
+	uint8_t op = *p++;
+
+	if (op == 0xE9) { // jmp rel32
+		int32_t rel; memcpy(&rel, p, 4);
+		f.type = FlowType::DirectJump; f.length = (uint8_t)(p - code) + 4;
+		f.target = rip + f.length + rel; f.resolved = true;
+	}
+	else if (op == 0xEB) { // jmp rel8
+		int8_t rel = (int8_t)*p;
+		f.type = FlowType::DirectJump; f.length = (uint8_t)(p - code) + 1;
+		f.target = rip + f.length + rel; f.resolved = true;
+	}
+	else if (op == 0xE8) { // call rel32
+		int32_t rel; memcpy(&rel, p, 4);
+		f.type = FlowType::DirectCall; f.length = (uint8_t)(p - code) + 4;
+		f.target = rip + f.length + rel; f.resolved = true;
+	}
+	else if (op == 0xC3) { // ret
+		f.type = FlowType::Return; f.length = (uint8_t)(p - code);
+#ifdef _WIN64
+		f.target = ReadPtr(ctx.Rsp);
+#else
+		f.target = ReadPtr(ctx.Esp);
+#endif
+		f.resolved = (f.target != 0);
+	}
+	else if (op == 0xC2) { // ret imm16
+		uint16_t imm; memcpy(&imm, p, 2);
+		f.type = FlowType::Return; f.length = (uint8_t)(p - code) + 2; f.retImm = imm;
+#ifdef _WIN64
+		f.target = ReadPtr(ctx.Rsp);
+#else
+		f.target = ReadPtr(ctx.Esp);
+#endif
+		f.resolved = (f.target != 0);
+	}
+	else if (op == 0xFF) { // indirect jmp/call
+		uint8_t modrm = *p++;
+		uint8_t mod = (modrm >> 6) & 3, reg = (modrm >> 3) & 7, rm = modrm & 7;
+		if (reg != 2 && reg != 4) { f.type = FlowType::Unknown; return f; } // not call/jmp
+		f.type = FlowType::IndirectBranch;
+
+		if (mod == 3) { // register direct: jmp rax, call rbx
+			uint8_t ri = rm | ((rex & 1) << 3);
+			f.target = RegFromCtx(ctx, ri); f.resolved = true;
+			f.length = (uint8_t)(p - code);
+		}
+#ifdef _WIN64
+		else if (mod == 0 && rm == 5) { // [rip+disp32]
+			int32_t disp; memcpy(&disp, p, 4); p += 4;
+			f.length = (uint8_t)(p - code);
+			f.target = ReadPtr(rip + f.length + disp); f.resolved = (f.target != 0);
+		}
+#else
+		else if (mod == 0 && rm == 5) { // [disp32]
+			uint32_t addr32; memcpy(&addr32, p, 4); p += 4;
+			f.length = (uint8_t)(p - code);
+			f.target = ReadPtr(addr32); f.resolved = (f.target != 0);
+		}
+#endif
+		else if (rm == 4 && mod != 3) { // SIB byte - too complex
+			f.type = FlowType::Unknown;
+		}
+		else if (mod == 0) { // [reg]
+			uint8_t ri = rm | ((rex & 1) << 3);
+			f.length = (uint8_t)(p - code);
+			f.target = ReadPtr(RegFromCtx(ctx, ri)); f.resolved = (f.target != 0);
+		}
+		else if (mod == 1) { // [reg+disp8]
+			uint8_t ri = rm | ((rex & 1) << 3);
+			int8_t disp = (int8_t)*p++;
+			f.length = (uint8_t)(p - code);
+			f.target = ReadPtr(RegFromCtx(ctx, ri) + disp); f.resolved = (f.target != 0);
+		}
+		else if (mod == 2) { // [reg+disp32]
+			uint8_t ri = rm | ((rex & 1) << 3);
+			int32_t disp; memcpy(&disp, p, 4); p += 4;
+			f.length = (uint8_t)(p - code);
+			f.target = ReadPtr(RegFromCtx(ctx, ri) + disp); f.resolved = (f.target != 0);
+		}
+	}
+	else if ((op >= 0x70 && op <= 0x7F) || (op == 0x0F)) { // conditional jmp
+		f.type = FlowType::Conditional; // don't follow statically -- use TF
+	}
+	// else: non-branch instruction -> Unknown (use INT3/TF)
+
+	return f;
+}
+
+static bool IsInTargetModule(uint64_t rip, const veh::VehHandler::ImportResolveState& ir) {
+	for (auto& mr : ir.moduleRanges) {
+		if (rip >= mr.base && rip < mr.end && mr.isTarget) return true;
+	}
+	return false;
+}
 
 // UEF safety net for follow_exceptions import resolution
 // Called when SEH doesn't handle an exception during thunk tracing.
@@ -1307,27 +1472,23 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			memset(&entries[i], 0, sizeof(ResolveImportEntry));
 			entries[i].thunkAddress = thunks[i];
 
-			// Call stub: simulate 'call thunk' with proper calling convention
-			// x64: 16-byte stack alignment + 32-byte shadow space + return addr
-			// x86: 16-byte alignment (optional) + return addr
+			// Call stub: proper calling convention + DR cleanup
 			CONTEXT tmpCtx = origCtx;
 			{
 				bool stackOk = true;
 				uint64_t fakeRet = ir.parkStub ? reinterpret_cast<uint64_t>(ir.parkStub) : origCtx.Rip;
 #ifdef _WIN64
-				// After 'call', RSP should be 16n+8 (16-aligned before call, -8 for ret addr)
-				// Layout: [RSP]=retAddr, [RSP+8..RSP+0x28]=shadow space (32 bytes)
-				tmpCtx.Rsp = (tmpCtx.Rsp & ~0xFULL);  // align to 16
-				tmpCtx.Rsp -= 0x28;  // 0x20 shadow + 0x8 return addr = 0x28 (RSP = 16n+8)
+				tmpCtx.Rsp = (tmpCtx.Rsp & ~0xFULL);
+				tmpCtx.Rsp -= 0x28;
 				if (IsBadWritePtr(reinterpret_cast<LPVOID>(tmpCtx.Rsp), 0x28)) {
 					stackOk = false;
 				} else {
-					memset(reinterpret_cast<void*>(tmpCtx.Rsp), 0, 0x28);  // zero shadow space
+					memset(reinterpret_cast<void*>(tmpCtx.Rsp), 0, 0x28);
 					*reinterpret_cast<uint64_t*>(tmpCtx.Rsp) = fakeRet;
 				}
 				tmpCtx.Rip = thunks[i];
 #else
-				tmpCtx.Esp = (tmpCtx.Esp & ~0xFU);  // align to 16
+				tmpCtx.Esp = (tmpCtx.Esp & ~0xFU);
 				tmpCtx.Esp -= 4;
 				if (IsBadWritePtr(reinterpret_cast<LPVOID>(tmpCtx.Esp), 4)) {
 					stackOk = false;
@@ -1336,76 +1497,201 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				}
 				tmpCtx.Eip = static_cast<DWORD>(thunks[i]);
 #endif
-				if (!stackOk) {
-					entries[i].resolved = 0;
-					continue;
-				}
+				if (!stackOk) { entries[i].resolved = 0; continue; }
 			}
+			// DR register cleanup: prevent anti-debug detection
+			tmpCtx.Dr0 = tmpCtx.Dr1 = tmpCtx.Dr2 = tmpCtx.Dr3 = 0;
+			tmpCtx.Dr6 = 0; tmpCtx.Dr7 = 0;
 			VehHandler::Instance().SetStoppedContext(req->threadId, tmpCtx);
 
-			// Start stepping
+			// Init trace state
 			ir.threadId = req->threadId;
 			ir.maxSteps = maxSteps;
 			ir.followExceptions = followExceptions;
 			ir.exceptionsPassed = 0;
 			ir.stepsExecuted = 0;
 			ir.traceLogIdx = 0;
+			ir.pendingInt3Addr = 0;
+			ir.pendingInt3Byte = 0;
 			memset(ir.traceLog, 0, sizeof(ir.traceLog));
 			ir.found = false;
 			ir.targetAddress = 0;
-			ir.done.store(false, std::memory_order_relaxed);
-			ir.active.store(true, std::memory_order_release);
 
-			VehHandler::Instance().ResumeStoppedThread(req->threadId, true);
+			// === Static analysis + INT3/TF hybrid loop ===
+			uint32_t stepCount = 0;
+			bool resolved = false;
 
-			// Wait for completion
-			int waitMs = 0;
-			int maxWaitMs = maxSteps * 10 + 5000;
-			while (!ir.done.load(std::memory_order_acquire) && waitMs < maxWaitMs) {
-				Sleep(1);
-				waitMs += 1;
-			}
-
-			if (ir.done.load(std::memory_order_acquire) && ir.found) {
-				entries[i].resolved = 1;
-				entries[i].targetAddress = ir.targetAddress;
-
-				// Get function name via SymFromAddr
-				DWORD64 displacement = 0;
-				char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
-				SYMBOL_INFO* sym = reinterpret_cast<SYMBOL_INFO*>(symBuf);
-				sym->SizeOfStruct = sizeof(SYMBOL_INFO);
-				sym->MaxNameLen = MAX_SYM_NAME;
-				if (SymFromAddr(GetCurrentProcess(), ir.targetAddress, &displacement, sym)) {
-					strncpy_s(entries[i].functionName, sym->Name, sizeof(entries[i].functionName) - 1);
+			while (stepCount < maxSteps) {
+				CONTEXT curCtx;
+				if (!VehHandler::Instance().GetStoppedContext(req->threadId, curCtx)) break;
+#ifdef _WIN64
+				uint64_t rip = curCtx.Rip;
+#else
+				uint64_t rip = curCtx.Eip;
+#endif
+				// Check if in target module
+				if (IsInTargetModule(rip, ir)) {
+					// SymFromAddr validation: check if at/near function entry
+					DWORD64 displacement = 0;
+					char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+					SYMBOL_INFO* sym = reinterpret_cast<SYMBOL_INFO*>(symBuf);
+					sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+					sym->MaxNameLen = MAX_SYM_NAME;
+					bool hasSym = SymFromAddr(GetCurrentProcess(), rip, &displacement, sym);
+					if (hasSym && displacement <= 0x100) {
+						// Valid function entry -- resolved!
+						entries[i].resolved = 1;
+						entries[i].targetAddress = rip;
+						strncpy_s(entries[i].functionName, sym->Name, sizeof(entries[i].functionName) - 1);
+						IMAGEHLP_MODULE64 modInfo = {}; modInfo.SizeOfStruct = sizeof(modInfo);
+						if (SymGetModuleInfo64(GetCurrentProcess(), rip, &modInfo))
+							strncpy_s(entries[i].moduleName, modInfo.ModuleName, sizeof(entries[i].moduleName) - 1);
+						resolved = true;
+						break;
+					}
+					// No symbol or large displacement -- might be trampoline, continue
+					// But accept after 50 extra steps to avoid infinite loop
+					if (stepCount > 0 && !hasSym) {
+						// In target module but no symbol -- still report as resolved (best effort)
+						entries[i].resolved = 1;
+						entries[i].targetAddress = rip;
+						IMAGEHLP_MODULE64 modInfo = {}; modInfo.SizeOfStruct = sizeof(modInfo);
+						if (SymGetModuleInfo64(GetCurrentProcess(), rip, &modInfo))
+							strncpy_s(entries[i].moduleName, modInfo.ModuleName, sizeof(entries[i].moduleName) - 1);
+						resolved = true;
+						break;
+					}
 				}
 
-				// Get module name
-				IMAGEHLP_MODULE64 modInfo = {};
-				modInfo.SizeOfStruct = sizeof(modInfo);
-				if (SymGetModuleInfo64(GetCurrentProcess(), ir.targetAddress, &modInfo)) {
-					strncpy_s(entries[i].moduleName, modInfo.ModuleName, sizeof(entries[i].moduleName) - 1);
+				// Record trace
+				ir.traceLog[ir.traceLogIdx % VehHandler::ImportResolveState::kTraceLogSize] = {rip, 0};
+				ir.traceLogIdx++;
+				ir.stepsExecuted = stepCount;
+
+				// Analyze instruction flow
+				InsnFlow flow = AnalyzeFlow(rip, curCtx);
+
+				if (flow.resolved && flow.type == FlowType::DirectJump) {
+					// Static follow: just update RIP
+#ifdef _WIN64
+					curCtx.Rip = flow.target;
+#else
+					curCtx.Eip = static_cast<DWORD>(flow.target);
+#endif
+					VehHandler::Instance().SetStoppedContext(req->threadId, curCtx);
+					stepCount++;
+					continue;
 				}
-			} else {
-				entries[i].resolved = 0;
+
+				if (flow.resolved && flow.type == FlowType::DirectCall) {
+					// Static follow: push return addr, set RIP
+#ifdef _WIN64
+					curCtx.Rsp -= 8;
+					uint64_t retAddr = rip + flow.length;
+					if (!IsBadWritePtr(reinterpret_cast<LPVOID>(curCtx.Rsp), 8))
+						*reinterpret_cast<uint64_t*>(curCtx.Rsp) = retAddr;
+					curCtx.Rip = flow.target;
+#else
+					curCtx.Esp -= 4;
+					uint32_t retAddr = static_cast<uint32_t>(rip + flow.length);
+					if (!IsBadWritePtr(reinterpret_cast<LPVOID>(curCtx.Esp), 4))
+						*reinterpret_cast<uint32_t*>(curCtx.Esp) = retAddr;
+					curCtx.Eip = static_cast<DWORD>(flow.target);
+#endif
+					VehHandler::Instance().SetStoppedContext(req->threadId, curCtx);
+					stepCount++;
+					continue;
+				}
+
+				if (flow.resolved && flow.type == FlowType::IndirectBranch) {
+					// Static follow: set RIP to resolved target
+#ifdef _WIN64
+					curCtx.Rip = flow.target;
+#else
+					curCtx.Eip = static_cast<DWORD>(flow.target);
+#endif
+					VehHandler::Instance().SetStoppedContext(req->threadId, curCtx);
+					stepCount++;
+					continue;
+				}
+
+				if (flow.resolved && flow.type == FlowType::Return) {
+					// Static follow: pop return addr
+#ifdef _WIN64
+					curCtx.Rsp += 8 + flow.retImm;
+					curCtx.Rip = flow.target;
+#else
+					curCtx.Esp += 4 + flow.retImm;
+					curCtx.Eip = static_cast<DWORD>(flow.target);
+#endif
+					VehHandler::Instance().SetStoppedContext(req->threadId, curCtx);
+					stepCount++;
+					continue;
+				}
+
+				// === Need actual execution ===
+				// Try INT3-based step (no TF exposure)
+				uint8_t insnBytes[16];
+				bool useInt3 = false;
+				if (SafeReadMem(rip, insnBytes, 16)) {
+					auto info = SyscallResolver::DecodeInsn(insnBytes, 16);
+					if (info.length > 0 && info.length <= 15) {
+						uint64_t nextAddr = rip + info.length;
+						uint8_t origByte = 0;
+						if (SafeReadMem(nextAddr, &origByte, 1)) {
+							ir.pendingInt3Addr = nextAddr;
+							ir.pendingInt3Byte = origByte;
+							// Write INT3
+							uint8_t cc = 0xCC;
+							MemoryManager::Instance().Write(nextAddr, &cc, 1);
+							useInt3 = true;
+						}
+					}
+				}
+
+				// Resume thread
+				ir.done.store(false, std::memory_order_relaxed);
+				ir.active.store(true, std::memory_order_release);
+				VehHandler::Instance().ResumeStoppedThread(req->threadId, !useInt3); // TF only if no INT3
+
+				// Wait for step completion
+				int waitMs = 0;
+				while (!ir.done.load(std::memory_order_acquire) && waitMs < 10000) {
+					Sleep(1);
+					waitMs++;
+				}
 				ir.active.store(false, std::memory_order_relaxed);
-				// Timeout: wait for VEH thread to reach stopped state
-				// (it may still be stepping or about to enter NotifyAndWait)
+
+				// Wait for thread to stop (NotifyAndWait)
 				for (int w = 0; w < 5000; w++) {
 					if (VehHandler::Instance().IsThreadStopped(req->threadId)) break;
 					Sleep(1);
 				}
+
+				if (!ir.done.load(std::memory_order_acquire)) {
+					// Timeout -- clean up INT3 if placed
+					if (useInt3 && ir.pendingInt3Addr) {
+						MemoryManager::Instance().Write(ir.pendingInt3Addr, &ir.pendingInt3Byte, 1);
+						ir.pendingInt3Addr = 0;
+					}
+					break;
+				}
+
+				stepCount++;
 			}
 
-			// Copy diagnostic trace log to entry
-			entries[i].stepsExecuted = ir.stepsExecuted;
+			if (!resolved) {
+				entries[i].resolved = 0;
+			}
+
+			// Copy diagnostic trace log
+			entries[i].stepsExecuted = stepCount;
 			entries[i].exceptionsPassed = static_cast<uint8_t>(
 				ir.exceptionsPassed > 255 ? 255 : ir.exceptionsPassed);
 			{
 				uint32_t total = ir.traceLogIdx;
 				uint32_t copyCount = (total < 16) ? total : 16;
 				entries[i].traceCount = static_cast<uint8_t>(copyCount);
-				// Copy last 16 entries from ring buffer (most recent first)
 				for (uint32_t t = 0; t < copyCount; t++) {
 					uint32_t srcIdx = (total - copyCount + t) % VehHandler::ImportResolveState::kTraceLogSize;
 					entries[i].traceAddresses[t] = ir.traceLog[srcIdx].address;
@@ -1413,7 +1699,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				}
 			}
 
-			// Restore original context for next thunk (or final restore)
+			// Restore original context
 			VehHandler::Instance().SetStoppedContext(req->threadId, origCtx);
 		}
 

@@ -306,6 +306,36 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		auto bp = BreakpointManager::Instance().FindByAddress(addr);
 		if (!bp) {
 			LOG_DEBUG("FindByAddress(0x%llX) returned nullopt — not our BP", addr);
+			// ImportResolve: INT3-based stepping -- our placed INT3
+			if (importResolve_.active.load(std::memory_order_acquire) &&
+				tid == importResolve_.threadId &&
+				importResolve_.pendingInt3Addr != 0 && addr == importResolve_.pendingInt3Addr) {
+				// Restore original byte
+				MemoryManager::Instance().Write(addr, &importResolve_.pendingInt3Byte, 1);
+				importResolve_.pendingInt3Addr = 0;
+				// Adjust RIP back to original instruction (INT3 advanced past it)
+#ifdef _WIN64
+				info->ContextRecord->Rip = addr;
+#else
+				info->ContextRecord->Eip = static_cast<DWORD>(addr);
+#endif
+				// Record trace
+				auto& tl = importResolve_.traceLog[importResolve_.traceLogIdx % ImportResolveState::kTraceLogSize];
+				tl.address = addr;
+				tl.exceptionCode = 0;
+				importResolve_.traceLogIdx++;
+				importResolve_.stepsExecuted++;
+				// Signal step done -- pipe_server controls the flow
+				importResolve_.done.store(true, std::memory_order_release);
+				LOG_DEBUG("ImportResolve: INT3 step at 0x%llX, signaling pipe_server", addr);
+				{
+					auto result = NotifyAndWait(info, tid, DebugEventType::SingleStepComplete, addr, 0, code);
+					if (result == WaitResult::Detached) {
+						return EXCEPTION_CONTINUE_EXECUTION;
+					}
+				}
+				return EXCEPTION_CONTINUE_EXECUTION;
+			}
 			// ImportResolve: exception-based thunk -- set TF and let SEH handle
 			if (importResolve_.active.load(std::memory_order_acquire) &&
 				tid == importResolve_.threadId && importResolve_.followExceptions) {
@@ -479,33 +509,17 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 			}
 		}
 
-		// 3) ResolveImport: step until RIP enters a loaded DLL range
+		// 3) ResolveImport: TF fallback step -- signal pipe_server, let it decide next action
 		if (importResolve_.active.load(std::memory_order_acquire) && tid == importResolve_.threadId) {
 			importResolve_.stepsExecuted++;
 			// Record trace log entry (ring buffer)
 			auto& tl = importResolve_.traceLog[importResolve_.traceLogIdx % ImportResolveState::kTraceLogSize];
 			tl.address = addr;
-			tl.exceptionCode = 0;  // normal single-step
+			tl.exceptionCode = 0;  // TF single-step
 			importResolve_.traceLogIdx++;
-			bool inDll = false;
-			// Check if RIP is in a target module (filtered by target_modules/system_only)
-			for (auto& mr : importResolve_.moduleRanges) {
-				if (addr >= mr.base && addr < mr.end && mr.isTarget) {
-					inDll = true;
-					break;
-				}
-			}
-
-			if (inDll || importResolve_.stepsExecuted >= importResolve_.maxSteps) {
-				importResolve_.found = inDll;
-				importResolve_.targetAddress = addr;
-				importResolve_.active.store(false, std::memory_order_relaxed);
-				importResolve_.done.store(true, std::memory_order_release);
-				// Fall through to NotifyAndWait (thread stays stopped)
-			} else {
-				info->ContextRecord->EFlags |= 0x100;
-				return EXCEPTION_CONTINUE_EXECUTION;
-			}
+			// Signal step done -- pipe_server controls all flow decisions
+			importResolve_.done.store(true, std::memory_order_release);
+			// Fall through to NotifyAndWait (thread stops, pipe_server reads context)
 		}
 
 		// 4) TraceRegister: check register condition, loop internally if not met
