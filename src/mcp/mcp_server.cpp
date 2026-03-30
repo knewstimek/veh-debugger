@@ -1327,9 +1327,38 @@ json McpServer::ToolExecuteShellcode(const json& args) {
 json McpServer::ToolBatch(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
-	json steps = args.value("steps", json::array());
+	json steps;
+
+	// File mode: load steps from JSON file
+	if (args.contains("file") && args["file"].is_string()) {
+		std::string filePath = args["file"].get<std::string>();
+		FILE* fp = fopen(filePath.c_str(), "rb");
+		if (!fp) return {{"error", "Cannot open file: " + filePath}};
+		fseek(fp, 0, SEEK_END);
+		long sz = ftell(fp);
+		fseek(fp, 0, SEEK_SET);
+		if (sz > 10 * 1024 * 1024) { fclose(fp); return {{"error", "File too large (max 10MB)"}}; }
+		std::string content(sz, '\0');
+		fread(&content[0], 1, sz, fp);
+		fclose(fp);
+		try {
+			json fileJson = json::parse(content);
+			if (fileJson.is_array()) {
+				steps = fileJson;
+			} else if (fileJson.is_object() && fileJson.contains("steps") && fileJson["steps"].is_array()) {
+				steps = fileJson["steps"];
+			} else {
+				return {{"error", "File must contain a JSON array of steps, or {\"steps\": [...]}"}};
+			}
+		} catch (const std::exception& e) {
+			return {{"error", std::string("JSON parse error: ") + e.what()}};
+		}
+	} else {
+		steps = args.value("steps", json::array());
+	}
+
 	if (!steps.is_array() || steps.empty()) {
-		return {{"error", "steps (array) is required"}};
+		return {{"error", "steps (array) is required, or provide file path"}};
 	}
 
 	BatchExecutor executor(session_);
@@ -2168,8 +2197,9 @@ json McpServer::GetToolsList() {
 			"  For-each: {steps: [{for_each: [\"0x1000\",\"0x2000\",\"0x3000\"], as: \"$addr\", do: [{tool: \"veh_write_memory\", args: {address: \"$addr\", data: \"90\"}}]}]}"
 		},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"steps", {{"type", "array"}, {"description", "Array of steps. Each step is {tool, args} or {if, then, else} or {loop, until, max} or {for_each, as, do}"}}}
-		 }}, {"required", json::array({"steps"})}}}},
+			{"steps", {{"type", "array"}, {"description", "Array of steps. Each step is {tool, args} or {if, then, else} or {loop, until, max} or {for_each, as, do}"}}},
+			{"file", {{"type", "string"}, {"description", "Load steps from a JSON file instead of inline. File can be a JSON array of steps or {\"steps\": [...]}. Example: veh_batch({file: \"patch_sequence.json\"})"}}}
+		 }}}}},
 
 		{{"name", "veh_trace_register"}, {"description", "Trace a register: single-steps internally (inside DLL, zero IPC overhead per step) until the register meets a condition. Returns the instruction that caused the change. Thread must be stopped at a breakpoint (not via veh_pause). Much faster than manual step+check loops."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
