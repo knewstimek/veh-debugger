@@ -1259,13 +1259,35 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			memset(&entries[i], 0, sizeof(ResolveImportEntry));
 			entries[i].thunkAddress = thunks[i];
 
-			// Set RIP to thunk address
+			// Call stub: simulate 'call thunk' by pushing fake return addr on stack
+			// This prevents crashes when thunk reads [RSP] expecting a return address
 			CONTEXT tmpCtx = origCtx;
+			{
+				bool stackOk = true;
 #ifdef _WIN64
-			tmpCtx.Rip = thunks[i];
+				tmpCtx.Rsp -= 8;
+				uint64_t fakeRet = ir.parkStub ? reinterpret_cast<uint64_t>(ir.parkStub) : origCtx.Rip;
+				if (IsBadWritePtr(reinterpret_cast<LPVOID>(tmpCtx.Rsp), 8)) {
+					stackOk = false;
+				} else {
+					*reinterpret_cast<uint64_t*>(tmpCtx.Rsp) = fakeRet;
+				}
+				tmpCtx.Rip = thunks[i];
 #else
-			tmpCtx.Eip = static_cast<DWORD>(thunks[i]);
+				tmpCtx.Esp -= 4;
+				uint32_t fakeRet = ir.parkStub ? static_cast<uint32_t>(reinterpret_cast<uintptr_t>(ir.parkStub)) : origCtx.Eip;
+				if (IsBadWritePtr(reinterpret_cast<LPVOID>(tmpCtx.Esp), 4)) {
+					stackOk = false;
+				} else {
+					*reinterpret_cast<uint32_t*>(tmpCtx.Esp) = fakeRet;
+				}
+				tmpCtx.Eip = static_cast<DWORD>(thunks[i]);
 #endif
+				if (!stackOk) {
+					entries[i].resolved = 0;
+					continue;
+				}
+			}
 			VehHandler::Instance().SetStoppedContext(req->threadId, tmpCtx);
 
 			// Start stepping
@@ -1274,6 +1296,8 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			ir.followExceptions = followExceptions;
 			ir.exceptionsPassed = 0;
 			ir.stepsExecuted = 0;
+			ir.traceLogIdx = 0;
+			memset(ir.traceLog, 0, sizeof(ir.traceLog));
 			ir.found = false;
 			ir.targetAddress = 0;
 			ir.done.store(false, std::memory_order_relaxed);
@@ -1317,6 +1341,22 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				for (int w = 0; w < 5000; w++) {
 					if (VehHandler::Instance().IsThreadStopped(req->threadId)) break;
 					Sleep(1);
+				}
+			}
+
+			// Copy diagnostic trace log to entry
+			entries[i].stepsExecuted = ir.stepsExecuted;
+			entries[i].exceptionsPassed = static_cast<uint8_t>(
+				ir.exceptionsPassed > 255 ? 255 : ir.exceptionsPassed);
+			{
+				uint32_t total = ir.traceLogIdx;
+				uint32_t copyCount = (total < 16) ? total : 16;
+				entries[i].traceCount = static_cast<uint8_t>(copyCount);
+				// Copy last 16 entries from ring buffer (most recent first)
+				for (uint32_t t = 0; t < copyCount; t++) {
+					uint32_t srcIdx = (total - copyCount + t) % VehHandler::ImportResolveState::kTraceLogSize;
+					entries[i].traceAddresses[t] = ir.traceLog[srcIdx].address;
+					entries[i].traceExcCodes[t] = ir.traceLog[srcIdx].exceptionCode;
 				}
 			}
 

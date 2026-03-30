@@ -312,6 +312,11 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 				if (importResolve_.exceptionsPassed < importResolve_.maxExceptionPasses) {
 					importResolve_.exceptionsPassed++;
 					importResolve_.stepsExecuted++;
+					// Record trace log with exception code
+					auto& tl = importResolve_.traceLog[importResolve_.traceLogIdx % ImportResolveState::kTraceLogSize];
+					tl.address = addr;
+					tl.exceptionCode = code;
+					importResolve_.traceLogIdx++;
 					info->ContextRecord->EFlags |= 0x100;  // TF survives through SEH
 					LOG_DEBUG("ImportResolve: passing INT3 at 0x%llX to SEH, TF set (pass #%u)",
 						addr, importResolve_.exceptionsPassed);
@@ -477,6 +482,11 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		// 3) ResolveImport: step until RIP enters a loaded DLL range
 		if (importResolve_.active.load(std::memory_order_acquire) && tid == importResolve_.threadId) {
 			importResolve_.stepsExecuted++;
+			// Record trace log entry (ring buffer)
+			auto& tl = importResolve_.traceLog[importResolve_.traceLogIdx % ImportResolveState::kTraceLogSize];
+			tl.address = addr;
+			tl.exceptionCode = 0;  // normal single-step
+			importResolve_.traceLogIdx++;
 			bool inDll = false;
 			// Check if RIP is in any module range (but not the main exe)
 			for (auto& mr : importResolve_.moduleRanges) {
@@ -606,6 +616,13 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 			if (importResolve_.exceptionsPassed < importResolve_.maxExceptionPasses) {
 				importResolve_.exceptionsPassed++;
 				importResolve_.stepsExecuted++;
+				// Record trace log with exception code
+				{
+					auto& tl = importResolve_.traceLog[importResolve_.traceLogIdx % ImportResolveState::kTraceLogSize];
+					tl.address = addr;
+					tl.exceptionCode = code;
+					importResolve_.traceLogIdx++;
+				}
 				info->ContextRecord->EFlags |= 0x100;
 				LOG_DEBUG("ImportResolve: passing exception 0x%08X at 0x%llX to SEH, TF set (pass #%u)",
 					code, addr, importResolve_.exceptionsPassed);
