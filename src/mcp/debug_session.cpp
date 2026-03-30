@@ -1129,6 +1129,48 @@ std::vector<DebugSession::ImportEntry> DebugSession::ResolveImports(
 	return result;
 }
 
+// --- TraceCalls ---
+
+DebugSession::TraceCallsResult DebugSession::TraceCalls(
+	const std::vector<uint64_t>& addresses, uint32_t durationMs) {
+
+	TraceCallsResult result = {};
+	if (addresses.empty()) return result;
+
+	std::vector<uint8_t> payload(sizeof(TraceCallsRequest) + addresses.size() * sizeof(uint64_t));
+	auto* req = reinterpret_cast<TraceCallsRequest*>(payload.data());
+	req->durationMs = durationMs;
+	req->count = static_cast<uint32_t>(addresses.size());
+	memcpy(payload.data() + sizeof(TraceCallsRequest), addresses.data(), addresses.size() * sizeof(uint64_t));
+
+	int timeoutMs = static_cast<int>(durationMs) + 30000;
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::TraceCalls, payload.data(),
+	                                static_cast<uint32_t>(payload.size()), respData, timeoutMs))
+		return result;
+
+	if (respData.size() < sizeof(TraceCallsResponse)) return result;
+	auto* resp = reinterpret_cast<const TraceCallsResponse*>(respData.data());
+	if (resp->status != IpcStatus::Ok) return result;
+
+	result.totalHits = resp->totalHits;
+	auto* entries = reinterpret_cast<const TraceCallsEntry*>(respData.data() + sizeof(TraceCallsResponse));
+	uint32_t count = resp->uniqueCount;
+	if (respData.size() < sizeof(TraceCallsResponse) + count * sizeof(TraceCallsEntry))
+		count = static_cast<uint32_t>((respData.size() - sizeof(TraceCallsResponse)) / sizeof(TraceCallsEntry));
+
+	for (uint32_t i = 0; i < count; i++) {
+		TraceCallEntry e;
+		e.callSite = entries[i].callSite;
+		e.target = entries[i].target;
+		e.hitCount = entries[i].hitCount;
+		char modBuf[65] = {}; memcpy(modBuf, entries[i].moduleName, 64); e.moduleName = modBuf;
+		char funcBuf[65] = {}; memcpy(funcBuf, entries[i].functionName, 64); e.functionName = funcBuf;
+		result.entries.push_back(e);
+	}
+	return result;
+}
+
 // --- PDB resolve ---
 
 uint64_t DebugSession::ResolveSourceLine(const std::string& file, uint32_t line) {

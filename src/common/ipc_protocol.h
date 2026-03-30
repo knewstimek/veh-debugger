@@ -71,6 +71,7 @@ enum class IpcCommand : uint32_t {
 	TraceRegister          = 0x0070,
 	TraceMemory            = 0x0071,
 	ResolveImport          = 0x0072,
+	TraceCalls             = 0x0073,
 
 	// Lifecycle
 	Heartbeat              = 0x00FE,
@@ -400,6 +401,28 @@ struct ResolveImportResponse {
 	IpcStatus status;
 	uint32_t  count;
 	// followed by: ResolveImportEntry[count]
+};
+
+// --- TraceCalls: monitor call/jmp targets at runtime ---
+struct TraceCallsRequest {
+	uint32_t durationMs;    // monitoring duration (0 = use default 5000)
+	uint32_t count;         // number of call/jmp site addresses
+	// followed by: uint64_t addresses[count]
+};
+
+struct TraceCallsEntry {
+	uint64_t callSite;
+	uint64_t target;
+	uint32_t hitCount;
+	char     moduleName[64];
+	char     functionName[64];
+};
+
+struct TraceCallsResponse {
+	IpcStatus status;
+	uint32_t  uniqueCount;   // number of unique (callSite, target) pairs
+	uint32_t  totalHits;
+	// followed by: TraceCallsEntry[uniqueCount]
 };
 
 // --- Memory management ---

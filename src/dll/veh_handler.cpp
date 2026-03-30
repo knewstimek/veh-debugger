@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <algorithm>
 #include "veh_handler.h"
 #include "breakpoint.h"
 #include "hw_breakpoint.h"
@@ -387,6 +388,11 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 
+		// TraceCalls: auto-continue, target will be recorded in SINGLE_STEP rearm
+		if (traceCalls_.active.load(std::memory_order_relaxed) && traceCalls_.IsTraced(addr)) {
+			return EXCEPTION_CONTINUE_EXECUTION;
+		}
+
 		// 내부 스레드(pipe server) BP 투명 스킵 -- 데드락 방지
 		// 원본 바이트 복원 + TF는 이미 위에서 완료. rearm으로 single-step 후 BP 자동 재설치.
 		// callback/wait 없이 바로 실행 재개하여 IPC 파이프가 블록되지 않도록 함.
@@ -443,11 +449,20 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		// 1) 소프트 브레이크포인트 재활성화 대기 중인 경우
 		auto& rearm = GetPendingRearm();
 		if (rearm.active) {
-			BreakpointManager::Instance().RearmBreakpoint(rearm.address);
-			LOG_DEBUG("Rearmed breakpoint at 0x%llX", rearm.address);
+			uint64_t rearmAddr = rearm.address;
+			BreakpointManager::Instance().RearmBreakpoint(rearmAddr);
+			LOG_DEBUG("Rearmed breakpoint at 0x%llX", rearmAddr);
 			bool wantStep = rearm.stepRequested;
 			rearm.active = false;
 			rearm.stepRequested = false;
+
+			// TraceCalls: record (callSite -> target) and auto-continue
+			if (traceCalls_.active.load(std::memory_order_relaxed) && traceCalls_.IsTraced(rearmAddr)) {
+				uint32_t idx = traceCalls_.writeIdx.fetch_add(1, std::memory_order_relaxed);
+				traceCalls_.buffer[idx % TraceCallsState::kBufferSize] = {rearmAddr, addr};
+				traceCalls_.totalHits.fetch_add(1, std::memory_order_relaxed);
+				return EXCEPTION_CONTINUE_EXECUTION;
+			}
 
 			if (wantStep) {
 				// StepOver/StepIn 요청: rearm 후 다시 TF 설정 → 다음 SINGLE_STEP에서 StepCompleted
@@ -764,6 +779,12 @@ void VehHandler::StartTraceRegister(uint32_t threadId, uint32_t regIndex, uint32
 
 	// Resume thread with step (TF set)
 	ResumeStoppedThread(threadId, true);
+}
+
+bool VehHandler::TraceCallsState::IsTraced(uint64_t addr) const {
+	// Binary search on sorted vector
+	auto it = std::lower_bound(addresses.begin(), addresses.end(), addr);
+	return it != addresses.end() && *it == addr;
 }
 
 } // namespace veh

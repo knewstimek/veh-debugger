@@ -233,6 +233,20 @@ public:
 		uint32_t maxStepsPerThunk = 1000, bool followExceptions = false,
 		bool systemOnly = false, const std::vector<std::string>& targetModules = {});
 
+	// Trace calls: monitor where call/jmp sites go at runtime
+	struct TraceCallEntry {
+		uint64_t callSite;
+		uint64_t target;
+		uint32_t hitCount;
+		std::string moduleName;
+		std::string functionName;
+	};
+	struct TraceCallsResult {
+		uint32_t totalHits;
+		std::vector<TraceCallEntry> entries;
+	};
+	TraceCallsResult TraceCalls(const std::vector<uint64_t>& addresses, uint32_t durationMs = 5000);
+
 	// --- Resolve (PDB) ---
 	uint64_t ResolveSourceLine(const std::string& file, uint32_t line);
 	uint64_t ResolveFunction(const std::string& name);

@@ -75,6 +75,7 @@ private:
 	json ToolTraceRegister(const json& args);
 	json ToolTraceMemory(const json& args);
 	json ToolResolveImports(const json& args);
+	json ToolTraceCalls(const json& args);
 
 	// Tool list definition
 	json GetToolsList();

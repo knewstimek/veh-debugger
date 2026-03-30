@@ -264,6 +264,7 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 		else if (name == "veh_trace_register")        result = ToolTraceRegister(args);
 		else if (name == "veh_trace_memory")          result = ToolTraceMemory(args);
 		else if (name == "veh_resolve_imports")       result = ToolResolveImports(args);
+		else if (name == "veh_trace_calls")           result = ToolTraceCalls(args);
 		else {
 			SendError(id, -32602, "Unknown tool: " + name);
 			return;
@@ -1556,6 +1557,48 @@ json McpServer::ToolResolveImports(const json& args) {
 	return {{"imports", arr}, {"total", thunks.size()}, {"resolved", resolved}};
 }
 
+json McpServer::ToolTraceCalls(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+
+	// Parse addresses
+	std::vector<uint64_t> addresses;
+	if (args.contains("addresses") && args["addresses"].is_array()) {
+		for (auto& a : args["addresses"]) {
+			uint64_t addr = 0;
+			if (a.is_string()) { std::string s = a.get<std::string>(); ParseAddress(s, addr); }
+			else if (a.is_number()) { addr = a.get<uint64_t>(); }
+			if (addr) addresses.push_back(addr);
+		}
+	}
+	if (addresses.empty()) return {{"error", "addresses (array of call/jmp site addresses) is required"}};
+	if (addresses.size() > 4000) return {{"error", "Too many addresses (max 4000)"}};
+
+	int durationSec = JsonInt(args, "duration_sec", 5);
+	if (durationSec < 1) durationSec = 1;
+	if (durationSec > 60) durationSec = 60;
+
+	auto result = session_.TraceCalls(addresses, static_cast<uint32_t>(durationSec) * 1000);
+
+	json arr = json::array();
+	for (auto& e : result.entries) {
+		char siteBuf[20]; snprintf(siteBuf, sizeof(siteBuf), "0x%llX", e.callSite);
+		char targetBuf[20]; snprintf(targetBuf, sizeof(targetBuf), "0x%llX", e.target);
+		std::string api = e.moduleName;
+		if (!e.functionName.empty()) api += "!" + e.functionName;
+		json entry = {
+			{"call_site", siteBuf}, {"target", targetBuf},
+			{"hits", e.hitCount}
+		};
+		if (!api.empty()) entry["api"] = api;
+		if (!e.moduleName.empty()) entry["module"] = e.moduleName;
+		if (!e.functionName.empty()) entry["function"] = e.functionName;
+		arr.push_back(entry);
+	}
+
+	return {{"calls", arr}, {"total_sites", addresses.size()},
+	        {"resolved", result.entries.size()}, {"total_hits", result.totalHits}};
+}
+
 json McpServer::ToolModules(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
@@ -2252,6 +2295,12 @@ json McpServer::GetToolsList() {
 			{"address", {{"type", "string"}, {"description", "Hex address to set breakpoint (e.g. '0x7FF600001000')"}}},
 			{"duration_sec", {{"type", "integer"}, {"description", "How long to collect callers in seconds (default: 5, max: 60)"}}}
 		 }}, {"required", json::array({"address"})}}}},
+
+		{{"name", "veh_trace_calls"}, {"description", "Monitor where call/jmp instructions go at runtime. Sets breakpoints on given call sites, runs the program for duration_sec seconds, collects actual target addresses with API names. 100% accurate (reads real execution targets, not heuristic analysis). Ideal for IAT reconstruction on packed binaries. Up to 4000 addresses per call."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"addresses", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Array of call/jmp site addresses to monitor (hex or module+RVA)"}}},
+			{"duration_sec", {{"type", "integer"}, {"description", "How long to monitor in seconds (default: 5, max: 60)"}}}
+		 }}, {"required", json::array({"addresses"})}}}},
 
 		{{"name", "veh_dump_memory"}, {"description", "Dump memory to a binary file. Reads in 1MB chunks, supports up to 64MB. Avoids token overhead of hex string encoding."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
