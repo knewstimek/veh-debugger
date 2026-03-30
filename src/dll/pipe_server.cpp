@@ -173,6 +173,14 @@ static InsnFlow AnalyzeFlow(uint64_t rip, const CONTEXT& ctx) {
 	return f;
 }
 
+// Verify address is in executable memory (prevents following into garbage)
+static bool IsExecutableAddr(uint64_t addr) {
+	MEMORY_BASIC_INFORMATION mbi;
+	if (!VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi))) return false;
+	return (mbi.State == MEM_COMMIT) &&
+	       (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY));
+}
+
 static bool IsInTargetModule(uint64_t rip, const veh::VehHandler::ImportResolveState& ir) {
 	for (auto& mr : ir.moduleRanges) {
 		if (rip >= mr.base && rip < mr.end && mr.isTarget) return true;
@@ -1571,6 +1579,12 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				// Analyze instruction flow
 				InsnFlow flow = AnalyzeFlow(rip, curCtx);
 
+				// Validate: target must be in executable memory
+				// Prevents false follows from coincidental opcode matches in encrypted/SMC code
+				if (flow.resolved && flow.target != 0 && !IsExecutableAddr(flow.target)) {
+					flow.resolved = false;
+				}
+
 				if (flow.resolved && flow.type == FlowType::DirectJump) {
 					// Static follow: just update RIP
 #ifdef _WIN64
@@ -1630,29 +1644,17 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				}
 
 				// === Need actual execution ===
-				// Try INT3-based step (no TF exposure)
-				uint8_t insnBytes[16];
+				// Default: TF for one step (always correct, minimal exposure since
+				// most branches are already handled by static analysis above).
+				// INT3 mode is available but risky with obfuscated code (DecodeInsn
+				// may return wrong length for unusual opcodes -> code corruption).
 				bool useInt3 = false;
-				if (SafeReadMem(rip, insnBytes, 16)) {
-					auto info = SyscallResolver::DecodeInsn(insnBytes, 16);
-					if (info.length > 0 && info.length <= 15) {
-						uint64_t nextAddr = rip + info.length;
-						uint8_t origByte = 0;
-						if (SafeReadMem(nextAddr, &origByte, 1)) {
-							ir.pendingInt3Addr = nextAddr;
-							ir.pendingInt3Byte = origByte;
-							// Write INT3
-							uint8_t cc = 0xCC;
-							MemoryManager::Instance().Write(nextAddr, &cc, 1);
-							useInt3 = true;
-						}
-					}
-				}
+				// (INT3 mode reserved for future opt-in parameter)
 
-				// Resume thread
+				// Resume thread with TF for one step
 				ir.done.store(false, std::memory_order_relaxed);
 				ir.active.store(true, std::memory_order_release);
-				VehHandler::Instance().ResumeStoppedThread(req->threadId, !useInt3); // TF only if no INT3
+				VehHandler::Instance().ResumeStoppedThread(req->threadId, true); // TF
 
 				// Wait for step completion
 				int waitMs = 0;
@@ -1669,12 +1671,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				}
 
 				if (!ir.done.load(std::memory_order_acquire)) {
-					// Timeout -- clean up INT3 if placed
-					if (useInt3 && ir.pendingInt3Addr) {
-						MemoryManager::Instance().Write(ir.pendingInt3Addr, &ir.pendingInt3Byte, 1);
-						ir.pendingInt3Addr = 0;
-					}
-					break;
+					break; // Timeout
 				}
 
 				stepCount++;
