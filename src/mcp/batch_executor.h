@@ -50,6 +50,9 @@ private:
 	// Map tool name -> DebugSession method call -> json result
 	json DispatchTool(const std::string& name, const json& args);
 
+	// Resolve address string with module+RVA support
+	uint64_t ResolveAddress(const std::string& addrStr);
+
 	DebugSession& session_;
 	std::vector<json> results_;  // step results indexed by step number
 	std::unordered_map<std::string, json> namedVars_;  // named variables ($addr, etc.)
