@@ -57,6 +57,21 @@ public:
 	void StopTrace();
 	std::unordered_map<uint64_t, uint32_t> GetTraceResults(uint32_t& totalHits);
 
+	// TraceCalls: monitor where call/jmp instructions go at runtime
+	// Zero IPC per hit: VEH records target in lock-free ring buffer, auto-continues
+	struct TraceCallsState {
+		std::atomic<bool> active{false};
+		std::vector<uint64_t> addresses;  // sorted, for binary search in VEH
+		bool IsTraced(uint64_t addr) const;
+		// Lock-free ring buffer
+		static constexpr uint32_t kBufferSize = 65536;
+		struct Entry { uint64_t callSite; uint64_t target; };
+		std::atomic<uint32_t> writeIdx{0};
+		Entry buffer[kBufferSize];
+		std::atomic<uint32_t> totalHits{0};
+	};
+	TraceCallsState traceCalls_;
+
 	// TraceRegister: single-step loop inside VEH, no IPC per step
 	struct TraceRegState {
 		std::atomic<bool> active{false};

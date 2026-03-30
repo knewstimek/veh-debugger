@@ -1710,6 +1710,107 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		break;
 	}
 
+	case IpcCommand::TraceCalls: {
+		if (payloadSize < sizeof(TraceCallsRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status)); return;
+		}
+		auto* req = reinterpret_cast<const TraceCallsRequest*>(payload);
+		uint32_t count = req->count;
+		if (count == 0 || count > 4000) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status)); return;
+		}
+		uint32_t durationMs = req->durationMs;
+		if (durationMs == 0) durationMs = 5000;
+		if (durationMs > 60000) durationMs = 60000;
+
+		const uint64_t* addrs = reinterpret_cast<const uint64_t*>(payload + sizeof(TraceCallsRequest));
+		if (payloadSize < sizeof(TraceCallsRequest) + count * sizeof(uint64_t)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status)); return;
+		}
+
+		// Set software breakpoints on all call/jmp sites
+		std::vector<uint32_t> bpIds;
+		for (uint32_t i = 0; i < count; i++) {
+			uint32_t id = BreakpointManager::Instance().Add(addrs[i]);
+			if (id) bpIds.push_back(id);
+		}
+
+		// Setup trace state
+		auto& tc = VehHandler::Instance().traceCalls_;
+		tc.addresses.assign(addrs, addrs + count);
+		std::sort(tc.addresses.begin(), tc.addresses.end());
+		tc.writeIdx.store(0, std::memory_order_relaxed);
+		tc.totalHits.store(0, std::memory_order_relaxed);
+		tc.active.store(true, std::memory_order_release);
+
+		// Resume all stopped threads
+		VehHandler::Instance().ResumeAllStoppedThreads();
+
+		// Wait for duration
+		Sleep(durationMs);
+
+		// Deactivate trace + pause
+		tc.active.store(false, std::memory_order_release);
+		// Note: threads continue running until they hit a BP or are externally paused.
+		// Results are already collected in the ring buffer.
+
+		// Remove breakpoints
+		for (auto id : bpIds) {
+			BreakpointManager::Instance().Remove(id);
+		}
+
+		// Aggregate results from ring buffer
+		uint32_t totalHits = tc.totalHits.load(std::memory_order_acquire);
+		uint32_t rawCount = tc.writeIdx.load(std::memory_order_acquire);
+		uint32_t bufCount = (rawCount < tc.kBufferSize) ? rawCount : tc.kBufferSize;
+
+		// Map: (callSite, target) -> hitCount
+		struct PairHash {
+			size_t operator()(const std::pair<uint64_t,uint64_t>& p) const {
+				return std::hash<uint64_t>()(p.first) ^ (std::hash<uint64_t>()(p.second) << 32);
+			}
+		};
+		std::unordered_map<std::pair<uint64_t,uint64_t>, uint32_t, PairHash> aggMap;
+		for (uint32_t i = 0; i < bufCount; i++) {
+			auto& e = tc.buffer[i];
+			aggMap[{e.callSite, e.target}]++;
+		}
+
+		// Build response
+		uint32_t uniqueCount = static_cast<uint32_t>(aggMap.size());
+		std::vector<uint8_t> respBuf(sizeof(TraceCallsResponse) + uniqueCount * sizeof(TraceCallsEntry));
+		auto* resp = reinterpret_cast<TraceCallsResponse*>(respBuf.data());
+		auto* entries = reinterpret_cast<TraceCallsEntry*>(respBuf.data() + sizeof(TraceCallsResponse));
+		resp->status = IpcStatus::Ok;
+		resp->uniqueCount = uniqueCount;
+		resp->totalHits = totalHits;
+
+		uint32_t idx = 0;
+		for (auto& [pair, hits] : aggMap) {
+			memset(&entries[idx], 0, sizeof(TraceCallsEntry));
+			entries[idx].callSite = pair.first;
+			entries[idx].target = pair.second;
+			entries[idx].hitCount = hits;
+			// SymFromAddr for target
+			DWORD64 disp = 0;
+			char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+			SYMBOL_INFO* sym = reinterpret_cast<SYMBOL_INFO*>(symBuf);
+			sym->SizeOfStruct = sizeof(SYMBOL_INFO); sym->MaxNameLen = MAX_SYM_NAME;
+			if (SymFromAddr(GetCurrentProcess(), pair.second, &disp, sym))
+				strncpy_s(entries[idx].functionName, sym->Name, sizeof(entries[idx].functionName) - 1);
+			IMAGEHLP_MODULE64 modInfo = {}; modInfo.SizeOfStruct = sizeof(modInfo);
+			if (SymGetModuleInfo64(GetCurrentProcess(), pair.second, &modInfo))
+				strncpy_s(entries[idx].moduleName, modInfo.ModuleName, sizeof(entries[idx].moduleName) - 1);
+			idx++;
+		}
+
+		SendResponse(command, respBuf.data(), static_cast<uint32_t>(respBuf.size()));
+		break;
+	}
+
 	case IpcCommand::Detach: {
 		// Detach: 디버깅 상태만 정리하고 파이프 서버는 유지한다.
 		// connected_=false로 내부 커맨드 루프만 탈출 → 외부 루프에서 새 클라이언트 대기
