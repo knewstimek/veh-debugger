@@ -15,6 +15,29 @@
 #include <cstring>
 #pragma comment(lib, "dbghelp.lib")
 
+// UEF safety net for follow_exceptions import resolution
+// Called when SEH doesn't handle an exception during thunk tracing.
+// Redirects thread to parkStub (NOP) with TF set -> SINGLE_STEP -> NotifyAndWait -> thread stops.
+static LONG WINAPI ImportResolveUEF(PEXCEPTION_POINTERS info) {
+	auto& ir = veh::VehHandler::Instance().importResolve_;
+	if (ir.active.load(std::memory_order_acquire) && ir.parkStub) {
+		ir.found = false;
+		ir.targetAddress = reinterpret_cast<uint64_t>(info->ExceptionRecord->ExceptionAddress);
+		ir.active.store(false, std::memory_order_relaxed);
+		ir.done.store(true, std::memory_order_release);
+		// Redirect to parkStub (NOP) with TF -> SINGLE_STEP -> VEH NotifyAndWait
+		info->ContextRecord->EFlags &= ~0x100; // clear TF first
+		info->ContextRecord->EFlags |= 0x100;  // set TF for one SINGLE_STEP after NOP
+#ifdef _WIN64
+		info->ContextRecord->Rip = reinterpret_cast<DWORD64>(ir.parkStub);
+#else
+		info->ContextRecord->Eip = reinterpret_cast<DWORD>(ir.parkStub);
+#endif
+		return EXCEPTION_CONTINUE_EXECUTION;
+	}
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
 namespace veh {
 
 PipeServer& PipeServer::Instance() {
@@ -1202,9 +1225,24 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			}
 		}
 
+		// Allocate parkStub + install UEF safety net if follow_exceptions
+		LPTOP_LEVEL_EXCEPTION_FILTER prevUEF = nullptr;
+		if (followExceptions) {
+			// NOP sled (0x90) - UEF redirects here on unhandled exception
+			ir.parkStub = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+			if (ir.parkStub) {
+				memset(ir.parkStub, 0x90, 4096);  // fill with NOPs
+			}
+			prevUEF = SetUnhandledExceptionFilter(ImportResolveUEF);
+		}
+
 		// Save original context
 		CONTEXT origCtx;
 		if (!VehHandler::Instance().GetStoppedContext(req->threadId, origCtx)) {
+			if (followExceptions) {
+				SetUnhandledExceptionFilter(prevUEF);
+				if (ir.parkStub) { VirtualFree(ir.parkStub, 0, MEM_RELEASE); ir.parkStub = nullptr; }
+			}
 			IpcStatus status = IpcStatus::Error;
 			SendResponse(command, &status, sizeof(status));
 			return;
@@ -1284,6 +1322,12 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 
 			// Restore original context for next thunk (or final restore)
 			VehHandler::Instance().SetStoppedContext(req->threadId, origCtx);
+		}
+
+		// Cleanup UEF + parkStub
+		if (followExceptions) {
+			SetUnhandledExceptionFilter(prevUEF);
+			if (ir.parkStub) { VirtualFree(ir.parkStub, 0, MEM_RELEASE); ir.parkStub = nullptr; }
 		}
 
 		SendResponse(command, respBuf.data(), static_cast<uint32_t>(respBuf.size()));
