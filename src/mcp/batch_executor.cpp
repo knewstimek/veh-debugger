@@ -39,6 +39,31 @@ static std::vector<uint8_t> ParseHexBytes(const std::string& hexStr) {
 
 BatchExecutor::BatchExecutor(DebugSession& session) : session_(session) {}
 
+uint64_t BatchExecutor::ResolveAddress(const std::string& s) {
+	if (s.empty()) return 0;
+	auto plusPos = s.find('+');
+	if (plusPos != std::string::npos && plusPos > 0) {
+		std::string mod = s.substr(0, plusPos);
+		bool isModule = false;
+		for (char c : mod) {
+			if (c == '.' || c == '_' || c == '-') { isModule = true; break; }
+			if (std::isalpha(c) && !std::isxdigit(c)) { isModule = true; break; }
+		}
+		if (isModule) {
+			auto modules = session_.GetModules();
+			std::string modLower = mod;
+			std::transform(modLower.begin(), modLower.end(), modLower.begin(), ::tolower);
+			for (auto& m : modules) {
+				std::string nl = m.name;
+				std::transform(nl.begin(), nl.end(), nl.begin(), ::tolower);
+				if (nl == modLower) return m.baseAddress + ParseHexOrDec(s.substr(plusPos + 1));
+			}
+			return 0;
+		}
+	}
+	return ParseHexOrDec(s);
+}
+
 json BatchExecutor::Execute(const json& steps) {
 	if (!steps.is_array()) {
 		return {{"error", "steps must be an array"}};
@@ -364,32 +389,7 @@ json BatchExecutor::DispatchTool(const std::string& name, const json& args) {
 	}
 
 	auto hexArg = [&](const std::string& key) -> uint64_t {
-		std::string s = args.value(key, "");
-		if (s.empty()) return 0;
-		// Module+RVA: "crackme.exe+0x1000"
-		auto plusPos = s.find('+');
-		if (plusPos != std::string::npos && plusPos > 0) {
-			std::string mod = s.substr(0, plusPos);
-			bool isModule = false;
-			for (char c : mod) {
-				if (c == '.' || c == '_' || c == '-') { isModule = true; break; }
-				if (std::isalpha(c) && !std::isxdigit(c)) { isModule = true; break; }
-			}
-			if (isModule) {
-				auto modules = session_.GetModules();
-				std::string modLower = mod;
-				std::transform(modLower.begin(), modLower.end(), modLower.begin(), ::tolower);
-				for (auto& m : modules) {
-					std::string nl = m.name;
-					std::transform(nl.begin(), nl.end(), nl.begin(), ::tolower);
-					if (nl == modLower) {
-						return m.baseAddress + ParseHexOrDec(s.substr(plusPos + 1));
-					}
-				}
-				return 0;
-			}
-		}
-		return ParseHexOrDec(s);
+		return ResolveAddress(args.value(key, ""));
 	};
 	auto intArg = [&](const std::string& key, int def) -> int {
 		if (!args.contains(key)) return def;
@@ -556,9 +556,9 @@ json BatchExecutor::DispatchTool(const std::string& name, const json& args) {
 		if (args.contains("patches") && args["patches"].is_array()) {
 			int ok = 0, fail = 0;
 			for (auto& p : args["patches"]) {
-				uint64_t a = ParseHexOrDec(p.value("address", "0"));
+				uint64_t a = ResolveAddress(p.value("address", "0"));
 				auto bytes = ParseHexBytes(p.value("data", ""));
-				if (!bytes.empty() && session_.WriteMemory(a, bytes.data(), static_cast<uint32_t>(bytes.size()))) ok++;
+				if (!bytes.empty() && a != 0 && session_.WriteMemory(a, bytes.data(), static_cast<uint32_t>(bytes.size()))) ok++;
 				else fail++;
 			}
 			return {{"success", fail == 0}, {"succeeded", ok}, {"failed", fail}};
