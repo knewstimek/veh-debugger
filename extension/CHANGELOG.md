@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.0.97 (2026-03-30)
+
+### New Features
+- **veh_batch file mode**: Load batch steps from a JSON/JSONC file. `veh_batch({file: "patch_sequence.json"})`. Supports `//` comments (JSONC). Zero-token reuse of debug scripts
+
+### Bug Fixes
+- **batch patches module+RVA**: `write_memory` patches in batch now correctly resolve `module.exe+0x1000` addresses
+- **batch ResolveAddress**: Extracted shared module+RVA helper, eliminated duplicate code
+- **batch file audit**: Path traversal mitigation (`..` blocked), fread/ftell error checks
+
 ## 1.0.96 (2026-03-30)
 
 ### New Features (MCP: 31 -> 33 tools)
