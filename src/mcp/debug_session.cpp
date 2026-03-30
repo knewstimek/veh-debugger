@@ -1066,6 +1066,52 @@ DebugSession::TraceMemResult DebugSession::TraceMemoryWrite(uint64_t address, ui
 	return result;
 }
 
+// --- Import resolution ---
+
+std::vector<DebugSession::ImportEntry> DebugSession::ResolveImports(
+	uint32_t threadId, const std::vector<uint64_t>& thunks, uint32_t maxStepsPerThunk) {
+
+	std::vector<ImportEntry> result;
+	if (thunks.empty()) return result;
+
+	std::vector<uint8_t> payload(sizeof(ResolveImportRequest) + thunks.size() * sizeof(uint64_t));
+	auto* req = reinterpret_cast<ResolveImportRequest*>(payload.data());
+	req->threadId = threadId;
+	req->count = static_cast<uint32_t>(thunks.size());
+	req->maxStepsPerThunk = maxStepsPerThunk;
+	memcpy(payload.data() + sizeof(ResolveImportRequest), thunks.data(), thunks.size() * sizeof(uint64_t));
+
+	int timeoutMs = static_cast<int>(thunks.size()) * maxStepsPerThunk / 10 + 30000;
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::ResolveImport, payload.data(),
+	                                 static_cast<uint32_t>(payload.size()), respData, timeoutMs)) {
+		return result;
+	}
+
+	if (respData.size() < sizeof(ResolveImportResponse)) return result;
+	auto* resp = reinterpret_cast<const ResolveImportResponse*>(respData.data());
+	if (resp->status != IpcStatus::Ok) return result;
+
+	auto* entries = reinterpret_cast<const ResolveImportEntry*>(
+		respData.data() + sizeof(ResolveImportResponse));
+	uint32_t count = resp->count;
+	if (respData.size() < sizeof(ResolveImportResponse) + count * sizeof(ResolveImportEntry))
+		count = static_cast<uint32_t>((respData.size() - sizeof(ResolveImportResponse)) / sizeof(ResolveImportEntry));
+
+	for (uint32_t i = 0; i < count; i++) {
+		ImportEntry e;
+		e.thunkAddress = entries[i].thunkAddress;
+		e.targetAddress = entries[i].targetAddress;
+		char modBuf[129] = {}; memcpy(modBuf, entries[i].moduleName, 128);
+		char funcBuf[129] = {}; memcpy(funcBuf, entries[i].functionName, 128);
+		e.moduleName = modBuf;
+		e.functionName = funcBuf;
+		e.resolved = entries[i].resolved != 0;
+		result.push_back(e);
+	}
+	return result;
+}
+
 // --- PDB resolve ---
 
 uint64_t DebugSession::ResolveSourceLine(const std::string& file, uint32_t line) {

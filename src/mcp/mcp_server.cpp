@@ -263,6 +263,7 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 		else if (name == "veh_batch")                 result = ToolBatch(args);
 		else if (name == "veh_trace_register")        result = ToolTraceRegister(args);
 		else if (name == "veh_trace_memory")          result = ToolTraceMemory(args);
+		else if (name == "veh_resolve_imports")       result = ToolResolveImports(args);
 		else {
 			SendError(id, -32602, "Unknown tool: " + name);
 			return;
@@ -1472,6 +1473,56 @@ json McpServer::ToolTraceMemory(const json& args) {
 	return ret;
 }
 
+json McpServer::ToolResolveImports(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+
+	uint32_t threadId = JsonUint32(args, "threadId");
+	if (threadId == 0) return {{"error", "threadId is required (must be stopped at breakpoint)"}};
+
+	int maxSteps = JsonInt(args, "max_steps", 1000);
+	if (maxSteps < 1) maxSteps = 1;
+	if (maxSteps > 10000) maxSteps = 10000;
+
+	// Parse addresses array
+	std::vector<uint64_t> thunks;
+	if (args.contains("addresses") && args["addresses"].is_array()) {
+		for (auto& a : args["addresses"]) {
+			uint64_t addr = 0;
+			if (a.is_string()) {
+				std::string s = a.get<std::string>();
+				ParseAddress(s, addr);
+			} else if (a.is_number()) {
+				addr = a.get<uint64_t>();
+			}
+			if (addr) thunks.push_back(addr);
+		}
+	}
+	if (thunks.empty()) return {{"error", "addresses (array) is required"}};
+	if (thunks.size() > 2000) return {{"error", "Too many addresses (max 2000)"}};
+
+	auto results = session_.ResolveImports(threadId, thunks, maxSteps);
+
+	json arr = json::array();
+	int resolved = 0;
+	for (auto& e : results) {
+		char thunkBuf[20]; snprintf(thunkBuf, sizeof(thunkBuf), "0x%llX", e.thunkAddress);
+		char targetBuf[20]; snprintf(targetBuf, sizeof(targetBuf), "0x%llX", e.targetAddress);
+		json entry = {{"thunk", thunkBuf}, {"resolved", e.resolved}};
+		if (e.resolved) {
+			std::string api = e.moduleName;
+			if (!e.functionName.empty()) api += "!" + e.functionName;
+			entry["target"] = targetBuf;
+			entry["api"] = api;
+			entry["module"] = e.moduleName;
+			entry["function"] = e.functionName;
+			resolved++;
+		}
+		arr.push_back(entry);
+	}
+
+	return {{"imports", arr}, {"total", thunks.size()}, {"resolved", resolved}};
+}
+
 json McpServer::ToolModules(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
@@ -2223,7 +2274,14 @@ json McpServer::GetToolsList() {
 			{"address", {{"type", "string"}, {"description", "Memory address to watch (hex or module+RVA)"}}},
 			{"size", {{"type", "integer"}, {"enum", json::array({1, 2, 4, 8})}, {"description", "Watch size in bytes (default: 4)"}}},
 			{"timeout_ms", {{"type", "integer"}, {"description", "Max wait time in ms (default: 10000, max: 60000)"}}}
-		 }}, {"required", json::array({"address"})}}}}
+		 }}, {"required", json::array({"address"})}}}},
+
+		{{"name", "veh_resolve_imports"}, {"description", "Resolve obfuscated/packed imports by single-stepping from thunk addresses until RIP enters a loaded DLL. Returns API names (module!function) for each thunk. Processes up to 2000 imports in a single call. Thread must be stopped at a breakpoint."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (must be stopped at breakpoint)"}}},
+			{"addresses", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Array of thunk addresses (hex or module+RVA)"}}},
+			{"max_steps", {{"type", "integer"}, {"description", "Max steps per thunk (default: 1000, max: 10000)"}}}
+		 }}, {"required", json::array({"threadId", "addresses"})}}}}
 	});
 }
 

@@ -74,6 +74,7 @@ private:
 	json ToolBatch(const json& args);
 	json ToolTraceRegister(const json& args);
 	json ToolTraceMemory(const json& args);
+	json ToolResolveImports(const json& args);
 
 	// Tool list definition
 	json GetToolsList();

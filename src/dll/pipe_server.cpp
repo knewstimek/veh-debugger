@@ -1152,6 +1152,135 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		break;
 	}
 
+	case IpcCommand::ResolveImport: {
+		if (payloadSize < sizeof(ResolveImportRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const ResolveImportRequest*>(payload);
+		uint32_t count = req->count;
+		if (count == 0 || count > 2000) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		uint32_t maxSteps = req->maxStepsPerThunk;
+		if (maxSteps == 0) maxSteps = 1000;
+		if (maxSteps > 10000) maxSteps = 10000;
+
+		const uint64_t* thunks = reinterpret_cast<const uint64_t*>(
+			payload + sizeof(ResolveImportRequest));
+		if (payloadSize < sizeof(ResolveImportRequest) + count * sizeof(uint64_t)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+
+		// Build module range table for RIP-in-DLL check
+		auto& ir = VehHandler::Instance().importResolve_;
+		ir.moduleRanges.clear();
+		{
+			HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+			if (snap != INVALID_HANDLE_VALUE) {
+				MODULEENTRY32W me; me.dwSize = sizeof(me);
+				bool first = true;
+				if (Module32FirstW(snap, &me)) {
+					do {
+						uint64_t base = reinterpret_cast<uint64_t>(me.modBaseAddr);
+						uint64_t end = base + me.modBaseSize;
+						ir.moduleRanges.push_back({base, end});
+						if (first) {
+							ir.exeBase = base;
+							ir.exeEnd = end;
+							first = false;
+						}
+					} while (Module32NextW(snap, &me));
+				}
+				CloseHandle(snap);
+			}
+		}
+
+		// Save original context
+		CONTEXT origCtx;
+		if (!VehHandler::Instance().GetStoppedContext(req->threadId, origCtx)) {
+			IpcStatus status = IpcStatus::Error;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+
+		// Process each thunk
+		std::vector<uint8_t> respBuf(sizeof(ResolveImportResponse) + count * sizeof(ResolveImportEntry));
+		auto* resp = reinterpret_cast<ResolveImportResponse*>(respBuf.data());
+		auto* entries = reinterpret_cast<ResolveImportEntry*>(respBuf.data() + sizeof(ResolveImportResponse));
+		resp->status = IpcStatus::Ok;
+		resp->count = count;
+
+		for (uint32_t i = 0; i < count; i++) {
+			memset(&entries[i], 0, sizeof(ResolveImportEntry));
+			entries[i].thunkAddress = thunks[i];
+
+			// Set RIP to thunk address
+			CONTEXT tmpCtx = origCtx;
+#ifdef _WIN64
+			tmpCtx.Rip = thunks[i];
+#else
+			tmpCtx.Eip = static_cast<DWORD>(thunks[i]);
+#endif
+			VehHandler::Instance().SetStoppedContext(req->threadId, tmpCtx);
+
+			// Start stepping
+			ir.threadId = req->threadId;
+			ir.maxSteps = maxSteps;
+			ir.stepsExecuted = 0;
+			ir.found = false;
+			ir.targetAddress = 0;
+			ir.done.store(false, std::memory_order_relaxed);
+			ir.active.store(true, std::memory_order_release);
+
+			VehHandler::Instance().ResumeStoppedThread(req->threadId, true);
+
+			// Wait for completion
+			int waitMs = 0;
+			int maxWaitMs = maxSteps * 10 + 5000;
+			while (!ir.done.load(std::memory_order_acquire) && waitMs < maxWaitMs) {
+				Sleep(1);
+				waitMs += 1;
+			}
+
+			if (ir.done.load(std::memory_order_acquire) && ir.found) {
+				entries[i].resolved = 1;
+				entries[i].targetAddress = ir.targetAddress;
+
+				// Get function name via SymFromAddr
+				DWORD64 displacement = 0;
+				char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+				SYMBOL_INFO* sym = reinterpret_cast<SYMBOL_INFO*>(symBuf);
+				sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+				sym->MaxNameLen = MAX_SYM_NAME;
+				if (SymFromAddr(GetCurrentProcess(), ir.targetAddress, &displacement, sym)) {
+					strncpy_s(entries[i].functionName, sym->Name, sizeof(entries[i].functionName) - 1);
+				}
+
+				// Get module name
+				IMAGEHLP_MODULE64 modInfo = {};
+				modInfo.SizeOfStruct = sizeof(modInfo);
+				if (SymGetModuleInfo64(GetCurrentProcess(), ir.targetAddress, &modInfo)) {
+					strncpy_s(entries[i].moduleName, modInfo.ModuleName, sizeof(entries[i].moduleName) - 1);
+				}
+			} else {
+				entries[i].resolved = 0;
+				ir.active.store(false, std::memory_order_relaxed);
+			}
+
+			// Restore original context for next thunk (or final restore)
+			VehHandler::Instance().SetStoppedContext(req->threadId, origCtx);
+		}
+
+		SendResponse(command, respBuf.data(), static_cast<uint32_t>(respBuf.size()));
+		break;
+	}
+
 	case IpcCommand::Detach: {
 		// Detach: 디버깅 상태만 정리하고 파이프 서버는 유지한다.
 		// connected_=false로 내부 커맨드 루프만 탈출 → 외부 루프에서 새 클라이언트 대기

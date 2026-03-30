@@ -216,6 +216,16 @@ public:
 	};
 	TraceMemResult TraceMemoryWrite(uint64_t address, uint32_t size, uint32_t timeoutMs);
 
+	// Import resolution: step from thunk until RIP enters a DLL
+	struct ImportEntry {
+		uint64_t thunkAddress;
+		uint64_t targetAddress;
+		std::string moduleName;
+		std::string functionName;
+		bool resolved;
+	};
+	std::vector<ImportEntry> ResolveImports(uint32_t threadId, const std::vector<uint64_t>& thunks, uint32_t maxStepsPerThunk = 1000);
+
 	// --- Resolve (PDB) ---
 	uint64_t ResolveSourceLine(const std::string& file, uint32_t line);
 	uint64_t ResolveFunction(const std::string& name);
