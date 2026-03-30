@@ -373,6 +373,8 @@ struct ResolveImportRequest {
 	uint32_t threadId;     // stopped thread to hijack for stepping
 	uint32_t count;        // number of thunk addresses (follows this struct)
 	uint32_t maxStepsPerThunk;  // max steps per import (default 1000)
+	uint8_t  followExceptions;  // 1 = pass non-SINGLE_STEP exceptions to SEH, keep TF for trace
+	uint8_t  reserved[3];
 	// followed by: uint64_t thunkAddresses[count]
 };
 

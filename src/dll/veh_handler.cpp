@@ -306,6 +306,24 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		auto bp = BreakpointManager::Instance().FindByAddress(addr);
 		if (!bp) {
 			LOG_DEBUG("FindByAddress(0x%llX) returned nullopt — not our BP", addr);
+			// ImportResolve: exception-based thunk -- set TF and let SEH handle
+			if (importResolve_.active.load(std::memory_order_acquire) &&
+				tid == importResolve_.threadId && importResolve_.followExceptions) {
+				if (importResolve_.exceptionsPassed < importResolve_.maxExceptionPasses) {
+					importResolve_.exceptionsPassed++;
+					importResolve_.stepsExecuted++;
+					info->ContextRecord->EFlags |= 0x100;  // TF survives through SEH
+					LOG_DEBUG("ImportResolve: passing INT3 at 0x%llX to SEH, TF set (pass #%u)",
+						addr, importResolve_.exceptionsPassed);
+					return EXCEPTION_CONTINUE_SEARCH;
+				}
+				// Max passes exceeded - abort resolve
+				importResolve_.found = false;
+				importResolve_.targetAddress = addr;
+				importResolve_.active.store(false, std::memory_order_relaxed);
+				importResolve_.done.store(true, std::memory_order_release);
+				LOG_WARN("ImportResolve: max exception passes exceeded at 0x%llX", addr);
+			}
 			return EXCEPTION_CONTINUE_SEARCH;
 		}
 
@@ -581,6 +599,26 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 	}
 
 	default: {
+		// ImportResolve: exception-based thunk (AV, PRIV_INSTRUCTION, etc.)
+		// Set TF and let SEH handle -- after SEH redirects, TF fires SINGLE_STEP to resume trace
+		if (importResolve_.active.load(std::memory_order_acquire) &&
+			tid == importResolve_.threadId && importResolve_.followExceptions) {
+			if (importResolve_.exceptionsPassed < importResolve_.maxExceptionPasses) {
+				importResolve_.exceptionsPassed++;
+				importResolve_.stepsExecuted++;
+				info->ContextRecord->EFlags |= 0x100;
+				LOG_DEBUG("ImportResolve: passing exception 0x%08X at 0x%llX to SEH, TF set (pass #%u)",
+					code, addr, importResolve_.exceptionsPassed);
+				return EXCEPTION_CONTINUE_SEARCH;
+			}
+			// Max passes exceeded - abort resolve
+			importResolve_.found = false;
+			importResolve_.targetAddress = addr;
+			importResolve_.active.store(false, std::memory_order_relaxed);
+			importResolve_.done.store(true, std::memory_order_release);
+			LOG_WARN("ImportResolve: max exception passes exceeded (0x%08X at 0x%llX)", code, addr);
+		}
+
 		// Crash-like 예외만 캡처 (C++ throw, OutputDebugString 등은 무시)
 		bool shouldStop = false;
 		switch (code) {

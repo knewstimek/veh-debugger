@@ -99,6 +99,8 @@ public:
 		std::atomic<bool> active{false};
 		uint32_t threadId = 0;
 		uint32_t maxSteps = 0;
+		bool followExceptions = false;    // pass non-SINGLE_STEP to SEH, keep TF
+		uint32_t maxExceptionPasses = 50; // safety limit per thunk
 		// Module ranges for "is RIP in a DLL?" check
 		struct ModRange { uint64_t base; uint64_t end; };
 		std::vector<ModRange> moduleRanges;
@@ -108,6 +110,7 @@ public:
 		std::atomic<bool> done{false};
 		bool found = false;
 		uint32_t stepsExecuted = 0;
+		uint32_t exceptionsPassed = 0;    // exceptions forwarded to SEH
 		uint64_t targetAddress = 0;
 	};
 	ImportResolveState importResolve_;

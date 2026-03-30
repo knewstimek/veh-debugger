@@ -1500,7 +1500,11 @@ json McpServer::ToolResolveImports(const json& args) {
 	if (thunks.empty()) return {{"error", "addresses (array) is required"}};
 	if (thunks.size() > 2000) return {{"error", "Too many addresses (max 2000)"}};
 
-	auto results = session_.ResolveImports(threadId, thunks, maxSteps);
+	bool followExceptions = false;
+	if (args.contains("follow_exceptions") && args["follow_exceptions"].is_boolean())
+		followExceptions = args["follow_exceptions"].get<bool>();
+
+	auto results = session_.ResolveImports(threadId, thunks, maxSteps, followExceptions);
 
 	json arr = json::array();
 	int resolved = 0;
@@ -2276,11 +2280,12 @@ json McpServer::GetToolsList() {
 			{"timeout_ms", {{"type", "integer"}, {"description", "Max wait time in ms (default: 10000, max: 60000)"}}}
 		 }}, {"required", json::array({"address"})}}}},
 
-		{{"name", "veh_resolve_imports"}, {"description", "Resolve obfuscated/packed imports by single-stepping from thunk addresses until RIP enters a loaded DLL. Returns API names (module!function) for each thunk. Processes up to 2000 imports in a single call. Thread must be stopped at a breakpoint."},
+		{{"name", "veh_resolve_imports"}, {"description", "Resolve obfuscated/packed imports by single-stepping from thunk addresses until RIP enters a loaded DLL. Returns API names (module!function) for each thunk. Processes up to 2000 imports in a single call. With follow_exceptions=true, passes non-single-step exceptions (INT3, AV, PRIV_INSTRUCTION) to SEH handlers while keeping trace active -- enables resolving exception-based obfuscated thunks (Themida, VMProtect style). Thread must be stopped at a breakpoint."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (must be stopped at breakpoint)"}}},
 			{"addresses", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Array of thunk addresses (hex or module+RVA)"}}},
-			{"max_steps", {{"type", "integer"}, {"description", "Max steps per thunk (default: 1000, max: 10000)"}}}
+			{"max_steps", {{"type", "integer"}, {"description", "Max steps per thunk (default: 1000, max: 10000)"}}},
+			{"follow_exceptions", {{"type", "boolean"}, {"description", "Pass non-SINGLE_STEP exceptions to SEH during trace (for exception-based obfuscated thunks). Default: false"}}}
 		 }}, {"required", json::array({"threadId", "addresses"})}}}}
 	});
 }

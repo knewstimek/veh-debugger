@@ -1069,7 +1069,7 @@ DebugSession::TraceMemResult DebugSession::TraceMemoryWrite(uint64_t address, ui
 // --- Import resolution ---
 
 std::vector<DebugSession::ImportEntry> DebugSession::ResolveImports(
-	uint32_t threadId, const std::vector<uint64_t>& thunks, uint32_t maxStepsPerThunk) {
+	uint32_t threadId, const std::vector<uint64_t>& thunks, uint32_t maxStepsPerThunk, bool followExceptions) {
 
 	std::vector<ImportEntry> result;
 	if (thunks.empty()) return result;
@@ -1079,6 +1079,8 @@ std::vector<DebugSession::ImportEntry> DebugSession::ResolveImports(
 	req->threadId = threadId;
 	req->count = static_cast<uint32_t>(thunks.size());
 	req->maxStepsPerThunk = maxStepsPerThunk;
+	req->followExceptions = followExceptions ? 1 : 0;
+	memset(req->reserved, 0, sizeof(req->reserved));
 	memcpy(payload.data() + sizeof(ResolveImportRequest), thunks.data(), thunks.size() * sizeof(uint64_t));
 
 	int timeoutMs = static_cast<int>(thunks.size()) * maxStepsPerThunk / 10 + 30000;
