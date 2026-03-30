@@ -1332,15 +1332,23 @@ json McpServer::ToolBatch(const json& args) {
 	// File mode: load steps from JSON file
 	if (args.contains("file") && args["file"].is_string()) {
 		std::string filePath = args["file"].get<std::string>();
+		// Basic path validation: block ".." segments
+		if (filePath.find("..") != std::string::npos) {
+			return {{"error", "Path must not contain '..' segments"}};
+		}
 		FILE* fp = fopen(filePath.c_str(), "rb");
 		if (!fp) return {{"error", "Cannot open file: " + filePath}};
 		fseek(fp, 0, SEEK_END);
 		long sz = ftell(fp);
+		if (sz < 0) { fclose(fp); return {{"error", "Failed to read file size"}}; }
 		fseek(fp, 0, SEEK_SET);
 		if (sz > 10 * 1024 * 1024) { fclose(fp); return {{"error", "File too large (max 10MB)"}}; }
 		std::string content(sz, '\0');
-		fread(&content[0], 1, sz, fp);
+		size_t nread = fread(&content[0], 1, sz, fp);
 		fclose(fp);
+		if (nread != static_cast<size_t>(sz)) {
+			return {{"error", "Failed to read file (partial read)"}};
+		}
 		try {
 			json fileJson = json::parse(content);
 			if (fileJson.is_array()) {
