@@ -76,13 +76,16 @@ static InsnFlow AnalyzeFlow(uint64_t rip, const CONTEXT& ctx) {
 	uint8_t* p = code;
 	uint8_t rex = 0;
 
+	// Skip legacy prefixes first (Intel SDM Vol.2 order: legacy -> REX -> opcode)
+	while (p < code + 14 &&
+	       (*p == 0x66 || *p == 0x67 || *p == 0xF2 || *p == 0xF3 ||
+	        *p == 0x2E || *p == 0x3E || *p == 0x26 || *p == 0x36 ||
+	        *p == 0x64 || *p == 0x65)) p++;
 #ifdef _WIN64
-	if (*p >= 0x40 && *p <= 0x4F) rex = *p++;
+	// REX prefix comes after legacy prefixes
+	if (p < code + 15 && *p >= 0x40 && *p <= 0x4F) rex = *p++;
 #endif
-	// Skip legacy prefixes
-	while (*p == 0x66 || *p == 0x67 || *p == 0xF2 || *p == 0xF3 ||
-	       *p == 0x2E || *p == 0x3E || *p == 0x26 || *p == 0x36 ||
-	       *p == 0x64 || *p == 0x65) p++;
+	if (p >= code + 16) return f;  // malformed (all prefixes, no opcode)
 
 	uint8_t op = *p++;
 
@@ -1519,8 +1522,8 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			ir.exceptionsPassed = 0;
 			ir.stepsExecuted = 0;
 			ir.traceLogIdx = 0;
-			ir.pendingInt3Addr = 0;
-			ir.pendingInt3Byte = 0;
+			ir.pendingInt3Addr.store(0, std::memory_order_relaxed);
+			ir.pendingInt3Byte.store(0, std::memory_order_relaxed);
 			memset(ir.traceLog, 0, sizeof(ir.traceLog));
 			ir.found = false;
 			ir.targetAddress = 0;

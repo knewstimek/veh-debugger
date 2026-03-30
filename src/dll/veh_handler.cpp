@@ -310,10 +310,12 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 			// ImportResolve: INT3-based stepping -- our placed INT3
 			if (importResolve_.active.load(std::memory_order_acquire) &&
 				tid == importResolve_.threadId &&
-				importResolve_.pendingInt3Addr != 0 && addr == importResolve_.pendingInt3Addr) {
+				importResolve_.pendingInt3Addr.load(std::memory_order_acquire) != 0 &&
+				addr == importResolve_.pendingInt3Addr.load(std::memory_order_relaxed)) {
 				// Restore original byte
-				MemoryManager::Instance().Write(addr, &importResolve_.pendingInt3Byte, 1);
-				importResolve_.pendingInt3Addr = 0;
+				uint8_t origByte = importResolve_.pendingInt3Byte.load(std::memory_order_relaxed);
+				MemoryManager::Instance().Write(addr, &origByte, 1);
+				importResolve_.pendingInt3Addr.store(0, std::memory_order_release);
 				// Adjust RIP back to original instruction (INT3 advanced past it)
 #ifdef _WIN64
 				info->ContextRecord->Rip = addr;
@@ -389,7 +391,7 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		}
 
 		// TraceCalls: auto-continue, target will be recorded in SINGLE_STEP rearm
-		if (traceCalls_.active.load(std::memory_order_relaxed) && traceCalls_.IsTraced(addr)) {
+		if (traceCalls_.active.load(std::memory_order_acquire) && traceCalls_.IsTraced(addr)) {
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 
@@ -457,7 +459,7 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 			rearm.stepRequested = false;
 
 			// TraceCalls: record (callSite -> target) and auto-continue
-			if (traceCalls_.active.load(std::memory_order_relaxed) && traceCalls_.IsTraced(rearmAddr)) {
+			if (traceCalls_.active.load(std::memory_order_acquire) && traceCalls_.IsTraced(rearmAddr)) {
 				uint32_t idx = traceCalls_.writeIdx.fetch_add(1, std::memory_order_relaxed);
 				traceCalls_.buffer[idx % TraceCallsState::kBufferSize] = {rearmAddr, addr};
 				traceCalls_.totalHits.fetch_add(1, std::memory_order_relaxed);
