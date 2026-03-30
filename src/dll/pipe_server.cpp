@@ -1734,6 +1734,12 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			SendResponse(command, &status, sizeof(status)); return;
 		}
 
+		bool resolveMode = (req->resolve != 0);
+		bool sysOnly = (req->systemOnly != 0);
+		uint32_t resolveMaxSteps = req->resolveMaxSteps;
+		if (resolveMaxSteps == 0) resolveMaxSteps = 2000;
+		if (resolveMaxSteps > 10000) resolveMaxSteps = 10000;
+
 		// Set software breakpoints on all call/jmp sites
 		std::vector<uint32_t> bpIds;
 		for (uint32_t i = 0; i < count; i++) {
@@ -1745,6 +1751,39 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		auto& tc = VehHandler::Instance().traceCalls_;
 		tc.addresses.assign(addrs, addrs + count);
 		std::sort(tc.addresses.begin(), tc.addresses.end());
+		tc.resolveMode = resolveMode;
+		tc.resolveMaxSteps = resolveMaxSteps;
+		tc.following.store(false, std::memory_order_relaxed);
+
+		// Build module range table for resolve mode
+		if (resolveMode) {
+			tc.moduleRanges.clear();
+			wchar_t sysDir[MAX_PATH] = {};
+			if (sysOnly) {
+				GetSystemDirectoryW(sysDir, MAX_PATH);
+				for (wchar_t* p = sysDir; *p; p++) *p = towlower(*p);
+			}
+			HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+			if (snap != INVALID_HANDLE_VALUE) {
+				MODULEENTRY32W me; me.dwSize = sizeof(me);
+				bool first = true;
+				if (Module32FirstW(snap, &me)) {
+					do {
+						uint64_t base = reinterpret_cast<uint64_t>(me.modBaseAddr);
+						uint64_t end = base + me.modBaseSize;
+						bool isTarget = !first;  // default: all non-exe
+						if (first) first = false;
+						if (sysOnly && isTarget) {
+							wchar_t path[MAX_PATH]; wcscpy_s(path, me.szExePath);
+							for (wchar_t* p = path; *p; p++) *p = towlower(*p);
+							isTarget = (wcsstr(path, sysDir) == path);
+						}
+						tc.moduleRanges.push_back({base, end, isTarget});
+					} while (Module32NextW(snap, &me));
+				}
+				CloseHandle(snap);
+			}
+		}
 		tc.writeIdx.store(0, std::memory_order_relaxed);
 		tc.totalHits.store(0, std::memory_order_relaxed);
 		tc.active.store(true, std::memory_order_release);

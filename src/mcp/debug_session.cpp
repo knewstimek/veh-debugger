@@ -1132,7 +1132,8 @@ std::vector<DebugSession::ImportEntry> DebugSession::ResolveImports(
 // --- TraceCalls ---
 
 DebugSession::TraceCallsResult DebugSession::TraceCalls(
-	const std::vector<uint64_t>& addresses, uint32_t durationMs) {
+	const std::vector<uint64_t>& addresses, uint32_t durationMs,
+	bool resolve, bool systemOnly, uint32_t resolveMaxSteps) {
 
 	TraceCallsResult result = {};
 	if (addresses.empty()) return result;
@@ -1140,6 +1141,9 @@ DebugSession::TraceCallsResult DebugSession::TraceCalls(
 	std::vector<uint8_t> payload(sizeof(TraceCallsRequest) + addresses.size() * sizeof(uint64_t));
 	auto* req = reinterpret_cast<TraceCallsRequest*>(payload.data());
 	req->durationMs = durationMs;
+	req->resolve = resolve ? 1 : 0;
+	req->systemOnly = systemOnly ? 1 : 0;
+	req->resolveMaxSteps = static_cast<uint16_t>(resolveMaxSteps > 0xFFFF ? 0xFFFF : resolveMaxSteps);
 	req->count = static_cast<uint32_t>(addresses.size());
 	memcpy(payload.data() + sizeof(TraceCallsRequest), addresses.data(), addresses.size() * sizeof(uint64_t));
 

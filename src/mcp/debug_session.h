@@ -245,7 +245,8 @@ public:
 		uint32_t totalHits;
 		std::vector<TraceCallEntry> entries;
 	};
-	TraceCallsResult TraceCalls(const std::vector<uint64_t>& addresses, uint32_t durationMs = 5000);
+	TraceCallsResult TraceCalls(const std::vector<uint64_t>& addresses, uint32_t durationMs = 5000,
+		bool resolve = false, bool systemOnly = false, uint32_t resolveMaxSteps = 2000);
 
 	// --- Resolve (PDB) ---
 	uint64_t ResolveSourceLine(const std::string& file, uint32_t line);
