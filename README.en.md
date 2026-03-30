@@ -24,7 +24,7 @@ No separate debugger GUI needed. **Everything works inside the VSCode debug pane
 
 - **VEH-based**: Uses VEH instead of Windows Debug API - bypasses PEB/NtQuery-based anti-debug checks (Themida, VMProtect, etc.)
 - **Full DAP support**: Works with VSCode, MCP debug tools, and any DAP-compatible client
-- **MCP tool server**: 33 tools for AI agents (Claude, Cursor, Codex, etc.) to directly control the debugger
+- **MCP tool server**: 34 tools for AI agents (Claude, Cursor, Codex, etc.) to directly control the debugger
 - **TCP mode**: Remote debugging via `--tcp --port=PORT`
 - **Remote access**: `--remote` / `--bind=0.0.0.0` for VM/network debugging
 - **32/64-bit**: Debug both x86 and x64 processes (WoW64 injection for 32-bit targets)
@@ -172,7 +172,7 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` | JSON (`mcpServers`) |
 | Codex CLI | `~/.codex/config.toml` | TOML (`mcp_servers`) |
 
-**MCP Tools (33)**
+**MCP Tools (34)**
 
 | Tool | Args | Description |
 |------|------|-------------|
@@ -207,6 +207,7 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | `veh_exception_info` | - | Last exception info |
 | `veh_trace_register` | `threadId, register, mode?, value?, max_steps?` | Trace register changes (DLL-internal step loop, zero IPC overhead) |
 | `veh_trace_memory` | `address, size?, timeout_ms?` | Trace memory writes (temp HW BP, fast detection) |
+| `veh_resolve_imports` | `threadId, addresses, max_steps?` | Batch-resolve obfuscated imports (step from thunk to DLL, up to 2000) |
 | `veh_batch` | `steps` | Execute multiple commands in one call ($N variable refs, if/loop/for_each control flow) |
 | `veh_trace_callers` | `address, duration_sec?` | Profile function callers (auto-resume -> collect for N seconds -> auto-pause). Returns unique callers with hit counts. x64: RtlVirtualUnwind (accurate). x86: [ESP] (accurate only at function entry) |
 

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.0.98 (2026-03-30)
+
+### New Features (MCP: 33 -> 34 tools)
+- **veh_resolve_imports**: Batch-resolve obfuscated/packed imports by single-stepping from thunk addresses until RIP enters a loaded DLL. Returns `module!function` for each thunk. Processes up to 2000 imports in a single call. Uses SymFromAddr for function name resolution
+
+### Bug Fixes
+- **resolve_import timeout**: VEH thread now properly waits for stopped state before context restore (prevents hang)
+
 ## 1.0.97 (2026-03-30)
 
 ### New Features
