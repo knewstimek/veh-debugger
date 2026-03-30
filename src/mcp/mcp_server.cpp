@@ -1350,7 +1350,7 @@ json McpServer::ToolBatch(const json& args) {
 			return {{"error", "Failed to read file (partial read)"}};
 		}
 		try {
-			json fileJson = json::parse(content);
+			json fileJson = json::parse(content, nullptr, true, true);  // allow_comments (JSONC)
 			if (fileJson.is_array()) {
 				steps = fileJson;
 			} else if (fileJson.is_object() && fileJson.contains("steps") && fileJson["steps"].is_array()) {
