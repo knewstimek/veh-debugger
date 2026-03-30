@@ -58,6 +58,14 @@ public:
 	// --- SetEvent 대체 ---
 	NTSTATUS SetEvent(HANDLE handle);
 
+	// 명령어 길이 디코더 (public -- import resolve static analysis에서도 사용)
+	struct InsnInfo {
+		uint8_t length;
+		uint8_t opcode;
+		bool    hasRexW;
+	};
+	static InsnInfo DecodeInsn(const uint8_t* code, uint32_t maxLen);
+
 private:
 	// 스텁 파싱 결과
 	struct StubInfo {
@@ -66,14 +74,6 @@ private:
 	};
 
 	StubInfo ParseStub(const uint8_t* stub, uint32_t maxLen);
-
-	// 명령어 길이 디코더
-	struct InsnInfo {
-		uint8_t length;
-		uint8_t opcode;
-		bool    hasRexW;
-	};
-	static InsnInfo DecodeInsn(const uint8_t* code, uint32_t maxLen);
 
 	// 단일 함수 스텁 복사. 반환: 사용한 바이트 수 (0 = 실패)
 	size_t CopyOneStub(const char* funcName, uint8_t* dest, size_t destRemaining, void** outFunc);
