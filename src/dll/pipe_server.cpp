@@ -1261,27 +1261,32 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			memset(&entries[i], 0, sizeof(ResolveImportEntry));
 			entries[i].thunkAddress = thunks[i];
 
-			// Call stub: simulate 'call thunk' by pushing fake return addr on stack
-			// This prevents crashes when thunk reads [RSP] expecting a return address
+			// Call stub: simulate 'call thunk' with proper calling convention
+			// x64: 16-byte stack alignment + 32-byte shadow space + return addr
+			// x86: 16-byte alignment (optional) + return addr
 			CONTEXT tmpCtx = origCtx;
 			{
 				bool stackOk = true;
-#ifdef _WIN64
-				tmpCtx.Rsp -= 8;
 				uint64_t fakeRet = ir.parkStub ? reinterpret_cast<uint64_t>(ir.parkStub) : origCtx.Rip;
-				if (IsBadWritePtr(reinterpret_cast<LPVOID>(tmpCtx.Rsp), 8)) {
+#ifdef _WIN64
+				// After 'call', RSP should be 16n+8 (16-aligned before call, -8 for ret addr)
+				// Layout: [RSP]=retAddr, [RSP+8..RSP+0x28]=shadow space (32 bytes)
+				tmpCtx.Rsp = (tmpCtx.Rsp & ~0xFULL);  // align to 16
+				tmpCtx.Rsp -= 0x28;  // 0x20 shadow + 0x8 return addr = 0x28 (RSP = 16n+8)
+				if (IsBadWritePtr(reinterpret_cast<LPVOID>(tmpCtx.Rsp), 0x28)) {
 					stackOk = false;
 				} else {
+					memset(reinterpret_cast<void*>(tmpCtx.Rsp), 0, 0x28);  // zero shadow space
 					*reinterpret_cast<uint64_t*>(tmpCtx.Rsp) = fakeRet;
 				}
 				tmpCtx.Rip = thunks[i];
 #else
+				tmpCtx.Esp = (tmpCtx.Esp & ~0xFU);  // align to 16
 				tmpCtx.Esp -= 4;
-				uint32_t fakeRet = ir.parkStub ? static_cast<uint32_t>(reinterpret_cast<uintptr_t>(ir.parkStub)) : origCtx.Eip;
 				if (IsBadWritePtr(reinterpret_cast<LPVOID>(tmpCtx.Esp), 4)) {
 					stackOk = false;
 				} else {
-					*reinterpret_cast<uint32_t*>(tmpCtx.Esp) = fakeRet;
+					*reinterpret_cast<uint32_t*>(tmpCtx.Esp) = static_cast<uint32_t>(fakeRet);
 				}
 				tmpCtx.Eip = static_cast<DWORD>(thunks[i]);
 #endif
