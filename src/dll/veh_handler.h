@@ -106,6 +106,8 @@ public:
 		std::vector<ModRange> moduleRanges;
 		uint64_t exeBase = 0;
 		uint64_t exeEnd = 0;
+		// UEF safety net: park stub for unhandled exception recovery
+		void* parkStub = nullptr;         // NOP sled (executable page) for UEF redirect
 		// Results
 		std::atomic<bool> done{false};
 		bool found = false;
