@@ -383,7 +383,14 @@ struct ResolveImportEntry {
 	uint64_t targetAddress;
 	char     moduleName[128];
 	char     functionName[128];
-	uint8_t  resolved;     // 1=success, 0=failed (max steps or error)
+	uint8_t  resolved;          // 1=success, 0=failed (max steps or error)
+	uint8_t  traceCount;        // number of valid trace entries (max 16)
+	uint8_t  exceptionsPassed;  // total exceptions forwarded to SEH
+	uint8_t  reserved;
+	uint32_t stepsExecuted;
+	// Diagnostic: last 16 addresses visited + exception codes (ring buffer tail)
+	uint64_t traceAddresses[16];
+	uint32_t traceExcCodes[16]; // 0=single-step, nonzero=exception code at that addr
 };
 
 struct ResolveImportResponse {

@@ -1109,6 +1109,11 @@ std::vector<DebugSession::ImportEntry> DebugSession::ResolveImports(
 		e.moduleName = modBuf;
 		e.functionName = funcBuf;
 		e.resolved = entries[i].resolved != 0;
+		e.stepsExecuted = entries[i].stepsExecuted;
+		e.exceptionsPassed = entries[i].exceptionsPassed;
+		for (uint8_t t = 0; t < entries[i].traceCount && t < 16; t++) {
+			e.trace.push_back({entries[i].traceAddresses[t], entries[i].traceExcCodes[t]});
+		}
 		result.push_back(e);
 	}
 	return result;

@@ -108,6 +108,14 @@ public:
 		uint64_t exeEnd = 0;
 		// UEF safety net: park stub for unhandled exception recovery
 		void* parkStub = nullptr;         // NOP sled (executable page) for UEF redirect
+		// Diagnostic trace log (ring buffer, last N addresses + exception codes)
+		static constexpr uint32_t kTraceLogSize = 32;
+		struct TraceLogEntry {
+			uint64_t address;
+			uint32_t exceptionCode;  // 0 for normal single-step
+		};
+		TraceLogEntry traceLog[kTraceLogSize] = {};
+		uint32_t traceLogIdx = 0;
 		// Results
 		std::atomic<bool> done{false};
 		bool found = false;

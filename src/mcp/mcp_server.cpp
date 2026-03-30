@@ -1521,6 +1521,23 @@ json McpServer::ToolResolveImports(const json& args) {
 			entry["function"] = e.functionName;
 			resolved++;
 		}
+		// Diagnostic info (always included, most useful for failed entries)
+		entry["steps"] = e.stepsExecuted;
+		if (e.exceptionsPassed > 0)
+			entry["exceptions_passed"] = e.exceptionsPassed;
+		if (!e.trace.empty()) {
+			json traceArr = json::array();
+			for (auto& t : e.trace) {
+				char addrBuf[20]; snprintf(addrBuf, sizeof(addrBuf), "0x%llX", t.address);
+				json te = {{"addr", addrBuf}};
+				if (t.excCode != 0) {
+					char excBuf[12]; snprintf(excBuf, sizeof(excBuf), "0x%08X", t.excCode);
+					te["exc"] = excBuf;
+				}
+				traceArr.push_back(te);
+			}
+			entry["trace"] = traceArr;
+		}
 		arr.push_back(entry);
 	}
 
