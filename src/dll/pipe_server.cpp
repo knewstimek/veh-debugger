@@ -1271,6 +1271,12 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			} else {
 				entries[i].resolved = 0;
 				ir.active.store(false, std::memory_order_relaxed);
+				// Timeout: wait for VEH thread to reach stopped state
+				// (it may still be stepping or about to enter NotifyAndWait)
+				for (int w = 0; w < 5000; w++) {
+					if (VehHandler::Instance().IsThreadStopped(req->threadId)) break;
+					Sleep(1);
+				}
 			}
 
 			// Restore original context for next thunk (or final restore)
