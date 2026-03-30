@@ -224,7 +224,7 @@ public:
 		std::string functionName;
 		bool resolved;
 	};
-	std::vector<ImportEntry> ResolveImports(uint32_t threadId, const std::vector<uint64_t>& thunks, uint32_t maxStepsPerThunk = 1000);
+	std::vector<ImportEntry> ResolveImports(uint32_t threadId, const std::vector<uint64_t>& thunks, uint32_t maxStepsPerThunk = 1000, bool followExceptions = false);
 
 	// --- Resolve (PDB) ---
 	uint64_t ResolveSourceLine(const std::string& file, uint32_t line);

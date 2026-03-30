@@ -1168,6 +1168,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		uint32_t maxSteps = req->maxStepsPerThunk;
 		if (maxSteps == 0) maxSteps = 1000;
 		if (maxSteps > 10000) maxSteps = 10000;
+		bool followExceptions = (req->followExceptions != 0);
 
 		const uint64_t* thunks = reinterpret_cast<const uint64_t*>(
 			payload + sizeof(ResolveImportRequest));
@@ -1232,6 +1233,8 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			// Start stepping
 			ir.threadId = req->threadId;
 			ir.maxSteps = maxSteps;
+			ir.followExceptions = followExceptions;
+			ir.exceptionsPassed = 0;
 			ir.stepsExecuted = 0;
 			ir.found = false;
 			ir.targetAddress = 0;
