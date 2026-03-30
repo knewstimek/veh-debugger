@@ -1577,7 +1577,15 @@ json McpServer::ToolTraceCalls(const json& args) {
 	if (durationSec < 1) durationSec = 1;
 	if (durationSec > 60) durationSec = 60;
 
-	auto result = session_.TraceCalls(addresses, static_cast<uint32_t>(durationSec) * 1000);
+	bool resolve = false;
+	if (args.contains("resolve") && args["resolve"].is_boolean())
+		resolve = args["resolve"].get<bool>();
+	bool systemOnly = false;
+	if (args.contains("system_only") && args["system_only"].is_boolean())
+		systemOnly = args["system_only"].get<bool>();
+
+	auto result = session_.TraceCalls(addresses, static_cast<uint32_t>(durationSec) * 1000,
+		resolve, systemOnly);
 
 	json arr = json::array();
 	for (auto& e : result.entries) {
@@ -2296,10 +2304,12 @@ json McpServer::GetToolsList() {
 			{"duration_sec", {{"type", "integer"}, {"description", "How long to collect callers in seconds (default: 5, max: 60)"}}}
 		 }}, {"required", json::array({"address"})}}}},
 
-		{{"name", "veh_trace_calls"}, {"description", "Monitor where call/jmp instructions go at runtime. Sets breakpoints on given call sites, runs the program for duration_sec seconds, collects actual target addresses with API names. 100% accurate (reads real execution targets, not heuristic analysis). Ideal for IAT reconstruction on packed binaries. Up to 4000 addresses per call."},
+		{{"name", "veh_trace_calls"}, {"description", "Monitor where call/jmp instructions go at runtime. Sets breakpoints on call sites, runs program for N seconds, collects actual targets. With resolve=true, follows through obfuscated thunks to the final API using natural call context (no forced RIP). Ideal for IAT reconstruction on packed binaries."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"addresses", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Array of call/jmp site addresses to monitor (hex or module+RVA)"}}},
-			{"duration_sec", {{"type", "integer"}, {"description", "How long to monitor in seconds (default: 5, max: 60)"}}}
+			{"duration_sec", {{"type", "integer"}, {"description", "How long to monitor in seconds (default: 5, max: 60)"}}},
+			{"resolve", {{"type", "boolean"}, {"description", "Follow through thunks to final target (system DLL). Uses natural call context. Default: false"}}},
+			{"system_only", {{"type", "boolean"}, {"description", "Only resolve to system DLLs. Default: false"}}}
 		 }}, {"required", json::array({"addresses"})}}}},
 
 		{{"name", "veh_dump_memory"}, {"description", "Dump memory to a binary file. Reads in 1MB chunks, supports up to 64MB. Avoids token overhead of hex string encoding."},

@@ -69,6 +69,17 @@ public:
 		std::atomic<uint32_t> writeIdx{0};
 		Entry buffer[kBufferSize];
 		std::atomic<uint32_t> totalHits{0};
+		// Resolve mode: follow through thunks to final target
+		bool resolveMode = false;
+		uint32_t resolveMaxSteps = 2000;
+		// Module ranges for resolve target detection
+		struct ModRange { uint64_t base; uint64_t end; bool isTarget; };
+		std::vector<ModRange> moduleRanges;
+		// Follow-through state (one thread at a time)
+		std::atomic<bool> following{false};
+		uint32_t followThreadId = 0;
+		uint64_t followCallSite = 0;
+		uint32_t followSteps = 0;
 	};
 	TraceCallsState traceCalls_;
 

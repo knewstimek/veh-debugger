@@ -307,6 +307,15 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		auto bp = BreakpointManager::Instance().FindByAddress(addr);
 		if (!bp) {
 			LOG_DEBUG("FindByAddress(0x%llX) returned nullopt — not our BP", addr);
+			// TraceCalls follow-through: INT3 in thunk -- pass to SEH, keep TF
+			if (traceCalls_.following.load(std::memory_order_acquire) && tid == traceCalls_.followThreadId) {
+				traceCalls_.followSteps++;
+				if (traceCalls_.followSteps < traceCalls_.resolveMaxSteps) {
+					info->ContextRecord->EFlags |= 0x100;
+					LOG_DEBUG("TraceCalls follow: passing INT3 to SEH at 0x%llX", addr);
+					return EXCEPTION_CONTINUE_SEARCH;
+				}
+			}
 			// ImportResolve: INT3-based stepping -- our placed INT3
 			if (importResolve_.active.load(std::memory_order_acquire) &&
 				tid == importResolve_.threadId &&
@@ -460,6 +469,16 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 
 			// TraceCalls: record (callSite -> target) and auto-continue
 			if (traceCalls_.active.load(std::memory_order_acquire) && traceCalls_.IsTraced(rearmAddr)) {
+				if (traceCalls_.resolveMode && !traceCalls_.following.load(std::memory_order_relaxed)) {
+					// Resolve mode: start follow-through with natural context
+					traceCalls_.following.store(true, std::memory_order_release);
+					traceCalls_.followThreadId = tid;
+					traceCalls_.followCallSite = rearmAddr;
+					traceCalls_.followSteps = 0;
+					info->ContextRecord->EFlags |= 0x100;  // TF to step through thunk
+					return EXCEPTION_CONTINUE_EXECUTION;
+				}
+				// Simple mode or already following: record immediate target
 				uint32_t idx = traceCalls_.writeIdx.fetch_add(1, std::memory_order_relaxed);
 				traceCalls_.buffer[idx % TraceCallsState::kBufferSize] = {rearmAddr, addr};
 				traceCalls_.totalHits.fetch_add(1, std::memory_order_relaxed);
@@ -526,7 +545,36 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 			}
 		}
 
-		// 3) ResolveImport: TF fallback step -- signal pipe_server, let it decide next action
+		// 3) TraceCalls follow-through: stepping through thunk to target module
+		if (traceCalls_.following.load(std::memory_order_acquire) && tid == traceCalls_.followThreadId) {
+			traceCalls_.followSteps++;
+
+			// Check if RIP is in a target module
+			bool inTarget = false;
+			for (auto& mr : traceCalls_.moduleRanges) {
+				if (addr >= mr.base && addr < mr.end && mr.isTarget) {
+					inTarget = true;
+					break;
+				}
+			}
+
+			if (inTarget || traceCalls_.followSteps >= traceCalls_.resolveMaxSteps) {
+				// Done: record final target
+				uint32_t idx = traceCalls_.writeIdx.fetch_add(1, std::memory_order_relaxed);
+				traceCalls_.buffer[idx % TraceCallsState::kBufferSize] = {traceCalls_.followCallSite, addr};
+				traceCalls_.totalHits.fetch_add(1, std::memory_order_relaxed);
+				traceCalls_.following.store(false, std::memory_order_release);
+				LOG_DEBUG("TraceCalls resolve: 0x%llX -> 0x%llX (%u steps)",
+					traceCalls_.followCallSite, addr, traceCalls_.followSteps);
+				return EXCEPTION_CONTINUE_EXECUTION;
+			}
+
+			// Continue stepping through thunk
+			info->ContextRecord->EFlags |= 0x100;
+			return EXCEPTION_CONTINUE_EXECUTION;
+		}
+
+		// 4) ResolveImport: TF fallback step -- signal pipe_server, let it decide next action
 		if (importResolve_.active.load(std::memory_order_acquire) && tid == importResolve_.threadId) {
 			importResolve_.stepsExecuted++;
 			// Record trace log entry (ring buffer)
@@ -637,6 +685,21 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 	}
 
 	default: {
+		// TraceCalls follow-through: pass exceptions to SEH, keep TF
+		if (traceCalls_.following.load(std::memory_order_acquire) && tid == traceCalls_.followThreadId) {
+			traceCalls_.followSteps++;
+			if (traceCalls_.followSteps < traceCalls_.resolveMaxSteps) {
+				info->ContextRecord->EFlags |= 0x100;  // TF survives through SEH
+				LOG_DEBUG("TraceCalls follow: passing exception 0x%08X to SEH at 0x%llX", code, addr);
+				return EXCEPTION_CONTINUE_SEARCH;
+			}
+			// Max steps: abort follow, record current position
+			uint32_t idx = traceCalls_.writeIdx.fetch_add(1, std::memory_order_relaxed);
+			traceCalls_.buffer[idx % TraceCallsState::kBufferSize] = {traceCalls_.followCallSite, addr};
+			traceCalls_.totalHits.fetch_add(1, std::memory_order_relaxed);
+			traceCalls_.following.store(false, std::memory_order_release);
+		}
+
 		// ImportResolve: exception-based thunk (AV, PRIV_INSTRUCTION, etc.)
 		// Set TF and let SEH handle -- after SEH redirects, TF fires SINGLE_STEP to resume trace
 		if (importResolve_.active.load(std::memory_order_acquire) &&

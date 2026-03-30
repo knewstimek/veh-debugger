@@ -407,6 +407,9 @@ struct ResolveImportResponse {
 struct TraceCallsRequest {
 	uint32_t durationMs;    // monitoring duration (0 = use default 5000)
 	uint32_t count;         // number of call/jmp site addresses
+	uint8_t  resolve;       // 1 = follow through thunks to final target (system DLL)
+	uint8_t  systemOnly;    // 1 = only system DLLs as resolve target
+	uint16_t resolveMaxSteps; // max steps per thunk follow (0 = default 2000)
 	// followed by: uint64_t addresses[count]
 };
 
