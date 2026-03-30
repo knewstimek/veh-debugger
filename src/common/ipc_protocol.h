@@ -70,6 +70,7 @@ enum class IpcCommand : uint32_t {
 	// Dynamic tracing
 	TraceRegister          = 0x0070,
 	TraceMemory            = 0x0071,
+	ResolveImport          = 0x0072,
 
 	// Lifecycle
 	Heartbeat              = 0x00FE,
@@ -365,6 +366,28 @@ struct TraceMemoryResponse {
 	uint64_t instructionAddress;  // instruction that triggered the write
 	uint64_t oldValue;
 	uint64_t newValue;
+};
+
+// --- Import resolution ---
+struct ResolveImportRequest {
+	uint32_t threadId;     // stopped thread to hijack for stepping
+	uint32_t count;        // number of thunk addresses (follows this struct)
+	uint32_t maxStepsPerThunk;  // max steps per import (default 1000)
+	// followed by: uint64_t thunkAddresses[count]
+};
+
+struct ResolveImportEntry {
+	uint64_t thunkAddress;
+	uint64_t targetAddress;
+	char     moduleName[128];
+	char     functionName[128];
+	uint8_t  resolved;     // 1=success, 0=failed (max steps or error)
+};
+
+struct ResolveImportResponse {
+	IpcStatus status;
+	uint32_t  count;
+	// followed by: ResolveImportEntry[count]
 };
 
 // --- Memory management ---

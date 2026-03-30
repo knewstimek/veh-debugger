@@ -456,7 +456,34 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 			}
 		}
 
-		// 3) TraceRegister: check register condition, loop internally if not met
+		// 3) ResolveImport: step until RIP enters a loaded DLL range
+		if (importResolve_.active.load(std::memory_order_acquire) && tid == importResolve_.threadId) {
+			importResolve_.stepsExecuted++;
+			bool inDll = false;
+			// Check if RIP is in any module range (but not the main exe)
+			for (auto& mr : importResolve_.moduleRanges) {
+				if (addr >= mr.base && addr < mr.end) {
+					// Skip if it's the main exe itself
+					if (mr.base != importResolve_.exeBase) {
+						inDll = true;
+						break;
+					}
+				}
+			}
+
+			if (inDll || importResolve_.stepsExecuted >= importResolve_.maxSteps) {
+				importResolve_.found = inDll;
+				importResolve_.targetAddress = addr;
+				importResolve_.active.store(false, std::memory_order_relaxed);
+				importResolve_.done.store(true, std::memory_order_release);
+				// Fall through to NotifyAndWait (thread stays stopped)
+			} else {
+				info->ContextRecord->EFlags |= 0x100;
+				return EXCEPTION_CONTINUE_EXECUTION;
+			}
+		}
+
+		// 4) TraceRegister: check register condition, loop internally if not met
 		if (traceReg_.active.load(std::memory_order_relaxed) && tid == traceReg_.threadId) {
 			traceReg_.stepsExecuted++;
 			uint64_t curVal = 0;

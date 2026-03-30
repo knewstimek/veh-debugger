@@ -94,6 +94,24 @@ public:
 	};
 	TraceMemState traceMem_;
 
+	// ResolveImport: step from thunk until RIP enters a loaded DLL
+	struct ImportResolveState {
+		std::atomic<bool> active{false};
+		uint32_t threadId = 0;
+		uint32_t maxSteps = 0;
+		// Module ranges for "is RIP in a DLL?" check
+		struct ModRange { uint64_t base; uint64_t end; };
+		std::vector<ModRange> moduleRanges;
+		uint64_t exeBase = 0;
+		uint64_t exeEnd = 0;
+		// Results
+		std::atomic<bool> done{false};
+		bool found = false;
+		uint32_t stepsExecuted = 0;
+		uint64_t targetAddress = 0;
+	};
+	ImportResolveState importResolve_;
+
 	// 내부 스레드 등록 (pipe server 등) -- BP 투명 스킵 + trace_callers 스킵
 	void SetInternalThread(uint32_t tid) { internalTid_.store(tid, std::memory_order_relaxed); }
 
