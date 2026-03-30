@@ -125,8 +125,8 @@ public:
 		uint64_t exeBase = 0;
 		uint64_t exeEnd = 0;
 		// INT3-based stepping (anti-TF): pipe_server places INT3, VEH catches it
-		uint64_t pendingInt3Addr = 0;     // address where INT3 was placed
-		uint8_t  pendingInt3Byte = 0;     // original byte at that address
+		std::atomic<uint64_t> pendingInt3Addr{0};  // address where INT3 was placed
+		std::atomic<uint8_t>  pendingInt3Byte{0};  // original byte at that address
 		// UEF safety net: park stub for unhandled exception recovery
 		void* parkStub = nullptr;         // NOP sled (executable page) for UEF redirect
 		// Diagnostic trace log (ring buffer, last N addresses + exception codes)
