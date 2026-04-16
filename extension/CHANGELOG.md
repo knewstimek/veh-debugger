@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **MCP server instructions block compressed** -- Removed redundant descriptions from Typical workflow steps; merged two `veh_continue` key-point lines into one. Added `veh_batch` flow-control hint (`$N` references, `if`/`loop`/`for_each`). Reduces per-turn token overhead with no behavior change.
+
 ## 1.1.0 (2026-04-16)
 
 ### Fixed
@@ -353,6 +358,7 @@
 ## 1.0.5 (2026-03-18)
 
 ### New Features
+- **veh_enum_locals**: Enumerate local variables and parameters for a stopped thread's stack frame. Returns variable names, types, addresses, and values. *(present since this version but undocumented)*
 - **PDB inline frame-based StepOver (O(1))** -- `SymbolEngine` uses `SymGetLineFromAddrW64` to calculate next source line address, sets a single temp BP + Continue instead of O(n) single-steps. Falls back to legacy step when Jcc detected in range or PDB unavailable
 - **Register modification** -- Double-click register values in Variables panel to edit them
 - **Conditional breakpoints** -- Break only when condition is met (e.g. `RAX==0x1234`, `*0x7FF600!=0`)
