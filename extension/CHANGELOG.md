@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 (2026-04-16)
+
+### Fixed
+- **MCP server zombie process**: `veh-mcp-server.exe` lingered after Claude Code session ended.
+  - Root cause: `PeekNamedPipe` returns `TRUE + avail=0` even after the write end closes, causing infinite `Sleep(10)` loop.
+  - Fix 1 (transport layer): replaced `PeekNamedPipe` polling with blocking `ReadFile`; pipe close triggers `ERROR_BROKEN_PIPE` immediately. `Stop()` uses `CancelSynchronousIo` to unblock the read thread.
+  - Fix 2 (server layer): `Run()` loop opens parent process handle on startup and polls `WaitForSingleObject(hParent, 0)` every 100ms as a second-layer guard -- catches cases where stdin is NUL/console instead of a real pipe.
+
+### Added
+- **`veh_launch` / `veh_attach`: optional `logFile` parameter** -- pass a file path to enable server-side logging at runtime (e.g. `"logFile": "veh-mcp.log"`). Omitting the parameter disables logging (default).
+
+### Changed
+- **Installer no longer sets `--log=veh-mcp.log` by default** -- eliminates stray `.log` files created on every MCP tool invocation. Use the new `logFile` parameter in `veh_launch`/`veh_attach` when logging is needed.
 
 ## 1.0.99 (2026-03-30)
 

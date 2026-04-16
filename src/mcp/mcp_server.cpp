@@ -8,6 +8,18 @@
 #include <wincrypt.h>
 #pragma comment(lib, "advapi32.lib")
 
+// Returns the PID of our parent process via NtQueryInformationProcess.
+static DWORD GetParentPid() {
+	typedef LONG(WINAPI* NtQIP_t)(HANDLE, UINT, PVOID, ULONG, PULONG);
+	auto NtQIP = (NtQIP_t)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess");
+	if (!NtQIP) return 0;
+	ULONG_PTR pbi[6] = {};
+	ULONG len = 0;
+	if (NtQIP(GetCurrentProcess(), 0 /*ProcessBasicInformation*/, pbi, sizeof(pbi), &len) != 0)
+		return 0;
+	return (DWORD)pbi[5]; // InheritedFromUniqueProcessId
+}
+
 namespace veh {
 
 // JSON args helper: accept both number and string for integer fields.
@@ -85,11 +97,27 @@ void McpServer::Run() {
 		return;
 	}
 
+	// Open parent process handle for exit detection.
+	// If stdin is NUL/console (not a pipe), ReadFile never unblocks on parent
+	// exit, so we poll the parent handle as a second-layer termination guard.
+	HANDLE hParent = NULL;
+	DWORD parentPid = GetParentPid();
+	if (parentPid) {
+		hParent = OpenProcess(SYNCHRONIZE, FALSE, parentPid);
+		LOG_INFO("Watching parent PID %u for exit", (unsigned)parentPid);
+	}
+
 	while (running_) {
+		if (hParent && WaitForSingleObject(hParent, 0) == WAIT_OBJECT_0) {
+			LOG_INFO("Parent process exited, stopping MCP server");
+			running_ = false;
+			break;
+		}
 		FlushEvents();
 		Sleep(100);
 	}
 
+	if (hParent) CloseHandle(hParent);
 	transport_->Stop();
 }
 
@@ -189,7 +217,7 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 		}},
 		{"serverInfo", {
 			{"name", "veh-debugger"},
-			{"version", "1.0.99"}
+			{"version", "1.1.0"}
 		}},
 		{"instructions",
 			"VEH Debugger - in-process debugger for Windows x86/x64 executables.\n"
@@ -290,6 +318,10 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 // --- Tool Implementations ---
 
 json McpServer::ToolAttach(const json& args) {
+	if (args.contains("logFile") && args["logFile"].is_string()) {
+		std::string lf = args["logFile"].get<std::string>();
+		if (!lf.empty()) veh::Logger::Instance().SetFile(lf);
+	}
 	if (session_.IsAttached()) {
 		LOG_INFO("Auto-detaching from previous session (pid=%u) before new attach", session_.GetTargetPid());
 		ToolDetach({});
@@ -324,6 +356,10 @@ json McpServer::ToolAttach(const json& args) {
 }
 
 json McpServer::ToolLaunch(const json& args) {
+	if (args.contains("logFile") && args["logFile"].is_string()) {
+		std::string lf = args["logFile"].get<std::string>();
+		if (!lf.empty()) veh::Logger::Instance().SetFile(lf);
+	}
 	if (session_.IsAttached()) {
 		LOG_INFO("Auto-detaching from previous session (pid=%u) before new launch", session_.GetTargetPid());
 		ToolDetach({});
@@ -2149,7 +2185,8 @@ json McpServer::GetToolsList() {
 	return json::array({
 		{{"name", "veh_attach"}, {"description", "Attach to a running process by PID. Injects VEH debugger DLL. Auto-detaches if already attached. Target process must be running (not CREATE_SUSPENDED)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"pid", {{"type", "integer"}, {"description", "Process ID to attach to"}}}
+			{"pid", {{"type", "integer"}, {"description", "Process ID to attach to"}}},
+			{"logFile", {{"type", "string"}, {"description", "Enable server-side logging to this file path (e.g. 'veh-mcp.log'). Omit to disable logging."}}}
 		 }}, {"required", json::array({"pid"})}}}},
 
 		{{"name", "veh_launch"}, {"description", "Launch a program and attach the debugger. Auto-detaches if already attached. Handles CREATE_SUSPENDED internally."},
@@ -2158,7 +2195,8 @@ json McpServer::GetToolsList() {
 			{"args", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Command line arguments"}}},
 			{"stopOnEntry", {{"type", "boolean"}, {"description", "Stop at entry point (default: true)"}}},
 			{"runAsInvoker", {{"type", "boolean"}, {"description", "Bypass UAC elevation prompt by setting __COMPAT_LAYER=RunAsInvoker (default: false)"}}},
-			{"injectionMethod", {{"type", "string"}, {"enum", json::array({"auto", "createRemoteThread", "ntCreateThreadEx", "threadHijack", "queueUserApc"})}, {"description", "DLL injection method (default: auto). Auto tries all methods in order."}}}
+			{"injectionMethod", {{"type", "string"}, {"enum", json::array({"auto", "createRemoteThread", "ntCreateThreadEx", "threadHijack", "queueUserApc"})}, {"description", "DLL injection method (default: auto). Auto tries all methods in order."}}},
+			{"logFile", {{"type", "string"}, {"description", "Enable server-side logging to this file path (e.g. 'veh-mcp.log'). Omit to disable logging."}}}
 		 }}, {"required", json::array({"program"})}}}},
 
 		{{"name", "veh_detach"}, {"description", "Detach debugger from the target process."},

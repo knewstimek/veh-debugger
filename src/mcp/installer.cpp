@@ -333,7 +333,7 @@ static bool InstallJson(const std::string& path, const std::string& serverPath) 
 
 	data["mcpServers"][SERVER_NAME] = {
 		{"command", NormalizePath(serverPath)},
-		{"args", json::array({"--log=veh-mcp.log"})}
+		{"args", json::array()}
 	};
 
 	return WriteJsonFile(path, data);
@@ -406,7 +406,7 @@ static bool InstallToml(const std::string& path, const std::string& serverPath) 
 	// 서버 항목 생성/업데이트
 	toml::table entry;
 	entry.insert_or_assign("command", NormalizePath(serverPath));
-	entry.insert_or_assign("args", toml::array{"--log=veh-mcp.log"});
+	entry.insert_or_assign("args", toml::array{});
 	entry.insert_or_assign("enabled", true);
 	servers->insert_or_assign(SERVER_NAME, std::move(entry));
 
