@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "veh-debugger": {
+      "type": "stdio",
+      "command": "./build/bin/Release/veh-mcp-server.exe",
+      "args": [],
+      "env": {}
+    }
+  }
+}
