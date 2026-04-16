@@ -248,8 +248,9 @@ bool McpStdioTransport::Start() {
 
 void McpStdioTransport::Stop() {
 	running_ = false;
-	_close(_fileno(stdin));
 	if (readThread_.joinable()) {
+		// Unblock the blocking ReadFile in ReadThread
+		CancelSynchronousIo(readThread_.native_handle());
 		readThread_.join();
 	}
 }
@@ -264,38 +265,32 @@ bool McpStdioTransport::Send(const std::string& json) {
 }
 
 void McpStdioTransport::ReadThread() {
-	// MCP stdio: one JSON object per line
+	// MCP stdio: one JSON object per line.
+	// Use blocking ReadFile so the pipe write-end closing (ERROR_BROKEN_PIPE)
+	// is detected immediately. PeekNamedPipe polling was unreliable: after the
+	// write end closes, PeekNamedPipe can return TRUE with avail=0 forever,
+	// leaving the process alive after the MCP client exits.
+	// Stop() cancels the blocking read via CancelSynchronousIo.
 	std::string lineBuf;
 	HANDLE hStdin = GetStdHandle(STD_INPUT_HANDLE);
 	char buf[4096];
 
 	while (running_) {
-		DWORD avail = 0;
-		BOOL peekOk = PeekNamedPipe(hStdin, NULL, 0, NULL, &avail, NULL);
-		if (!peekOk) {
-			DWORD err = GetLastError();
-			LOG_INFO("MCP stdin pipe broken (PeekNamedPipe err=%u), stopping", (unsigned)err);
-			running_ = false;
-			if (closeCallback_) closeCallback_();
-			break;
-		}
-		if (avail == 0) {
-			Sleep(10);
-			continue;
-		}
 		DWORD bytesRead = 0;
-		DWORD toRead = (avail < sizeof(buf)) ? avail : sizeof(buf);
-		BOOL ok = ReadFile(hStdin, buf, toRead, &bytesRead, NULL);
+		BOOL ok = ReadFile(hStdin, buf, sizeof(buf), &bytesRead, NULL);
 		if (!ok || bytesRead == 0) {
-			LOG_INFO("MCP stdin closed (ok=%d, read=%u, err=%u), stopping",
-				(int)ok, (unsigned)bytesRead, (unsigned)GetLastError());
-			running_ = false;
-			if (closeCallback_) closeCallback_();
+			DWORD err = GetLastError();
+			if (running_ && err != ERROR_OPERATION_ABORTED) {
+				// Genuine pipe close (e.g. ERROR_BROKEN_PIPE), not Stop()
+				LOG_INFO("MCP stdin closed (ok=%d, read=%u, err=%u), stopping",
+					(int)ok, (unsigned)bytesRead, (unsigned)err);
+				running_ = false;
+				if (closeCallback_) closeCallback_();
+			}
 			break;
 		}
-		int n = (int)bytesRead;
 
-		lineBuf.append(buf, n);
+		lineBuf.append(buf, (int)bytesRead);
 
 		// Extract complete lines
 		size_t pos;
