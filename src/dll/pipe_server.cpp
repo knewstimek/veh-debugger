@@ -1487,8 +1487,8 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			CONTEXT tmpCtx = origCtx;
 			{
 				bool stackOk = true;
-				uint64_t fakeRet = ir.parkStub ? reinterpret_cast<uint64_t>(ir.parkStub) : origCtx.Rip;
 #ifdef _WIN64
+				uint64_t fakeRet = ir.parkStub ? reinterpret_cast<uint64_t>(ir.parkStub) : origCtx.Rip;
 				tmpCtx.Rsp = (tmpCtx.Rsp & ~0xFULL);
 				tmpCtx.Rsp -= 0x28;
 				if (IsBadWritePtr(reinterpret_cast<LPVOID>(tmpCtx.Rsp), 0x28)) {
@@ -1499,6 +1499,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				}
 				tmpCtx.Rip = thunks[i];
 #else
+				uint32_t fakeRet = ir.parkStub ? reinterpret_cast<uint32_t>(ir.parkStub) : origCtx.Eip;
 				tmpCtx.Esp = (tmpCtx.Esp & ~0xFU);
 				tmpCtx.Esp -= 4;
 				if (IsBadWritePtr(reinterpret_cast<LPVOID>(tmpCtx.Esp), 4)) {
@@ -1812,7 +1813,11 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		// Map: (callSite, target) -> hitCount
 		struct PairHash {
 			size_t operator()(const std::pair<uint64_t,uint64_t>& p) const {
-				return std::hash<uint64_t>()(p.first) ^ (std::hash<uint64_t>()(p.second) << 32);
+				// 비트폭 독립 결합 (x86에서 size_t=32bit << 32 = UB 회피)
+				uint64_t a = std::hash<uint64_t>()(p.first);
+				uint64_t b = std::hash<uint64_t>()(p.second);
+				uint64_t h = a * 0x9e3779b97f4a7c15ULL + b;
+				return static_cast<size_t>(h ^ (h >> 32));
 			}
 		};
 		std::unordered_map<std::pair<uint64_t,uint64_t>, uint32_t, PairHash> aggMap;

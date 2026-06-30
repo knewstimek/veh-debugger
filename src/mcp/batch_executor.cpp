@@ -636,7 +636,7 @@ json BatchExecutor::DispatchTool(const std::string& name, const json& args) {
 		{
 			std::lock_guard<std::mutex> lock(session_.GetBpMutex());
 			for (auto& bp : session_.GetSwBreakpoints())
-				sw.push_back({{"id", bp.id}, {"address", ToHex(bp.address)}});
+				sw.push_back({{"id", bp.id}, {"address", ToHex(bp.address)}, {"status", bp.pending ? "pending" : "active"}});
 			for (auto& bp : session_.GetHwBreakpoints())
 				hw.push_back({{"id", bp.id}, {"address", ToHex(bp.address)}});
 		}

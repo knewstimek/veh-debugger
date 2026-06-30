@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 1.1.1 (2026-07-01)
+
+### Added
+- **Deferred (pending) breakpoints** -- Source/function breakpoints on symbols whose module is not loaded yet are no longer dropped. They are kept as `pending` and automatically bound when the module loads (via `LdrRegisterDllNotification` -> re-resolve through the PDB).
+  - DAP: a pending BP is reported with `verified: false`, then a `breakpoint` event (reason `changed`, `verified: true`) is sent once it binds -- VS Code fills in the breakpoint automatically.
+  - MCP: `veh_set_source_breakpoint` / `veh_set_function_breakpoint` return `{"pending": true}`; `veh_list_breakpoints` shows `status: "pending" | "active"`. Re-resolution runs on a dedicated worker thread (the module-load event arrives on the reader thread, where synchronous IPC would deadlock).
+
+### Fixed
+- **Attach/launch race: breakpoints set before the VEH handler finished installing** -- `Connect` returned as soon as the named pipe accepted, but the DLL's `veh.Install()` could still be in progress. Added `PipeClient::WaitForReady()`: after connect (and before the reader thread starts) the client synchronously waits for the DLL's `Ready` event, which the DLL sends only after VEH installation is guaranteed. Applied to all DAP/MCP attach/launch/reconnect paths. If `Ready` times out the client proceeds with a warning -- no regression vs. previous behavior.
+- **VEH handler double-install race** -- `VehHandler::Install()` had no lock, so `InitThread` and the pipe server thread could both call `AddVectoredExceptionHandler`. Serialized with a mutex and a re-check of `installed_` inside the lock.
+- **x86 build was broken** -- `pipe_server.cpp` referenced `ctx.Rip` (x64-only; x86 uses `Eip`) and shifted a 32-bit `size_t` left by 32 (undefined behavior on x86). Both fixed; the x86 DLL (`vcruntime_net32.dll`) now builds cleanly and deferred/attach features are verified on an x86 (WoW64) target.
 
 ### Changed
 - **MCP server instructions block compressed** -- Removed redundant descriptions from Typical workflow steps; merged two `veh_continue` key-point lines into one. Added `veh_batch` flow-control hint (`$N` references, `if`/`loop`/`for_each`). Reduces per-turn token overhead with no behavior change.

@@ -181,8 +181,8 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | `veh_detach` | - | Detach debugger |
 | `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?, action?` | Software BP. `action` auto-executes on hit (veh_batch format) |
 | `veh_remove_breakpoint` | `id` | Remove software BP |
-| `veh_set_source_breakpoint` | `source, line, condition?, hitCondition?, logMessage?` | Source file + line BP (PDB required) |
-| `veh_set_function_breakpoint` | `name, condition?, hitCondition?, logMessage?` | Function name BP (PDB required) |
+| `veh_set_source_breakpoint` | `source, line, condition?, hitCondition?, logMessage?` | Source file + line BP (PDB required; unresolved modules kept `pending` and bound automatically on module load) |
+| `veh_set_function_breakpoint` | `name, condition?, hitCondition?, logMessage?` | Function name BP (PDB required; unresolved modules kept `pending` until module loads) |
 | `veh_list_breakpoints` | - | List active SW/HW breakpoints |
 | `veh_set_data_breakpoint` | `address, type, size` | HW BP (write/readwrite/execute) |
 | `veh_remove_data_breakpoint` | `id` | Remove HW BP |

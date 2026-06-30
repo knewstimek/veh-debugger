@@ -39,7 +39,9 @@ public:
 
 	void SetEventCallback(DebugEventCallback cb);
 
-	bool IsInstalled() const { return handler_ != nullptr; }
+	// installed_(atomic)를 읽는다. Install이 handler_ 설정 후 installed_=true로 두므로
+	// installed_==true면 handler_ 설정이 완료된 상태. ServerThread의 무락 읽기 data race 회피.
+	bool IsInstalled() const { return installed_.load(); }
 
 	// 스레드 재개 시그널 (continue/step 명령에서 호출)
 	void ResumeStoppedThread(uint32_t threadId, bool step = false, bool passException = false);
@@ -183,6 +185,9 @@ private:
 	PVOID handler_ = nullptr;
 	DebugEventCallback callback_;
 	std::atomic<bool> installed_{false};
+	// Install() 직렬화 - InitThread와 ServerThread가 동시에 들어와도
+	// AddVectoredExceptionHandler가 중복 호출되지 않게 한다(attach race 방지).
+	std::mutex installMutex_;
 
 	// VEH 재진입 방지 TLS 슬롯 (thread_local 금지 -> TlsAlloc 사용)
 	DWORD reentryTlsSlot_ = TLS_OUT_OF_INDEXES;

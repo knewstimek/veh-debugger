@@ -67,6 +67,7 @@ void DapServer::SetTransport(Transport* transport) {
 
 void DapServer::Run() {
 	running_ = true;
+	StartRetryThread();
 	transport_->Start();
 
 	// 메인 루프 — transport가 종료될 때까지 대기
@@ -75,6 +76,7 @@ void DapServer::Run() {
 	}
 
 	Cleanup();
+	StopRetryThread();
 }
 
 void DapServer::Stop() {
@@ -293,6 +295,10 @@ void DapServer::OnLaunch(const Request& req) {
 	pipeClient_.StartEventListener([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
 		OnIpcEvent(eventId, payload, size);
 	});
+	// VEH 설치 완료(Ready) 대기 (reader 시작 후 -- condvar). 실패해도 진행(보수적).
+	if (!pipeClient_.WaitForReady(3000)) {
+		LOG_WARN("No Ready after connect (pid=%u); proceeding (VEH may not be installed yet)", targetPid_);
+	}
 	pipeClient_.StartHeartbeat();
 
 	// 타겟 비트니스에 맞게 디스어셈블러 재생성
@@ -354,6 +360,10 @@ void DapServer::OnAttach(const Request& req) {
 	pipeClient_.StartEventListener([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
 		OnIpcEvent(eventId, payload, size);
 	});
+	// VEH 설치 완료(Ready) 대기 (reader 시작 후 -- condvar). 실패해도 진행(보수적).
+	if (!pipeClient_.WaitForReady(3000)) {
+		LOG_WARN("No Ready after connect (pid=%u); proceeding (VEH may not be installed yet)", targetPid_);
+	}
 	pipeClient_.StartHeartbeat();
 
 	// 타겟 비트니스에 맞게 디스어셈블러 재생성
@@ -528,11 +538,14 @@ void DapServer::OnSetBreakpoints(const Request& req) {
 	std::vector<uint64_t> changedAddresses; // BP 설정/해제로 메모리가 변경된 주소
 	for (auto it = breakpointMappings_.begin(); it != breakpointMappings_.end(); ) {
 		if (it->source == sourceFile && newAddresses.find(it->address) == newAddresses.end()) {
-			DAP_TRACE("RemoveSourceBP", "vehId=" + std::to_string(it->vehId) + " addr=" + FormatAddress(it->address));
-			changedAddresses.push_back(it->address);
-			RemoveBreakpointRequest rmReq;
-			rmReq.id = it->vehId;
-			pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
+			// pending(vehId==0)은 실제 DLL BP가 없으므로 RemoveBreakpoint 생략
+			if (it->vehId != 0) {
+				DAP_TRACE("RemoveSourceBP", "vehId=" + std::to_string(it->vehId) + " addr=" + FormatAddress(it->address));
+				changedAddresses.push_back(it->address);
+				RemoveBreakpointRequest rmReq;
+				rmReq.id = it->vehId;
+				pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
+			}
 			it = breakpointMappings_.erase(it);
 		} else {
 			++it;
@@ -548,6 +561,23 @@ void DapServer::OnSetBreakpoints(const Request& req) {
 			dbp.id = nextDapBpId_++;
 			dbp.verified = false;
 			dbp.message = rb.errorMsg;
+			// 모듈 미로드로 인한 미해결일 수 있으면 deferred로 보관 (file+line 필요).
+			// 모듈이 나중에 로드되면 ModuleLoaded 핸들러가 재해석해 실제 BP로 전환.
+			if (!sourceFile.empty() && rb.line > 0) {
+				BreakpointMapping m{};
+				m.dapId = dbp.id;
+				m.vehId = 0;
+				m.address = 0;
+				m.source = sourceFile;
+				m.condition = rb.condition;
+				m.hitCondition = rb.hitCondition;
+				m.logMessage = rb.logMessage;
+				m.type = BpType::Source;
+				m.line = rb.line;
+				m.pending = true;
+				breakpointMappings_.push_back(m);
+				DAP_TRACE("PendingSourceBP", sourceFile + ":" + std::to_string(rb.line));
+			}
 			breakpointsJson.push_back(dbp.ToJson());
 			continue;
 		}
@@ -625,9 +655,11 @@ void DapServer::OnSetFunctionBreakpoints(const Request& req) {
 	// 기존 function breakpoint 제거 (DAP: 전체 교체 방식)
 	for (auto it = breakpointMappings_.begin(); it != breakpointMappings_.end(); ) {
 		if (it->type == BpType::Function) {
-			RemoveBreakpointRequest rmReq;
-			rmReq.id = it->vehId;
-			pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
+			if (it->vehId != 0) {  // pending(vehId==0)은 실제 DLL BP가 없으므로 생략
+				RemoveBreakpointRequest rmReq;
+				rmReq.id = it->vehId;
+				pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
+			}
 			it = breakpointMappings_.erase(it);
 		} else {
 			++it;
@@ -664,7 +696,14 @@ void DapServer::OnSetFunctionBreakpoints(const Request& req) {
 			Breakpoint dbp;
 			dbp.id = nextDapBpId_++;
 			dbp.verified = false;
-			dbp.message = "Symbol not found: " + funcName;
+			dbp.message = "Symbol not found: " + funcName + " (pending: will bind when module loads)";
+			// 함수 심볼 미해결 -> deferred로 보관. 모듈 로드 시 재해석.
+			BreakpointMapping m{};
+			m.dapId = dbp.id;
+			m.type = BpType::Function;
+			m.functionName = funcName;
+			m.pending = true;
+			breakpointMappings_.push_back(m);
 			breakpointsJson.push_back(dbp.ToJson());
 			continue;
 		}
@@ -700,6 +739,146 @@ void DapServer::OnSetFunctionBreakpoints(const Request& req) {
 	resp.success = true;
 	resp.body = {{"breakpoints", breakpointsJson}};
 	SendResponse(resp);
+}
+
+// Deferred BP: 단일 영속 워커 + condvar.
+void DapServer::StartRetryThread() {
+	retryStop_ = false;
+	retryThread_ = std::thread(&DapServer::RetryThreadLoop, this);
+}
+
+void DapServer::StopRetryThread() {
+	{
+		std::lock_guard<std::mutex> lk(retryMutex_);
+		retryStop_ = true;
+	}
+	retryCv_.notify_one();
+	if (retryThread_.joinable()) retryThread_.join();
+}
+
+// reader 스레드(ModuleLoaded)에서 호출: breakpointMutex_나 std::thread 객체를 절대
+// 건드리지 않고 wake signal만 보낸다 -> reader<->main 데드락/thread race 원천 차단.
+void DapServer::NotifyRetry() {
+	{
+		std::lock_guard<std::mutex> lk(retryMutex_);
+		retryWake_ = true;
+	}
+	retryCv_.notify_one();
+}
+
+void DapServer::RetryThreadLoop() {
+	for (;;) {
+		{
+			std::unique_lock<std::mutex> lk(retryMutex_);
+			retryCv_.wait(lk, [this] { return retryWake_ || retryStop_; });
+			if (retryStop_) return;
+			retryWake_ = false;   // wake 소비. 처리 중 새 signal이 오면 다시 set되어 재실행됨(lost-wakeup 방지)
+		}
+		try {
+			RetryPendingBreakpointsOnce();
+		} catch (...) {
+			LOG_ERROR("RetryPendingBreakpointsOnce threw");
+		}
+	}
+}
+
+// pending BP를 DLL 심볼로 재해석하고, 성공하면 실제 BP 설정 +
+// DAP breakpoint(reason=changed, verified=true) 이벤트로 통지한다.
+// 워커 스레드에서만 호출되므로 IPC(SendAndReceive)를 안전하게 쓸 수 있다.
+void DapServer::RetryPendingBreakpointsOnce() {
+	// pending이 소진되거나 더 이상 해석되지 않을 때까지 반복.
+	for (;;) {
+		if (!running_ || !pipeClient_.IsConnected()) return;
+
+		struct Retry {
+			int dapId;
+			bool isFunc;
+			std::string source;
+			uint32_t line;
+			std::string functionName;
+		};
+		std::vector<Retry> todo;
+		{
+			std::lock_guard<std::mutex> lock(breakpointMutex_);
+			for (auto& m : breakpointMappings_) {
+				if (!m.pending) continue;
+				todo.push_back({m.dapId, m.type == BpType::Function, m.source, m.line, m.functionName});
+			}
+		}
+		if (todo.empty()) return;
+
+		bool anyResolved = false;
+		for (auto& r : todo) {
+			uint64_t addr = 0;
+			if (r.isFunc) {
+				ResolveFunctionRequest rq = {};
+				strncpy_s(rq.functionName, r.functionName.c_str(), sizeof(rq.functionName) - 1);
+				std::vector<uint8_t> resp;
+				if (pipeClient_.SendAndReceive(IpcCommand::ResolveFunction, &rq, sizeof(rq), resp)
+					&& resp.size() >= sizeof(ResolveFunctionResponse)) {
+					auto* r2 = reinterpret_cast<const ResolveFunctionResponse*>(resp.data());
+					if (r2->status == IpcStatus::Ok) addr = r2->address;
+				}
+			} else {
+				ResolveSourceLineRequest rq = {};
+				strncpy_s(rq.fileName, r.source.c_str(), sizeof(rq.fileName) - 1);
+				rq.line = r.line;
+				std::vector<uint8_t> resp;
+				if (pipeClient_.SendAndReceive(IpcCommand::ResolveSourceLine, &rq, sizeof(rq), resp)
+					&& resp.size() >= sizeof(ResolveSourceLineResponse)) {
+					auto* r2 = reinterpret_cast<const ResolveSourceLineResponse*>(resp.data());
+					if (r2->status == IpcStatus::Ok) addr = r2->address;
+				}
+			}
+			if (addr == 0) continue;  // 아직 해석 불가 (이 모듈이 아님)
+
+			// 실제 BP 설정
+			SetBreakpointRequest sreq;
+			sreq.address = addr;
+			std::vector<uint8_t> sresp;
+			uint32_t newVehId = 0;
+			bool ok = false;
+			if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &sreq, sizeof(sreq), sresp)
+				&& sresp.size() >= sizeof(SetBreakpointResponse)) {
+				auto* s2 = reinterpret_cast<const SetBreakpointResponse*>(sresp.data());
+				if (s2->status == IpcStatus::Ok) { ok = true; newVehId = s2->id; }
+			}
+			if (!ok) continue;
+
+			// 매핑 갱신 (dapId로 추적; 동시 재설정으로 사라졌을 수 있음)
+			bool updated = false;
+			{
+				std::lock_guard<std::mutex> lock(breakpointMutex_);
+				for (auto& m : breakpointMappings_) {
+					if (m.dapId == r.dapId && m.pending) {
+						m.vehId = newVehId;
+						m.address = addr;
+						m.pending = false;
+						updated = true;
+						break;
+					}
+				}
+			}
+			if (updated) {
+				anyResolved = true;
+				Breakpoint dbp;
+				dbp.id = r.dapId;
+				dbp.verified = true;
+				dbp.instructionReference = addr;
+				SendEvent("breakpoint", {
+					{"reason", "changed"},
+					{"breakpoint", dbp.ToJson()},
+				});
+				DAP_TRACE("DeferredBPResolved", (r.isFunc ? r.functionName : (r.source + ":" + std::to_string(r.line))) + " -> " + FormatAddress(addr));
+			} else {
+				// 매핑이 사라짐(동시 재설정) -> 방금 설정한 BP 정리
+				RemoveBreakpointRequest rmReq;
+				rmReq.id = newVehId;
+				pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
+			}
+		}
+		if (!anyResolved) return;  // 이번 라운드에 아무것도 못 풀면 종료
+	}
 }
 
 void DapServer::OnSetExceptionBreakpoints(const Request& req) {
@@ -2324,6 +2503,10 @@ void DapServer::OnRestart(const Request& req) {
 		pipeClient_.StartEventListener([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
 			OnIpcEvent(eventId, payload, size);
 		});
+		// VEH 설치 완료(Ready) 대기 (reader 시작 후 -- condvar). 실패해도 진행(보수적).
+		if (!pipeClient_.WaitForReady(3000)) {
+			LOG_WARN("No Ready after reconnect (pid=%u); proceeding", targetPid_);
+		}
 		pipeClient_.StartHeartbeat();
 
 		// targetProcess_ + symbolEngine_ 재초기화 (attach 모드)
@@ -2396,6 +2579,10 @@ void DapServer::OnRestart(const Request& req) {
 		pipeClient_.StartEventListener([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
 			OnIpcEvent(eventId, payload, size);
 		});
+		// VEH 설치 완료(Ready) 대기 (reader 시작 후 -- condvar). 실패해도 진행(보수적).
+		if (!pipeClient_.WaitForReady(3000)) {
+			LOG_WARN("No Ready after reconnect (pid=%u); proceeding", targetPid_);
+		}
 		pipeClient_.StartHeartbeat();
 
 		// targetProcess_ + symbolEngine_ 재초기화
@@ -2888,6 +3075,11 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				safePath[sizeof(e->module.path) - 1] = '\0';
 				symbolEngine_.LoadModule(safePath, e->module.baseAddress, e->module.size);
 			}
+
+			// Deferred BP: 새 모듈 심볼로 미해결 BP 재해석.
+			// 이 콜백은 Reader 스레드 -> SendAndReceive/락 금지. NotifyRetry는 wake signal만
+			// 보내고, 영속 워커 스레드가 재해석을 수행한다(데드락/race 차단).
+			NotifyRetry();
 		}
 		break;
 	}
@@ -3446,6 +3638,9 @@ void DapServer::Cleanup(bool detachOnly) {
 	// Disconnect는 항상 호출 (파이프 닫기 + 스레드 정리)
 	pipeClient_.Disconnect();
 
+	// 주: deferred 재시도 워커(retryThread_)는 Run() 생애 동안 유지되며 Run() 종료 시
+	// StopRetryThread()로 정리한다. Cleanup은 detach/restart에서도 불리므로 여기서 워커를
+	// 멈추지 않는다. 워커는 pipeClient_.IsConnected()를 확인하므로 Disconnect 후에도 안전.
 	{
 		std::lock_guard<std::mutex> lock(breakpointMutex_);
 		breakpointMappings_.clear();

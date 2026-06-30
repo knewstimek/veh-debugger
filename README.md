@@ -224,8 +224,8 @@ enabled = true
 | `veh_detach` | - | 디버거 분리 |
 | `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?, action?` | 소프트웨어 BP. `action`으로 히트 시 자동 실행 (veh_batch 형식) |
 | `veh_remove_breakpoint` | `id` | 소프트웨어 BP 제거 |
-| `veh_set_source_breakpoint` | `source, line, condition?, hitCondition?, logMessage?` | 소스 파일+줄번호 BP (PDB 필요) |
-| `veh_set_function_breakpoint` | `name, condition?, hitCondition?, logMessage?` | 함수명 BP (PDB 필요) |
+| `veh_set_source_breakpoint` | `source, line, condition?, hitCondition?, logMessage?` | 소스 파일+줄번호 BP (PDB 필요; 미로드 모듈은 `pending` 후 모듈 로드 시 자동 바인딩) |
+| `veh_set_function_breakpoint` | `name, condition?, hitCondition?, logMessage?` | 함수명 BP (PDB 필요; 미로드 모듈은 `pending` 후 자동 바인딩) |
 | `veh_list_breakpoints` | - | 활성 SW/HW BP 목록 조회 |
 | `veh_set_data_breakpoint` | `address, type, size` | HW BP (write/readwrite/execute) |
 | `veh_remove_data_breakpoint` | `id` | HW BP 제거 |

@@ -31,6 +31,11 @@ public:
 		const void* payload, uint32_t payloadSize,
 		std::vector<uint8_t>& response, int timeoutMs = 3000);
 
+	// Connect 직후, StartEventListener 전에 호출. DLL이 클라 연결 후 보내는 Ready
+	// 이벤트를 동기로 수신해 VEH 핸들러 설치 완료를 보장한다(attach race 방지).
+	// 성공 시 true, 타임아웃/오류 시 false (호출 측은 false여도 진행 가능 - 보수적).
+	bool WaitForReady(int timeoutMs = 3000);
+
 	// Start event listener thread (single reader thread)
 	using EventCallback = std::function<void(uint32_t eventId, const uint8_t* payload, uint32_t size)>;
 	void StartEventListener(EventCallback cb);
@@ -68,6 +73,13 @@ private:
 	std::mutex readerReadyMutex_;
 	std::condition_variable readerReadyCv_;
 	bool readerReady_ = false;
+
+	// Ready 핸드셰이크용. reader thread가 Ready(0x1000) 이벤트를 수신하면 signal.
+	// WaitForReady는 이 condvar만 대기 -> 동기 부분 읽기로 인한 프레이밍 desync 없음.
+	// (WaitForReady는 StartEventListener로 reader가 시작된 후 호출해야 한다.)
+	std::mutex readyMutex_;
+	std::condition_variable readyCv_;
+	bool readyReceived_ = false;
 
 	// 응답 대기용
 	std::mutex responseMutex_;
