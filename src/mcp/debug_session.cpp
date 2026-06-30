@@ -111,6 +111,8 @@ bool DebugSession::Attach(uint32_t pid) {
 		LOG_ERROR("Pipe connection failed (pid=%u)", pid);
 		return false;
 	}
+	// 주: Ready 대기는 이벤트 리스너(reader) 시작 후에 해야 하므로 McpServer가
+	// SetEventCallback 직후 GetPipeClient().WaitForReady()를 호출한다(condvar 방식).
 
 	targetPid_ = pid;
 	targetProcess_ = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
@@ -212,6 +214,7 @@ DebugSession::LaunchResult DebugSession::Launch(const LaunchOptions& opts) {
 		return result;
 	}
 
+	// 주: Ready 대기는 reader 시작 후라야 하므로 McpServer가 SetEventCallback 뒤에 수행.
 	targetPid_ = lr.pid;
 	attached_ = true;
 

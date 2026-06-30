@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <atomic>
+#include <thread>
 #include <condition_variable>
 #include "dap_types.h"
 #include "transport.h"
@@ -135,9 +136,28 @@ private:
 		uint32_t hitCount = 0;
 		std::string logMessage;
 		BpType type = BpType::Source;
+		// Deferred BP: 심볼 미해결 상태로 보관했다가 모듈 로드 시 재해석
+		uint32_t line = 0;            // source BP 재해석용 (file+line)
+		std::string functionName;    // function BP 재해석용
+		bool pending = false;        // true면 vehId/address 미설정, 모듈 로드 대기 중
 	};
 	std::vector<BreakpointMapping> breakpointMappings_;
 	int nextDapBpId_ = 1;
+
+	// Deferred BP 재시도: 단일 영속 워커 + condvar.
+	// ModuleLoaded(reader 스레드)는 NotifyRetry()로 signal만 보낸다 -- breakpointMutex_나
+	// std::thread 객체를 건드리지 않으므로 reader<->main 데드락/thread race가 원천 차단된다.
+	// 워커는 Run() 생애 동안 1개만 존재(생성/join 각 1회).
+	std::thread retryThread_;
+	std::mutex retryMutex_;
+	std::condition_variable retryCv_;
+	bool retryWake_ = false;   // retryMutex_ 보호
+	bool retryStop_ = false;   // retryMutex_ 보호
+	void StartRetryThread();
+	void StopRetryThread();
+	void RetryThreadLoop();              // 워커 본체: wait -> RetryPendingBreakpointsOnce
+	void NotifyRetry();                  // reader 스레드에서 호출: wake signal만
+	void RetryPendingBreakpointsOnce();  // pending 재해석 1패스 (락 잡고 스냅샷 -> IPC -> 갱신)
 
 	// Data breakpoint (hardware watchpoint) mapping
 	struct DataBreakpointMapping {

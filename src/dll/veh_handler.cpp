@@ -56,6 +56,9 @@ VehHandler& VehHandler::Instance() {
 }
 
 bool VehHandler::Install() {
+	// InitThread와 ServerThread가 동시에 Install()에 들어오는 race를 막는다.
+	// lock 안에서 installed_를 재확인하여 AddVectoredExceptionHandler 중복 호출 방지.
+	std::lock_guard<std::mutex> lock(installMutex_);
 	if (installed_) {
 		LOG_WARN("VEH handler already installed");
 		return true;

@@ -67,9 +67,14 @@ static bool JsonBool(const json& args, const char* key, bool defaultVal = false)
 	return defaultVal;
 }
 
-McpServer::McpServer() {}
+McpServer::McpServer() {
+	StartRetryThread();
+}
 McpServer::~McpServer() {
 	running_ = false;
+	// Deferred BP 워커 정리 (session_ 멤버가 아직 유효할 때 stop+join).
+	// 단일 영속 워커라 여기서만 join하며, 이후 reader가 NotifyRetry해도 재기동 없음.
+	StopRetryThread();
 }
 
 void McpServer::SetTransport(dap::Transport* transport) {
@@ -217,7 +222,7 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 		}},
 		{"serverInfo", {
 			{"name", "veh-debugger"},
-			{"version", "1.1.0"}
+			{"version", "1.1.1"}
 		}},
 		{"instructions",
 			"VEH Debugger - in-process debugger for Windows x86/x64 executables.\n"
@@ -341,6 +346,10 @@ json McpServer::ToolAttach(const json& args) {
 	session_.SetEventCallback([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
 		OnIpcEvent(eventId, payload, size);
 	});
+	// VEH 설치 완료(Ready) 대기 (이벤트 리스너 시작 후 -- condvar). attach 직후 BP race 방지.
+	if (!session_.GetPipeClient().WaitForReady(3000)) {
+		LOG_WARN("No Ready after attach/launch; proceeding (VEH may not be installed yet)");
+	}
 	session_.StartProcessMonitor();
 
 	json ret = {{"success", true}, {"pid", pid}, {"message", "Attached to process"}};
@@ -391,6 +400,10 @@ json McpServer::ToolLaunch(const json& args) {
 	session_.SetEventCallback([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
 		OnIpcEvent(eventId, payload, size);
 	});
+	// VEH 설치 완료(Ready) 대기 (이벤트 리스너 시작 후 -- condvar). attach 직후 BP race 방지.
+	if (!session_.GetPipeClient().WaitForReady(3000)) {
+		LOG_WARN("No Ready after attach/launch; proceeding (VEH may not be installed yet)");
+	}
 	session_.StartProcessMonitor();
 
 	json ret = {{"success", true}, {"pid", result.pid}, {"message",
@@ -406,6 +419,8 @@ json McpServer::ToolLaunch(const json& args) {
 json McpServer::ToolDetach(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
+	// Deferred BP 워커는 영속(McpServer 생애). 워커는 session_.IsAttached()를 확인하므로
+	// detach 후 죽은 세션에 접근하지 않는다. 여기서 join하지 않는다(재attach 시 재사용).
 	session_.Detach();
 	return {{"success", true}, {"message", "Detached"}};
 }
@@ -497,7 +512,27 @@ json McpServer::ToolSetSourceBreakpoint(const json& args) {
 
 	uint64_t addr = session_.ResolveSourceLine(source, line);
 	if (addr == 0) {
-		return {{"error", "Could not resolve source line (no PDB symbols or line not found)"}};
+		// deferred: 모듈 미로드일 수 있으므로 pending으로 보관. 모듈 로드 시 워커가 재해석.
+		std::lock_guard<std::mutex> lock(session_.GetBpMutex());
+		auto& bps = session_.GetSwBreakpoints();
+		bool exists = false;
+		for (auto& ex : bps) {
+			if (ex.pending && ex.source == source && ex.line == line) { exists = true; break; }
+		}
+		if (!exists) {
+			SwBpInfo bp;
+			bp.id = 0;
+			bp.address = 0;
+			bp.source = source;
+			bp.line = line;
+			bp.condition = args.value("condition", "");
+			bp.hitCondition = args.value("hitCondition", "");
+			bp.logMessage = args.value("logMessage", "");
+			bp.pending = true;
+			bps.push_back(bp);
+		}
+		return {{"pending", true}, {"source", source}, {"line", line},
+		        {"message", "Symbol not loaded yet; breakpoint is pending and will bind when the module loads. Poll veh_list_breakpoints (status) to confirm."}};
 	}
 
 	auto bpResult = session_.SetBreakpoint(addr);
@@ -510,7 +545,13 @@ json McpServer::ToolSetSourceBreakpoint(const json& args) {
 		auto& bps = session_.GetSwBreakpoints();
 		bool found = false;
 		for (auto& existing : bps) {
-			if (existing.id == bpResult.id) {
+			// 같은 vehId, 또는 같은 source/line의 미해결 pending 엔트리를 재사용한다.
+			// (모듈 로드 후 워커가 바인딩하기 전에 같은 BP를 재설정하면 중복 active 발생 -> 방지)
+			if (existing.id == bpResult.id ||
+			    (existing.pending && existing.source == source && existing.line == line)) {
+				existing.id = bpResult.id;
+				existing.address = addr;
+				existing.pending = false;
 				existing.source = source;
 				existing.line = line;
 				existing.condition = args.value("condition", "");
@@ -545,7 +586,26 @@ json McpServer::ToolSetFunctionBreakpoint(const json& args) {
 
 	uint64_t addr = session_.ResolveFunction(name);
 	if (addr == 0) {
-		return {{"error", "Could not resolve function '" + name + "' (no PDB symbols or not found)"}};
+		// deferred: 함수 심볼 미해결 -> pending으로 보관. 모듈 로드 시 워커가 재해석.
+		std::lock_guard<std::mutex> lock(session_.GetBpMutex());
+		auto& bps = session_.GetSwBreakpoints();
+		bool exists = false;
+		for (auto& ex : bps) {
+			if (ex.pending && ex.functionName == name) { exists = true; break; }
+		}
+		if (!exists) {
+			SwBpInfo bp;
+			bp.id = 0;
+			bp.address = 0;
+			bp.functionName = name;
+			bp.condition = args.value("condition", "");
+			bp.hitCondition = args.value("hitCondition", "");
+			bp.logMessage = args.value("logMessage", "");
+			bp.pending = true;
+			bps.push_back(bp);
+		}
+		return {{"pending", true}, {"function", name},
+		        {"message", "Symbol not loaded yet; breakpoint is pending and will bind when the module loads. Poll veh_list_breakpoints (status) to confirm."}};
 	}
 
 	auto bpResult = session_.SetBreakpoint(addr);
@@ -558,7 +618,13 @@ json McpServer::ToolSetFunctionBreakpoint(const json& args) {
 		auto& bps = session_.GetSwBreakpoints();
 		bool found = false;
 		for (auto& existing : bps) {
-			if (existing.id == bpResult.id) {
+			// 같은 vehId, 또는 같은 functionName의 미해결 pending 엔트리를 재사용한다.
+			// (모듈 로드 후 워커가 바인딩하기 전에 같은 BP를 재설정하면 중복 active 발생 -> 방지)
+			if (existing.id == bpResult.id ||
+			    (existing.pending && existing.functionName == name)) {
+				existing.id = bpResult.id;
+				existing.address = addr;
+				existing.pending = false;
 				existing.functionName = name;
 				existing.condition = args.value("condition", "");
 				existing.hitCondition = args.value("hitCondition", "");
@@ -589,7 +655,7 @@ json McpServer::ToolListBreakpoints(const json& args) {
 		std::lock_guard<std::mutex> lock(session_.GetBpMutex());
 		for (auto& bp : session_.GetSwBreakpoints()) {
 			char buf[32]; snprintf(buf, sizeof(buf), "0x%llX", bp.address);
-			json entry = {{"id", bp.id}, {"address", buf}};
+			json entry = {{"id", bp.id}, {"address", buf}, {"status", bp.pending ? "pending" : "active"}};
 			if (!bp.condition.empty()) entry["condition"] = bp.condition;
 			if (!bp.hitCondition.empty()) entry["hitCondition"] = bp.hitCondition;
 			if (!bp.logMessage.empty()) entry["logMessage"] = bp.logMessage;
@@ -1915,6 +1981,110 @@ void McpServer::CleanupTempStepOverBp() {
 	}
 }
 
+// --- Deferred BP retry (worker thread) ---
+
+// Deferred BP: 단일 영속 워커 + condvar.
+void McpServer::StartRetryThread() {
+	retryStop_ = false;
+	retryThread_ = std::thread(&McpServer::RetryThreadLoop, this);
+}
+
+void McpServer::StopRetryThread() {
+	{
+		std::lock_guard<std::mutex> lk(retryMutex_);
+		retryStop_ = true;
+	}
+	retryCv_.notify_one();
+	if (retryThread_.joinable()) retryThread_.join();
+}
+
+// reader 스레드(ModuleLoaded)에서 호출: BP 락이나 std::thread 객체를 건드리지 않고
+// wake signal만 보낸다 -> reader/tool/main 스레드 간 thread 객체 race 원천 차단.
+void McpServer::NotifyRetry() {
+	{
+		std::lock_guard<std::mutex> lk(retryMutex_);
+		retryWake_ = true;
+	}
+	retryCv_.notify_one();
+}
+
+void McpServer::RetryThreadLoop() {
+	for (;;) {
+		{
+			std::unique_lock<std::mutex> lk(retryMutex_);
+			retryCv_.wait(lk, [this] { return retryWake_ || retryStop_; });
+			if (retryStop_) return;
+			retryWake_ = false;   // 처리 중 새 signal이 오면 다시 set됨(lost-wakeup 방지)
+		}
+		try {
+			RetryPendingBreakpointsOnce();
+		} catch (...) {
+			LOG_ERROR("RetryPendingBreakpointsOnce threw");
+		}
+	}
+}
+
+// pending BP를 DLL 심볼로 재해석하고, 성공하면 실제 BP 설정 +
+// notifications/logging으로 통지한다 (에이전트는 veh_list_breakpoints로도 확인 가능).
+// 워커 스레드에서만 호출되므로 IPC(SendAndReceive)를 안전하게 쓸 수 있다.
+void McpServer::RetryPendingBreakpointsOnce() {
+	for (;;) {
+		if (!session_.IsAttached()) return;
+
+		struct Retry { bool isFunc; std::string source; uint32_t line; std::string functionName; };
+		std::vector<Retry> todo;
+		{
+			std::lock_guard<std::mutex> lock(session_.GetBpMutex());
+			for (auto& bp : session_.GetSwBreakpoints()) {
+				if (!bp.pending) continue;
+				todo.push_back({!bp.functionName.empty(), bp.source, bp.line, bp.functionName});
+			}
+		}
+		if (todo.empty()) return;
+
+		bool anyResolved = false;
+		for (auto& r : todo) {
+			uint64_t addr = r.isFunc ? session_.ResolveFunction(r.functionName)
+			                         : session_.ResolveSourceLine(r.source, r.line);
+			if (addr == 0) continue;  // 아직 해석 불가 (이 모듈이 아님)
+
+			auto bpResult = session_.SetBreakpoint(addr);
+			if (!bpResult.ok) continue;
+
+			bool updated = false;
+			{
+				std::lock_guard<std::mutex> lock(session_.GetBpMutex());
+				for (auto& bp : session_.GetSwBreakpoints()) {
+					if (!bp.pending) continue;
+					bool match = r.isFunc ? (bp.functionName == r.functionName)
+					                      : (bp.source == r.source && bp.line == r.line);
+					if (match) {
+						bp.id = bpResult.id;
+						bp.address = addr;
+						bp.pending = false;
+						updated = true;
+						break;
+					}
+				}
+			}
+			if (!updated) {
+				// 매핑이 사라짐(동시 재설정) -> 방금 설정한 BP 정리
+				session_.RemoveBreakpoint(bpResult.id);
+				continue;
+			}
+			anyResolved = true;
+
+			std::string label = r.isFunc ? r.functionName : (r.source + ":" + std::to_string(r.line));
+			char buf[320];
+			snprintf(buf, sizeof(buf), "Deferred breakpoint #%u bound: %s -> 0x%llX",
+				bpResult.id, label.c_str(), addr);
+			std::lock_guard<std::mutex> lock(eventMutex_);
+			pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
+		}
+		if (!anyResolved) return;  // 이번 라운드에 아무것도 못 풀면 종료
+	}
+}
+
 // --- IPC Event Handler ---
 
 void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t size) {
@@ -2118,6 +2288,12 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 			}
 			session_.SignalStop("exception", e->address, e->threadId, 0);
 		}
+		break;
+	}
+	case IpcEvent::ModuleLoaded: {
+		// 새 모듈 심볼로 pending(deferred) BP 재해석. 이 콜백은 reader 스레드이므로
+		// SendAndReceive/락 직접 호출 금지 -> NotifyRetry로 wake signal만, 영속 워커가 처리.
+		NotifyRetry();
 		break;
 	}
 	case IpcEvent::Error:

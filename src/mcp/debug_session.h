@@ -112,6 +112,7 @@ struct SwBpInfo {
 	std::string source;
 	uint32_t line = 0;
 	std::string functionName;
+	bool pending = false;   // deferred: symbol unresolved, retried on module load
 };
 
 struct HwBpInfo {

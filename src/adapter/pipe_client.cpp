@@ -133,8 +133,26 @@ bool PipeClient::Connect(uint32_t targetPid, int timeoutMs) {
 
 	connected_ = true;
 	lastRecvTime_ = GetTickCount64();
+	{ std::lock_guard<std::mutex> l(readyMutex_); readyReceived_ = false; }  // 재연결마다 새 Ready 대기
 	LOG_INFO("Connected to VEH DLL pipe (PID: %u) [overlapped]", targetPid);
 	return true;
+}
+
+bool PipeClient::WaitForReady(int timeoutMs) {
+	// reader thread(ReaderThread)가 Ready(0x1000) 이벤트를 수신하면 readyReceived_를 set +
+	// signal한다. 동기 부분 읽기를 하지 않으므로 파이프 프레이밍 desync가 원천적으로 없다.
+	// **반드시 StartEventListener() 호출 후**에 부를 것(그래야 reader가 Ready를 받아 깨운다).
+	// DLL ServerThread는 Ready 송신 전에 VEH 설치를 보장하므로(pipe_server.cpp),
+	// Ready 수신 = VEH 핸들러 설치 완료. attach 직후 BP race를 막는다.
+	std::unique_lock<std::mutex> lk(readyMutex_);
+	bool ok = readyCv_.wait_for(lk, std::chrono::milliseconds(timeoutMs),
+		[this] { return readyReceived_; });
+	if (ok) {
+		LOG_INFO("WaitForReady: Ready received (VEH installed)");
+	} else {
+		LOG_WARN("WaitForReady timeout (%dms) -- proceeding", timeoutMs);
+	}
+	return ok;
 }
 
 void PipeClient::Disconnect() {
@@ -310,6 +328,11 @@ void PipeClient::ReaderThread() {
 
 		// 이벤트인지 응답인지 구분
 		if (hdr.command >= IPC_EVENT_THRESHOLD) {
+			// Ready 핸드셰이크: WaitForReady가 이 signal을 기다린다.
+			if (hdr.command == static_cast<uint32_t>(IpcEvent::Ready)) {
+				{ std::lock_guard<std::mutex> l(readyMutex_); readyReceived_ = true; }
+				readyCv_.notify_all();
+			}
 			if (eventCallback_) {
 				eventCallback_(hdr.command, payload.data(), hdr.payloadSize);
 			}

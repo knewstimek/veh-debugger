@@ -6,6 +6,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <queue>
+#include <thread>
 #include <unordered_map>
 #include "adapter/transport.h"
 #include "debug_session.h"
@@ -135,6 +136,22 @@ private:
 
 	// BP actions: breakpoint ID -> action steps (executed on hit, then auto-continue)
 	std::unordered_map<uint32_t, json> bpActions_;  // guarded by session_.GetBpMutex()
+
+	// Deferred BP retry: single persistent worker + condvar.
+	// ModuleLoaded (reader thread) only signals via NotifyRetry() -- it never touches
+	// the BP mutex or the std::thread object, so reader/tool/main races on the thread
+	// object are eliminated. The worker lives for the McpServer lifetime (each tool call
+	// runs on its own thread, so ad-hoc spawn/join was unsafe). Created/joined exactly once.
+	std::thread retryThread_;
+	std::mutex retryMutex_;
+	std::condition_variable retryCv_;
+	bool retryWake_ = false;   // guarded by retryMutex_
+	bool retryStop_ = false;   // guarded by retryMutex_
+	void StartRetryThread();
+	void StopRetryThread();
+	void RetryThreadLoop();
+	void NotifyRetry();
+	void RetryPendingBreakpointsOnce();
 };
 
 } // namespace veh
