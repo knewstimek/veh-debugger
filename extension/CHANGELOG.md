@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- `veh_set_source_breakpoint` / `veh_set_function_breakpoint` tool descriptions now explain deferred (pending) behavior, so agents recognize a `pending:true` response as normal (not an error) and know to poll `veh_list_breakpoints`.
+
 ## 1.1.1 (2026-07-01)
 
 ### Added

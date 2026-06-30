@@ -2390,7 +2390,7 @@ json McpServer::GetToolsList() {
 			{"id", {{"type", "integer"}, {"description", "Breakpoint ID from veh_set_breakpoint"}}}
 		 }}, {"required", json::array({"id"})}}}},
 
-		{{"name", "veh_set_source_breakpoint"}, {"description", "Set a breakpoint by source file and line number. Requires PDB symbols loaded."},
+		{{"name", "veh_set_source_breakpoint"}, {"description", "Set a breakpoint by source file and line number. Requires PDB symbols. If the symbol's module is not loaded yet, the breakpoint is kept pending (response has pending:true) and auto-binds when the module loads -- poll veh_list_breakpoints (status: pending|active). This is normal, not an error."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"source", {{"type", "string"}, {"description", "Source file path (e.g. 'main.cpp', 'src/app.cpp')"}}},
 			{"line", {{"type", "integer"}, {"description", "Line number in the source file"}}},
@@ -2399,7 +2399,7 @@ json McpServer::GetToolsList() {
 			{"logMessage", {{"type", "string"}, {"description", "Log message template (logpoint)"}}}
 		 }}, {"required", json::array({"source", "line"})}}}},
 
-		{{"name", "veh_set_function_breakpoint"}, {"description", "Set a breakpoint at the entry of a function by name. Requires PDB symbols loaded."},
+		{{"name", "veh_set_function_breakpoint"}, {"description", "Set a breakpoint at the entry of a function by name. Requires PDB symbols. If the function's module is not loaded yet, the breakpoint is kept pending (response has pending:true) and auto-binds when the module loads -- poll veh_list_breakpoints (status: pending|active). This is normal, not an error."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"name", {{"type", "string"}, {"description", "Function name (e.g. 'main', 'MyClass::DoSomething')"}}},
 			{"condition", {{"type", "string"}, {"description", "Condition expression"}}},
