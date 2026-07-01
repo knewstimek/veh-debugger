@@ -24,7 +24,7 @@ No separate debugger GUI needed. **Everything works inside the VSCode debug pane
 
 - **VEH-based**: Uses VEH instead of Windows Debug API - bypasses PEB/NtQuery-based anti-debug checks (Themida, VMProtect, etc.)
 - **Full DAP support**: Works with VSCode, MCP debug tools, and any DAP-compatible client
-- **MCP tool server**: 36 tools for AI agents (Claude, Cursor, Codex, etc.) to directly control the debugger
+- **MCP tool server**: 37 tools for AI agents (Claude, Cursor, Codex, etc.) to directly control the debugger
 - **TCP mode**: Remote debugging via `--tcp --port=PORT`
 - **Remote access**: `--remote` / `--bind=0.0.0.0` for VM/network debugging
 - **32/64-bit**: Debug both x86 and x64 processes (WoW64 injection for 32-bit targets)
@@ -57,7 +57,7 @@ veh-debug-adapter.exe              veh-mcp-server.exe
 |-----------|------|
 | `veh-debugger.dll` (`vcruntime_net.dll`) | Injected into target. Registers VEH handler, manages breakpoints, queries threads/stack/memory |
 | `veh-debug-adapter.exe` | DAP protocol server. DLL injection, Named Pipe IPC, JSON-RPC processing |
-| `veh-mcp-server.exe` | MCP tool server. 30 tools for AI agents to directly control the debugger |
+| `veh-mcp-server.exe` | MCP tool server. 37 tools for AI agents to directly control the debugger |
 | VSCode Extension | launch.json schema, adapter path configuration (minimal wrapper) |
 
 ## Build
@@ -172,19 +172,19 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` | JSON (`mcpServers`) |
 | Codex CLI | `~/.codex/config.toml` | TOML (`mcp_servers`) |
 
-**MCP Tools (36)**
+**MCP Tools (37)**
 
 | Tool | Args | Description |
 |------|------|-------------|
 | `veh_attach` | `pid` | Inject DLL + connect pipe |
-| `veh_launch` | `program, args?, stopOnEntry?` | Create process + inject |
+| `veh_launch` | `program, args?, stopOnEntry?, env?` | Create process + inject. `env` passes environment variables to the target (`{"KEY":"VAL"}` or `["KEY=VALUE"]`, overlaid on the inherited parent environment) |
 | `veh_detach` | - | Detach debugger |
 | `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?, action?` | Software BP. `action` auto-executes on hit (veh_batch format) |
 | `veh_remove_breakpoint` | `id` | Remove software BP |
 | `veh_set_source_breakpoint` | `source, line, condition?, hitCondition?, logMessage?` | Source file + line BP (PDB required; unresolved modules kept `pending` and bound automatically on module load) |
 | `veh_set_function_breakpoint` | `name, condition?, hitCondition?, logMessage?` | Function name BP (PDB required; unresolved modules kept `pending` until module loads) |
 | `veh_list_breakpoints` | - | List active SW/HW breakpoints |
-| `veh_set_data_breakpoint` | `address, type, size` | HW BP (write/readwrite/execute) |
+| `veh_set_data_breakpoint` | `address, type, size, condition?, hitCondition?` | HW BP (write/readwrite/execute). `condition`'s `value` token = current value at the watched address (e.g. `value != 0` filters zero-write noise); `hitCondition:"5"` stops only on the 5th hit |
 | `veh_remove_data_breakpoint` | `id` | Remove HW BP |
 | `veh_continue` | `threadId?, wait?, timeout?, pass_exception?, ignore_exceptions?` | Continue. `ignore_exceptions=[0x80000003]` auto-passes specific exceptions to SEH |
 | `veh_step_in` | `threadId` | Step Into |
@@ -192,11 +192,12 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | `veh_step_out` | `threadId` | Step Out |
 | `veh_pause` | `threadId?` | Pause |
 | `veh_threads` | - | List threads |
-| `veh_stack_trace` | `threadId, maxFrames?` | Stack trace |
+| `veh_stack_trace` | `threadId, maxFrames?` | Stack trace. For PDB-less modules, parses the PE export table directly for accurate function names (instead of DbgHelp's inaccurate `OrdinalNNNNN` labels) |
 | `veh_registers` | `threadId` | Read registers |
 | `veh_set_register` | `threadId, name, value` | Modify register value |
 | `veh_evaluate` | `expression, threadId` | Evaluate register/memory/pointer/segment (`[reg+offset]`, `gs:[0x60]`, etc.) |
 | `veh_read_memory` | `address, size` | Read memory (hex) |
+| `veh_read_pointer_chain` | `base, offsets[], derefFinal?, size?` | Follow a multi-level pointer chain in one call (no per-hop round-trips). Dereferences `*(cur+offset)` at each hop (auto-detects 4/8-byte pointers for x86/x64), returns every hop and the final resolved address. `derefFinal:false` returns the final address without the last deref; `size>0` also reads bytes at the resolved address |
 | `veh_write_memory` | `address, data` or `patches` | Write memory. Batch: `patches=[{address,data},...]` |
 | `veh_dump_memory` | `address, size, output_path` | Dump memory to binary file (up to 64MB) |
 | `veh_allocate_memory` | `size?, protection?` | Allocate memory in target (VirtualAlloc) |

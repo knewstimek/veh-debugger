@@ -60,6 +60,7 @@ private:
 	json ToolStackTrace(const json& args);
 	json ToolRegisters(const json& args);
 	json ToolReadMemory(const json& args);
+	json ToolReadPointerChain(const json& args);
 	json ToolWriteMemory(const json& args);
 	json ToolModules(const json& args);
 	json ToolDisassemble(const json& args);

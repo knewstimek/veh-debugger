@@ -6,6 +6,7 @@
 
 #include <dbghelp.h>
 #include <psapi.h>
+#include <cstring>
 #pragma comment(lib, "dbghelp.lib")
 
 namespace veh {
@@ -60,6 +61,112 @@ void StackWalker::Initialize() {
 	initialized_ = true;
 	LOG_INFO("SymInitialize succeeded");
 }
+
+namespace {
+
+// DbgHelp가 PDB 없는 모듈에서 nearest-export 휴리스틱으로 만들어내는
+// 가짜 이름("Ordinal12345") 형식인지 판별
+bool IsOrdinalLikeName(const char* name) {
+	if (!name || strncmp(name, "Ordinal", 7) != 0) return false;
+	const char* digits = name + 7;
+	if (!*digits) return false;
+	for (const char* p = digits; *p; ++p) {
+		if (*p < '0' || *p > '9') return false;
+	}
+	return true;
+}
+
+// moduleBase에서 PE export table을 직접 파싱하여, address 이하에서 가장 가까운
+// 이름 있는(named) export를 찾는다. DbgHelp가 PDB 없는 모듈에서 붙이는 부정확한
+// ordinal 라벨을 대체하기 위한 fallback 경로.
+// 이 DLL은 타겟 프로세스 내부에서 실행되므로 moduleBase는 in-process 포인터이며
+// ReadProcessMemory 없이 직접 역참조 가능하다. 단, SEH 사용은 프로젝트 규칙상
+// 금지되어 있으므로(ManualMap DLL 디텍션 벡터) 모든 접근 전에 RVA를 SizeOfImage
+// 범위 내로 방어적으로 검증한다.
+std::string ResolveNearestExport(uint64_t moduleBase, uint64_t address, uint64_t& outDisplacement) {
+	outDisplacement = 0;
+	if (!moduleBase || address < moduleBase) return {};
+
+	const uint8_t* base = reinterpret_cast<const uint8_t*>(moduleBase);
+
+	auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+	if (dos->e_magic != IMAGE_DOS_SIGNATURE) return {};
+	if (dos->e_lfanew <= 0 || dos->e_lfanew > 0x1000) return {};
+
+	auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+	if (nt->Signature != IMAGE_NT_SIGNATURE) return {};
+
+	const uint32_t sizeOfImage = nt->OptionalHeader.SizeOfImage;
+	if (sizeOfImage == 0) return {};
+
+	const uint64_t targetRva64 = address - moduleBase;
+	if (targetRva64 >= sizeOfImage) return {};
+	const uint32_t targetRva = static_cast<uint32_t>(targetRva64);
+
+	if (nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXPORT) return {};
+	const IMAGE_DATA_DIRECTORY& exportEntry = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+	const uint32_t exportDirRva  = exportEntry.VirtualAddress;
+	const uint32_t exportDirSize = exportEntry.Size;
+	if (exportDirRva == 0 || exportDirSize == 0) return {};
+	if ((uint64_t)exportDirRva + exportDirSize > sizeOfImage) return {};
+	// export dir 헤더 구조체 전체가 이미지 안에 들어가는지 확인 (size < sizeof 인 손상 PE 방어)
+	if ((uint64_t)exportDirRva + sizeof(IMAGE_EXPORT_DIRECTORY) > sizeOfImage) return {};
+
+	auto* exportDir = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base + exportDirRva);
+
+	const uint32_t numNames = exportDir->NumberOfNames;
+	const uint32_t numFuncs = exportDir->NumberOfFunctions;
+	const uint32_t namesRva = exportDir->AddressOfNames;
+	const uint32_t ordsRva  = exportDir->AddressOfNameOrdinals;
+	const uint32_t funcsRva = exportDir->AddressOfFunctions;
+	if (numNames == 0 || numFuncs == 0) return {};
+	if (namesRva == 0 || ordsRva == 0 || funcsRva == 0) return {};
+
+	// 손상된 PE 방어용 상한 (정상 PE는 이 값을 넘지 않음)
+	constexpr uint32_t kMaxExports = 65536;
+	if (numNames > kMaxExports || numFuncs > kMaxExports) return {};
+
+	if ((uint64_t)namesRva + (uint64_t)numNames * sizeof(uint32_t) > sizeOfImage) return {};
+	if ((uint64_t)ordsRva  + (uint64_t)numNames * sizeof(uint16_t) > sizeOfImage) return {};
+	if ((uint64_t)funcsRva + (uint64_t)numFuncs * sizeof(uint32_t) > sizeOfImage) return {};
+
+	const uint32_t* namesArr = reinterpret_cast<const uint32_t*>(base + namesRva);
+	const uint16_t* ordsArr  = reinterpret_cast<const uint16_t*>(base + ordsRva);
+	const uint32_t* funcsArr = reinterpret_cast<const uint32_t*>(base + funcsRva);
+
+	const char* bestName = nullptr;
+	uint32_t bestFuncRva = 0;
+	uint32_t bestNameRva = 0;
+
+	for (uint32_t i = 0; i < numNames; ++i) {
+		const uint16_t ordinal = ordsArr[i];
+		if (ordinal >= numFuncs) continue;
+
+		const uint32_t funcRva = funcsArr[ordinal];
+		if (funcRva == 0 || funcRva > targetRva) continue;
+
+		// forwarder export: RVA가 export 디렉토리 자체 범위 내부를 가리킴 -> 제외
+		if (funcRva >= exportDirRva && funcRva < exportDirRva + exportDirSize) continue;
+
+		if (bestName && funcRva <= bestFuncRva) continue;
+
+		const uint32_t nameRva = namesArr[i];
+		if (nameRva == 0 || nameRva >= sizeOfImage) continue;
+
+		bestFuncRva = funcRva;
+		bestNameRva = nameRva;
+		bestName = reinterpret_cast<const char*>(base + nameRva);
+	}
+
+	if (!bestName) return {};
+	outDisplacement = targetRva - bestFuncRva;
+	// 이름이 NUL 종료되지 않은 손상 PE 방어: 이미지 경계까지만 스캔(경계 넘어 over-read 방지)
+	size_t maxLen = static_cast<size_t>(sizeOfImage - bestNameRva);
+	size_t nameLen = ::strnlen(bestName, maxLen);
+	return std::string(bestName, nameLen);
+}
+
+} // anonymous namespace
 
 std::vector<StackFrame> StackWalker::Walk(uint32_t threadId, uint32_t startFrame, uint32_t maxFrames) {
 	std::vector<StackFrame> frames;
@@ -146,24 +253,7 @@ std::vector<StackFrame> StackWalker::Walk(uint32_t threadId, uint32_t startFrame
 		frame.frameBase     = sf.AddrFrame.Offset;
 		frame.line          = 0;
 
-		// 함수명 해석
-		DWORD64 displacement64 = 0;
-		if (SymFromAddr(hProcess, sf.AddrPC.Offset, &displacement64, symInfo)) {
-			frame.functionName = symInfo->Name;
-		}
-
-		// 줄 번호 해석
-		IMAGEHLP_LINE64 lineInfo = {};
-		lineInfo.SizeOfStruct = sizeof(lineInfo);
-		DWORD displacement32 = 0;
-		if (SymGetLineFromAddr64(hProcess, sf.AddrPC.Offset, &displacement32, &lineInfo)) {
-			frame.line = lineInfo.LineNumber;
-			if (lineInfo.FileName) {
-				frame.sourceFile = lineInfo.FileName;
-			}
-		}
-
-		// 모듈명 해석: AddrPC로 모듈 핸들 → 파일명
+		// 모듈명 해석: AddrPC로 모듈 핸들 → 파일명 (export fallback이 moduleBase를 필요로 하므로 함수명 해석보다 먼저 수행)
 		HMODULE hModule = nullptr;
 		if (GetModuleHandleExA(
 				GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -174,6 +264,37 @@ std::vector<StackFrame> StackWalker::Walk(uint32_t threadId, uint32_t startFrame
 			if (GetModuleFileNameA(hModule, modPath, MAX_PATH)) {
 				const char* slash = strrchr(modPath, '\\');
 				frame.moduleName = slash ? (slash + 1) : modPath;
+			}
+		}
+
+		// 함수명 해석
+		DWORD64 displacement64 = 0;
+		bool gotSymName = SymFromAddr(hProcess, sf.AddrPC.Offset, &displacement64, symInfo) != FALSE;
+		if (gotSymName) {
+			frame.functionName = symInfo->Name;
+		}
+
+		// DbgHelp 결과가 없거나, ordinal 전용 가짜 이름이거나, displacement가 비정상적으로 큰 경우
+		// (PDB 없는 모듈에서 DbgHelp의 nearest-export 휴리스틱이 부정확한 이름을 붙이는 문제) ->
+		// PE export table을 직접 파싱해 정확한 이름으로 교체 시도
+		if (frame.functionName.empty() ||
+			IsOrdinalLikeName(frame.functionName.c_str()) ||
+			(gotSymName && displacement64 >= 0x10000)) {
+			uint64_t exportDisp = 0;
+			std::string exportName = ResolveNearestExport(frame.moduleBase, sf.AddrPC.Offset, exportDisp);
+			if (!exportName.empty()) {
+				frame.functionName = exportName;
+			}
+		}
+
+		// 줄 번호 해석
+		IMAGEHLP_LINE64 lineInfo = {};
+		lineInfo.SizeOfStruct = sizeof(lineInfo);
+		DWORD displacement32 = 0;
+		if (SymGetLineFromAddr64(hProcess, sf.AddrPC.Offset, &displacement32, &lineInfo)) {
+			frame.line = lineInfo.LineNumber;
+			if (lineInfo.FileName) {
+				frame.sourceFile = lineInfo.FileName;
 			}
 		}
 

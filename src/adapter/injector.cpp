@@ -3,6 +3,8 @@
 #include <tlhelp32.h>
 #include <psapi.h>
 #include <filesystem>
+#include <mutex>
+#include <set>
 
 // NtCreateThreadEx 타입 정의
 #ifndef NTSTATUS
@@ -739,7 +741,8 @@ LaunchResult Injector::LaunchAndInject(
 	const std::string& workingDir,
 	const std::string& dllPath,
 	InjectionMethod method,
-	bool runAsInvoker)
+	bool runAsInvoker,
+	const std::vector<std::string>& env)
 {
 	STARTUPINFOA si = {};
 	si.cb = sizeof(si);
@@ -752,6 +755,11 @@ LaunchResult Injector::LaunchAndInject(
 	std::vector<char> cmdBuf(cmdLine.begin(), cmdLine.end());
 	cmdBuf.push_back('\0');
 
+	// env/__COMPAT_LAYER은 프로세스 전역 환경을 임시 변경 -> 동시 launch 시 서로
+	// 오염되지 않도록 CreateProcess 완료까지 직렬화(정적 뮤텍스, adapter 프로세스이므로 안전).
+	static std::mutex g_launchEnvMutex;
+	std::lock_guard<std::mutex> envLock(g_launchEnvMutex);
+
 	// runAsInvoker: UAC manifest에 requireAdministrator가 있는 exe를
 	// UAC 프롬프트 없이 현재 권한으로 실행 (__COMPAT_LAYER=RunAsInvoker)
 	// 현재 프로세스 환경에 임시로 설정 후 CreateProcess가 상속하게 함
@@ -759,6 +767,31 @@ LaunchResult Injector::LaunchAndInject(
 		SetEnvironmentVariableA("__COMPAT_LAYER", "RunAsInvoker");
 		LOG_INFO("RunAsInvoker enabled: bypassing UAC elevation prompt");
 	}
+
+	// 사용자 지정 환경변수: CreateProcess가 부모 환경(+덮어쓴 값)을 상속하도록
+	// 임시 적용. 자식 생성 직후 원래 값으로 복원해 현재 프로세스 오염 방지.
+	std::vector<std::pair<std::string, std::string>> savedEnv;  // 원래 있던 키 (값 복원)
+	std::vector<std::string> unsetKeys;                          // 원래 없던 키 (복원 시 삭제)
+	std::set<std::string> seenKeys;                              // 중복 키 복원 오류 방지
+	for (const auto& kv : env) {
+		auto eq = kv.find('=');
+		if (eq == std::string::npos || eq == 0) continue;
+		std::string key = kv.substr(0, eq);
+		std::string val = kv.substr(eq + 1);
+		if (seenKeys.insert(key).second) {
+			// 이 키를 처음 본 경우에만 원래 값을 저장(중복 키가 있어도 최초 원본으로 복원)
+			std::vector<char> prior(32768);
+			DWORD n = GetEnvironmentVariableA(key.c_str(), prior.data(), (DWORD)prior.size());
+			if (n > 0 && n < prior.size()) savedEnv.emplace_back(key, std::string(prior.data(), n));
+			else unsetKeys.push_back(key);
+		}
+		SetEnvironmentVariableA(key.c_str(), val.c_str());
+		LOG_INFO("Launch env override: %s", key.c_str());
+	}
+	auto restoreEnv = [&]() {
+		for (auto& kv : savedEnv) SetEnvironmentVariableA(kv.first.c_str(), kv.second.c_str());
+		for (auto& k : unsetKeys) SetEnvironmentVariableA(k.c_str(), nullptr);
+	};
 
 	// DETACHED_PROCESS: prevent child from inheriting parent's console.
 	// Without this, child's printf/cout goes to parent's stdout pipe,
@@ -776,6 +809,7 @@ LaunchResult Injector::LaunchAndInject(
 		DWORD err = GetLastError();
 		// 환경변수 정리 (현재 프로세스 오염 방지)
 		if (runAsInvoker) SetEnvironmentVariableA("__COMPAT_LAYER", nullptr);
+		restoreEnv();
 		LOG_ERROR("CreateProcess failed for '%s': %u", exePath.c_str(), err);
 		LaunchResult fail;
 		fail.error = "CreateProcess failed (error " + std::to_string(err) + ")";
@@ -792,6 +826,7 @@ LaunchResult Injector::LaunchAndInject(
 
 	// 환경변수 정리 (현재 프로세스 오염 방지)
 	if (runAsInvoker) SetEnvironmentVariableA("__COMPAT_LAYER", nullptr);
+	restoreEnv();
 
 	LOG_INFO("Process created (PID: %u, TID: %u) in suspended state",
 		pi.dwProcessId, pi.dwThreadId);

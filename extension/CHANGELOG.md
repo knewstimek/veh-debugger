@@ -1,9 +1,18 @@
 # Changelog
 
-## Unreleased
+## 1.1.11
+
+### Added
+- **`veh_read_pointer_chain`** (new tool) -- follow a multi-level pointer chain in a single call instead of N round-trips. Give a `base` and `offsets[]`; it dereferences `*(cur+offset)` at each hop (auto-detects 4/8-byte pointers for x86/x64), returns every hop and the final resolved address. `derefFinal:false` yields the final address itself (no last deref); `size>0` also reads bytes at the resolved address.
+- **`veh_launch` `env` parameter** -- pass environment variables to the target (object `{"KEY":"VAL"}` or array `["KEY=VALUE"]`), applied on top of the inherited parent environment. Enables debugging headless processes that are configured via env vars.
+- **`veh_set_data_breakpoint` `condition` / `hitCondition`** -- filter noisy hardware watchpoints. The `value` token resolves to the current value at the watched address (size-aware), e.g. `value != 0` skips zero-writes from a clear-helper; `hitCondition:"5"` stops only on the 5th write.
 
 ### Changed
+- Stack traces now fall back to parsing the module's PE export table when DbgHelp yields no name / an `OrdinalNNNNN` placeholder / a far-off symbol (PDB-less modules), producing accurate function labels instead of misleading nearest-export guesses.
 - `veh_set_source_breakpoint` / `veh_set_function_breakpoint` tool descriptions now explain deferred (pending) behavior, so agents recognize a `pending:true` response as normal (not an error) and know to poll `veh_list_breakpoints`.
+
+### Fixed
+- Conditional breakpoints using memory dereference (`[addr]`) or the data-breakpoint `value` token now read target memory correctly for launched processes -- the target handle was missing `PROCESS_VM_READ`, so such conditions silently evaluated against 0.
 
 ## 1.1.1 (2026-07-01)
 
