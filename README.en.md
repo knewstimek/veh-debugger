@@ -177,7 +177,7 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | Tool | Args | Description |
 |------|------|-------------|
 | `veh_attach` | `pid` | Inject DLL + connect pipe |
-| `veh_launch` | `program, args?, stopOnEntry?, env?` | Create process + inject. `env` passes environment variables to the target (`{"KEY":"VAL"}` or `["KEY=VALUE"]`, overlaid on the inherited parent environment) |
+| `veh_launch` | `program, args?, stopOnEntry?, cwd?, env?` | Create process + inject. `cwd` sets the target's working directory (omit to inherit the debugger's cwd). `env` passes environment variables to the target (`{"KEY":"VAL"}` or `["KEY=VALUE"]`, overlaid on the inherited parent environment) |
 | `veh_detach` | - | Detach debugger |
 | `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?, action?` | Software BP. `action` auto-executes on hit (veh_batch format) |
 | `veh_remove_breakpoint` | `id` | Remove software BP |

@@ -189,7 +189,7 @@ DebugSession::LaunchResult DebugSession::Launch(const LaunchOptions& opts) {
 	}
 
 	InjectionMethod injMethod = ParseInjectionMethod(opts.injectionMethod);
-	auto lr = Injector::LaunchAndInject(opts.program, argsStr, "", dllPath, injMethod, opts.runAsInvoker, opts.env);
+	auto lr = Injector::LaunchAndInject(opts.program, argsStr, opts.cwd, dllPath, injMethod, opts.runAsInvoker, opts.env);
 	if (lr.pid == 0) {
 		result.error = "Launch failed: " + opts.program;
 		if (!lr.error.empty()) result.error += " - " + lr.error;

@@ -220,7 +220,7 @@ enabled = true
 | 도구 | 인자 | 설명 |
 |------|------|------|
 | `veh_attach` | `pid` | 프로세스에 DLL 인젝션 + 파이프 연결 |
-| `veh_launch` | `program, args?, stopOnEntry?, env?` | 프로세스 생성 + 인젝션. `env`로 타겟에 환경변수 전달 (`{"KEY":"VAL"}` 또는 `["KEY=VALUE"]`, 부모 환경 위에 덮어씀) |
+| `veh_launch` | `program, args?, stopOnEntry?, cwd?, env?` | 프로세스 생성 + 인젝션. `cwd`로 타겟 작업 디렉토리 지정(생략 시 디버거 cwd 상속). `env`로 타겟에 환경변수 전달 (`{"KEY":"VAL"}` 또는 `["KEY=VALUE"]`, 부모 환경 위에 덮어씀) |
 | `veh_detach` | - | 디버거 분리 |
 | `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?, action?` | 소프트웨어 BP. `action`으로 히트 시 자동 실행 (veh_batch 형식) |
 | `veh_remove_breakpoint` | `id` | 소프트웨어 BP 제거 |

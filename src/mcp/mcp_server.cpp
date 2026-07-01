@@ -405,6 +405,7 @@ json McpServer::ToolLaunch(const json& args) {
 	opts.stopOnEntry = JsonBool(args, "stopOnEntry", true);
 	opts.runAsInvoker = JsonBool(args, "runAsInvoker", false);
 	opts.injectionMethod = args.value("injectionMethod", "auto");
+	opts.cwd = args.value("cwd", "");
 
 	auto result = session_.Launch(opts);
 	if (!result.ok) {
@@ -2516,6 +2517,7 @@ json McpServer::GetToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"program", {{"type", "string"}, {"description", "Path to executable"}}},
 			{"args", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Command line arguments"}}},
+			{"cwd", {{"type", "string"}, {"description", "Working directory for the target process. Omit to inherit the debugger's current directory. Use this when the program loads config/resources/DLLs by relative path from its own folder."}}},
 			{"env", {{"type", "object"}, {"description", "Environment variables for the target, applied on top of the inherited parent environment (e.g. {\"ORACLE_M4_HOME\":\"C:/oracle\"}). Enables debugging headless processes configured via env vars. Also accepts an array of \"KEY=VALUE\" strings."}}},
 			{"stopOnEntry", {{"type", "boolean"}, {"description", "Stop at entry point (default: true)"}}},
 			{"runAsInvoker", {{"type", "boolean"}, {"description", "Bypass UAC elevation prompt by setting __COMPAT_LAYER=RunAsInvoker (default: false)"}}},
