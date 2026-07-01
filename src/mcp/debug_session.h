@@ -141,6 +141,7 @@ public:
 		bool stopOnEntry = true;
 		bool runAsInvoker = false;
 		std::string injectionMethod = "auto";
+		std::string cwd;                // 작업 디렉토리; 빈 값이면 디버거의 cwd 상속
 	};
 	struct LaunchResult {
 		bool ok = false;

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **`veh_launch` `cwd` parameter** -- set the target process's working directory (maps to `CreateProcess` `lpCurrentDirectory`). Omit to inherit the debugger's cwd (previous behavior). Fixes programs that load config/resources/DLLs by relative path from their own folder, and brings the MCP launch path to parity with the DAP path, which already supported `cwd`.
+
 ## 1.1.11
 
 ### Added
