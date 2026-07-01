@@ -120,6 +120,9 @@ struct HwBpInfo {
 	uint64_t address;
 	uint8_t type;
 	uint8_t size;
+	std::string condition;      // 'value != 0', '[0x..]>5' 등. value = 감시 주소의 현재 값
+	std::string hitCondition;   // N번째 히트에만 발화 (앞 N-1회 스킵)
+	uint32_t hitCount = 0;
 };
 
 // --- DebugSession: IPC wrapper with session state ---
@@ -134,6 +137,7 @@ public:
 	struct LaunchOptions {
 		std::string program;
 		std::vector<std::string> args;
+		std::vector<std::string> env;   // "KEY=VALUE" 형식, 부모 환경 위에 덮어씀
 		bool stopOnEntry = true;
 		bool runAsInvoker = false;
 		std::string injectionMethod = "auto";

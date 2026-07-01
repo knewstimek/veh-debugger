@@ -222,7 +222,7 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 		}},
 		{"serverInfo", {
 			{"name", "veh-debugger"},
-			{"version", "1.1.1"}
+			{"version", "1.1.11"}
 		}},
 		{"instructions",
 			"VEH Debugger - in-process debugger for Windows x86/x64 executables.\n"
@@ -276,6 +276,7 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 		else if (name == "veh_stack_trace")           result = ToolStackTrace(args);
 		else if (name == "veh_registers")             result = ToolRegisters(args);
 		else if (name == "veh_read_memory")           result = ToolReadMemory(args);
+		else if (name == "veh_read_pointer_chain")    result = ToolReadPointerChain(args);
 		else if (name == "veh_write_memory")          result = ToolWriteMemory(args);
 		else if (name == "veh_modules")               result = ToolModules(args);
 		else if (name == "veh_disassemble")           result = ToolDisassemble(args);
@@ -385,6 +386,20 @@ json McpServer::ToolLaunch(const json& args) {
 	if (args.contains("args") && args["args"].is_array()) {
 		for (auto& a : args["args"]) {
 			if (a.is_string()) opts.args.push_back(a.get<std::string>());
+		}
+	}
+	// env: object {"KEY":"VAL"} 또는 array ["KEY=VAL"] 둘 다 수용
+	if (args.contains("env")) {
+		const auto& e = args["env"];
+		if (e.is_object()) {
+			for (auto it = e.begin(); it != e.end(); ++it) {
+				std::string v = it.value().is_string() ? it.value().get<std::string>() : it.value().dump();
+				opts.env.push_back(it.key() + "=" + v);
+			}
+		} else if (e.is_array()) {
+			for (auto& s : e) {
+				if (s.is_string()) opts.env.push_back(s.get<std::string>());
+			}
 		}
 	}
 	opts.stopOnEntry = JsonBool(args, "stopOnEntry", true);
@@ -811,7 +826,10 @@ json McpServer::ToolSetDataBreakpoint(const json& args) {
 
 	{
 		std::lock_guard<std::mutex> lock(session_.GetBpMutex());
-		session_.GetHwBreakpoints().push_back({result.id, addr, type, static_cast<uint8_t>(size)});
+		HwBpInfo info{result.id, addr, type, static_cast<uint8_t>(size)};
+		info.condition = args.value("condition", "");
+		info.hitCondition = args.value("hitCondition", "");
+		session_.GetHwBreakpoints().push_back(std::move(info));
 	}
 
 	char buf[32]; snprintf(buf, sizeof(buf), "0x%llX", addr);
@@ -1181,6 +1199,96 @@ json McpServer::ToolReadMemory(const json& args) {
 	snprintf(addrBuf, sizeof(addrBuf), "0x%llX", addr);
 
 	return {{"address", addrBuf}, {"size", data.size()}, {"hex", oss.str()}};
+}
+
+json McpServer::ToolReadPointerChain(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+
+	std::string baseStr = args.value("base", "");
+	if (baseStr.empty()) baseStr = args.value("address", "");  // alias
+	if (baseStr.empty()) return {{"error", "base is required"}};
+
+	uint64_t cur;
+	if (!ParseAddress(baseStr, cur)) return {{"error", "invalid base address format"}};
+
+	if (!args.contains("offsets") || !args["offsets"].is_array())
+		return {{"error", "offsets array is required (e.g. [\"0x2c\",\"0x1c\",\"0x10\"])"}};
+
+	std::vector<int64_t> offsets;
+	for (auto& o : args["offsets"]) {
+		if (o.is_string()) {
+			try { offsets.push_back((int64_t)std::stoll(o.get<std::string>(), nullptr, 0)); }
+			catch (...) { return {{"error", "invalid offset: " + o.get<std::string>()}}; }
+		} else if (o.is_number_integer()) {
+			offsets.push_back(o.get<int64_t>());
+		} else {
+			return {{"error", "offsets must be hex strings or integers"}};
+		}
+	}
+	if (offsets.empty()) return {{"error", "offsets must not be empty"}};
+	if (offsets.size() > 64) return {{"error", "too many offsets (max 64 hops)"}};
+
+	bool derefFinal = JsonBool(args, "derefFinal", true);
+	int readSize = JsonInt(args, "size", 0);
+
+	// 포인터 크기 판정 (QUERY 권한만 필요). deref 자체는 IPC ReadMemory(DLL 인-프로세스)로
+	// 처리 -- targetProcess_ 핸들에 VM_READ가 없어도 동작.
+	BOOL isWow64 = FALSE;
+	if (HANDLE hProc = session_.GetTargetProcess()) IsWow64Process(hProc, &isWow64);
+	int ptrSize = isWow64 ? 4 : 8;
+
+	json steps = json::array();
+	for (size_t i = 0; i < offsets.size(); i++) {
+		int64_t off = offsets[i];
+		uint64_t target = cur + (uint64_t)off;
+		// 오버플로우/언더플로우 가드: wrap 되면 잘못된 주소이므로 거부
+		if ((off >= 0 && target < cur) || (off < 0 && target > cur)) {
+			char ob[20]; snprintf(ob, sizeof(ob), "0x%llX", (unsigned long long)cur);
+			return {{"error", "address overflow at step " + std::to_string(i) + " (base " + ob + ")"},
+			        {"steps", steps}, {"failedStep", (int)i}};
+		}
+		char tbuf[20]; snprintf(tbuf, sizeof(tbuf), "0x%llX", target);
+		bool doDeref = derefFinal || (i + 1 < offsets.size());
+		if (!doDeref) {
+			cur = target;  // 마지막 오프셋: deref 없이 주소 자체가 결과
+			steps.push_back({{"deref_at", tbuf}, {"value", nullptr}, {"note", "final (no deref)"}});
+			break;
+		}
+		auto bytes = session_.ReadMemory(target, (uint32_t)ptrSize);
+		if (bytes.size() < (size_t)ptrSize) {
+			return {{"error", "pointer read failed at step " + std::to_string(i) + " (address " + tbuf + ")"},
+			        {"steps", steps}, {"failedStep", (int)i}};
+		}
+		uint64_t val = 0;
+		memcpy(&val, bytes.data(), ptrSize);
+		char vbuf[20]; snprintf(vbuf, sizeof(vbuf), "0x%llX", val);
+		steps.push_back({{"deref_at", tbuf}, {"value", vbuf}});
+		cur = val;
+	}
+
+	char rbuf[20]; snprintf(rbuf, sizeof(rbuf), "0x%llX", cur);
+	json ret = {{"success", true}, {"resolved", rbuf}, {"steps", steps}, {"pointerSize", ptrSize}};
+
+	if (readSize > 0) {
+		if (readSize > 4096) readSize = 4096;
+		auto data = session_.ReadMemory(cur, (uint32_t)readSize);
+		if (!data.empty()) {
+			std::ostringstream oss;
+			for (size_t i = 0; i < data.size(); i++) {
+				if (i > 0 && i % 16 == 0) oss << "\n";
+				else if (i > 0) oss << " ";
+				oss << std::hex << std::setfill('0') << std::setw(2) << (int)data[i];
+			}
+			ret["hex"] = oss.str();
+			ret["bytesRead"] = (uint64_t)data.size();
+			uint64_t iv = 0; memcpy(&iv, data.data(), data.size() < 8 ? data.size() : 8);
+			char ib[20]; snprintf(ib, sizeof(ib), "0x%llX", iv);
+			ret["value"] = ib;
+		} else {
+			ret["readError"] = "final read failed (resolved address inaccessible)";
+		}
+	}
+	return ret;
 }
 
 // Helper: parse hex string to bytes
@@ -2146,6 +2254,47 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 							break;
 						}
 					}
+
+					// Hardware data breakpoint: condition / hit-skip filter.
+					// 'value' 토큰 = 감시 주소의 현재 값 (예: 'value != 0' -> 0 쓰기 노이즈 무시)
+					for (auto& bp : session_.GetHwBreakpoints()) {
+						if (bp.id != e->breakpointId) continue;
+						bp.hitCount++;
+						if (!bp.condition.empty()) {
+							std::string cond = bp.condition;
+							bool canEval = true;
+							// 'value' 토큰 = 감시 주소에서 size 바이트 읽은 현재 값.
+							// 이벤트 콜백 스레드이므로 IPC ReadMemory(재진입 불가) 대신 ReadProcessMemory 사용.
+							if (cond.find("value") != std::string::npos) {
+								uint32_t rsz = bp.size ? bp.size : 8;
+								if (rsz > 8) rsz = 8;
+								uint64_t cv = 0;
+								SIZE_T rgot = 0;
+								HANDLE hp = session_.GetTargetProcess();
+								if (!hp || !ReadProcessMemory(hp, (LPCVOID)bp.address, &cv, rsz, &rgot) || rgot != rsz) {
+									// 값을 못 읽으면 조건 판단 불가 -> cv=0 로 오판(거짓 정지/거짓 통과) 방지, 안전하게 정지 유지
+									canEval = false;
+								} else {
+									char lit[24]; snprintf(lit, sizeof(lit), "0x%llX", (unsigned long long)cv);
+									for (size_t p = cond.find("value"); p != std::string::npos; p = cond.find("value", p)) {
+										bool lb = (p == 0) || !(isalnum((unsigned char)cond[p-1]) || cond[p-1] == '_');
+										size_t rpos = p + 5;
+										bool rb = (rpos >= cond.size()) || !(isalnum((unsigned char)cond[rpos]) || cond[rpos] == '_');
+										if (lb && rb) { cond.replace(p, 5, lit); p += strlen(lit); }
+										else p = rpos;
+									}
+								}
+							}
+							if (canEval && !EvaluateCondition(cond, e->threadId, &e->regs)) shouldStop = false;
+						}
+						if (shouldStop && !bp.hitCondition.empty()) {
+							try {
+								uint32_t target = std::stoul(bp.hitCondition);
+								if (bp.hitCount < target) shouldStop = false;
+							} catch (...) {}
+						}
+						break;
+					}
 				}
 
 				if (!shouldStop) {
@@ -2367,6 +2516,7 @@ json McpServer::GetToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"program", {{"type", "string"}, {"description", "Path to executable"}}},
 			{"args", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Command line arguments"}}},
+			{"env", {{"type", "object"}, {"description", "Environment variables for the target, applied on top of the inherited parent environment (e.g. {\"ORACLE_M4_HOME\":\"C:/oracle\"}). Enables debugging headless processes configured via env vars. Also accepts an array of \"KEY=VALUE\" strings."}}},
 			{"stopOnEntry", {{"type", "boolean"}, {"description", "Stop at entry point (default: true)"}}},
 			{"runAsInvoker", {{"type", "boolean"}, {"description", "Bypass UAC elevation prompt by setting __COMPAT_LAYER=RunAsInvoker (default: false)"}}},
 			{"injectionMethod", {{"type", "string"}, {"enum", json::array({"auto", "createRemoteThread", "ntCreateThreadEx", "threadHijack", "queueUserApc"})}, {"description", "DLL injection method (default: auto). Auto tries all methods in order."}}},
@@ -2410,11 +2560,13 @@ json McpServer::GetToolsList() {
 		{{"name", "veh_list_breakpoints"}, {"description", "List all active software and hardware breakpoints with their properties."},
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}},
 
-		{{"name", "veh_set_data_breakpoint"}, {"description", "Set a hardware data breakpoint (DR0-DR3). Like Cheat Engine's 'Find out what writes/accesses'. Max 4 simultaneous."},
+		{{"name", "veh_set_data_breakpoint"}, {"description", "Set a hardware data breakpoint (DR0-DR3). Like Cheat Engine's 'Find out what writes/accesses'. Max 4 simultaneous. Supports condition/hitCondition to filter noisy writes (e.g. a clear-helper writing 0)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"address", {{"type", "string"}, {"description", "Hex address to watch"}}},
+			{"address", {{"type", "string"}, {"description", "Hex address to watch (also accepts module+RVA)"}}},
 			{"type", {{"type", "string"}, {"enum", json::array({"write", "readwrite", "execute"})}, {"description", "Breakpoint type (default: write)"}}},
-			{"size", {{"type", "integer"}, {"enum", json::array({1, 2, 4, 8})}, {"description", "Watch size in bytes (default: 4)"}}}
+			{"size", {{"type", "integer"}, {"enum", json::array({1, 2, 4, 8})}, {"description", "Watch size in bytes (default: 4)"}}},
+			{"condition", {{"type", "string"}, {"description", "Only stop when true. Token 'value' = current value at the watched address (e.g. 'value != 0' skips zero-writes; 'value > 100'). Registers and [0xADDR] deref also allowed."}}},
+			{"hitCondition", {{"type", "string"}, {"description", "Stop only on the Nth hit (skips first N-1). E.g. '5' = stop on 5th write."}}}
 		 }}, {"required", json::array({"address"})}}}},
 
 		{{"name", "veh_remove_data_breakpoint"}, {"description", "Remove a hardware data breakpoint by ID."},
@@ -2470,6 +2622,14 @@ json McpServer::GetToolsList() {
 			{"address", {{"type", "string"}, {"description", "Hex address"}}},
 			{"size", {{"type", "integer"}, {"description", "Bytes to read (default: 64, max: 1MB)"}}}
 		 }}, {"required", json::array({"address"})}}}},
+
+		{{"name", "veh_read_pointer_chain"}, {"description", "Follow a pointer chain in one call (no per-hop round-trips). Starts at base, then for each offset dereferences *(cur+offset). E.g. base='unit', offsets=['0x2c','0x1c','0x10','0x58'] resolves unit->+0x2c->+0x1c->+0x10->+0x58. Auto-detects 4/8-byte pointers (x86/x64). Returns each hop and the final resolved address; pass size>0 to also read bytes there."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"base", {{"type", "string"}, {"description", "Base address: hex or module+RVA (e.g. 'game.exe+0x1a340')"}}},
+			{"offsets", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Offsets applied and dereferenced in order, hex strings or ints (e.g. ['0x2c','0x1c','0x10'])"}}},
+			{"derefFinal", {{"type", "boolean"}, {"description", "If true (default) the last offset is also dereferenced (resolved = final pointer value). If false, resolved = cur+lastOffset (the address itself, not dereferenced)."}}},
+			{"size", {{"type", "integer"}, {"description", "If >0, also read this many bytes at the resolved address (max 4096). Returns hex + little-endian integer value."}}}
+		 }}, {"required", json::array({"base", "offsets"})}}}},
 
 		{{"name", "veh_write_memory"}, {"description", "Write memory to the target process. Single mode: address+data. Batch mode: patches array for multi-address patching in one call."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {

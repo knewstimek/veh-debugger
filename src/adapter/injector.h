@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
 #include <windows.h>
 
 namespace veh {
@@ -30,13 +31,16 @@ public:
 		InjectionMethod method = InjectionMethod::Auto);
 
 	// 프로세스 생성 + 인젝션 (메인 스레드는 suspended 상태 유지)
+	// env: 자식 프로세스에 추가할 환경변수 목록 ("KEY=VALUE" 형식).
+	//      부모 환경을 상속한 위에 덮어씀 (헤드리스 프로세스 설정용).
 	static LaunchResult LaunchAndInject(
 		const std::string& exePath,
 		const std::string& args,
 		const std::string& workingDir,
 		const std::string& dllPath,
 		InjectionMethod method = InjectionMethod::Auto,
-		bool runAsInvoker = false);
+		bool runAsInvoker = false,
+		const std::vector<std::string>& env = {});
 
 	// DLL 이젝트
 	static bool EjectDll(uint32_t pid, const std::string& dllName);

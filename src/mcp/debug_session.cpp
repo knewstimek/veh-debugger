@@ -115,9 +115,12 @@ bool DebugSession::Attach(uint32_t pid) {
 	// SetEventCallback 직후 GetPipeClient().WaitForReady()를 호출한다(condvar 방식).
 
 	targetPid_ = pid;
-	targetProcess_ = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+	// VM_READ: 조건부 BP의 [addr]/value 평가가 이벤트 콜백 스레드에서 ReadProcessMemory로
+	// 값을 읽는다(IPC ReadMemory는 콜백 스레드에서 재진입 불가). 실패 시 VM_READ 없이 폴백.
+	targetProcess_ = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_VM_READ, FALSE, pid);
 	if (!targetProcess_) {
-		LOG_WARN("Cannot open process %u for monitoring", pid);
+		targetProcess_ = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+		if (!targetProcess_) LOG_WARN("Cannot open process %u for monitoring", pid);
 	}
 	attached_ = true;
 
@@ -186,7 +189,7 @@ DebugSession::LaunchResult DebugSession::Launch(const LaunchOptions& opts) {
 	}
 
 	InjectionMethod injMethod = ParseInjectionMethod(opts.injectionMethod);
-	auto lr = Injector::LaunchAndInject(opts.program, argsStr, "", dllPath, injMethod, opts.runAsInvoker);
+	auto lr = Injector::LaunchAndInject(opts.program, argsStr, "", dllPath, injMethod, opts.runAsInvoker, opts.env);
 	if (lr.pid == 0) {
 		result.error = "Launch failed: " + opts.program;
 		if (!lr.error.empty()) result.error += " - " + lr.error;
@@ -196,7 +199,8 @@ DebugSession::LaunchResult DebugSession::Launch(const LaunchOptions& opts) {
 	launchedMainThreadId_ = lr.mainThreadId;
 	mainThreadResumed_ = false;
 
-	targetProcess_ = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, lr.pid);
+	// VM_READ: 조건부 BP 값 평가용(위 Attach 주석 참조). 우리가 만든 자식이라 항상 성공.
+	targetProcess_ = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, lr.pid);
 	if (!targetProcess_) {
 		LOG_WARN("OpenProcess(TERMINATE) failed for pid=%u", lr.pid);
 	}

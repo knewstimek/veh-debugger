@@ -24,7 +24,7 @@ MCP(Model Context Protocol) 도구 서버를 내장하여 **Claude, Cursor, Wind
 
 - **VEH 기반**: Windows Debug API 대신 VEH를 사용하여 안티디버그 우회에 유리
 - **DAP 전체 지원**: VSCode, MCP debug 도구 등 모든 DAP 호환 클라이언트에서 사용 가능
-- **MCP 도구 서버**: AI 에이전트(Claude, Codex 등)가 직접 디버거를 제어하는 36개 도구 제공
+- **MCP 도구 서버**: AI 에이전트(Claude, Codex 등)가 직접 디버거를 제어하는 37개 도구 제공
 - **TCP 모드**: `--tcp --port=PORT`로 원격 디버깅/MCP 연동 지원
 - **원격 접속**: `--remote` / `--bind=0.0.0.0`으로 VM/네트워크 너머 디버깅
 - **32/64비트 지원**: x86/x64 프로세스 모두 디버깅 가능 (별도 32비트 DLL 빌드)
@@ -51,7 +51,7 @@ veh-debug-adapter.exe              veh-mcp-server.exe
 |---------|------|
 | `veh-debugger.dll` (`vcruntime_net.dll`) | 타겟 프로세스에 인젝션. VEH 핸들러 등록, 브레이크포인트 관리, 스레드/스택/메모리 조회 |
 | `veh-debug-adapter.exe` | DAP 프로토콜 서버. DLL 인젝션, Named Pipe 통신, JSON-RPC 처리 |
-| `veh-mcp-server.exe` | MCP 도구 서버. AI 에이전트가 36개 도구로 디버거 직접 제어 |
+| `veh-mcp-server.exe` | MCP 도구 서버. AI 에이전트가 37개 도구로 디버거 직접 제어 |
 | VSCode Extension | launch.json 스키마 정의, 어댑터 경로 설정 (최소 래퍼) |
 
 ## 빌드
@@ -215,19 +215,19 @@ enabled = true
 
 설정 후 에이전트/IDE를 재시작하면 활성화됩니다.
 
-**MCP 도구 목록 (36개)**
+**MCP 도구 목록 (37개)**
 
 | 도구 | 인자 | 설명 |
 |------|------|------|
 | `veh_attach` | `pid` | 프로세스에 DLL 인젝션 + 파이프 연결 |
-| `veh_launch` | `program, args?, stopOnEntry?` | 프로세스 생성 + 인젝션 |
+| `veh_launch` | `program, args?, stopOnEntry?, env?` | 프로세스 생성 + 인젝션. `env`로 타겟에 환경변수 전달 (`{"KEY":"VAL"}` 또는 `["KEY=VALUE"]`, 부모 환경 위에 덮어씀) |
 | `veh_detach` | - | 디버거 분리 |
 | `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?, action?` | 소프트웨어 BP. `action`으로 히트 시 자동 실행 (veh_batch 형식) |
 | `veh_remove_breakpoint` | `id` | 소프트웨어 BP 제거 |
 | `veh_set_source_breakpoint` | `source, line, condition?, hitCondition?, logMessage?` | 소스 파일+줄번호 BP (PDB 필요; 미로드 모듈은 `pending` 후 모듈 로드 시 자동 바인딩) |
 | `veh_set_function_breakpoint` | `name, condition?, hitCondition?, logMessage?` | 함수명 BP (PDB 필요; 미로드 모듈은 `pending` 후 자동 바인딩) |
 | `veh_list_breakpoints` | - | 활성 SW/HW BP 목록 조회 |
-| `veh_set_data_breakpoint` | `address, type, size` | HW BP (write/readwrite/execute) |
+| `veh_set_data_breakpoint` | `address, type, size, condition?, hitCondition?` | HW BP (write/readwrite/execute). `condition`의 `value` 토큰=감시 주소 현재값 (예: `value != 0`으로 0-write 노이즈 필터), `hitCondition:"5"`=5번째 hit에서만 정지 |
 | `veh_remove_data_breakpoint` | `id` | HW BP 제거 |
 | `veh_continue` | `threadId?, wait?, timeout?, pass_exception?, ignore_exceptions?` | 실행 계속. `ignore_exceptions=[0x80000003]`으로 특정 예외만 SEH 전달 |
 | `veh_step_in` | `threadId` | Step Into |
@@ -235,11 +235,12 @@ enabled = true
 | `veh_step_out` | `threadId` | Step Out |
 | `veh_pause` | `threadId?` | 일시정지 |
 | `veh_threads` | - | 스레드 목록 |
-| `veh_stack_trace` | `threadId, maxFrames?` | 스택 트레이스 |
+| `veh_stack_trace` | `threadId, maxFrames?` | 스택 트레이스. PDB 없는 모듈은 PE export 테이블을 직접 파싱해 정확한 함수명 제공 (DbgHelp의 부정확한 `OrdinalNNNNN` 라벨 대신) |
 | `veh_registers` | `threadId` | 레지스터 조회 |
 | `veh_set_register` | `threadId, name, value` | 레지스터 값 변경 |
 | `veh_evaluate` | `expression, threadId` | 레지스터/메모리/포인터/세그먼트 평가 (`[reg+offset]`, `gs:[0x60]` 등) |
 | `veh_read_memory` | `address, size` | 메모리 읽기 (hex) |
+| `veh_read_pointer_chain` | `base, offsets[], derefFinal?, size?` | 다단계 포인터 체인을 1콜로 추적 (N번 왕복 대신). 각 홉마다 `*(cur+offset)` 역참조 (x86/x64 포인터 크기 자동 판정), 각 홉과 최종 주소 반환. `derefFinal:false`면 마지막 오프셋은 역참조 없이 주소만 반환, `size>0`이면 최종 주소에서 바이트도 읽음 |
 | `veh_write_memory` | `address, data` 또는 `patches` | 메모리 쓰기. 배치: `patches=[{address,data},...]` |
 | `veh_dump_memory` | `address, size, output_path` | 메모리를 바이너리 파일로 덤프 (최대 64MB) |
 | `veh_allocate_memory` | `size?, protection?` | 타겟 프로세스에 메모리 할당 (VirtualAlloc) |
@@ -378,7 +379,7 @@ Windows 디버거의 "실행하며 디버깅" 기능과 동일. DAP(`launch` 요
 │   │   └── zydis_disassembler.cpp # ZydisDisassembler (Zydis v4 기반)
 │   ├── mcp/                    # MCP 도구 서버
 │   │   ├── main.cpp            # 진입점 (--install, --log 등)
-│   │   ├── mcp_server.*        # MCP 프로토콜 + 26개 도구 구현
+│   │   ├── mcp_server.*        # MCP 프로토콜 + 37개 도구 구현
 │   │   └── installer.*         # 에이전트별 자동 설치/제거
 │   └── common/                 # 공유 코드
 │       ├── ipc_protocol.h      # IPC 명령/응답 정의
