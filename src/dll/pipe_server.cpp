@@ -541,11 +541,16 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			return;
 		}
 		auto* req = reinterpret_cast<const SetModuleLoadStopRequest*>(payload);
+		// The wire buffer is exactly payloadSize; a sender that fills all 256 name
+		// bytes leaves no NUL. Force-terminate a local copy before any strlen use.
+		char name[sizeof(req->name) + 1];
+		memcpy(name, req->name, sizeof(req->name));
+		name[sizeof(req->name)] = '\0';
 		auto& veh = VehHandler::Instance();
 		if (req->action == 2)      veh.ClearModuleLoadPatterns();
-		else if (req->action == 1) veh.RemoveModuleLoadPattern(req->name);
-		else                       veh.AddModuleLoadPattern(req->name);
-		LOG_INFO("SetModuleLoadStop: action=%u name=%s", req->action, req->name);
+		else if (req->action == 1) veh.RemoveModuleLoadPattern(name);
+		else                       veh.AddModuleLoadPattern(name);
+		LOG_INFO("SetModuleLoadStop: action=%u name=%s", req->action, name);
 		SetModuleLoadStopResponse resp{IpcStatus::Ok};
 		SendResponse(command, &resp, sizeof(resp));
 		break;

@@ -337,6 +337,15 @@ void VehHandler::NotifyModuleLoadStop(uint64_t base, uint32_t size, const char* 
 	rec.ExceptionAddress = reinterpret_cast<PVOID>(static_cast<uintptr_t>(base));
 	EXCEPTION_POINTERS ptrs{ &rec, &ctx };
 	NotifyAndWait(&ptrs, tid, DebugEventType::ModuleLoad, base, 0, 0);
+
+	// This synthetic stop does not honor step/passException (the loader thread just
+	// resumes the load). Clear any flags a step/pass_exception resume may have set so
+	// they don't leak into the next real breakpoint on this thread.
+	{
+		std::lock_guard<std::mutex> lock(stepFlagMutex_);
+		stepFlags_.erase(tid);
+		passExceptionFlags_.erase(tid);
+	}
 }
 
 LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
