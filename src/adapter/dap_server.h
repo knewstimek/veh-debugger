@@ -100,6 +100,7 @@ private:
 	HANDLE targetProcess_ = nullptr;
 	bool launchedByUs_ = false;
 	bool stopOnEntry_ = false;
+	std::vector<std::string> stopOnModuleLoadPatterns_;  // launch.json "stopOnModuleLoad"
 	uint32_t launchedMainThreadId_ = 0;  // OS 스레드 ID (CREATE_SUSPENDED 상태)
 	bool mainThreadResumed_ = false;     // configurationDone 또는 continue에서 resume 완료
 	std::string programPath_;

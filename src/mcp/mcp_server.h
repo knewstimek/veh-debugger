@@ -45,6 +45,7 @@ private:
 	json ToolLaunch(const json& args);
 	json ToolDetach(const json& args);
 	json ToolSetBreakpoint(const json& args);
+	json ToolSetModuleBreakpoint(const json& args);
 	json ToolRemoveBreakpoint(const json& args);
 	json ToolSetSourceBreakpoint(const json& args);
 	json ToolSetFunctionBreakpoint(const json& args);

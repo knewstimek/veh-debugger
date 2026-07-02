@@ -33,6 +33,7 @@ enum class IpcCommand : uint32_t {
 	RemoveBreakpointByAddr = 0x0005,
 	SetHwBreakpoint        = 0x0003,
 	RemoveHwBreakpoint     = 0x0004,
+	SetModuleLoadStop      = 0x0006,  // stop when a matching module is loaded
 
 	// Execution control
 	Continue               = 0x0010,
@@ -90,6 +91,7 @@ enum class IpcEvent : uint32_t {
 	ModuleUnloaded         = 0x1007,
 	ProcessExited          = 0x1008,
 	Paused                 = 0x1009,
+	ModuleLoadStopped      = 0x100A,  // stopped at a matching module load
 	HeartbeatAck           = 0x10FE,
 	Error                  = 0x10FF,
 	Ready                  = 0x1000,
@@ -133,6 +135,23 @@ struct SetHwBreakpointResponse {
 	IpcStatus status;
 	uint32_t id;
 	uint8_t  slot;     // DR0~DR3
+};
+
+// Module-load breakpoint: freeze the loading thread when a matching module loads.
+struct SetModuleLoadStopRequest {
+	uint8_t action;      // 0 = add pattern, 1 = remove pattern, 2 = clear all
+	char    name[256];   // module-name substring, case-insensitive (e.g. "D2Common")
+};
+
+struct SetModuleLoadStopResponse {
+	IpcStatus status;
+};
+
+struct ModuleLoadStopEvent {
+	uint64_t baseAddress;
+	uint32_t size;
+	uint32_t threadId;
+	char     name[256];
 };
 
 struct RemoveHwBreakpointRequest {

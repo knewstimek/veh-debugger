@@ -298,6 +298,22 @@ BpResult DebugSession::SetBreakpoint(uint64_t address) {
 	return result;
 }
 
+bool DebugSession::SetModuleLoadStop(const std::string& name, int action) {
+	SetModuleLoadStopRequest req{};
+	req.action = static_cast<uint8_t>(action);
+	strncpy_s(req.name, sizeof(req.name), name.c_str(), _TRUNCATE);
+
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::SetModuleLoadStop, &req, sizeof(req), respData))
+		return false;
+
+	if (respData.size() >= sizeof(SetModuleLoadStopResponse)) {
+		auto* resp = reinterpret_cast<const SetModuleLoadStopResponse*>(respData.data());
+		return resp->status == IpcStatus::Ok;
+	}
+	return false;
+}
+
 bool DebugSession::RemoveBreakpoint(uint32_t id) {
 	RemoveBreakpointRequest req;
 	req.id = id;
