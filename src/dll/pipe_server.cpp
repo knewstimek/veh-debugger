@@ -534,6 +534,23 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		break;
 	}
 
+	case IpcCommand::SetModuleLoadStop: {
+		if (payloadSize < sizeof(SetModuleLoadStopRequest)) {
+			SetModuleLoadStopResponse resp{IpcStatus::InvalidArgs};
+			SendResponse(command, &resp, sizeof(resp));
+			return;
+		}
+		auto* req = reinterpret_cast<const SetModuleLoadStopRequest*>(payload);
+		auto& veh = VehHandler::Instance();
+		if (req->action == 2)      veh.ClearModuleLoadPatterns();
+		else if (req->action == 1) veh.RemoveModuleLoadPattern(req->name);
+		else                       veh.AddModuleLoadPattern(req->name);
+		LOG_INFO("SetModuleLoadStop: action=%u name=%s", req->action, req->name);
+		SetModuleLoadStopResponse resp{IpcStatus::Ok};
+		SendResponse(command, &resp, sizeof(resp));
+		break;
+	}
+
 	case IpcCommand::RemoveBreakpoint: {
 		if (payloadSize < sizeof(RemoveBreakpointRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;

@@ -161,6 +161,10 @@ public:
 	HwBpResult SetHwBreakpoint(uint64_t address, uint8_t type, uint8_t size);
 	bool RemoveHwBreakpoint(uint32_t id);
 
+	// Module-load breakpoint: stop when a matching module loads.
+	// action: 0 = add pattern, 1 = remove pattern, 2 = clear all.
+	bool SetModuleLoadStop(const std::string& name, int action);
+
 	// BP tracking (conditions are MCP/DAP-level, not IPC)
 	std::vector<SwBpInfo>& GetSwBreakpoints() { return swBreakpoints_; }
 	std::vector<HwBpInfo>& GetHwBreakpoints() { return hwBreakpoints_; }

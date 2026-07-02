@@ -22,6 +22,21 @@ static std::string ToHex(uint64_t v) {
 	return buf;
 }
 
+// Distinguish "process exited" from "never attached" so wait=false + exit
+// doesn't collapse into a vague "Not attached" (mirrors McpServer::NotAttachedMessage).
+static std::string NotAttachedReason(DebugSession& session) {
+	HANDLE hProc = session.GetTargetProcess();
+	if (hProc) {
+		DWORD exitCode = 0;
+		if (GetExitCodeProcess(hProc, &exitCode) && exitCode != STILL_ACTIVE) {
+			char buf[128];
+			snprintf(buf, sizeof(buf), "Not attached - target process exited (code %lu)", exitCode);
+			return buf;
+		}
+	}
+	return "Not attached to any process";
+}
+
 static std::vector<uint8_t> ParseHexBytes(const std::string& hexStr) {
 	std::string clean;
 	for (char c : hexStr) {
@@ -236,10 +251,15 @@ json BatchExecutor::ResolveValue(const std::string& ref) {
 
 	if (parts.empty()) return json(ref);
 
-	// Root: check named vars first, then numeric index
+	// Root: $last/$prev sentinels -> most recent result(s), then named vars, then numeric index.
+	// These make loop `until` conditions writable (the latest step index is not known statically).
 	json root;
-	auto it = namedVars_.find("$" + parts[0]);
-	if (it != namedVars_.end()) {
+	if (parts[0] == "last" || parts[0] == "prev") {
+		if (results_.empty()) return json(ref);
+		size_t n = results_.size();
+		size_t idx = (parts[0] == "last") ? n - 1 : (n >= 2 ? n - 2 : 0);
+		root = results_[idx];
+	} else if (auto it = namedVars_.find("$" + parts[0]); it != namedVars_.end()) {
 		root = it->second;
 	} else {
 		try {
@@ -385,7 +405,7 @@ bool BatchExecutor::EvaluateCondition(const std::string& condition) {
 
 json BatchExecutor::DispatchTool(const std::string& name, const json& args) {
 	if (!session_.IsAttached()) {
-		return {{"error", "Not attached to any process"}};
+		return {{"error", NotAttachedReason(session_)}};
 	}
 
 	auto hexArg = [&](const std::string& key) -> uint64_t {
@@ -469,6 +489,18 @@ json BatchExecutor::DispatchTool(const std::string& name, const json& args) {
 		if (!r.ok) return {{"error", "SetBreakpoint failed"}};
 		return {{"success", true}, {"id", r.id}, {"address", ToHex(addr)}};
 	}
+	if (name == "veh_set_module_breakpoint") {
+		if (boolArg("clear")) {
+			bool ok = session_.SetModuleLoadStop("", 2);
+			return {{"success", ok}, {"cleared", true}};
+		}
+		std::string module = args.value("module", "");
+		if (module.empty()) return {{"error", "module is required (or pass clear=true)"}};
+		bool enabled = args.contains("enabled") ? boolArg("enabled") : true;
+		if (!session_.SetModuleLoadStop(module, enabled ? 0 : 1))
+			return {{"error", "SetModuleLoadStop failed"}};
+		return {{"success", true}, {"module", module}, {"action", enabled ? "add" : "remove"}};
+	}
 	if (name == "veh_remove_breakpoint") {
 		uint32_t id = uint32Arg("id");
 		if (!session_.RemoveBreakpoint(id)) return {{"error", "RemoveBreakpoint failed"}};
@@ -504,16 +536,37 @@ json BatchExecutor::DispatchTool(const std::string& name, const json& args) {
 		if (!regs) return {{"error", "GetRegisters failed"}};
 		auto hex = [](uint64_t v) { char b[20]; snprintf(b, sizeof(b), "0x%llX", v); return std::string(b); };
 		json r;
-		r["rax"] = hex(regs->rax); r["rbx"] = hex(regs->rbx);
-		r["rcx"] = hex(regs->rcx); r["rdx"] = hex(regs->rdx);
-		r["rsi"] = hex(regs->rsi); r["rdi"] = hex(regs->rdi);
-		r["rbp"] = hex(regs->rbp); r["rsp"] = hex(regs->rsp);
-		r["r8"] = hex(regs->r8); r["r9"] = hex(regs->r9);
-		r["r10"] = hex(regs->r10); r["r11"] = hex(regs->r11);
-		r["r12"] = hex(regs->r12); r["r13"] = hex(regs->r13);
-		r["r14"] = hex(regs->r14); r["r15"] = hex(regs->r15);
-		r["rip"] = hex(regs->rip); r["rflags"] = hex(regs->rflags);
+		// Emit 32-bit register names for 32-bit targets (mirror direct veh_registers).
+		// Otherwise $N.registers.esp silently fails to resolve on a 32-bit process.
+		if (regs->is32bit) {
+			r["eax"] = hex(regs->rax); r["ebx"] = hex(regs->rbx);
+			r["ecx"] = hex(regs->rcx); r["edx"] = hex(regs->rdx);
+			r["esi"] = hex(regs->rsi); r["edi"] = hex(regs->rdi);
+			r["ebp"] = hex(regs->rbp); r["esp"] = hex(regs->rsp);
+			r["eip"] = hex(regs->rip);
+		} else {
+			r["rax"] = hex(regs->rax); r["rbx"] = hex(regs->rbx);
+			r["rcx"] = hex(regs->rcx); r["rdx"] = hex(regs->rdx);
+			r["rsi"] = hex(regs->rsi); r["rdi"] = hex(regs->rdi);
+			r["rbp"] = hex(regs->rbp); r["rsp"] = hex(regs->rsp);
+			r["r8"] = hex(regs->r8); r["r9"] = hex(regs->r9);
+			r["r10"] = hex(regs->r10); r["r11"] = hex(regs->r11);
+			r["r12"] = hex(regs->r12); r["r13"] = hex(regs->r13);
+			r["r14"] = hex(regs->r14); r["r15"] = hex(regs->r15);
+			r["rip"] = hex(regs->rip);
+		}
+		r["eflags"] = hex(regs->rflags);  // match direct veh_registers key name
 		r["is32bit"] = (bool)regs->is32bit;
+		// Optional field selection keeps loop dumps small (e.g. fields: ["esp","eip"]).
+		if (args.contains("fields") && args["fields"].is_array() && !args["fields"].empty()) {
+			json filtered;
+			for (auto& f : args["fields"]) {
+				if (f.is_string() && r.contains(f.get<std::string>()))
+					filtered[f.get<std::string>()] = r[f.get<std::string>()];
+			}
+			filtered["is32bit"] = r["is32bit"];
+			return {{"registers", filtered}};
+		}
 		return {{"registers", r}};
 	}
 	if (name == "veh_stack_trace") {

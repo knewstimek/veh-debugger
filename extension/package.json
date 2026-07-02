@@ -89,6 +89,14 @@
                 "description": "Stop at entry point after launch",
                 "default": false
               },
+              "stopOnModuleLoad": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Stop when a module (DLL) whose name matches one of these substrings is loaded (case-insensitive, e.g. [\"D2Common\"]). Fires after the module's DllMain on modern Windows.",
+                "default": []
+              },
               "injectionMethod": {
                 "type": "string",
                 "enum": [

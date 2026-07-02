@@ -206,6 +206,15 @@ void DapServer::OnLaunch(const Request& req) {
 	injectionMethod_ = ParseInjectionMethod(req.arguments.value("injectionMethod", "auto"));
 	runAsInvoker_ = req.arguments.value("runAsInvoker", false);
 
+	// Module-load breakpoints: stop when a DLL whose name matches is loaded.
+	stopOnModuleLoadPatterns_.clear();
+	if (req.arguments.contains("stopOnModuleLoad") && req.arguments["stopOnModuleLoad"].is_array()) {
+		for (auto& m : req.arguments["stopOnModuleLoad"]) {
+			if (m.is_string() && !m.get<std::string>().empty())
+				stopOnModuleLoadPatterns_.push_back(m.get<std::string>());
+		}
+	}
+
 	// args 배열을 공백 구분 문자열로 변환 (Windows CommandLineToArgvW 규칙)
 	std::string argStr;
 	if (req.arguments.contains("args") && req.arguments["args"].is_array()) {
@@ -446,6 +455,17 @@ void DapServer::OnConfigurationDone(const Request& req) {
 	resp.command = "configurationDone";
 	resp.success = true;
 	SendResponse(resp);
+
+	// Register module-load breakpoints (launch.json "stopOnModuleLoad") before resuming,
+	// so a match during startup is not missed.
+	for (const auto& pat : stopOnModuleLoadPatterns_) {
+		SetModuleLoadStopRequest mreq{};
+		mreq.action = 0;
+		strncpy_s(mreq.name, sizeof(mreq.name), pat.c_str(), _TRUNCATE);
+		std::vector<uint8_t> mresp;
+		pipeClient_.SendAndReceive(IpcCommand::SetModuleLoadStop, &mreq, sizeof(mreq), mresp);
+		LOG_INFO("stopOnModuleLoad: registered pattern '%s'", pat.c_str());
+	}
 
 	// Launch 모드: 메인 스레드가 CREATE_SUSPENDED 상태
 	// setBreakpoints가 이미 완료된 상태이므로 이제 안전하게 resume 가능
@@ -3029,6 +3049,23 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				{"threadId", (int)e->threadId},
 				{"allThreadsStopped", true},
 				{"description", lastException_.description},
+			});
+		}
+		break;
+	}
+
+	case IpcEvent::ModuleLoadStopped: {
+		if (size >= sizeof(ModuleLoadStopEvent)) {
+			auto* e = reinterpret_cast<const ModuleLoadStopEvent*>(payload);
+			lastStoppedThreadId_.store(e->threadId);
+			char nameBuf[sizeof(e->name)];
+			memcpy(nameBuf, e->name, sizeof(e->name));
+			nameBuf[sizeof(e->name) - 1] = '\0';
+			SendEvent("stopped", {
+				{"reason", "module load"},
+				{"threadId", (int)e->threadId},
+				{"allThreadsStopped", true},
+				{"description", std::string("Module loaded: ") + nameBuf},
 			});
 		}
 		break;

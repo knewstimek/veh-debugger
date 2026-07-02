@@ -89,6 +89,16 @@ VOID CALLBACK DllNotificationCallback(
 		               &evt, sizeof(evt));
 		LOG_DEBUG("Module loaded: %s (0x%llX)", evt.module.name, evt.module.baseAddress);
 
+		// Module-load breakpoint: freeze this loader thread if the name matches a pattern.
+		// Skip the internal pipe-server thread (stopping it would deadlock IPC).
+		auto& vehH = veh::VehHandler::Instance();
+		uint32_t curTid = GetCurrentThreadId();
+		if (curTid != vehH.GetInternalThread() && vehH.MatchModuleLoad(evt.module.name)) {
+			LOG_INFO("Module-load BP: stopping on %s (0x%llX)", evt.module.name, evt.module.baseAddress);
+			vehH.NotifyModuleLoadStop(evt.module.baseAddress, evt.module.size,
+			                          evt.module.name, curTid);
+		}
+
 	} else if (NotificationReason == LDR_DLL_NOTIFICATION_REASON_UNLOADED) {
 		auto& d = NotificationData->Unloaded;
 		evt.module.baseAddress = reinterpret_cast<uint64_t>(d.DllBase);
@@ -224,6 +234,17 @@ DWORD WINAPI InitThread(LPVOID) {
 			}
 			snprintf(payload.description, sizeof(payload.description), "%s", desc);
 			pipe.SendEvent(static_cast<uint32_t>(veh::IpcEvent::ExceptionOccurred),
+			               &payload, sizeof(payload));
+			break;
+		}
+		case veh::DebugEventType::ModuleLoad: {
+			veh::ModuleLoadStopEvent payload{};
+			payload.baseAddress = event.address;
+			payload.threadId = event.threadId;
+			auto& vh = veh::VehHandler::Instance();
+			payload.size = vh.GetPendingModuleSize();
+			strncpy_s(payload.name, sizeof(payload.name), vh.GetPendingModuleName(), _TRUNCATE);
+			pipe.SendEvent(static_cast<uint32_t>(veh::IpcEvent::ModuleLoadStopped),
 			               &payload, sizeof(payload));
 			break;
 		}

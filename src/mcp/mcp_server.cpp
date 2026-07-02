@@ -240,7 +240,9 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 			"- Step commands are synchronous (wait for completion automatically).\n"
 			"- Inspection tools require the target to be stopped.\n"
 			"- veh_attach auto-detaches previous session. Cannot attach to CREATE_SUSPENDED processes.\n"
-			"- veh_batch: JSON array of commands; $N references prior result; supports if/loop/for_each flow control.\n"
+			"- veh_registers returns 32-bit names (eax/esp/eip) on 32-bit targets, 64-bit (rax/rsp/rip) otherwise; check the is32bit flag.\n"
+			"- veh_set_module_breakpoint(module): stop right after a matching DLL is loaded (headless capture; fires post-DllMain).\n"
+			"- veh_batch: JSON array of commands; $N / $last / $prev reference prior results; supports if/loop/for_each flow control.\n"
 		}
 	};
 	SendResult(id, result);
@@ -264,6 +266,7 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 		else if (name == "veh_launch")                result = ToolLaunch(args);
 		else if (name == "veh_detach")                result = ToolDetach(args);
 		else if (name == "veh_set_breakpoint")        result = ToolSetBreakpoint(args);
+		else if (name == "veh_set_module_breakpoint") result = ToolSetModuleBreakpoint(args);
 		else if (name == "veh_remove_breakpoint")     result = ToolRemoveBreakpoint(args);
 		else if (name == "veh_set_data_breakpoint")   result = ToolSetDataBreakpoint(args);
 		else if (name == "veh_remove_data_breakpoint") result = ToolRemoveDataBreakpoint(args);
@@ -439,6 +442,23 @@ json McpServer::ToolDetach(const json& args) {
 	// detach 후 죽은 세션에 접근하지 않는다. 여기서 join하지 않는다(재attach 시 재사용).
 	session_.Detach();
 	return {{"success", true}, {"message", "Detached"}};
+}
+
+json McpServer::ToolSetModuleBreakpoint(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+
+	if (args.value("clear", false)) {
+		bool ok = session_.SetModuleLoadStop("", 2);
+		return {{"success", ok}, {"cleared", true}};
+	}
+
+	std::string module = args.value("module", "");
+	if (module.empty()) return {{"error", "module is required (or pass clear=true)"}};
+
+	bool enabled = args.value("enabled", true);
+	bool ok = session_.SetModuleLoadStop(module, enabled ? 0 : 1);
+	if (!ok) return {{"error", "Failed to update module-load breakpoint"}};
+	return {{"success", true}, {"module", module}, {"action", enabled ? "add" : "remove"}};
 }
 
 json McpServer::ToolSetBreakpoint(const json& args) {
@@ -2446,6 +2466,20 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 		NotifyRetry();
 		break;
 	}
+	case IpcEvent::ModuleLoadStopped: {
+		if (size >= sizeof(ModuleLoadStopEvent)) {
+			auto* e = reinterpret_cast<const ModuleLoadStopEvent*>(payload);
+			char buf[320];
+			snprintf(buf, sizeof(buf), "Stopped at module load: %s (base 0x%llX, thread %u)",
+				e->name, (unsigned long long)e->baseAddress, e->threadId);
+			{
+				std::lock_guard<std::mutex> lock(eventMutex_);
+				pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
+			}
+			session_.SignalStop("module-load", e->baseAddress, e->threadId, 0, e->name);
+		}
+		break;
+	}
 	case IpcEvent::Error:
 		LOG_ERROR("VEH DLL error event received");
 		break;
@@ -2614,7 +2648,7 @@ json McpServer::GetToolsList() {
 			{"maxFrames", {{"type", "integer"}, {"description", "Max frames to return (default: 20)"}}}
 		 }}, {"required", json::array({"threadId"})}}}},
 
-		{{"name", "veh_registers"}, {"description", "Get CPU registers for a thread."},
+		{{"name", "veh_registers"}, {"description", "Get CPU registers for a thread. 32-bit targets return eax/ebx/.../esp/eip; 64-bit targets return rax/.../rsp/rip plus r8-r15. The is32bit flag tells which set to expect. (In veh_batch, pass fields:[...] to return only selected registers.)"},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}}
 		 }}, {"required", json::array({"threadId"})}}}},
@@ -2710,14 +2744,25 @@ json McpServer::GetToolsList() {
 			{"timeout_ms", {{"type", "integer"}, {"description", "Max wait time in ms (default: 5000, max: 60000). 0 = fire-and-forget (don't wait, don't free)."}}}
 		 }}, {"required", json::array({"shellcode"})}}}},
 
+		{{"name", "veh_set_module_breakpoint"}, {"description",
+			"Stop when a module (DLL) whose name matches is loaded into the target. Matching is case-insensitive substring on the base name (e.g. \"D2Common\" matches \"D2Common.dll\"). The loading thread is frozen right after the module is mapped (via LdrRegisterDllNotification), so you can then set breakpoints inside it, resolve its exports, or dump it -- ideal for headless capture. NOTE: on modern Windows the notification fires AFTER the module's own DllMain has run, so use this to catch a module becoming present/initialized, not to freeze before its init code executes. Pass enabled=false to remove one pattern, or clear=true to remove all. The stop surfaces via veh_continue(wait=true) with reason \"module-load\"."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"module", {{"type", "string"}, {"description", "Module-name substring to stop on (case-insensitive), e.g. \"D2Common.dll\""}}},
+			{"enabled", {{"type", "boolean"}, {"description", "false removes this pattern; default true adds it"}}},
+			{"clear", {{"type", "boolean"}, {"description", "true clears ALL module-load breakpoints (module ignored)"}}}
+		 }}}}},
+
 		{{"name", "veh_batch"}, {"description",
 			"Execute multiple debugger commands in a single call, reducing round-trips. "
-			"Supports sequential execution, variable references ($N for step N result, $N.key for nested access), "
+			"Supports sequential execution, variable references ($N for step N result, $N.key for nested access; "
+			"$last / $prev for the most recent result and the one before it), "
 			"and control flow (if/loop/for_each). Uses existing tool names and args format.\n"
+			"Note: veh_registers returns 32-bit names (eax/esp/eip) on 32-bit targets, 64-bit (rax/rsp/rip) otherwise; "
+			"pass args.fields (e.g. [\"esp\",\"eip\"]) to shrink per-step output in loops.\n"
 			"\nExamples:\n"
 			"  Sequential: {steps: [{tool: \"veh_registers\", args: {threadId: 1234}}, {tool: \"veh_read_memory\", args: {address: \"$0.registers.rsp\", size: 8}}]}\n"
 			"  Batch patch: {steps: [{tool: \"veh_write_memory\", args: {patches: [{address: \"0x1000\", data: \"90\"}, {address: \"0x2000\", data: \"90\"}]}}]}\n"
-			"  Loop: {steps: [{loop: [{tool: \"veh_step_over\", args: {threadId: 1}}, {tool: \"veh_registers\", args: {threadId: 1}}], until: \"$registers.rax!=0\", max: 100}]}\n"
+			"  Loop (use $last, not a step index -- the index changes each iteration): {steps: [{loop: [{tool: \"veh_step_over\", args: {threadId: 1}}, {tool: \"veh_registers\", args: {threadId: 1, fields: [\"rax\"]}}], until: \"$last.registers.rax!=0\", max: 100}]}\n"
 			"  If: {steps: [{tool: \"veh_registers\", args: {threadId: 1}}, {if: \"$0.registers.rax==0\", then: [{tool: \"veh_write_memory\", args: {address: \"0x1000\", data: \"90\"}}]}]}\n"
 			"  For-each: {steps: [{for_each: [\"0x1000\",\"0x2000\",\"0x3000\"], as: \"$addr\", do: [{tool: \"veh_write_memory\", args: {address: \"$addr\", data: \"90\"}}]}]}"
 		},

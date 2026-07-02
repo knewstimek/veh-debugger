@@ -3,7 +3,14 @@
 ## Unreleased
 
 ### Added
+- **`veh_set_module_breakpoint`** (new tool) -- stop when a module (DLL) whose name matches is loaded into the target. Case-insensitive substring match on the base name (e.g. `"D2Common"` matches `D2Common.dll`). The loading thread is frozen right after the module is mapped (via `LdrRegisterDllNotification`, no INT3/patching -- the target's SEH is never involved), so you can then set breakpoints inside it, resolve its exports, or dump it -- ideal for headless capture. Surfaces via `veh_continue(wait=true)` with `reason:"module-load"`. NOTE: on modern Windows the notification fires after the module's own DllMain has run, so use it to catch a module becoming present/initialized, not to freeze before its init code executes. Pass `enabled:false` to remove a pattern, or `clear:true` to remove all.
 - **`veh_launch` `cwd` parameter** -- set the target process's working directory (maps to `CreateProcess` `lpCurrentDirectory`). Omit to inherit the debugger's cwd (previous behavior). Fixes programs that load config/resources/DLLs by relative path from their own folder, and brings the MCP launch path to parity with the DAP path, which already supported `cwd`.
+- **`veh_batch` `$last` / `$prev` references** -- resolve to the most recent step result and the one before it. `loop` `until` conditions can now reference the latest iteration's output (e.g. `until: "$last.registers.rax != 0"`); previously only fixed absolute indices (`$N`) or named `as` vars worked, so the latest step (whose index changes each iteration) was unaddressable.
+- **`veh_batch` `veh_registers` field selection** -- pass `args.fields` (e.g. `["esp","eip"]`) to return only the listed registers, shrinking large per-iteration dumps inside loops.
+
+### Fixed
+- **`veh_batch` returned 64-bit register names on 32-bit targets** -- the batch `veh_registers` always emitted `rax`/`rsp`/`rip`, so a 32-bit reference like `$N.registers.esp` silently failed to resolve (surfacing later as `invalid stoull`). It now mirrors the direct tool: 32-bit targets get `eax`/`esp`/`eip`, and the flags key is `eflags` for both paths.
+- **`veh_batch` "Not attached" no longer hides process exit** -- batch tool calls after the target exits now report `Not attached - target process exited (code N)` (matching the direct MCP path) instead of a bare `Not attached to any process`, distinguishing an exit from a detach.
 
 ## 1.1.11
 

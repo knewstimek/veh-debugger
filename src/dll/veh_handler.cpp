@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <algorithm>
+#include <cctype>
 #include "veh_handler.h"
 #include "breakpoint.h"
 #include "hw_breakpoint.h"
@@ -279,6 +280,63 @@ VehHandler::WaitResult VehHandler::NotifyAndWait(
 		}
 	}
 	return WaitResult::Detached;
+}
+
+// --- Module-load breakpoints ---
+
+static std::string ToLowerCopy(const char* s) {
+	std::string r = s ? s : "";
+	for (auto& c : r) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+	return r;
+}
+
+void VehHandler::AddModuleLoadPattern(const char* name) {
+	if (!name || !*name) return;
+	std::lock_guard<std::mutex> lock(moduleLoadMutex_);
+	std::string n = name;
+	for (auto& p : moduleLoadPatterns_) if (p == n) return;  // dedup
+	moduleLoadPatterns_.push_back(n);
+}
+
+void VehHandler::RemoveModuleLoadPattern(const char* name) {
+	if (!name) return;
+	std::lock_guard<std::mutex> lock(moduleLoadMutex_);
+	std::string n = name;
+	for (auto it = moduleLoadPatterns_.begin(); it != moduleLoadPatterns_.end(); ++it) {
+		if (*it == n) { moduleLoadPatterns_.erase(it); return; }
+	}
+}
+
+void VehHandler::ClearModuleLoadPatterns() {
+	std::lock_guard<std::mutex> lock(moduleLoadMutex_);
+	moduleLoadPatterns_.clear();
+}
+
+bool VehHandler::MatchModuleLoad(const char* baseName) {
+	if (!baseName) return false;
+	std::string b = ToLowerCopy(baseName);
+	std::lock_guard<std::mutex> lock(moduleLoadMutex_);
+	if (moduleLoadPatterns_.empty()) return false;
+	for (auto& p : moduleLoadPatterns_) {
+		if (b.find(ToLowerCopy(p.c_str())) != std::string::npos) return true;
+	}
+	return false;
+}
+
+void VehHandler::NotifyModuleLoadStop(uint64_t base, uint32_t size, const char* name, uint32_t tid) {
+	if (!callback_) return;
+	// Stash module info for the event callback (same thread, read synchronously below).
+	pendingModuleSize_ = size;
+	strncpy_s(pendingModuleName_, sizeof(pendingModuleName_), name ? name : "", _TRUNCATE);
+	// Capture the loader thread's context so inspection tools can read it while stopped.
+	// No INT3: we synthesize EXCEPTION_POINTERS and reuse the normal stop/wait path,
+	// so the target's SEH is never involved.
+	CONTEXT ctx;
+	RtlCaptureContext(&ctx);
+	EXCEPTION_RECORD rec{};
+	rec.ExceptionAddress = reinterpret_cast<PVOID>(static_cast<uintptr_t>(base));
+	EXCEPTION_POINTERS ptrs{ &rec, &ctx };
+	NotifyAndWait(&ptrs, tid, DebugEventType::ModuleLoad, base, 0, 0);
 }
 
 LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {

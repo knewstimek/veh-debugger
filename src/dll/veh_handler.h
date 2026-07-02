@@ -4,6 +4,7 @@
 #include <functional>
 #include <atomic>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -16,6 +17,7 @@ enum class DebugEventType {
 	SingleStepComplete,
 	AccessViolation,
 	Exception,
+	ModuleLoad,   // stopped in the loader after a matching module was mapped
 };
 
 struct DebugEvent {
@@ -161,6 +163,20 @@ public:
 
 	// 내부 스레드 등록 (pipe server 등) -- BP 투명 스킵 + trace_callers 스킵
 	void SetInternalThread(uint32_t tid) { internalTid_.store(tid, std::memory_order_relaxed); }
+	uint32_t GetInternalThread() const { return internalTid_.load(std::memory_order_relaxed); }
+
+	// Module-load breakpoints: freeze the loading thread when a matching module loads.
+	// Matching runs in the loader-notification callback (dllmain); the stop reuses
+	// NotifyAndWait so no INT3/patching is involved (SEH is never consulted).
+	void AddModuleLoadPattern(const char* name);
+	void RemoveModuleLoadPattern(const char* name);
+	void ClearModuleLoadPatterns();
+	bool MatchModuleLoad(const char* baseName);
+	void NotifyModuleLoadStop(uint64_t base, uint32_t size, const char* name, uint32_t tid);
+	// Read back the module info stashed for the last NotifyModuleLoadStop (same thread,
+	// consumed synchronously inside the event callback).
+	uint32_t GetPendingModuleSize() const { return pendingModuleSize_; }
+	const char* GetPendingModuleName() const { return pendingModuleName_; }
 
 	// 셸코드 스레드 등록/해제 -- VEH 핸들러가 예외를 무시 (CONTINUE_SEARCH)
 	void RegisterShellcodeThread(uint32_t tid);
@@ -218,6 +234,12 @@ private:
 	uint64_t traceBuffer_[kTraceBufferSize];   // lock-free ring buffer
 	std::atomic<uint32_t> traceTotalHits_{0};
 	std::atomic<uint32_t> internalTid_{0};  // pipe server tid (trace skip)
+
+	// Module-load breakpoint patterns (matched case-insensitively as substrings)
+	std::mutex moduleLoadMutex_;
+	std::vector<std::string> moduleLoadPatterns_;
+	uint32_t pendingModuleSize_ = 0;
+	char     pendingModuleName_[256] = {};
 
 	// Track which address needs re-arming after single-step (per-thread)
 	struct PendingRearm {
