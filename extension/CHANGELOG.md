@@ -11,6 +11,8 @@
 ### Fixed
 - **`veh_batch` returned 64-bit register names on 32-bit targets** -- the batch `veh_registers` always emitted `rax`/`rsp`/`rip`, so a 32-bit reference like `$N.registers.esp` silently failed to resolve (surfacing later as `invalid stoull`). It now mirrors the direct tool: 32-bit targets get `eax`/`esp`/`eip`, and the flags key is `eflags` for both paths.
 - **`veh_batch` "Not attached" no longer hides process exit** -- batch tool calls after the target exits now report `Not attached - target process exited (code N)` (matching the direct MCP path) instead of a bare `Not attached to any process`, distinguishing an exit from a detach.
+- **Reliable process-exit detection** -- exit-vs-detach messages now use `WaitForSingleObject` instead of comparing the exit code to `STILL_ACTIVE`, so a target that genuinely exits with code 259 is no longer misreported as still-attached (both the direct and batch paths).
+- **Hardened module-load IPC** -- the `SetModuleLoadStop` handler force-terminates the fixed 256-byte module-name field before use (guards against a non-NUL-terminated payload), and the module-load stop clears any stale step/pass-exception flags so they cannot leak into the next breakpoint.
 
 ## 1.1.11
 

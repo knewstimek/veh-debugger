@@ -26,13 +26,14 @@ static std::string ToHex(uint64_t v) {
 // doesn't collapse into a vague "Not attached" (mirrors McpServer::NotAttachedMessage).
 static std::string NotAttachedReason(DebugSession& session) {
 	HANDLE hProc = session.GetTargetProcess();
-	if (hProc) {
+	// WaitForSingleObject(,0) reliably detects termination; GetExitCodeProcess alone is
+	// ambiguous when the real exit code is 259 (== STILL_ACTIVE).
+	if (hProc && WaitForSingleObject(hProc, 0) == WAIT_OBJECT_0) {
 		DWORD exitCode = 0;
-		if (GetExitCodeProcess(hProc, &exitCode) && exitCode != STILL_ACTIVE) {
-			char buf[128];
-			snprintf(buf, sizeof(buf), "Not attached - target process exited (code %lu)", exitCode);
-			return buf;
-		}
+		GetExitCodeProcess(hProc, &exitCode);
+		char buf[128];
+		snprintf(buf, sizeof(buf), "Not attached - target process exited (code %lu)", exitCode);
+		return buf;
 	}
 	return "Not attached to any process";
 }

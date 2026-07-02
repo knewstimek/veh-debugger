@@ -2745,7 +2745,7 @@ json McpServer::GetToolsList() {
 		 }}, {"required", json::array({"shellcode"})}}}},
 
 		{{"name", "veh_set_module_breakpoint"}, {"description",
-			"Stop when a module (DLL) whose name matches is loaded into the target. Matching is case-insensitive substring on the base name (e.g. \"D2Common\" matches \"D2Common.dll\"). The loading thread is frozen right after the module is mapped (via LdrRegisterDllNotification), so you can then set breakpoints inside it, resolve its exports, or dump it -- ideal for headless capture. NOTE: on modern Windows the notification fires AFTER the module's own DllMain has run, so use this to catch a module becoming present/initialized, not to freeze before its init code executes. Pass enabled=false to remove one pattern, or clear=true to remove all. The stop surfaces via veh_continue(wait=true) with reason \"module-load\"."},
+			"Stop when a module (DLL) whose name matches is loaded into the target. Matching is case-insensitive substring on the base name (e.g. \"D2Common\" matches \"D2Common.dll\"). The loading thread is frozen right after the module is mapped (via LdrRegisterDllNotification), so you can then set breakpoints inside it, resolve its exports, or dump it -- ideal for headless capture. NOTE: on modern Windows the notification fires AFTER the module's own DllMain has run, so use this to catch a module becoming present/initialized, not to freeze before its init code executes. Pass enabled=false to remove one pattern, or clear=true to remove all. The stop surfaces via veh_continue(wait=true) with reason \"module-load\". While stopped here, registers/memory/stack/modules are readable, but this is an inspection stop -- register/RIP writes (veh_set_register) are not applied to the loader thread."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"module", {{"type", "string"}, {"description", "Module-name substring to stop on (case-insensitive), e.g. \"D2Common.dll\""}}},
 			{"enabled", {{"type", "boolean"}, {"description", "false removes this pattern; default true adds it"}}},
@@ -2801,13 +2801,14 @@ json McpServer::GetToolsList() {
 
 std::string McpServer::NotAttachedMessage() {
 	HANDLE hProc = session_.GetTargetProcess();
-	if (hProc) {
+	// WaitForSingleObject(,0) reliably detects termination; GetExitCodeProcess alone is
+	// ambiguous when the real exit code is 259 (== STILL_ACTIVE).
+	if (hProc && WaitForSingleObject(hProc, 0) == WAIT_OBJECT_0) {
 		DWORD exitCode = 0;
-		if (GetExitCodeProcess(hProc, &exitCode) && exitCode != STILL_ACTIVE) {
-			char buf[128];
-			snprintf(buf, sizeof(buf), "Not attached - target process exited (code %lu)", exitCode);
-			return buf;
-		}
+		GetExitCodeProcess(hProc, &exitCode);
+		char buf[128];
+		snprintf(buf, sizeof(buf), "Not attached - target process exited (code %lu)", exitCode);
+		return buf;
 	}
 	return "Not attached";
 }
@@ -2815,13 +2816,12 @@ std::string McpServer::NotAttachedMessage() {
 std::string McpServer::IpcErrorMessage() {
 	if (!session_.IsAttached()) return NotAttachedMessage();
 	HANDLE hProc = session_.GetTargetProcess();
-	if (hProc) {
+	if (hProc && WaitForSingleObject(hProc, 0) == WAIT_OBJECT_0) {
 		DWORD exitCode = 0;
-		if (GetExitCodeProcess(hProc, &exitCode) && exitCode != STILL_ACTIVE) {
-			char buf[128];
-			snprintf(buf, sizeof(buf), "Target process has exited (exit code: %lu)", exitCode);
-			return buf;
-		}
+		GetExitCodeProcess(hProc, &exitCode);
+		char buf[128];
+		snprintf(buf, sizeof(buf), "Target process has exited (exit code: %lu)", exitCode);
+		return buf;
 	}
 	if (!session_.GetPipeClient().IsConnected()) return "Target pipe disconnected (process may have crashed)";
 	return "IPC communication failed (timeout)";
