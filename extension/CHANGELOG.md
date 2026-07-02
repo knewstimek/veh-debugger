@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.12
 
 ### Added
 - **`veh_set_module_breakpoint`** (new tool) -- stop when a module (DLL) whose name matches is loaded into the target. Case-insensitive substring match on the base name (e.g. `"D2Common"` matches `D2Common.dll`). The loading thread is frozen right after the module is mapped (via `LdrRegisterDllNotification`, no INT3/patching -- the target's SEH is never involved), so you can then set breakpoints inside it, resolve its exports, or dump it -- ideal for headless capture. Surfaces via `veh_continue(wait=true)` with `reason:"module-load"`. NOTE: on modern Windows the notification fires after the module's own DllMain has run, so use it to catch a module becoming present/initialized, not to freeze before its init code executes. Pass `enabled:false` to remove a pattern, or `clear:true` to remove all.
