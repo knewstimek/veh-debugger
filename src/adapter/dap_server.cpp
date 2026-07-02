@@ -329,6 +329,15 @@ void DapServer::OnAttach(const Request& req) {
 	targetPid_ = req.arguments.value("processId", 0);
 	injectionMethod_ = ParseInjectionMethod(req.arguments.value("injectionMethod", "auto"));
 
+	// Module-load breakpoints also work in attach mode (catches future loads).
+	stopOnModuleLoadPatterns_.clear();
+	if (req.arguments.contains("stopOnModuleLoad") && req.arguments["stopOnModuleLoad"].is_array()) {
+		for (auto& m : req.arguments["stopOnModuleLoad"]) {
+			if (m.is_string() && !m.get<std::string>().empty())
+				stopOnModuleLoadPatterns_.push_back(m.get<std::string>());
+		}
+	}
+
 	Response resp;
 	resp.request_seq = req.seq;
 	resp.command = "attach";
@@ -463,8 +472,11 @@ void DapServer::OnConfigurationDone(const Request& req) {
 		mreq.action = 0;
 		strncpy_s(mreq.name, sizeof(mreq.name), pat.c_str(), _TRUNCATE);
 		std::vector<uint8_t> mresp;
-		pipeClient_.SendAndReceive(IpcCommand::SetModuleLoadStop, &mreq, sizeof(mreq), mresp);
-		LOG_INFO("stopOnModuleLoad: registered pattern '%s'", pat.c_str());
+		bool ok = pipeClient_.SendAndReceive(IpcCommand::SetModuleLoadStop, &mreq, sizeof(mreq), mresp)
+			&& mresp.size() >= sizeof(SetModuleLoadStopResponse)
+			&& reinterpret_cast<const SetModuleLoadStopResponse*>(mresp.data())->status == IpcStatus::Ok;
+		if (ok) LOG_INFO("stopOnModuleLoad: registered pattern '%s'", pat.c_str());
+		else LOG_WARN("stopOnModuleLoad: FAILED to register pattern '%s'", pat.c_str());
 	}
 
 	// Launch 모드: 메인 스레드가 CREATE_SUSPENDED 상태

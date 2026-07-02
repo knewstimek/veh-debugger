@@ -159,6 +159,14 @@
                 "description": "Process ID to attach to",
                 "default": 0
               },
+              "stopOnModuleLoad": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Stop when a module (DLL) whose name matches one of these substrings is loaded after attach (case-insensitive, e.g. [\"D2Common\"]).",
+                "default": []
+              },
               "injectionMethod": {
                 "type": "string",
                 "enum": [
