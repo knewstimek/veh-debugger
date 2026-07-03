@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **`veh_terminate`** (new tool) -- kill the target from inside: the injected DLL calls `TerminateProcess` on its own process (`GetCurrentProcess()`), which always holds terminate rights regardless of any DACL the target set to block *external* `OpenProcess`. This reliably kills self-protecting targets (deny-DACL or higher integrity) that refuse external `taskkill`, replacing the fragile `WM_CLOSE -> detach -> taskkill` sequence. Auto-detaches afterward. Optional `exitCode` (default 0).
+
+### Fixed
+- **`veh_launch` `stopOnEntry:false` resume race** -- the main thread was resumed inside `Launch()` *before* the VEH handler finished installing (the `WaitForReady` gate ran later in the caller), leaving a window where the target could execute without exception coverage. Resume is now deferred until after `WaitForReady`, closing the race.
+
+### Changed
+- **Categorized `veh_attach` failure messages** -- attach errors now distinguish the actual cause instead of a generic "check logs": CREATE_SUSPENDED / uninitialized (with a hint to use `veh_launch`), access-denied for injection (target self-protects its process object or runs at higher integrity), DLL-not-found, injection-failed, and pipe-timeout. Helps diagnose attach failures against hardened or hidden-desktop targets.
+- **Docs**: clarified that memory-oriented tools (`veh_read_memory`, `veh_read_pointer_chain`, `veh_write_memory`, `veh_dump_memory`, `veh_disassemble`, `veh_modules`) are **non-stop** -- they work while the target runs, so live GUI values can be read without a breakpoint or detach/attach round-trip. Only context-dependent tools (`veh_registers`, `veh_stack_trace`, `veh_enum_locals`, `veh_step_*`) require a stopped thread.
+
 ## 1.1.12
 
 ### Added

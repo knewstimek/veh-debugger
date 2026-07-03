@@ -24,7 +24,7 @@ MCP(Model Context Protocol) 도구 서버를 내장하여 **Claude, Cursor, Wind
 
 - **VEH 기반**: Windows Debug API 대신 VEH를 사용하여 안티디버그 우회에 유리
 - **DAP 전체 지원**: VSCode, MCP debug 도구 등 모든 DAP 호환 클라이언트에서 사용 가능
-- **MCP 도구 서버**: AI 에이전트(Claude, Codex 등)가 직접 디버거를 제어하는 38개 도구 제공
+- **MCP 도구 서버**: AI 에이전트(Claude, Codex 등)가 직접 디버거를 제어하는 39개 도구 제공
 - **TCP 모드**: `--tcp --port=PORT`로 원격 디버깅/MCP 연동 지원
 - **원격 접속**: `--remote` / `--bind=0.0.0.0`으로 VM/네트워크 너머 디버깅
 - **32/64비트 지원**: x86/x64 프로세스 모두 디버깅 가능 (별도 32비트 DLL 빌드)
@@ -51,7 +51,7 @@ veh-debug-adapter.exe              veh-mcp-server.exe
 |---------|------|
 | `veh-debugger.dll` (`vcruntime_net.dll`) | 타겟 프로세스에 인젝션. VEH 핸들러 등록, 브레이크포인트 관리, 스레드/스택/메모리 조회 |
 | `veh-debug-adapter.exe` | DAP 프로토콜 서버. DLL 인젝션, Named Pipe 통신, JSON-RPC 처리 |
-| `veh-mcp-server.exe` | MCP 도구 서버. AI 에이전트가 38개 도구로 디버거 직접 제어 |
+| `veh-mcp-server.exe` | MCP 도구 서버. AI 에이전트가 39개 도구로 디버거 직접 제어 |
 | VSCode Extension | launch.json 스키마 정의, 어댑터 경로 설정 (최소 래퍼) |
 
 ## 빌드
@@ -215,13 +215,14 @@ enabled = true
 
 설정 후 에이전트/IDE를 재시작하면 활성화됩니다.
 
-**MCP 도구 목록 (38개)**
+**MCP 도구 목록 (39개)**
 
 | 도구 | 인자 | 설명 |
 |------|------|------|
 | `veh_attach` | `pid` | 프로세스에 DLL 인젝션 + 파이프 연결 |
 | `veh_launch` | `program, args?, stopOnEntry?, cwd?, env?` | 프로세스 생성 + 인젝션. `cwd`로 타겟 작업 디렉토리 지정(생략 시 디버거 cwd 상속). `env`로 타겟에 환경변수 전달 (`{"KEY":"VAL"}` 또는 `["KEY=VALUE"]`, 부모 환경 위에 덮어씀) |
-| `veh_detach` | - | 디버거 분리 |
+| `veh_detach` | - | 디버거 분리 (타겟은 계속 실행) |
+| `veh_terminate` | `exitCode?` | 타겟을 **내부에서** 강제 종료 (주입된 DLL이 자기 프로세스에 `TerminateProcess` 호출). 외부 `taskkill`/`OpenProcess`를 막는 자기보호 타겟(deny-DACL/상위 무결성)도 확실히 종료 -- 프로세스 자기 핸들은 항상 종료 권한 보유. 종료 후 자동 detach. `WM_CLOSE->detach->taskkill` 수순 대체 |
 | `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?, action?` | 소프트웨어 BP. `action`으로 히트 시 자동 실행 (veh_batch 형식) |
 | `veh_remove_breakpoint` | `id` | 소프트웨어 BP 제거 |
 | `veh_set_source_breakpoint` | `source, line, condition?, hitCondition?, logMessage?` | 소스 파일+줄번호 BP (PDB 필요; 미로드 모듈은 `pending` 후 모듈 로드 시 자동 바인딩) |
@@ -256,6 +257,8 @@ enabled = true
 | `veh_batch` | `steps` | 다중 명령 일괄 실행 (`$N`/`$last`/`$prev` 결과 참조, if/loop/for_each 제어 흐름) |
 | `veh_trace_callers` | `address, duration_sec?` | 함수 호출자 프로파일링 (자동 resume -> N초간 caller 수집 -> 자동 pause). 유니크 caller별 히트 카운트 반환. x64: RtlVirtualUnwind (정확). x86: [ESP] (함수 진입점에서만 정확) |
 | `veh_trace_calls` | `addresses, duration_sec?, resolve?, system_only?` | call/jmp 명령이 런타임에 어디로 가는지 모니터링. 콜 사이트에 BP 설치 후 N초간 실행, 실제 타겟 주소 + API 이름 수집. `resolve=true`: thunk/trampoline을 자연스러운 call 컨텍스트에서 따라가 최종 API까지 추적 (예외 기반 난독화 대응). `system_only=true`: 시스템 DLL 타겟만 반환. 패킹된 바이너리의 IAT 복원용. |
+
+> **Non-stop 조회 (타겟 정지 불필요)**: `veh_read_memory` / `veh_read_pointer_chain` / `veh_write_memory` / `veh_dump_memory` / `veh_disassemble` / `veh_modules` 는 타겟이 **실행 중에도** 동작합니다 (DLL 내 전용 파이프 스레드가 처리 -- 다른 스레드를 멈추지 않음). GUI를 조작하면서 라이브 값을 읽을 때 BP를 걸거나 detach/attach를 왕복할 필요가 없습니다. 반대로 `veh_registers` / `veh_stack_trace` / `veh_enum_locals` / `veh_step_*` 는 스레드 컨텍스트가 필요하므로 BP 히트나 `veh_pause`로 정지된 상태에서만 동작합니다.
 
 > **Tip**: 주소 인자는 hex (`"0x401000"`), 10진수 (`4198400`), **모듈+RVA** (`"crackme.exe+0x1000"`) 모두 허용합니다. 모듈+RVA는 ASLR 계산 없이 사용 가능합니다.
 
@@ -380,7 +383,7 @@ Windows 디버거의 "실행하며 디버깅" 기능과 동일. DAP(`launch` 요
 │   │   └── zydis_disassembler.cpp # ZydisDisassembler (Zydis v4 기반)
 │   ├── mcp/                    # MCP 도구 서버
 │   │   ├── main.cpp            # 진입점 (--install, --log 등)
-│   │   ├── mcp_server.*        # MCP 프로토콜 + 38개 도구 구현
+│   │   ├── mcp_server.*        # MCP 프로토콜 + 39개 도구 구현
 │   │   └── installer.*         # 에이전트별 자동 설치/제거
 │   └── common/                 # 공유 코드
 │       ├── ipc_protocol.h      # IPC 명령/응답 정의

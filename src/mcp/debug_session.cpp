@@ -85,17 +85,48 @@ DebugSession::~DebugSession() {
 }
 
 bool DebugSession::Attach(uint32_t pid) {
-	if (pid == 0) return false;
+	lastAttachError_.clear();
+	if (pid == 0) { lastAttachError_ = "invalid pid (0)"; return false; }
 
 	if (IsProcessUninitializedSuspended(pid)) {
 		LOG_ERROR("Process %u appears to be in CREATE_SUSPENDED state", pid);
+		lastAttachError_ = "Process " + std::to_string(pid) + " is CREATE_SUSPENDED / uninitialized. "
+			"Attach needs a running process (the DLL init thread cannot execute while the process is suspended). "
+			"If a launcher spawns it suspended (common on hidden desktops), use veh_launch to debug from the start instead.";
 		return false;
 	}
 
-	std::string dllPath = GetDllPath(pid);
-	if (dllPath.empty()) return false;
-
 	bool pipeExists = IsPipeAvailable(pid);
+
+	// Fresh attach must inject -- probe access first so we can report *why* it fails precisely
+	// (self-protected/higher-integrity targets deny OpenProcess even for injection rights).
+	if (!pipeExists) {
+		HANDLE probe = OpenProcess(
+			PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_QUERY_INFORMATION,
+			FALSE, pid);
+		if (!probe) {
+			DWORD e = GetLastError();
+			LOG_ERROR("OpenProcess(inject rights) failed for PID %u: %lu", pid, e);
+			if (e == ERROR_ACCESS_DENIED) {
+				lastAttachError_ = "Access denied opening PID " + std::to_string(pid) + " for injection. "
+					"The target likely self-protects its process object (deny-DACL) or runs at higher integrity, "
+					"so a fresh attach is impossible. Launch it under the debugger (veh_launch) so injection happens "
+					"before it hardens, or run the debugger elevated.";
+			} else {
+				lastAttachError_ = "OpenProcess failed for PID " + std::to_string(pid) +
+					" (Win32 error " + std::to_string(e) + ").";
+			}
+			return false;
+		}
+		CloseHandle(probe);
+	}
+
+	std::string dllPath = GetDllPath(pid);
+	if (dllPath.empty()) {
+		lastAttachError_ = "Could not locate the VEH DLL for the target's bitness (veh_dll_x64.dll / veh_dll_x86.dll) "
+			"next to the server, or failed to query the process architecture.";
+		return false;
+	}
 
 	if (pipeExists) {
 		LOG_INFO("Pipe already exists for PID %u, skipping injection (re-attach)", pid);
@@ -103,12 +134,16 @@ bool DebugSession::Attach(uint32_t pid) {
 		LOG_INFO("Injecting into PID %u: %s", pid, dllPath.c_str());
 		if (!Injector::InjectDll(pid, dllPath)) {
 			LOG_ERROR("DLL injection failed for PID %u", pid);
+			lastAttachError_ = "DLL injection into PID " + std::to_string(pid) + " failed (all methods exhausted). "
+				"The target may block remote thread creation or the DLL failed to load. See logs for details.";
 			return false;
 		}
 	}
 
 	if (!pipeClient_.Connect(pid, 3500)) {
 		LOG_ERROR("Pipe connection failed (pid=%u)", pid);
+		lastAttachError_ = "Injected into PID " + std::to_string(pid) + " but the IPC pipe did not come up within 3.5s. "
+			"The DLL may have failed to initialize inside the target.";
 		return false;
 	}
 	// 주: Ready 대기는 이벤트 리스너(reader) 시작 후에 해야 하므로 McpServer가
@@ -229,9 +264,9 @@ DebugSession::LaunchResult DebugSession::Launch(const LaunchOptions& opts) {
 		LOG_INFO("Disassembler set to %s mode", is64 ? "x64" : "x86");
 	}
 
-	if (!opts.stopOnEntry) {
-		ResumeMainThread();
-	}
+	// NOTE: stopOnEntry=false 의 메인스레드 재개는 여기서 하지 않는다.
+	// VEH 설치 완료(Ready) 이전에 재개하면 타겟이 핸들러 없이 조기 실행되는 레이스가 생긴다.
+	// 호출자(McpServer::ToolLaunch)가 WaitForReady 이후 ResumeMainThread()를 호출한다.
 
 	result.ok = true;
 	result.pid = lr.pid;
@@ -267,6 +302,42 @@ bool DebugSession::Detach() {
 	}
 	launchedByUs_ = false;
 
+	return true;
+}
+
+bool DebugSession::Terminate(uint32_t exitCode) {
+	if (!attached_) return false;
+
+	// 1) 인-프로세스 종료 요청. 타겟 DLL 이 TerminateProcess(GetCurrentProcess()) 를 호출하므로
+	//    외부 OpenProcess(TERMINATE) 를 막는 자기보호 타겟도 확실히 죽는다.
+	//    프로세스가 곧 사라지므로 응답을 기다리지 않는 fire-and-forget.
+	TerminateRequest req{ exitCode };
+	try { pipeClient_.SendCommand(IpcCommand::Terminate, &req, sizeof(req)); } catch (...) {}
+
+	// 2) 우리가 띄운 프로세스면 TERMINATE 핸들을 이미 쥐고 있으니 백업으로 직접 종료(1 실패 대비).
+	if (launchedByUs_ && targetProcess_) {
+		TerminateProcess(targetProcess_, exitCode);
+	}
+
+	// 3) 세션 정리. Detach 명령은 보내지 않는다 -- 타겟이 사라지는 중이라 파이프도 곧 끊긴다.
+	attached_ = false;
+	StopProcessMonitor();
+	pipeClient_.StopHeartbeat();
+	pipeClient_.StopEventListener();
+	pipeClient_.Disconnect();
+	{
+		std::lock_guard<std::mutex> lock(bpMutex_);
+		swBreakpoints_.clear();
+		hwBreakpoints_.clear();
+	}
+	targetPid_ = 0;
+	launchedMainThreadId_ = 0;
+	mainThreadResumed_ = false;
+	if (targetProcess_) {
+		CloseHandle(targetProcess_);
+		targetProcess_ = nullptr;
+	}
+	launchedByUs_ = false;
 	return true;
 }
 

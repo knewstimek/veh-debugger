@@ -1896,6 +1896,25 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		break;
 	}
 
+	case IpcCommand::Terminate: {
+		// Terminate: 타겟 프로세스 자체를 내부에서 강제 종료한다.
+		// GetCurrentProcess() 의사 핸들은 타겟이 외부 OpenProcess 를 막으려 설정한 DACL 과
+		// 무관하게 항상 PROCESS_TERMINATE 권한을 가지므로, 외부 taskkill 이 막히는
+		// 자기보호(self-protected) 타겟도 확실히 종료된다.
+		uint32_t exitCode = 0;
+		if (payloadSize >= sizeof(TerminateRequest)) {
+			exitCode = reinterpret_cast<const TerminateRequest*>(payload)->exitCode;
+		}
+		LOG_INFO("Terminate requested (exitCode=%u) -- killing target from inside", exitCode);
+		// 응답은 best-effort (프로세스가 곧 사라지므로 클라이언트는 fire-and-forget).
+		IpcStatus status = IpcStatus::Ok;
+		SendResponse(command, &status, sizeof(status));
+		// ExitProcess 는 DLL_PROCESS_DETACH/atexit 를 돌리다 후킹/훼손된 타겟에서 hang 할 수 있으므로
+		// 정리 없이 즉시 끝내는 TerminateProcess 를 쓴다.
+		TerminateProcess(GetCurrentProcess(), exitCode);
+		break;  // 도달하지 않음
+	}
+
 	case IpcCommand::Shutdown: {
 		// Shutdown: 완전 종료. running_=false로 ServerThread 자체가 종료된다.
 		// 프로세스 종료 또는 DLL 언로드 시 사용

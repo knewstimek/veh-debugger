@@ -24,7 +24,7 @@ No separate debugger GUI needed. **Everything works inside the VSCode debug pane
 
 - **VEH-based**: Uses VEH instead of Windows Debug API - bypasses PEB/NtQuery-based anti-debug checks (Themida, VMProtect, etc.)
 - **Full DAP support**: Works with VSCode, MCP debug tools, and any DAP-compatible client
-- **MCP tool server**: 38 tools for AI agents (Claude, Cursor, Codex, etc.) to directly control the debugger
+- **MCP tool server**: 39 tools for AI agents (Claude, Cursor, Codex, etc.) to directly control the debugger
 - **TCP mode**: Remote debugging via `--tcp --port=PORT`
 - **Remote access**: `--remote` / `--bind=0.0.0.0` for VM/network debugging
 - **32/64-bit**: Debug both x86 and x64 processes (WoW64 injection for 32-bit targets)
@@ -57,7 +57,7 @@ veh-debug-adapter.exe              veh-mcp-server.exe
 |-----------|------|
 | `veh-debugger.dll` (`vcruntime_net.dll`) | Injected into target. Registers VEH handler, manages breakpoints, queries threads/stack/memory |
 | `veh-debug-adapter.exe` | DAP protocol server. DLL injection, Named Pipe IPC, JSON-RPC processing |
-| `veh-mcp-server.exe` | MCP tool server. 38 tools for AI agents to directly control the debugger |
+| `veh-mcp-server.exe` | MCP tool server. 39 tools for AI agents to directly control the debugger |
 | VSCode Extension | launch.json schema, adapter path configuration (minimal wrapper) |
 
 ## Build
@@ -172,13 +172,14 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` | JSON (`mcpServers`) |
 | Codex CLI | `~/.codex/config.toml` | TOML (`mcp_servers`) |
 
-**MCP Tools (38)**
+**MCP Tools (39)**
 
 | Tool | Args | Description |
 |------|------|-------------|
 | `veh_attach` | `pid` | Inject DLL + connect pipe |
 | `veh_launch` | `program, args?, stopOnEntry?, cwd?, env?` | Create process + inject. `cwd` sets the target's working directory (omit to inherit the debugger's cwd). `env` passes environment variables to the target (`{"KEY":"VAL"}` or `["KEY=VALUE"]`, overlaid on the inherited parent environment) |
-| `veh_detach` | - | Detach debugger |
+| `veh_detach` | - | Detach debugger (target keeps running) |
+| `veh_terminate` | `exitCode?` | Kill the target from **inside** (the injected DLL calls `TerminateProcess` on its own process). Works even on self-protected targets that deny external `taskkill`/`OpenProcess` (deny-DACL or higher integrity), since a process's own handle always has terminate rights. Auto-detaches afterward. Replaces the `WM_CLOSE->detach->taskkill` dance. |
 | `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?, action?` | Software BP. `action` auto-executes on hit (veh_batch format) |
 | `veh_remove_breakpoint` | `id` | Remove software BP |
 | `veh_set_source_breakpoint` | `source, line, condition?, hitCondition?, logMessage?` | Source file + line BP (PDB required; unresolved modules kept `pending` and bound automatically on module load) |
@@ -213,6 +214,8 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | `veh_batch` | `steps` | Execute multiple commands in one call ($N/$last/$prev variable refs, if/loop/for_each control flow) |
 | `veh_trace_callers` | `address, duration_sec?` | Profile function callers (auto-resume -> collect for N seconds -> auto-pause). Returns unique callers with hit counts. x64: RtlVirtualUnwind (accurate). x86: [ESP] (accurate only at function entry) |
 | `veh_trace_calls` | `addresses, duration_sec?, resolve?, system_only?` | Monitor where call/jmp instructions go at runtime. Sets BPs on call sites, runs program for N seconds, collects actual targets with API names. `resolve=true`: follow thunks/trampolines in natural call context to final API (handles exception-based obfuscation). `system_only=true`: return only system DLL targets. For IAT reconstruction on packed binaries. |
+
+> **Non-stop inspection (no target stop required)**: `veh_read_memory` / `veh_read_pointer_chain` / `veh_write_memory` / `veh_dump_memory` / `veh_disassemble` / `veh_modules` work while the target is **running** (serviced by a dedicated pipe thread inside the DLL -- other threads are never frozen). You don't need a breakpoint or a detach/attach round-trip to read live values during GUI interaction. In contrast, `veh_registers` / `veh_stack_trace` / `veh_enum_locals` / `veh_step_*` need a thread context, so they only work when stopped at a breakpoint or after `veh_pause`.
 
 > **Tip**: Address arguments accept hex (`"0x401000"`), decimal (`4198400`), or **module+RVA** (`"crackme.exe+0x1000"`). Module+RVA eliminates manual ASLR base calculation.
 

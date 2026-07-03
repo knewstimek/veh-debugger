@@ -77,6 +77,7 @@ enum class IpcCommand : uint32_t {
 	// Lifecycle
 	Heartbeat              = 0x00FE,
 	Detach                 = 0x00F0,
+	Terminate              = 0x00F1,  // terminate the target from inside (bypasses external OpenProcess locks)
 	Shutdown               = 0x00FF,
 };
 
@@ -173,6 +174,13 @@ struct PauseRequest {
 
 struct TerminateThreadRequest {
 	uint32_t threadId;
+};
+
+// Terminate the whole target process from inside the DLL.
+// The target's own-process pseudo-handle always holds PROCESS_TERMINATE regardless of any
+// DACL the target set to block *external* OpenProcess -- so this works on self-protected targets.
+struct TerminateRequest {
+	uint32_t exitCode;
 };
 
 struct SetInstructionPointerRequest {
