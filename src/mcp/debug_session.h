@@ -150,9 +150,14 @@ public:
 	};
 	LaunchResult Launch(const LaunchOptions& opts);
 	bool Detach();
+	// Terminate the target from inside (via DLL). Works even on self-protected targets that
+	// deny external OpenProcess(PROCESS_TERMINATE). Tears down the session afterward.
+	bool Terminate(uint32_t exitCode = 0);
 	bool IsAttached() const { return attached_; }
 	uint32_t GetTargetPid() const { return targetPid_; }
 	bool IsTargetAlive();
+	// Last Attach() failure reason (categorized: suspended / access-denied / injection / pipe).
+	const std::string& LastAttachError() const { return lastAttachError_; }
 
 	// --- Breakpoints ---
 	BpResult SetBreakpoint(uint64_t address);
@@ -296,6 +301,7 @@ private:
 	// Session state
 	uint32_t targetPid_ = 0;
 	HANDLE targetProcess_ = nullptr;
+	std::string lastAttachError_;   // categorized reason for the last Attach() failure
 	std::atomic<bool> attached_{false};
 	std::atomic<bool> launchedByUs_{false};
 	uint32_t launchedMainThreadId_ = 0;

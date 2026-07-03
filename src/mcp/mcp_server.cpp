@@ -265,6 +265,7 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 		if      (name == "veh_attach")                result = ToolAttach(args);
 		else if (name == "veh_launch")                result = ToolLaunch(args);
 		else if (name == "veh_detach")                result = ToolDetach(args);
+		else if (name == "veh_terminate")             result = ToolTerminate(args);
 		else if (name == "veh_set_breakpoint")        result = ToolSetBreakpoint(args);
 		else if (name == "veh_set_module_breakpoint") result = ToolSetModuleBreakpoint(args);
 		else if (name == "veh_remove_breakpoint")     result = ToolRemoveBreakpoint(args);
@@ -343,7 +344,9 @@ json McpServer::ToolAttach(const json& args) {
 	if (pid == 0) return {{"error", "pid is required"}};
 
 	if (!session_.Attach(pid)) {
-		return {{"error", "Attach failed for PID " + std::to_string(pid) + ". Check logs for details."}};
+		std::string why = session_.LastAttachError();
+		if (why.empty()) why = "Attach failed for PID " + std::to_string(pid) + ". Check logs for details.";
+		return {{"error", why}};
 	}
 
 	// Start event listener + heartbeat + process monitor
@@ -425,6 +428,12 @@ json McpServer::ToolLaunch(const json& args) {
 	}
 	session_.StartProcessMonitor();
 
+	// stopOnEntry=false: VEH 설치 완료(WaitForReady) 이후에야 메인스레드를 재개한다.
+	// (Launch 내부에서 재개하면 핸들러 설치 전 조기 실행 레이스가 생김)
+	if (!opts.stopOnEntry) {
+		session_.ResumeMainThread();
+	}
+
 	json ret = {{"success", true}, {"pid", result.pid}, {"message",
 		opts.stopOnEntry ? "Launched and attached (stopped on entry)" : "Launched and attached"}};
 	auto modules = session_.GetModules();
@@ -442,6 +451,16 @@ json McpServer::ToolDetach(const json& args) {
 	// detach 후 죽은 세션에 접근하지 않는다. 여기서 join하지 않는다(재attach 시 재사용).
 	session_.Detach();
 	return {{"success", true}, {"message", "Detached"}};
+}
+
+json McpServer::ToolTerminate(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+
+	uint32_t pid = session_.GetTargetPid();
+	int exitCode = JsonInt(args, "exitCode", 0);
+	session_.Terminate(static_cast<uint32_t>(exitCode));
+	return {{"success", true}, {"pid", pid},
+	        {"message", "Terminated target from inside (in-process kill; works on self-protected targets) and detached"}};
 }
 
 json McpServer::ToolSetModuleBreakpoint(const json& args) {
@@ -2559,8 +2578,13 @@ json McpServer::GetToolsList() {
 			{"logFile", {{"type", "string"}, {"description", "Enable server-side logging to this file path (e.g. 'veh-mcp.log'). Omit to disable logging."}}}
 		 }}, {"required", json::array({"program"})}}}},
 
-		{{"name", "veh_detach"}, {"description", "Detach debugger from the target process."},
+		{{"name", "veh_detach"}, {"description", "Detach debugger from the target process (leaves it running)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}},
+
+		{{"name", "veh_terminate"}, {"description", "Kill the target process from inside (the injected DLL calls TerminateProcess on its own process). Works even on self-protected targets that deny external OpenProcess/taskkill (deny-DACL or higher integrity), because a process's own-handle always has terminate rights. Detaches afterward. Use this instead of the WM_CLOSE->detach->taskkill dance."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"exitCode", {{"type", "integer"}, {"description", "Process exit code (default: 0)"}}}
+		 }}}}},
 
 		{{"name", "veh_set_breakpoint"}, {"description", "Set a software breakpoint (INT3) at an address. Supports module+RVA (e.g. 'crackme.exe+0x1000'). Duplicate address returns existing BP id. Use 'action' to auto-execute commands on hit (no agent intervention needed)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
