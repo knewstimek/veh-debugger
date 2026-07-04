@@ -842,6 +842,57 @@ std::vector<DisasmInsn> DebugSession::Disassemble(uint64_t address, uint32_t cou
 	return result;
 }
 
+bool DebugSession::ResolveAddrExpr(const std::string& innerIn, const RegisterSet* regs, uint64_t& out) {
+	std::string inner = innerIn;
+	while (!inner.empty() && inner.front() == ' ') inner.erase(inner.begin());
+	while (!inner.empty() && inner.back() == ' ') inner.pop_back();
+	if (inner.empty()) return false;
+
+	auto parseNum = [](const std::string& s, uint64_t& v) -> bool {
+		if (s.empty()) return false;
+		try { size_t pos; v = std::stoull(s, &pos, 0); return pos == s.size(); }
+		catch (...) { return false; }
+	};
+
+	// Whole token is a plain number (fully consumed -- rejects "0x10+0x20" here so it
+	// falls through to the operator branch instead of silently parsing just "0x10").
+	if (parseNum(inner, out)) return true;
+
+	// <term> (+|-) <term>, where term is a register or a literal. Scan from index 1 so a
+	// leading sign is never mistaken for the operator.
+	size_t opPos = std::string::npos; char opChar = 0;
+	for (size_t i = 1; i < inner.size(); i++) {
+		if (inner[i] == '+' || inner[i] == '-') { opPos = i; opChar = inner[i]; break; }
+	}
+	if (opPos != std::string::npos) {
+		std::string lhs = inner.substr(0, opPos);
+		std::string rhs = inner.substr(opPos + 1);
+		while (!lhs.empty() && lhs.back() == ' ') lhs.pop_back();
+		while (!rhs.empty() && rhs.front() == ' ') rhs.erase(rhs.begin());
+
+		uint64_t lv = 0, rv = 0; bool lok = false, rok = false;
+		if (TryParseRegisterName(lhs)) { if (regs) { lv = ResolveRegisterByName(lhs, *regs); lok = true; } }
+		else lok = parseNum(lhs, lv);
+		if (TryParseRegisterName(rhs)) { if (regs) { rv = ResolveRegisterByName(rhs, *regs); rok = true; } }
+		else rok = parseNum(rhs, rv);
+
+		if (lok && rok) {
+			if (opChar == '+') { uint64_t r = lv + rv; if (r < lv) return false; out = r; }  // overflow
+			else { if (rv > lv) return false; out = lv - rv; }                                // underflow
+			return true;
+		}
+		return false;
+	}
+
+	// Bare register.
+	if (TryParseRegisterName(inner)) {
+		if (!regs) return false;
+		out = ResolveRegisterByName(inner, *regs);
+		return true;
+	}
+	return false;
+}
+
 EvalResult DebugSession::Evaluate(const std::string& expression, uint32_t threadId) {
 	EvalResult result;
 
@@ -979,60 +1030,10 @@ EvalResult DebugSession::Evaluate(const std::string& expression, uint32_t thread
 		while (!inner.empty() && inner.back() == ' ') inner.pop_back();
 
 		uint64_t addr = 0;
-		bool resolved = false;
-		try {
-			addr = std::stoull(inner, nullptr, 0);
-			resolved = true;
-		} catch (...) {}
-
+		bool resolved = ResolveAddrExpr(inner, nullptr, addr);  // literal / literal-arithmetic fast path
 		if (!resolved && threadId != 0) {
 			auto regs = GetRegisters(threadId);
-			if (regs) {
-				// Find + or - operator
-				size_t opPos = std::string::npos;
-				char opChar = 0;
-				for (size_t i = 1; i < inner.size(); i++) {
-					if (inner[i] == '+' || inner[i] == '-') {
-						opPos = i;
-						opChar = inner[i];
-						break;
-					}
-				}
-
-				if (opPos != std::string::npos) {
-					std::string lhs = inner.substr(0, opPos);
-					std::string rhs = inner.substr(opPos + 1);
-					while (!lhs.empty() && lhs.back() == ' ') lhs.pop_back();
-					while (!rhs.empty() && rhs.front() == ' ') rhs.erase(rhs.begin());
-
-					uint64_t lhsVal = 0, rhsVal = 0;
-					bool lhsOk = false, rhsOk = false;
-
-					if (TryParseRegisterName(lhs)) {
-						lhsVal = ResolveRegisterByName(lhs, *regs);
-						lhsOk = true;
-					} else {
-						try { lhsVal = std::stoull(lhs, nullptr, 0); lhsOk = true; } catch (...) {}
-					}
-
-					if (TryParseRegisterName(rhs)) {
-						rhsVal = ResolveRegisterByName(rhs, *regs);
-						rhsOk = true;
-					} else {
-						try { rhsVal = std::stoull(rhs, nullptr, 0); rhsOk = true; } catch (...) {}
-					}
-
-					if (lhsOk && rhsOk) {
-						addr = (opChar == '+') ? (lhsVal + rhsVal) : (lhsVal - rhsVal);
-						resolved = true;
-					}
-				} else {
-					if (TryParseRegisterName(inner)) {
-						addr = ResolveRegisterByName(inner, *regs);
-						resolved = true;
-					}
-				}
-			}
+			if (regs) resolved = ResolveAddrExpr(inner, &*regs, addr);
 		}
 
 		if (!resolved) {

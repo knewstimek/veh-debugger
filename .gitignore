@@ -55,5 +55,8 @@ test_detach_reattach.py
 
 # Personal config (not for repo)
 CLAUDE.md
+
+# 비공개 문서 백업 (별도 private 레포: knewstimek/veh-debugger-private)
+private/
 .github/
 .mcp.json
