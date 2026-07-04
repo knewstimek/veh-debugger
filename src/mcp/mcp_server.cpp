@@ -222,7 +222,7 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 		}},
 		{"serverInfo", {
 			{"name", "veh-debugger"},
-			{"version", "1.1.12"}
+			{"version", "1.1.13"}
 		}},
 		{"instructions",
 			"VEH Debugger - in-process debugger for Windows x86/x64 executables.\n"
@@ -1954,31 +1954,41 @@ bool McpServer::EvaluateCondition(const std::string& condition, uint32_t threadI
 	};
 	trim(lhs); trim(rhs);
 
-	auto resolveVal = [&](const std::string& tok) -> uint64_t {
-		if (tok.empty()) return 0;
+	// Resolve an operand to a value. Returns false when it cannot be resolved, so the
+	// caller fail-safes (stops) instead of silently comparing garbage and free-running.
+	// Callback-thread safe: cachedRegs + ReadProcessMemory only (no reentrant IPC).
+	auto resolveVal = [&](const std::string& tok, uint64_t& out) -> bool {
+		if (tok.empty()) return false;
 		if (tok[0] == '*' || tok[0] == '[') {
-			std::string addrStr = tok.substr(1);
-			if (!addrStr.empty() && addrStr.back() == ']') addrStr.pop_back();
-			trim(addrStr);
-			try {
-				uint64_t addr = std::stoull(addrStr, nullptr, 0);
-				uint64_t val = 0;
-				SIZE_T bytesRead = 0;
-				HANDLE hProc = session_.GetTargetProcess();
-				if (hProc && ReadProcessMemory(hProc, (LPCVOID)addr, &val, 8, &bytesRead))
-					return val;
-			} catch (...) {}
-			return 0;
+			std::string inner = tok.substr(1);
+			if (!inner.empty() && inner.back() == ']') inner.pop_back();
+			trim(inner);
+			uint64_t addr = 0;
+			if (!DebugSession::ResolveAddrExpr(inner, cachedRegs, addr)) return false;
+			uint64_t val = 0;
+			SIZE_T bytesRead = 0;
+			HANDLE hProc = session_.GetTargetProcess();
+			if (hProc && ReadProcessMemory(hProc, (LPCVOID)addr, &val, 8, &bytesRead) && bytesRead == 8) {
+				out = val;
+				return true;
+			}
+			return false;
 		}
 		if (DebugSession::TryParseRegisterName(tok)) {
-			if (cachedRegs) return DebugSession::ResolveRegisterByName(tok, *cachedRegs);
-			return 0;
+			if (!cachedRegs) return false;
+			out = DebugSession::ResolveRegisterByName(tok, *cachedRegs);
+			return true;
 		}
-		try { return std::stoull(tok, nullptr, 0); } catch (...) { return 0; }
+		// Full-consume check: a partial parse (e.g. "0x12+0x1") is an unsupported operand,
+		// so report unresolved and let the caller fail-safe (stop) instead of comparing garbage.
+		try { size_t pos; out = std::stoull(tok, &pos, 0); return pos == tok.size(); } catch (...) { return false; }
 	};
 
-	uint64_t lhsVal = resolveVal(lhs);
-	uint64_t rhsVal = resolveVal(rhs);
+	uint64_t lhsVal = 0, rhsVal = 0;
+	if (!resolveVal(lhs, lhsVal) || !resolveVal(rhs, rhsVal)) {
+		// Unresolvable operand -> fail-safe: stop so the user notices, never a silent free-run.
+		return true;
+	}
 
 	if (opStr == "==") return lhsVal == rhsVal;
 	if (opStr == "!=") return lhsVal != rhsVal;
@@ -2511,49 +2521,65 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 // --- Helpers ---
 
 bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
-	// Module+RVA syntax: "crackme.exe+0x1000" or "ntdll.dll+0x5000"
-	auto plusPos = addrStr.find('+');
+	std::string s = addrStr;
+	while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+	while (!s.empty() && s.back() == ' ') s.pop_back();
+	if (s.empty()) return false;
+
+	auto parseNum = [](const std::string& t, uint64_t& v) -> bool {
+		if (t.empty()) return false;
+		try { size_t pos; v = std::stoull(t, &pos, 0); return pos == t.size(); }
+		catch (...) { return false; }
+	};
+	auto trimTok = [](std::string t) {
+		while (!t.empty() && t.front() == ' ') t.erase(t.begin());
+		while (!t.empty() && t.back() == ' ') t.pop_back();
+		return t;
+	};
+
+	// 1) Plain hex/decimal address (fully consumed).
+	if (parseNum(s, out)) return true;
+
+	// 2) '+' form: module+RVA ("crackme.exe+0x1000") or literal arithmetic ("0x1000+0x34").
+	//    Fully-numeric left => arithmetic; otherwise treat left as a module name.
+	auto plusPos = s.find('+');
 	if (plusPos != std::string::npos && plusPos > 0) {
-		std::string modulePart = addrStr.substr(0, plusPos);
-		std::string offsetPart = addrStr.substr(plusPos + 1);
-
-		// Check if the part before '+' looks like a module name (contains '.' or non-hex chars)
-		bool looksLikeModule = false;
-		for (char c : modulePart) {
-			if (c == '.' || c == '_' || c == '-') { looksLikeModule = true; break; }
-			if (std::isalpha(c) && !std::isxdigit(c)) { looksLikeModule = true; break; }
+		std::string left = trimTok(s.substr(0, plusPos));
+		std::string right = trimTok(s.substr(plusPos + 1));
+		uint64_t rv;
+		if (!parseNum(right, rv)) return false;  // offset/RVA must be numeric
+		uint64_t lv;
+		if (parseNum(left, lv)) {  // literal arithmetic
+			uint64_t r = lv + rv;
+			if (r < lv) return false;  // overflow -> reject rather than wrap to a bogus address
+			out = r; return true;
 		}
-
-		if (looksLikeModule && session_.IsAttached()) {
-			// Resolve module base
-			auto modules = session_.GetModules();
-			// Case-insensitive match
-			std::string modLower = modulePart;
-			std::transform(modLower.begin(), modLower.end(), modLower.begin(), ::tolower);
-
-			for (auto& m : modules) {
+		if (session_.IsAttached()) {
+			auto toLo = [](char c) { return (char)::tolower((unsigned char)c); };
+			std::string modLower = left;
+			std::transform(modLower.begin(), modLower.end(), modLower.begin(), toLo);
+			for (auto& m : session_.GetModules()) {
 				std::string nameLower = m.name;
-				std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
-				if (nameLower == modLower) {
-					try {
-						uint64_t offset = std::stoull(offsetPart, nullptr, 0);
-						out = m.baseAddress + offset;
-						return true;
-					} catch (...) { return false; }
-				}
+				std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), toLo);
+				if (nameLower == modLower) { out = m.baseAddress + rv; return true; }
 			}
-			return false;  // module not found
 		}
+		return false;  // module not found
 	}
 
-	// Plain hex/decimal address
-	try {
-		size_t pos;
-		out = std::stoull(addrStr, &pos, 0);
-		return pos == addrStr.size();
-	} catch (...) {
-		return false;
+	// 3) '-' form: literal subtraction only ("0x1000-0x10"). A module name may itself
+	//    contain '-', so require both sides to be pure numbers before treating it as math.
+	auto minusPos = s.find('-', 1);
+	if (minusPos != std::string::npos) {
+		uint64_t lv, rv;
+		if (parseNum(trimTok(s.substr(0, minusPos)), lv) &&
+		    parseNum(trimTok(s.substr(minusPos + 1)), rv)) {
+			if (rv > lv) return false;  // underflow -> reject rather than wrap
+			out = lv - rv;
+			return true;
+		}
 	}
+	return false;
 }
 
 // --- Tool List Definition ---

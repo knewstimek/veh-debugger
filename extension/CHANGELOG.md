@@ -1,14 +1,18 @@
 # Changelog
 
-## Unreleased
+## 1.1.13
 
 ### Added
 - **`veh_terminate`** (new tool) -- kill the target from inside: the injected DLL calls `TerminateProcess` on its own process (`GetCurrentProcess()`), which always holds terminate rights regardless of any DACL the target set to block *external* `OpenProcess`. This reliably kills self-protecting targets (deny-DACL or higher integrity) that refuse external `taskkill`, replacing the fragile `WM_CLOSE -> detach -> taskkill` sequence. Auto-detaches afterward. Optional `exitCode` (default 0).
 
 ### Fixed
+- **Conditional breakpoint silent free-run (critical)** -- a `condition` whose operand could not be resolved (e.g. a register-relative memory deref like `[ESI+0x34]==1000`, or any malformed expression) silently resolved to `0`, so the comparison quietly failed and the breakpoint auto-continued -- the target ran to exit with no error surfaced. The MCP condition evaluator now (a) resolves register-relative memory operands (`[reg+off]`, `[reg-off]`, `[reg+reg]`) instead of only literal addresses, and (b) **fail-safes to STOP** when any operand is unresolvable, matching the DAP path -- so a bad condition halts visibly instead of vanishing the process.
+- **`veh_read_memory` / address parsing now supports literal arithmetic** -- `ParseAddress` accepts `<addr>+<off>` and `<addr>-<off>` (e.g. `0x7FF6000012C0+0x34`), which is what a batch reference like `$last.registers.esi+0x34` expands to after substitution. Previously such an address was misparsed as a module name (the leading `0x` made it "look like" a module) and rejected with `invalid address format`, forcing manual offset math. Module+RVA (`crackme.exe+0x1000`) is unchanged; module names containing `-`/`.` are not mistaken for subtraction. Arithmetic that would overflow/underflow the 64-bit address space is rejected rather than silently wrapping to a bogus address, and non-fully-consumed numeric condition operands (e.g. `0x12+0x1` inside a `condition`) are treated as unresolvable so they fail-safe to a stop.
+
 - **`veh_launch` `stopOnEntry:false` resume race** -- the main thread was resumed inside `Launch()` *before* the VEH handler finished installing (the `WaitForReady` gate ran later in the caller), leaving a window where the target could execute without exception coverage. Resume is now deferred until after `WaitForReady`, closing the race.
 
 ### Changed
+- **Unified address-expression resolver** -- extracted `DebugSession::ResolveAddrExpr`, a pure (no-IPC, no-memory-read) resolver for `literal`, `reg`, `reg+/-off`, and `reg+reg` forms, now shared by `veh_evaluate` and the conditional-breakpoint evaluator. This is why register-relative conditions became possible: the condition path runs on the IPC event-callback thread where reentrant IPC would deadlock, so it needed a resolver that touches only cached registers + `ReadProcessMemory`. Also fixes a latent `[0x10+0x20]` case in `veh_evaluate` that previously parsed only the first literal.
 - **Categorized `veh_attach` failure messages** -- attach errors now distinguish the actual cause instead of a generic "check logs": CREATE_SUSPENDED / uninitialized (with a hint to use `veh_launch`), access-denied for injection (target self-protects its process object or runs at higher integrity), DLL-not-found, injection-failed, and pipe-timeout. Helps diagnose attach failures against hardened or hidden-desktop targets.
 - **Docs**: clarified that memory-oriented tools (`veh_read_memory`, `veh_read_pointer_chain`, `veh_write_memory`, `veh_dump_memory`, `veh_disassemble`, `veh_modules`) are **non-stop** -- they work while the target runs, so live GUI values can be read without a breakpoint or detach/attach round-trip. Only context-dependent tools (`veh_registers`, `veh_stack_trace`, `veh_enum_locals`, `veh_step_*`) require a stopped thread.
 

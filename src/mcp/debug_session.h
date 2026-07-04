@@ -289,6 +289,12 @@ public:
 	static uint64_t ResolveRegisterByName(const std::string& name, const RegisterSet& regs);
 	static uint32_t GetRegisterIndex(const std::string& name);
 
+	// Resolve an address expression to a numeric address using cached registers only.
+	// Handles: literal (0x1000 / 4096), reg (RAX), reg+off, reg-off, reg+reg, literal+/-literal.
+	// Pure -- no IPC / no memory read -- so it is safe to call from the IPC event-callback thread.
+	// `regs` may be null (only literal forms then resolve). Returns false if unresolvable.
+	static bool ResolveAddrExpr(const std::string& inner, const RegisterSet* regs, uint64_t& out);
+
 private:
 	std::string GetExeDir();
 	std::string ResolveDll(const std::string& dir, bool use32);
