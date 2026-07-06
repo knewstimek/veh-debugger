@@ -414,46 +414,6 @@ Windows 디버거의 "실행하며 디버깅" 기능과 동일. DAP(`launch` 요
 | 메모리/디스어셈블리 | readMemory, writeMemory, disassemble |
 | 기타 | modules, loadedSources, exceptionInfo, completions, source, cancel, gotoTargets |
 
-## 프로젝트 구조
-
-```
-├── CMakeLists.txt              # 루트 CMake (MT 정적 CRT)
-├── src/
-│   ├── dll/                    # VEH 디버거 DLL
-│   │   ├── dllmain.cpp         # DLL 진입점
-│   │   ├── veh_handler.*       # VEH 예외 핸들러
-│   │   ├── breakpoint.*        # 소프트웨어 BP 관리
-│   │   ├── hw_breakpoint.*     # 하드웨어 BP (DR0~DR3)
-│   │   ├── memory.*            # 메모리 읽기/쓰기
-│   │   ├── threads.*           # 스레드 열거/제어
-│   │   ├── stack_walk.*        # 스택 워킹 (DbgHelp)
-│   │   └── pipe_server.*       # Named Pipe IPC 서버
-│   ├── adapter/                # DAP 어댑터 EXE
-│   │   ├── main.cpp            # 진입점 (모드 파싱)
-│   │   ├── dap_server.*        # DAP 프로토콜 핸들러
-│   │   ├── dap_types.h         # DAP 타입 정의
-│   │   ├── transport.*         # stdin/stdout & TCP 전송
-│   │   ├── injector.*          # DLL 인젝션 (4가지 방식)
-│   │   ├── pipe_client.*       # Named Pipe IPC 클라이언트
-│   │   ├── disassembler.h      # IDisassembler 인터페이스
-│   │   ├── disassembler.cpp    # SimpleDisassembler (내장 경량 디코더)
-│   │   └── zydis_disassembler.cpp # ZydisDisassembler (Zydis v4 기반)
-│   ├── mcp/                    # MCP 도구 서버
-│   │   ├── main.cpp            # 진입점 (--install, --log 등)
-│   │   ├── mcp_server.*        # MCP 프로토콜 + 39개 도구 구현
-│   │   └── installer.*         # 에이전트별 자동 설치/제거
-│   └── common/                 # 공유 코드
-│       ├── ipc_protocol.h      # IPC 명령/응답 정의
-│       └── logger.h            # 로깅 유틸리티
-├── third_party/                # 외부 라이브러리
-│   └── nlohmann/json.hpp       # JSON 파서 (MIT)
-│   # Zydis v4.1 (vendored in third_party/)
-└── extension/                  # VSCode 익스텐션
-    ├── package.json
-    ├── tsconfig.json
-    └── src/extension.ts
-```
-
 ## 문제 해결
 
 ### DLL 인젝션 실패
