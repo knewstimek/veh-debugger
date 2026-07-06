@@ -2,21 +2,79 @@
 
 [한국어](README.md) | **English**
 
-Windows debugger based on **VEH (Vectored Exception Handler)** instead of the Windows Debug API. Fully supports **DAP** (Debug Adapter Protocol) and **MCP** (Model Context Protocol).
+An in-process Windows debugger built on **VEH (Vectored Exception Handler)**. Drive breakpoints, hardware watchpoints, memory/register inspection, pointer-chain and runtime call tracing **as MCP tool calls from an AI agent, or as DAP from VSCode** -- one engine, two protocols.
 
-## Why VEH Debugger?
+## Why VEH
 
-### Anti-debug bypass advantage
-Does not use Windows Debug API (`NtSetInformationThread`, `IsDebuggerPresent`, etc.), keeping `PEB.BeingDebugged = 0`. Naturally bypasses PEB/NtQuery-based anti-debug checks used by **Themida, VMProtect**, etc. Note: protections that inspect VEH itself (kernel anti-cheats like EAC) can still detect it.
+It doesn't use the Windows Debug API. Instead of `DebugActiveProcess` / `NtSetInformationThread`, it catches exceptions from inside the target via VEH, so `PEB.BeingDebugged` stays 0. The PEB/NtQuery-based anti-debug checks in Themida and VMProtect don't see the debugger. (Kernel anti-cheats that scan for VEH registration itself, like EAC, are the exception.)
 
-### Side-by-side with existing debuggers
-Windows Debug API debuggers (x64dbg, WinDbg, Visual Studio) allow only one per process, but VEH Debugger can **attach alongside them simultaneously**. Useful for running kernel/user-mode debugger analysis while using VEH Debugger for auxiliary breakpoints/memory watches.
+Being in-process has a second effect. A Windows Debug API debugger attaches only one per process, but VEH attaches **alongside an x64dbg session already on the target**. Analyze with a kernel/user debugger while running watchpoints through VEH.
 
-### Native AI agent support
-Built-in MCP (Model Context Protocol) tool server lets **Claude, Cursor, Windsurf, Codex** and other AI agents control the debugger directly. Debug with natural language: "Set a breakpoint on this function and check the RAX value."
+## Control paths: DAP and MCP
 
-### Full VSCode integration
-No separate debugger GUI needed. **Everything works inside the VSCode debug panel** - disassembly view, register read/write, memory read/write, hardware breakpoints.
+The same debugging engine, exposed over two protocols.
+
+- **DAP**: directly in the VSCode debug panel. Source BPs, stepping, disassembly, register editing.
+- **MCP**: Claude, Cursor, Codex, etc. call 39 tools. The debugging operation itself is a function the agent invokes.
+
+## Scenarios
+
+How a natural-language request unfolds into a tool sequence.
+
+**Break inside a module the moment it loads**
+
+Stop the instant Game.dll is mapped, then set a BP inside it.
+```
+veh_set_module_breakpoint(module="Game.dll")   # stop on load
+veh_continue(wait=true)
+veh_set_breakpoint(address="Game.dll+0x1234")
+veh_continue(wait=true)
+veh_registers(threadId=...)
+```
+Catches modules that only appear after unpacking, and lazily-loaded DLLs, at load time. The `module+RVA` address needs no ASLR base math.
+
+**Find what writes to an address (Find What Writes)**
+
+Find the instruction that wrote to a watched address.
+```
+veh_set_data_breakpoint(address="0x...", type="write", size=4, condition="value != 0")
+veh_continue(wait=true)
+veh_registers(threadId=...)            # RIP of the writing instruction
+veh_disassemble(address=<RIP above>)
+```
+DR0~DR3 hardware watchpoints -- no INT3 planted in code, so integrity checks don't trip. `value != 0` skips zero-write noise.
+
+**Trace register changes over N steps**
+
+Collect only the steps where EAX changes over 100 steps.
+```
+veh_trace_register(threadId=..., register="eax", max_steps=100)
+```
+The step loop runs inside the target DLL, so there's no IPC round-trip per step. Returns only the steps where the value changed.
+
+**Resolve a pointer chain in one call**
+
+Follow offsets from a base to read the final value.
+```
+veh_read_pointer_chain(base="game.exe+0x1F00", offsets=[0x10, 0x8, 0x34], size=4)
+```
+Dereferences each hop (4/8-byte pointer size auto-detected) and returns every hop plus the final value. Replaces one round-trip per hop with a single call. HP/coordinate/entity pointer tracking.
+
+**Batch-resolve obfuscated imports**
+
+Resolve where a set of thunk addresses actually land.
+```
+veh_resolve_imports(threadId=..., addresses=[...], follow_exceptions=true, system_only=true)
+```
+Steps from each thunk into the DLL to find the real API (up to 2000). `follow_exceptions` handles exception-based obfuscation. Reconstructs imports on binaries with a mangled IAT.
+
+**Collect runtime call targets on a packed binary**
+
+Gather where call sites actually land at runtime over 5 seconds.
+```
+veh_trace_calls(addresses=[...], duration_sec=5, resolve=true, system_only=true)
+```
+Collects the runtime target address + API name for each call/jmp. `resolve=true` follows thunks/trampolines to the end. For IAT reconstruction on packed binaries.
 
 ---
 
@@ -27,7 +85,7 @@ No separate debugger GUI needed. **Everything works inside the VSCode debug pane
 - **MCP tool server**: 39 tools for AI agents (Claude, Cursor, Codex, etc.) to directly control the debugger
 - **TCP mode**: Remote debugging via `--tcp --port=PORT`
 - **Remote access**: `--remote` / `--bind=0.0.0.0` for VM/network debugging
-- **32/64-bit**: Debug both x86 and x64 processes (WoW64 injection for 32-bit targets)
+- **32/64-bit**: Debug both x86 and x64 processes (separate 32-bit DLL build; WoW64 injection for 32-bit targets)
 - **Software breakpoints**: INT3 (0xCC) patching with original byte masking in ReadMemory
 - **Conditional breakpoints**: Break on condition (e.g. `RAX==0x1234`, `*0x7FF600!=0`)
 - **Hit count breakpoints**: Break on Nth hit
@@ -145,6 +203,8 @@ Connect from external DAP client to `<target-ip>:4711`.
 
 **Security note**: `--remote` binds to all network interfaces. Only use on trusted networks or restrict via firewall.
 
+> Any DAP-capable client can connect to the adapter over TCP -- e.g. the agent-tool `debug` tool via `debug(operation: "launch", address: "localhost:4711", ...)`.
+
 ### 4. MCP Tool Server (AI Agent Control)
 
 Separate MCP server for AI agents to control the debugger via function calls.
@@ -172,6 +232,30 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` | JSON (`mcpServers`) |
 | Codex CLI | `~/.codex/config.toml` | TOML (`mcp_servers`) |
 
+**Manual install** (edit the config file directly)
+
+Claude Code / Claude Desktop / Cursor / Windsurf (JSON):
+```json
+{
+  "mcpServers": {
+    "veh-debugger": {
+      "command": "C:/path/to/veh-mcp-server.exe",
+      "args": ["--log=veh-mcp.log"]
+    }
+  }
+}
+```
+
+Codex CLI (TOML):
+```toml
+[mcp_servers.veh-debugger]
+command = "C:/path/to/veh-mcp-server.exe"
+args = ["--log=veh-mcp.log"]
+enabled = true
+```
+
+Restart the agent/IDE after configuring to activate.
+
 **MCP Tools (39)**
 
 | Tool | Args | Description |
@@ -195,6 +279,7 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 | `veh_pause` | `threadId?` | Pause |
 | `veh_threads` | - | List threads |
 | `veh_stack_trace` | `threadId, maxFrames?` | Stack trace. For PDB-less modules, parses the PE export table directly for accurate function names (instead of DbgHelp's inaccurate `OrdinalNNNNN` labels) |
+| `veh_enum_locals` | `threadId, instructionAddress?, frameBase?` | Enumerate locals/parameters in a stopped thread's stack frame (name/type/address/value). Auto-detects the top frame if omitted (PDB required) |
 | `veh_registers` | `threadId` | Read registers |
 | `veh_set_register` | `threadId, name, value` | Modify register value |
 | `veh_evaluate` | `expression, threadId` | Evaluate register/memory/pointer/segment (`[reg+offset]`, `gs:[0x60]`, etc.) |
@@ -218,6 +303,30 @@ Supported agents: `claude-code`, `claude-desktop`, `cursor`, `windsurf`, `codex`
 > **Non-stop inspection (no target stop required)**: `veh_read_memory` / `veh_read_pointer_chain` / `veh_write_memory` / `veh_dump_memory` / `veh_disassemble` / `veh_modules` work while the target is **running** (serviced by a dedicated pipe thread inside the DLL -- other threads are never frozen). You don't need a breakpoint or a detach/attach round-trip to read live values during GUI interaction. In contrast, `veh_registers` / `veh_stack_trace` / `veh_enum_locals` / `veh_step_*` need a thread context, so they only work when stopped at a breakpoint or after `veh_pause`.
 
 > **Tip**: Address arguments accept hex (`"0x401000"`), decimal (`4198400`), or **module+RVA** (`"crackme.exe+0x1000"`). Module+RVA eliminates manual ASLR base calculation.
+
+### Command-line Options
+
+**veh-mcp-server.exe**
+
+| Option | Description |
+|--------|-------------|
+| `--install [AGENT]` | Register the MCP server in AI agent configs (all or specific) |
+| `--uninstall [AGENT]` | Remove the MCP server from AI agent configs |
+| `--log=FILE` | Log file path |
+| `--log-level=LEVEL` | Log level: debug, info, warn, error |
+| `--help` | Print help |
+
+**veh-debug-adapter.exe**
+
+| Option | Description |
+|--------|-------------|
+| `--tcp` | TCP transport mode (default: stdin/stdout) |
+| `--port=PORT` | TCP port number (default: 4711) |
+| `--remote` | Bind to 0.0.0.0 (allow remote connections) |
+| `--bind=0.0.0.0` | Same as `--remote` |
+| `--log=FILE` | Log file path |
+| `--log-level=LEVEL` | Log level: debug, info, warn, error (default: info) |
+| `--help` | Print help |
 
 ## DAP Commands
 

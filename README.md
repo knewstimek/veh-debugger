@@ -2,21 +2,79 @@
 
 **한국어** | [English](README.en.md)
 
-Windows VEH(Vectored Exception Handler) 기반 디버거. DAP(Debug Adapter Protocol) 완전 지원.
+Windows 프로세스를 VEH(Vectored Exception Handler)로 디버깅하는 인-프로세스 디버거. 브레이크포인트, 하드웨어 워치포인트, 메모리/레지스터 조회, 포인터 체인과 런타임 call 추적을 **AI 에이전트는 MCP 도구 호출로, 사람은 VSCode의 DAP로** 같은 엔진에서 제어한다.
 
-## 왜 VEH Debugger인가?
+## 왜 VEH인가
 
-### 안티디버그 우회에 유리
-Windows Debug API(`NtSetInformationThread`, `IsDebuggerPresent` 등)를 사용하지 않으므로 `PEB.BeingDebugged = 0` 상태를 유지합니다. **Themida, VMProtect** 등 PEB/NtQuery 기반 안티디버그 체크를 자연스럽게 우회합니다. 단, VEH 자체를 검사하는 보호(EAC 등 커널 안티치트)는 감지될 수 있습니다.
+Windows Debug API를 쓰지 않는다. `DebugActiveProcess` / `NtSetInformationThread` 대신 타겟 안에서 VEH로 예외를 잡으므로 `PEB.BeingDebugged`가 0으로 유지된다. Themida, VMProtect의 PEB/NtQuery 기반 안티디버그 체크에 디버거가 보이지 않는다. (VEH 등록 자체를 스캔하는 EAC류 커널 안티치트는 예외.)
 
-### 🤝 기존 디버거와 동시 사용 가능
-Windows Debug API 디버거(x64dbg, WinDbg, Visual Studio 등)는 프로세스당 하나만 붙을 수 있지만, VEH Debugger는 **Windows 디버거와 동시에 같은 프로세스에 붙을 수 있습니다.** 커널 디버거나 다른 유저모드 디버거로 분석하면서, VEH Debugger로 보조 브레이크포인트/메모리 감시를 병행할 수 있습니다.
+in-process라는 점에서 하나 더. Windows Debug API 디버거는 프로세스당 하나만 붙지만, VEH는 **x64dbg가 이미 붙은 프로세스에도 동시에** 붙는다. 커널/유저 디버거로 분석하면서 워치포인트만 VEH로 병행할 수 있다.
 
-### 🤖 AI 에이전트 네이티브 지원
-MCP(Model Context Protocol) 도구 서버를 내장하여 **Claude, Cursor, Windsurf, Codex** 등 AI 에이전트가 디버거를 직접 제어합니다. "이 함수에 브레이크포인트 걸고 RAX 값 확인해줘"처럼 자연어로 디버깅을 지시할 수 있습니다.
+## 제어 경로: DAP와 MCP
 
-### 🖥️ VSCode 환경 통합
-별도 디버거 GUI 없이 **VSCode 디버그 패널에서 모든 것을 수행합니다.** 디스어셈블리 뷰, 레지스터 조회/수정, 메모리 읽기/쓰기, 하드웨어 브레이크포인트까지 VSCode 안에서 완결됩니다.
+같은 디버깅 엔진을 두 프로토콜로 노출한다.
+
+- **DAP**: VSCode 디버그 패널에서 직접. 소스 BP, 스텝, 디스어셈블리, 레지스터 편집.
+- **MCP**: Claude, Cursor, Codex 등이 39개 도구를 호출. 디버깅 연산 자체가 에이전트가 부르는 함수다.
+
+## 실전 시나리오
+
+자연어 요청이 실제로 어떤 도구 시퀀스로 풀리는지.
+
+**모듈 로드 시점에 내부로 BP**
+
+Game.dll이 로드되는 순간 정지시키고, 그 안 오프셋에 BP를 건다.
+```
+veh_set_module_breakpoint(module="Game.dll")   # 로드 시점에 정지
+veh_continue(wait=true)
+veh_set_breakpoint(address="Game.dll+0x1234")
+veh_continue(wait=true)
+veh_registers(threadId=...)
+```
+언패킹 후에야 나타나는 모듈, 지연 로드 DLL을 로드 시점에 잡는다. `module+RVA` 주소라 ASLR 베이스 계산이 없다.
+
+**이 값에 쓰는 코드 찾기 (Find What Writes)**
+
+감시 주소에 쓰기가 일어난 명령을 찾는다.
+```
+veh_set_data_breakpoint(address="0x...", type="write", size=4, condition="value != 0")
+veh_continue(wait=true)
+veh_registers(threadId=...)            # 쓴 명령의 RIP
+veh_disassemble(address=<위 RIP 값>)
+```
+DR0~DR3 하드웨어 워치포인트라 코드에 INT3를 심지 않아 무결성 검사에 안 걸린다. `value != 0`으로 0-write 노이즈를 건너뛴다.
+
+**N스텝 동안 레지스터 변화 추적**
+
+특정 지점부터 100스텝 동안 EAX 값이 바뀌는 지점만 모은다.
+```
+veh_trace_register(threadId=..., register="eax", max_steps=100)
+```
+스텝 루프가 타겟 DLL 안에서 돌아 스텝마다 IPC 왕복이 없다. 값이 바뀐 스텝만 반환한다.
+
+**포인터 체인 한 번에 풀기**
+
+base에서 오프셋을 차례로 따라가 최종 값을 읽는다.
+```
+veh_read_pointer_chain(base="game.exe+0x1F00", offsets=[0x10, 0x8, 0x34], size=4)
+```
+각 홉을 역참조(x86/x64 포인터 크기 자동)해 홉마다 주소와 최종 값을 반환한다. 홉당 왕복하던 걸 1콜로. HP/좌표/엔티티 포인터 추적.
+
+**난독화된 import 일괄 해석**
+
+thunk 주소들이 실제로 어느 API로 가는지 한 번에 푼다.
+```
+veh_resolve_imports(threadId=..., addresses=[...], follow_exceptions=true, system_only=true)
+```
+각 thunk에서 DLL 안까지 스텝으로 따라가 실제 API를 알아낸다(최대 2000). 예외 기반 난독화도 `follow_exceptions`로 추적. IAT가 밀린 바이너리의 import 복원.
+
+**패킹된 바이너리의 런타임 call 타겟 수집**
+
+콜사이트들이 실행 중 실제로 어디로 도달하는지 5초간 모은다.
+```
+veh_trace_calls(addresses=[...], duration_sec=5, resolve=true, system_only=true)
+```
+콜/점프가 런타임에 도달하는 주소 + API 이름을 수집한다. `resolve=true`는 thunk/트램폴린을 끝까지 따라간다. 패킹 바이너리의 IAT 재구성용.
 
 ---
 
@@ -27,12 +85,18 @@ MCP(Model Context Protocol) 도구 서버를 내장하여 **Claude, Cursor, Wind
 - **MCP 도구 서버**: AI 에이전트(Claude, Codex 등)가 직접 디버거를 제어하는 39개 도구 제공
 - **TCP 모드**: `--tcp --port=PORT`로 원격 디버깅/MCP 연동 지원
 - **원격 접속**: `--remote` / `--bind=0.0.0.0`으로 VM/네트워크 너머 디버깅
-- **32/64비트 지원**: x86/x64 프로세스 모두 디버깅 가능 (별도 32비트 DLL 빌드)
-- **소프트웨어 브레이크포인트**: INT3 (0xCC) 패치
+- **32/64비트 지원**: x86/x64 프로세스 모두 디버깅 (32비트 타겟은 별도 32비트 DLL 빌드 + WoW64 인젝션)
+- **소프트웨어 브레이크포인트**: INT3 (0xCC) 패치 (ReadMemory에서 원본 바이트 마스킹)
+- **조건부 브레이크포인트**: 조건식 만족 시에만 정지 (예: `RAX==0x1234`, `*0x7FF600!=0`)
+- **힐 카운트 브레이크포인트**: N번째 히트에서만 정지
+- **로그 포인트**: 정지 없이 Debug Console에 로깅 (예: `RAX={RAX}, ptr={*0x7FF600}`)
 - **하드웨어 브레이크포인트**: DR0~DR3 (메모리 읽기/쓰기 감시 = Find What Writes/Accesses)
 - **PDB 심볼 지원**: 소스 파일/줄 번호 매핑, 함수 이름으로 브레이크포인트
+- **PDB 기반 O(1) StepOver**: `SymGetLineFromAddrW64`로 다음 소스 줄 주소를 계산 — O(n) 싱글스텝 대신 임시 BP 하나
+- **레지스터 편집**: Variables 패널에서 레지스터 값 더블클릭 수정
 - **디스어셈블리**: Zydis x86/x64 디스어셈블러 (기본) + 내장 경량 디코더 (폴백)
 - **메모리 읽기/쓰기**: DAP readMemory/writeMemory 지원
+- **detach/재부착**: detach 후에도 DLL 파이프 서버 유지 — 타겟 재시작 없이 재부착 가능
 - **MT(정적 CRT) 빌드**: DLL 인젝션 시 vcruntime 의존성 없음
 
 ## 아키텍처
@@ -152,17 +216,9 @@ veh-debug-adapter.exe --tcp --port=4711 --bind=0.0.0.0
 
 **보안 주의**: `--remote`는 모든 네트워크 인터페이스에 바인딩합니다. 신뢰할 수 있는 네트워크에서만 사용하거나 방화벽으로 접근을 제한하세요.
 
-### 4. MCP debug 도구 연동 (DAP over TCP)
+> TCP로 열어둔 어댑터에는 DAP를 지원하는 클라이언트라면 무엇이든 붙을 수 있습니다. 예를 들어 agent-tool의 `debug` 도구로 `debug(operation: "launch", address: "localhost:4711", ...)` 처럼 연결합니다.
 
-```
-# TCP 모드로 어댑터 실행
-veh-debug-adapter.exe --tcp --port=4711
-
-# MCP debug 도구에서 TCP 연결
-debug(operation: "launch", address: "localhost:4711", ...)
-```
-
-### 5. MCP 도구 서버 (AI 에이전트 직접 제어)
+### 4. MCP 도구 서버 (AI 에이전트 직접 제어)
 
 DAP 프로토콜을 모르는 AI 에이전트가 함수 호출처럼 디버거를 제어할 수 있는 별도 MCP 서버.
 
@@ -238,6 +294,7 @@ enabled = true
 | `veh_pause` | `threadId?` | 일시정지 |
 | `veh_threads` | - | 스레드 목록 |
 | `veh_stack_trace` | `threadId, maxFrames?` | 스택 트레이스. PDB 없는 모듈은 PE export 테이블을 직접 파싱해 정확한 함수명 제공 (DbgHelp의 부정확한 `OrdinalNNNNN` 라벨 대신) |
+| `veh_enum_locals` | `threadId, instructionAddress?, frameBase?` | 정지된 스레드의 스택 프레임에서 지역변수/파라미터 열거 (이름/타입/주소/값). 생략 시 최상위 프레임 자동 감지 (PDB 필요) |
 | `veh_registers` | `threadId` | 레지스터 조회 |
 | `veh_set_register` | `threadId, name, value` | 레지스터 값 변경 |
 | `veh_evaluate` | `expression, threadId` | 레지스터/메모리/포인터/세그먼트 평가 (`[reg+offset]`, `gs:[0x60]` 등) |
