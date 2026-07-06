@@ -2,7 +2,7 @@
 
 [한국어](README.md) | **English**
 
-An in-process Windows debugger built on **VEH (Vectored Exception Handler)**. Drive breakpoints, hardware watchpoints, memory/register inspection, pointer-chain and runtime call tracing **as MCP tool calls from an AI agent, or as DAP from VSCode** -- one engine, two protocols.
+An in-process Windows debugger built on **VEH (Vectored Exception Handler)**. Breakpoints, hardware watchpoints, memory/register inspection, pointer-chain and runtime call tracing -- **every debugging operation is exposed as a callable, headless primitive.** With no GUI to drive, an AI agent calls them directly as MCP functions; a human uses the same engine through DAP in VSCode.
 
 ## Why VEH
 
@@ -15,7 +15,7 @@ Being in-process has a second effect. A Windows Debug API debugger attaches only
 The same debugging engine, exposed over two protocols.
 
 - **DAP**: directly in the VSCode debug panel. Source BPs, stepping, disassembly, register editing.
-- **MCP**: Claude, Cursor, Codex, etc. call 39 tools. The debugging operation itself is a function the agent invokes.
+- **MCP**: Claude, Cursor, Codex, etc. call 39 tools directly. No GUI in the loop -- the agent composes and automates debugging operations as functions, *programming* the debugger rather than *driving* it.
 
 ## Scenarios
 

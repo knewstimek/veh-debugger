@@ -2,7 +2,7 @@
 
 **한국어** | [English](README.en.md)
 
-Windows 프로세스를 VEH(Vectored Exception Handler)로 디버깅하는 인-프로세스 디버거. 브레이크포인트, 하드웨어 워치포인트, 메모리/레지스터 조회, 포인터 체인과 런타임 call 추적을 **AI 에이전트는 MCP 도구 호출로, 사람은 VSCode의 DAP로** 같은 엔진에서 제어한다.
+Windows 프로세스를 VEH(Vectored Exception Handler)로 디버깅하는 인-프로세스 디버거. 브레이크포인트, 하드웨어 워치포인트, 메모리/레지스터 조회, 포인터 체인과 런타임 call 추적 — **모든 디버깅 연산을 호출 가능한 headless primitive로 노출한다.** GUI를 조작할 필요 없이 AI 에이전트는 이걸 MCP 함수로 직접 호출하고, 사람은 같은 엔진을 VSCode의 DAP로 쓴다.
 
 ## 왜 VEH인가
 
@@ -15,7 +15,7 @@ in-process라는 점에서 하나 더. Windows Debug API 디버거는 프로세�
 같은 디버깅 엔진을 두 프로토콜로 노출한다.
 
 - **DAP**: VSCode 디버그 패널에서 직접. 소스 BP, 스텝, 디스어셈블리, 레지스터 편집.
-- **MCP**: Claude, Cursor, Codex 등이 39개 도구를 호출. 디버깅 연산 자체가 에이전트가 부르는 함수다.
+- **MCP**: Claude, Cursor, Codex 등이 39개 도구를 직접 호출. GUI를 거치지 않고 디버깅 연산을 함수처럼 조합·자동화한다 — 에이전트가 디버거를 '조종'하는 게 아니라 primitive로 '프로그래밍'한다.
 
 ## 실전 시나리오
 
