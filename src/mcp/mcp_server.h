@@ -101,6 +101,8 @@ private:
 	bool ParseAddress(const std::string& addrStr, uint64_t& out);
 	std::string NotAttachedMessage();
 	std::string IpcErrorMessage();
+	void ResetSessionEventState();
+	bool IsCurrentStopEvent(const StopEvent& event);
 
 	dap::Transport* transport_ = nullptr;
 	DebugSession session_;

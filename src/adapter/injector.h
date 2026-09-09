@@ -28,7 +28,8 @@ class Injector {
 public:
 	// 지정된 방식으로 DLL 인젝션
 	static bool InjectDll(uint32_t pid, const std::string& dllPath,
-		InjectionMethod method = InjectionMethod::Auto);
+		InjectionMethod method = InjectionMethod::Auto,
+		std::string* error = nullptr);
 
 	// 프로세스 생성 + 인젝션 (메인 스레드는 suspended 상태 유지)
 	// env: 자식 프로세스에 추가할 환경변수 목록 ("KEY=VALUE" 형식).
@@ -68,10 +69,14 @@ private:
 	static FARPROC ResolveWow64LoadLibraryA();
 
 	// 개별 인젝션 방식
-	static bool InjectViaCreateRemoteThread(HANDLE process, LPVOID remoteStr, FARPROC loadLib);
-	static bool InjectViaNtCreateThreadEx(HANDLE process, LPVOID remoteStr, FARPROC loadLib);
-	static bool InjectViaThreadHijack(HANDLE process, uint32_t pid, LPVOID remoteStr, bool isWow64);
-	static bool InjectViaQueueUserAPC(HANDLE process, uint32_t pid, LPVOID remoteStr, FARPROC loadLib);
+	static bool InjectViaCreateRemoteThread(HANDLE process, LPVOID remoteStr, FARPROC loadLib,
+		const std::string& dllPath, std::string* error);
+	static bool InjectViaNtCreateThreadEx(HANDLE process, LPVOID remoteStr, FARPROC loadLib,
+		const std::string& dllPath, std::string* error);
+	static bool InjectViaThreadHijack(HANDLE process, uint32_t pid, LPVOID remoteStr, bool isWow64,
+		std::string* error);
+	static bool InjectViaQueueUserAPC(HANDLE process, uint32_t pid, LPVOID remoteStr, FARPROC loadLib,
+		std::string* error);
 };
 
 } // namespace veh

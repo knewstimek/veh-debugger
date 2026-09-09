@@ -3,6 +3,9 @@
 Tests that:
 1. stopOnEntry=false -> process runs immediately (exits on its own)
 2. stopOnEntry=true -> process is suspended, veh_continue resumes it
+3. cached stops and exceptions do not cross a relaunch boundary
+4. an outstanding wait is cancelled when a new session replaces it
+5. both synchronous remote-thread injection methods accept real module handles
 """
 import subprocess
 import json
@@ -10,8 +13,10 @@ import time
 import sys
 import os
 
-MCP_EXE = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe")
-TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
+MCP_EXE = os.environ.get("VEH_MCP_EXE", os.path.join(
+    os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe"))
+TARGET = os.environ.get("VEH_TEST_TARGET", os.path.join(
+    os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe"))
 
 class McpClient:
     def __init__(self):
@@ -49,8 +54,11 @@ class McpClient:
         return None
 
     def call_tool(self, name, args=None):
-        self.send("tools/call", {"name": name, "arguments": args or {}})
-        return self.recv()
+        request_id = self.send("tools/call", {"name": name, "arguments": args or {}})
+        while True:
+            response = self.recv()
+            if response is None or response.get("id") == request_id:
+                return response
 
     def close(self):
         try:
@@ -78,6 +86,26 @@ def check_process_alive(pid):
         return exit_code.value == 259  # STILL_ACTIVE
     except:
         return False
+
+
+def terminate_process(pid):
+    """Best-effort cleanup for targets deliberately detached by a test."""
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
+        if handle:
+            kernel32.TerminateProcess(handle, 0)
+            kernel32.CloseHandle(handle)
+    except Exception:
+        pass
+
+
+def tool_data(response):
+    result = (response or {}).get("result", {})
+    content = result.get("content", [{}])
+    text = content[0].get("text", "") if content else ""
+    return json.loads(text) if text else {}
 
 
 def test_stop_on_entry_false():
@@ -119,6 +147,8 @@ def test_stop_on_entry_false():
     # Detach
     resp = client.call_tool("veh_detach")
     print(f"  Detach: {resp}")
+
+    terminate_process(pid)
 
     client.close()
     print("  PASSED\n")
@@ -171,6 +201,126 @@ def test_stop_on_entry_true():
     resp = client.call_tool("veh_detach")
     print(f"  Detach: {resp}")
 
+    terminate_process(pid)
+
+    client.close()
+    print("  PASSED\n")
+    return True
+
+
+def test_new_launch_clears_previous_stop():
+    """A cached exception from process A must never be returned for process B."""
+    print("=== Test: launch clears previous session stop state ===")
+    client = McpClient()
+
+    client.send("initialize", {"protocolVersion": "2024-11-05",
+                                "capabilities": {},
+                                "clientInfo": {"name": "test", "version": "1.0"}})
+    init_response = client.recv()
+    assert init_response and "result" in init_response, init_response
+
+    first = tool_data(client.call_tool("veh_launch", {
+        "program": TARGET,
+        "args": ["--crash"],
+        "stopOnEntry": False,
+    }))
+    assert "error" not in first and first.get("pid", 0) > 0, first
+
+    # Let process A's AV reach the MCP stop cache without consuming it.
+    time.sleep(3)
+
+    second = tool_data(client.call_tool("veh_launch", {
+        "program": TARGET,
+        "stopOnEntry": True,
+    }))
+    assert "error" not in second and second.get("pid", 0) > 0, second
+    assert second["pid"] != first["pid"]
+
+    exception_info = tool_data(client.call_tool("veh_exception_info"))
+    assert exception_info.get("error") == "No exception recorded", exception_info
+
+    continued = tool_data(client.call_tool("veh_continue", {
+        "wait": True,
+        "timeout": 1,
+    }))
+    assert continued.get("timeout") is True, continued
+
+    client.call_tool("veh_terminate")
+    client.close()
+    print("  PASSED\n")
+    return True
+
+
+def test_explicit_remote_thread_methods():
+    """Both synchronous LoadLibrary methods still accept real module handles."""
+    print("=== Test: explicit remote-thread injection methods ===")
+    client = McpClient()
+
+    client.send("initialize", {"protocolVersion": "2024-11-05",
+                                "capabilities": {},
+                                "clientInfo": {"name": "test", "version": "1.0"}})
+    init_response = client.recv()
+    assert init_response and "result" in init_response, init_response
+
+    for method in ["createRemoteThread", "ntCreateThreadEx"]:
+        launched = tool_data(client.call_tool("veh_launch", {
+            "program": TARGET,
+            "stopOnEntry": True,
+            "injectionMethod": method,
+        }))
+        assert "error" not in launched and launched.get("pid", 0) > 0, {
+            "method": method,
+            "result": launched,
+        }
+        terminated = tool_data(client.call_tool("veh_terminate"))
+        assert terminated.get("success") is True, {"method": method, "result": terminated}
+
+    client.close()
+    print("  PASSED\n")
+    return True
+
+
+def test_wait_is_cancelled_by_relaunch():
+    """A wait started for process A must not consume process B's first stop."""
+    print("=== Test: outstanding wait is cancelled by relaunch ===")
+    client = McpClient()
+
+    client.send("initialize", {"protocolVersion": "2024-11-05",
+                                "capabilities": {},
+                                "clientInfo": {"name": "test", "version": "1.0"}})
+    init_response = client.recv()
+    assert init_response and "result" in init_response, init_response
+
+    first = tool_data(client.call_tool("veh_launch", {
+        "program": TARGET,
+        "stopOnEntry": True,
+    }))
+    assert "error" not in first and first.get("pid", 0) > 0, first
+
+    wait_id = client.send("tools/call", {
+        "name": "veh_continue",
+        "arguments": {"wait": True, "timeout": 10},
+    })
+    time.sleep(0.25)
+    launch_id = client.send("tools/call", {
+        "name": "veh_launch",
+        "arguments": {"program": TARGET, "stopOnEntry": True},
+    })
+
+    responses = {}
+    while wait_id not in responses or launch_id not in responses:
+        response = client.recv(timeout=15)
+        assert response is not None, responses
+        if response.get("id") in (wait_id, launch_id):
+            responses[response["id"]] = response
+
+    wait_result = tool_data(responses[wait_id])
+    assert wait_result.get("error") == "Debug session changed while waiting for a stop event", wait_result
+
+    launch_result = tool_data(responses[launch_id])
+    assert "error" not in launch_result and launch_result.get("pid", 0) > 0, launch_result
+
+    client.call_tool("veh_terminate")
     client.close()
     print("  PASSED\n")
     return True
@@ -180,7 +330,10 @@ if __name__ == "__main__":
     passed = 0
     failed = 0
 
-    for test_fn in [test_stop_on_entry_false, test_stop_on_entry_true]:
+    for test_fn in [test_stop_on_entry_false, test_stop_on_entry_true,
+                    test_new_launch_clears_previous_stop,
+                    test_explicit_remote_thread_methods,
+                    test_wait_is_cancelled_by_relaunch]:
         try:
             if test_fn():
                 passed += 1

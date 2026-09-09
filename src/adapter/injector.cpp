@@ -80,6 +80,106 @@ void Injector::FreeRemoteString(HANDLE process, LPVOID remoteMem) {
 	if (remoteMem) VirtualFreeEx(process, remoteMem, 0, MEM_RELEASE);
 }
 
+static void SetInjectionError(std::string* error, const std::string& message) {
+	if (error) *error = message;
+}
+
+static std::string FileNamePart(const std::string& path) {
+	auto pos = path.find_last_of("\\/");
+	return pos == std::string::npos ? path : path.substr(pos + 1);
+}
+
+// GetExitCodeThread is only a DWORD even when LoadLibraryA returns a 64-bit HMODULE.
+// Match the low 32 bits against the target's module list instead of treating every
+// non-zero value as success (or rejecting a valid x64 base solely by its high bits).
+static bool HasLoadedModuleAtThreadExitCode(HANDLE process, const std::string& dllPath,
+	DWORD exitCode) {
+	DWORD pid = GetProcessId(process);
+	if (pid == 0) return false;
+
+	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+	if (snapshot == INVALID_HANDLE_VALUE) return false;
+
+	const std::string requestedName = FileNamePart(dllPath);
+	MODULEENTRY32W me = {};
+	me.dwSize = sizeof(me);
+	bool found = false;
+	if (Module32FirstW(snapshot, &me)) {
+		do {
+			DWORD moduleLow = static_cast<DWORD>(reinterpret_cast<uintptr_t>(me.modBaseAddr));
+			char moduleName[MAX_PATH] = {};
+			WideCharToMultiByte(CP_ACP, 0, me.szModule, -1, moduleName,
+				static_cast<int>(sizeof(moduleName)), nullptr, nullptr);
+			if (moduleLow == exitCode && _stricmp(moduleName, requestedName.c_str()) == 0) {
+				found = true;
+				break;
+			}
+		} while (Module32NextW(snapshot, &me));
+	}
+	CloseHandle(snapshot);
+	return found;
+}
+
+static bool LooksLikeNtStatusOrException(DWORD value) {
+	// NTSTATUS severity 3 (error), plus the common warning-severity exception range
+	// containing STATUS_BREAKPOINT / STATUS_SINGLE_STEP.
+	return (value & 0xC0000000u) == 0xC0000000u ||
+		(value & 0xFFFF0000u) == 0x80000000u;
+}
+
+static bool CompleteLoadLibraryThread(HANDLE process, HANDLE thread,
+	const std::string& dllPath, const char* tag, std::string* error) {
+	DWORD waitResult = WaitForSingleObject(thread, 5000);
+	if (waitResult != WAIT_OBJECT_0) {
+		char message[160];
+		if (waitResult == WAIT_TIMEOUT) {
+			snprintf(message, sizeof(message), "LoadLibrary thread timed out after 5000 ms");
+		} else {
+			snprintf(message, sizeof(message), "waiting for LoadLibrary thread failed (error %lu)", GetLastError());
+		}
+		LOG_ERROR("[%s] %s", tag, message);
+		SetInjectionError(error, message);
+		return false;
+	}
+
+	DWORD exitCode = 0;
+	if (!GetExitCodeThread(thread, &exitCode)) {
+		char message[160];
+		snprintf(message, sizeof(message), "GetExitCodeThread failed (error %lu)", GetLastError());
+		LOG_ERROR("[%s] %s", tag, message);
+		SetInjectionError(error, message);
+		return false;
+	}
+
+	if (exitCode == 0) {
+		LOG_ERROR("[%s] LoadLibrary returned NULL", tag);
+		SetInjectionError(error, "LoadLibrary returned NULL");
+		return false;
+	}
+	if (exitCode == STILL_ACTIVE) {
+		LOG_ERROR("[%s] LoadLibrary thread still active after signaled wait", tag);
+		SetInjectionError(error, "LoadLibrary thread returned STILL_ACTIVE");
+		return false;
+	}
+
+	if (!HasLoadedModuleAtThreadExitCode(process, dllPath, exitCode)) {
+		char message[192];
+		if (LooksLikeNtStatusOrException(exitCode)) {
+			snprintf(message, sizeof(message),
+				"LoadLibrary thread failed with NTSTATUS/exception 0x%08lX", exitCode);
+		} else {
+			snprintf(message, sizeof(message),
+				"LoadLibrary returned invalid module handle 0x%08lX (DLL not present at that base)", exitCode);
+		}
+		LOG_ERROR("[%s] %s", tag, message);
+		SetInjectionError(error, message);
+		return false;
+	}
+
+	LOG_INFO("[%s] Success (module: 0x%08lX)", tag, exitCode);
+	return true;
+}
+
 // --- WoW64 원격 LoadLibraryA 주소 찾기 ---
 
 FARPROC Injector::GetRemoteLoadLibraryA(HANDLE process) {
@@ -266,38 +366,37 @@ FARPROC Injector::ResolveWow64LoadLibraryA() {
 
 // --- 방식 1: CreateRemoteThread ---
 
-bool Injector::InjectViaCreateRemoteThread(HANDLE process, LPVOID remoteStr, FARPROC loadLib) {
+bool Injector::InjectViaCreateRemoteThread(HANDLE process, LPVOID remoteStr, FARPROC loadLib,
+	const std::string& dllPath, std::string* error) {
 
 	HANDLE thread = ::CreateRemoteThread(process, nullptr, 0,
 		(LPTHREAD_START_ROUTINE)loadLib, remoteStr, 0, nullptr);
 	if (!thread) {
-		LOG_ERROR("[CRT] CreateRemoteThread failed: %u", GetLastError());
+		DWORD lastError = GetLastError();
+		LOG_ERROR("[CRT] CreateRemoteThread failed: %u", lastError);
+		SetInjectionError(error, "CreateRemoteThread failed (error " + std::to_string(lastError) + ")");
 		return false;
 	}
 
-	WaitForSingleObject(thread, 5000);
-	DWORD exitCode = 0;
-	GetExitCodeThread(thread, &exitCode);
+	bool success = CompleteLoadLibraryThread(process, thread, dllPath, "CRT", error);
 	CloseHandle(thread);
-
-	if (exitCode == 0) {
-		LOG_ERROR("[CRT] LoadLibrary returned NULL");
-		return false;
-	}
-
-	LOG_INFO("[CRT] Success (module: 0x%X)", exitCode);
-	return true;
+	return success;
 }
 
 // --- 방식 2: NtCreateThreadEx ---
 
-bool Injector::InjectViaNtCreateThreadEx(HANDLE process, LPVOID remoteStr, FARPROC loadLib) {
+bool Injector::InjectViaNtCreateThreadEx(HANDLE process, LPVOID remoteStr, FARPROC loadLib,
+	const std::string& dllPath, std::string* error) {
 	HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-	if (!ntdll) return false;
+	if (!ntdll) {
+		SetInjectionError(error, "ntdll.dll is not loaded");
+		return false;
+	}
 
 	auto NtCreateThreadEx = (NtCreateThreadEx_t)GetProcAddress(ntdll, "NtCreateThreadEx");
 	if (!NtCreateThreadEx) {
 		LOG_ERROR("[NtCTE] NtCreateThreadEx not found");
+		SetInjectionError(error, "NtCreateThreadEx export not found");
 		return false;
 	}
 
@@ -316,26 +415,22 @@ bool Injector::InjectViaNtCreateThreadEx(HANDLE process, LPVOID remoteStr, FARPR
 
 	if (status != 0 || !thread) {
 		LOG_ERROR("[NtCTE] NtCreateThreadEx failed: NTSTATUS 0x%08X", status);
+		char message[128];
+		snprintf(message, sizeof(message), "NtCreateThreadEx failed (NTSTATUS 0x%08lX)",
+			static_cast<DWORD>(status));
+		SetInjectionError(error, message);
 		return false;
 	}
 
-	WaitForSingleObject(thread, 5000);
-	DWORD exitCode = 0;
-	GetExitCodeThread(thread, &exitCode);
+	bool success = CompleteLoadLibraryThread(process, thread, dllPath, "NtCTE", error);
 	CloseHandle(thread);
-
-	if (exitCode == 0) {
-		LOG_ERROR("[NtCTE] LoadLibrary returned NULL");
-		return false;
-	}
-
-	LOG_INFO("[NtCTE] Success (module: 0x%X)", exitCode);
-	return true;
+	return success;
 }
 
 // --- 방식 3: Thread Hijacking ---
 
-bool Injector::InjectViaThreadHijack(HANDLE process, uint32_t pid, LPVOID remoteStr, bool isWow64) {
+bool Injector::InjectViaThreadHijack(HANDLE process, uint32_t pid, LPVOID remoteStr, bool isWow64,
+	std::string* error) {
 	// 타겟의 첫 번째 스레드를 찾아서 하이재킹
 	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
 	if (snapshot == INVALID_HANDLE_VALUE) return false;
@@ -356,6 +451,7 @@ bool Injector::InjectViaThreadHijack(HANDLE process, uint32_t pid, LPVOID remote
 
 	if (targetTid == 0) {
 		LOG_ERROR("[Hijack] No thread found in PID %u", pid);
+		SetInjectionError(error, "thread hijack found no target thread");
 		return false;
 	}
 
@@ -364,6 +460,7 @@ bool Injector::InjectViaThreadHijack(HANDLE process, uint32_t pid, LPVOID remote
 		FALSE, targetTid);
 	if (!thread) {
 		LOG_ERROR("[Hijack] OpenThread failed for TID %u: %u", targetTid, GetLastError());
+		SetInjectionError(error, "thread hijack could not open target thread");
 		return false;
 	}
 
@@ -373,6 +470,7 @@ bool Injector::InjectViaThreadHijack(HANDLE process, uint32_t pid, LPVOID remote
 	// 셸코드 생성 + 컨텍스트 조작
 	LPVOID shellMem = nullptr;
 	size_t shellSize = 0;
+	bool loaded = false;
 
 #ifdef _WIN64
 	if (isWow64) {
@@ -529,7 +627,6 @@ bool Injector::InjectViaThreadHijack(HANDLE process, uint32_t pid, LPVOID remote
 		const char* dllFileName = strrchr(dllPathBuf, '\\');
 		dllFileName = dllFileName ? (dllFileName + 1) : dllPathBuf;
 
-		bool found = false;
 		for (int i = 0; i < 20; ++i) { // 20 * 100ms = 2초
 			Sleep(100);
 			HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
@@ -541,33 +638,37 @@ bool Injector::InjectViaThreadHijack(HANDLE process, uint32_t pid, LPVOID remote
 					char narrowName[MAX_PATH];
 					WideCharToMultiByte(CP_ACP, 0, me.szModule, -1, narrowName, MAX_PATH, nullptr, nullptr);
 					if (_stricmp(narrowName, dllFileName) == 0) {
-						found = true;
+						loaded = true;
 						break;
 					}
 				} while (Module32NextW(snap, &me));
 			}
 			CloseHandle(snap);
-			if (found) break;
+			if (loaded) break;
 		}
-		if (!found) {
+		if (!loaded) {
 			LOG_WARN("[Hijack] DLL '%s' not detected in module list after 2s", dllFileName);
+			SetInjectionError(error, "thread hijack completed without loading the DLL");
 		}
 
 		// 셸코드 메모리 해제 (DLL 로드 확인 후에만 -- 미확인 시 아직 실행 중일 수 있음)
-		if (found) {
+		if (loaded) {
 			VirtualFreeEx(process, shellMem, 0, MEM_RELEASE);
 		} else {
 			LOG_WARN("[Hijack] Skipping shellcode free (may still be executing)");
 		}
 	}
 
-	LOG_INFO("[Hijack] Thread %u hijacked, LoadLibrary should have executed", targetTid);
-	return true;
+	if (loaded) {
+		LOG_INFO("[Hijack] Thread %u hijacked and DLL load verified", targetTid);
+	}
+	return loaded;
 }
 
 // --- 방식 4: QueueUserAPC ---
 
-bool Injector::InjectViaQueueUserAPC(HANDLE process, uint32_t pid, LPVOID remoteStr, FARPROC loadLib) {
+bool Injector::InjectViaQueueUserAPC(HANDLE process, uint32_t pid, LPVOID remoteStr, FARPROC loadLib,
+	std::string* error) {
 
 	// 모든 스레드에 APC를 큐잉 (하나라도 alertable 상태이면 성공)
 	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
@@ -595,19 +696,20 @@ bool Injector::InjectViaQueueUserAPC(HANDLE process, uint32_t pid, LPVOID remote
 
 	if (queued == 0) {
 		LOG_ERROR("[APC] Failed to queue APC to any thread");
+		SetInjectionError(error, "failed to queue LoadLibrary APC to any thread");
 		return false;
 	}
 
 	LOG_INFO("[APC] Queued LoadLibrary APC to %d thread(s)", queued);
 
 	// APC 실행 대기: 모듈 로드를 최대 2초간 100ms 간격으로 폴링
+	bool loaded = false;
 	{
 		char dllPathBuf[MAX_PATH] = {};
 		ReadProcessMemory(process, remoteStr, dllPathBuf, sizeof(dllPathBuf) - 1, nullptr);
 		const char* dllFileName = strrchr(dllPathBuf, '\\');
 		dllFileName = dllFileName ? (dllFileName + 1) : dllPathBuf;
 
-		bool found = false;
 		for (int i = 0; i < 20; ++i) { // 20 * 100ms = 2초
 			Sleep(100);
 			HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
@@ -619,28 +721,31 @@ bool Injector::InjectViaQueueUserAPC(HANDLE process, uint32_t pid, LPVOID remote
 					char narrowName[MAX_PATH];
 					WideCharToMultiByte(CP_ACP, 0, me.szModule, -1, narrowName, MAX_PATH, nullptr, nullptr);
 					if (_stricmp(narrowName, dllFileName) == 0) {
-						found = true;
+						loaded = true;
 						break;
 					}
 				} while (Module32NextW(snap, &me));
 			}
 			CloseHandle(snap);
-			if (found) break;
+			if (loaded) break;
 		}
-		if (found) {
+		if (loaded) {
 			LOG_INFO("[APC] DLL '%s' loaded, freeing remote string", dllFileName);
 			FreeRemoteString(process, remoteStr);
 		} else {
 			LOG_WARN("[APC] DLL '%s' not detected in module list after 2s, remote string not freed", dllFileName);
+			SetInjectionError(error, "LoadLibrary APC queued but DLL did not load within 2 seconds");
 		}
 	}
 
-	return true;
+	return loaded;
 }
 
 // --- 메인 인젝션 함수 ---
 
-bool Injector::InjectDll(uint32_t pid, const std::string& dllPath, InjectionMethod method) {
+bool Injector::InjectDll(uint32_t pid, const std::string& dllPath, InjectionMethod method,
+	std::string* error) {
+	if (error) error->clear();
 	EnableDebugPrivilege();
 
 	HANDLE process = OpenProcess(
@@ -648,12 +753,15 @@ bool Injector::InjectDll(uint32_t pid, const std::string& dllPath, InjectionMeth
 		PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
 		FALSE, pid);
 	if (!process) {
-		LOG_ERROR("OpenProcess failed for PID %u: %u", pid, GetLastError());
+		DWORD lastError = GetLastError();
+		LOG_ERROR("OpenProcess failed for PID %u: %u", pid, lastError);
+		SetInjectionError(error, "OpenProcess failed (error " + std::to_string(lastError) + ")");
 		return false;
 	}
 
 	LPVOID remoteStr = AllocRemoteString(process, dllPath);
 	if (!remoteStr) {
+		SetInjectionError(error, "failed to allocate/write the remote DLL path");
 		CloseHandle(process);
 		return false;
 	}
@@ -674,6 +782,7 @@ bool Injector::InjectDll(uint32_t pid, const std::string& dllPath, InjectionMeth
 		}
 		if (!loadLib) {
 			LOG_ERROR("Failed to resolve 32-bit LoadLibraryA for WoW64 target");
+			SetInjectionError(error, "failed to resolve 32-bit LoadLibraryA");
 			FreeRemoteString(process, remoteStr);
 			CloseHandle(process);
 			return false;
@@ -683,6 +792,12 @@ bool Injector::InjectDll(uint32_t pid, const std::string& dllPath, InjectionMeth
 	}
 
 	bool apcUsed = false;  // APC 내부에서 remoteStr을 자체 관리하므로 추적 필요
+	std::vector<std::string> attemptErrors;
+	auto recordAttempt = [&](const char* name, bool ok, const std::string& attemptError) {
+		if (!ok) attemptErrors.push_back(std::string(name) + ": " +
+			(attemptError.empty() ? "injection attempt failed" : attemptError));
+		return ok;
+	};
 
 	if (method == InjectionMethod::Auto) {
 		// 순서대로 시도
@@ -690,44 +805,63 @@ bool Injector::InjectDll(uint32_t pid, const std::string& dllPath, InjectionMeth
 
 		if (!success) {
 			LOG_INFO("Trying CreateRemoteThread...");
-			success = InjectViaCreateRemoteThread(process, remoteStr, loadLib);
+			std::string why;
+			bool attemptOk = InjectViaCreateRemoteThread(process, remoteStr, loadLib, dllPath, &why);
+			success = recordAttempt("CreateRemoteThread", attemptOk, why);
 		}
 		if (!success) {
 			LOG_INFO("Trying NtCreateThreadEx...");
-			success = InjectViaNtCreateThreadEx(process, remoteStr, loadLib);
+			std::string why;
+			bool attemptOk = InjectViaNtCreateThreadEx(process, remoteStr, loadLib, dllPath, &why);
+			success = recordAttempt("NtCreateThreadEx", attemptOk, why);
 		}
 		if (!success) {
 			LOG_INFO("Trying Thread Hijacking...");
-			success = InjectViaThreadHijack(process, pid, remoteStr, isWow64);
+			std::string why;
+			bool attemptOk = InjectViaThreadHijack(process, pid, remoteStr, isWow64, &why);
+			success = recordAttempt("ThreadHijack", attemptOk, why);
 		}
 		if (!success) {
 			LOG_INFO("Trying QueueUserAPC...");
-			success = InjectViaQueueUserAPC(process, pid, remoteStr, loadLib);
-			if (success) apcUsed = true;
+			apcUsed = true;
+			std::string why;
+			bool attemptOk = InjectViaQueueUserAPC(process, pid, remoteStr, loadLib, &why);
+			success = recordAttempt("QueueUserAPC", attemptOk, why);
 		}
 	} else {
+		std::string why;
 		switch (method) {
 		case InjectionMethod::CreateRemoteThread:
-			success = InjectViaCreateRemoteThread(process, remoteStr, loadLib);
+			success = InjectViaCreateRemoteThread(process, remoteStr, loadLib, dllPath, &why);
 			break;
 		case InjectionMethod::NtCreateThreadEx:
-			success = InjectViaNtCreateThreadEx(process, remoteStr, loadLib);
+			success = InjectViaNtCreateThreadEx(process, remoteStr, loadLib, dllPath, &why);
 			break;
 		case InjectionMethod::ThreadHijack:
-			success = InjectViaThreadHijack(process, pid, remoteStr, isWow64);
+			success = InjectViaThreadHijack(process, pid, remoteStr, isWow64, &why);
 			break;
 		case InjectionMethod::QueueUserAPC:
-			success = InjectViaQueueUserAPC(process, pid, remoteStr, loadLib);
+			apcUsed = true;
+			success = InjectViaQueueUserAPC(process, pid, remoteStr, loadLib, &why);
 			break;
 		default:
 			break;
+		}
+		SetInjectionError(error, why);
+	}
+
+	if (!success && method == InjectionMethod::Auto && error) {
+		error->clear();
+		for (size_t i = 0; i < attemptErrors.size(); ++i) {
+			if (i != 0) *error += "; ";
+			*error += attemptErrors[i];
 		}
 	}
 
 	// remoteStr 해제:
 	// - APC 방식(직접 지정 또는 Auto 폴백)은 내부에서 자체 관리 (found 시 해제, 아니면 유지)
 	// - 그 외 방식은 여기서 해제 (성공/실패 무관, LoadLibrary 동기 완료 후이므로 안전)
-	if (!apcUsed && method != InjectionMethod::QueueUserAPC) {
+	if (!apcUsed) {
 		FreeRemoteString(process, remoteStr);
 	}
 
@@ -831,13 +965,15 @@ LaunchResult Injector::LaunchAndInject(
 	LOG_INFO("Process created (PID: %u, TID: %u) in suspended state",
 		pi.dwProcessId, pi.dwThreadId);
 
-	if (!InjectDll(pi.dwProcessId, dllPath, method)) {
+	std::string injectionError;
+	if (!InjectDll(pi.dwProcessId, dllPath, method, &injectionError)) {
 		LOG_ERROR("DLL injection failed for '%s', terminating process %u", dllPath.c_str(), pi.dwProcessId);
 		TerminateProcess(pi.hProcess, 1);
 		CloseHandle(pi.hThread);
 		CloseHandle(pi.hProcess);
 		LaunchResult fail;
 		fail.error = "DLL injection failed: " + dllPath;
+		if (!injectionError.empty()) fail.error += " (" + injectionError + ")";
 		return fail;
 	}
 

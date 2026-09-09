@@ -348,6 +348,7 @@ json McpServer::ToolAttach(const json& args) {
 		if (why.empty()) why = "Attach failed for PID " + std::to_string(pid) + ". Check logs for details.";
 		return {{"error", why}};
 	}
+	ResetSessionEventState();
 
 	// Start event listener + heartbeat + process monitor
 	session_.SetEventCallback([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
@@ -417,6 +418,7 @@ json McpServer::ToolLaunch(const json& args) {
 	if (!result.ok) {
 		return {{"error", result.error}};
 	}
+	ResetSessionEventState();
 
 	// Start event listener + heartbeat + process monitor
 	session_.SetEventCallback([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
@@ -910,6 +912,7 @@ json McpServer::ToolContinue(const json& args) {
 	uint32_t threadId = JsonUint32(args, "threadId");
 	bool wait = JsonBool(args, "wait");
 	bool passException = JsonBool(args, "pass_exception");
+	uint64_t sessionGeneration = session_.GetSessionGeneration();
 	int timeoutSec = JsonInt(args, "timeout", 10);
 	if (timeoutSec < 1) timeoutSec = 1;
 	if (timeoutSec > 300) timeoutSec = 300;
@@ -930,7 +933,7 @@ json McpServer::ToolContinue(const json& args) {
 	// Check for cached stop event before sending Continue
 	if (wait && !passException) {
 		auto cached = session_.ConsumeCachedStop();
-		if (cached) {
+		if (cached && IsCurrentStopEvent(*cached)) {
 			json ret = {
 				{"stopped", true},
 				{"reason", cached->reason},
@@ -951,10 +954,26 @@ json McpServer::ToolContinue(const json& args) {
 		return {{"success", true}, {"threadId", threadId}};
 	}
 
-	// Wait for stop event
-	auto stopEvent = session_.WaitForStop(timeoutSec);
-	if (stopEvent.timeout) {
-		return {{"timeout", true}, {"message", "No stop event within timeout. Process still running."}};
+	// Wait for a stop from the current process. A stale event is discarded and the
+	// remaining timeout is used without issuing a second Continue command.
+	auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeoutSec);
+	StopEvent stopEvent;
+	for (;;) {
+		auto now = std::chrono::steady_clock::now();
+		if (now >= deadline) {
+			return {{"timeout", true}, {"message", "No stop event within timeout. Process still running."}};
+		}
+		auto remaining = std::chrono::duration_cast<std::chrono::seconds>(deadline - now);
+		int remainingSec = static_cast<int>(remaining.count());
+		if (remainingSec < 1) remainingSec = 1;
+		stopEvent = session_.WaitForStop(remainingSec, sessionGeneration);
+		if (stopEvent.timeout) {
+			return {{"timeout", true}, {"message", "No stop event within timeout. Process still running."}};
+		}
+		if (stopEvent.sessionChanged) {
+			return {{"error", "Debug session changed while waiting for a stop event"}};
+		}
+		if (IsCurrentStopEvent(stopEvent)) break;
 	}
 
 	json ret = {
@@ -966,6 +985,40 @@ json McpServer::ToolContinue(const json& args) {
 	};
 	if (!stopEvent.bpType.empty()) ret["breakpointType"] = stopEvent.bpType;
 	return ret;
+}
+
+void McpServer::ResetSessionEventState() {
+	// The previous pipe listener has been stopped before lifecycle code reaches here,
+	// and the new listener has not started yet. Clear every session-scoped event cache
+	// in this gap so the first command cannot observe the prior process.
+	std::scoped_lock lock(eventMutex_, exceptionMutex_, stepMutex_, filterMutex_,
+		session_.GetBpMutex());
+	session_.ResetStopState();
+	pendingEvents_ = {};
+	pendingAutoContinue_ = {};
+	tempStepOverBpId_ = 0;
+	stepCompleted_ = false;
+	stepCompletedAddr_ = 0;
+	stepCompletedThread_ = 0;
+	lastException_ = {};
+	ignoreExceptionCodes_.clear();
+	bpActions_.clear();
+}
+
+bool McpServer::IsCurrentStopEvent(const StopEvent& event) {
+	if (event.sessionGeneration != 0 &&
+		event.sessionGeneration != session_.GetSessionGeneration()) {
+		LOG_WARN("Discarding stop event from session generation %llu (current %llu)",
+			static_cast<unsigned long long>(event.sessionGeneration),
+			static_cast<unsigned long long>(session_.GetSessionGeneration()));
+		return false;
+	}
+	if (event.threadId == 0) return true; // pause/exit events intentionally have no TID
+	if (session_.IsThreadOwnedByTarget(event.threadId)) return true;
+
+	LOG_WARN("Discarding stale stop event '%s': TID %u does not belong to current PID %u",
+		event.reason.c_str(), event.threadId, session_.GetTargetPid());
+	return false;
 }
 
 json McpServer::ToolStepIn(const json& args) {
