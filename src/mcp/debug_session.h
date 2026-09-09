@@ -30,11 +30,13 @@ struct HwBpResult {
 struct StopEvent {
 	bool stopped = false;
 	bool timeout = false;
+	bool sessionChanged = false;
 	std::string reason;   // "breakpoint", "exception", "pause", "step", "exit"
 	std::string bpType;   // "software", "hardware", ""
 	uint64_t address = 0;
 	uint32_t threadId = 0;
 	uint32_t breakpointId = 0;
+	uint64_t sessionGeneration = 0;
 };
 
 struct ThreadEntry {
@@ -184,9 +186,14 @@ public:
 	void ResumeMainThread();
 
 	// Wait for stop event (blocks)
-	StopEvent WaitForStop(int timeoutSec = 10);
+	StopEvent WaitForStop(int timeoutSec = 10, uint64_t expectedGeneration = 0);
 	// Consume cached stop event without sending Continue
 	std::optional<StopEvent> ConsumeCachedStop();
+	// Clear stop state when a new process becomes the active session.
+	void ResetStopState();
+	uint64_t GetSessionGeneration() const { return sessionGeneration_.load(); }
+	// Validate that an event thread still belongs to the active target process.
+	bool IsThreadOwnedByTarget(uint32_t threadId) const;
 
 	// --- State queries ---
 	std::vector<ThreadEntry> GetThreads();
@@ -323,6 +330,7 @@ private:
 	std::condition_variable stopCv_;
 	bool stopOccurred_ = false;
 	StopEvent lastStop_;
+	std::atomic<uint64_t> sessionGeneration_{0};
 
 	// Process monitor
 	std::thread processMonitorThread_;

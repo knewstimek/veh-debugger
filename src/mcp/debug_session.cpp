@@ -132,10 +132,12 @@ bool DebugSession::Attach(uint32_t pid) {
 		LOG_INFO("Pipe already exists for PID %u, skipping injection (re-attach)", pid);
 	} else {
 		LOG_INFO("Injecting into PID %u: %s", pid, dllPath.c_str());
-		if (!Injector::InjectDll(pid, dllPath)) {
+		std::string injectionError;
+		if (!Injector::InjectDll(pid, dllPath, InjectionMethod::Auto, &injectionError)) {
 			LOG_ERROR("DLL injection failed for PID %u", pid);
 			lastAttachError_ = "DLL injection into PID " + std::to_string(pid) + " failed (all methods exhausted). "
 				"The target may block remote thread creation or the DLL failed to load. See logs for details.";
+			if (!injectionError.empty()) lastAttachError_ += " Details: " + injectionError;
 			return false;
 		}
 	}
@@ -518,12 +520,19 @@ void DebugSession::ResumeMainThread() {
 
 // --- Stop event synchronization ---
 
-StopEvent DebugSession::WaitForStop(int timeoutSec) {
+StopEvent DebugSession::WaitForStop(int timeoutSec, uint64_t expectedGeneration) {
 	StopEvent ev;
 	std::unique_lock<std::mutex> lock(stopMutex_);
 	if (!stopCv_.wait_for(lock, std::chrono::seconds(timeoutSec),
-			[this]{ return stopOccurred_ || !attached_; })) {
+			[this, expectedGeneration]{
+				return stopOccurred_ || !attached_ ||
+					(expectedGeneration != 0 && sessionGeneration_.load() != expectedGeneration);
+			})) {
 		ev.timeout = true;
+		return ev;
+	}
+	if (expectedGeneration != 0 && sessionGeneration_.load() != expectedGeneration) {
+		ev.sessionChanged = true;
 		return ev;
 	}
 	stopOccurred_ = false;
@@ -544,6 +553,44 @@ std::optional<StopEvent> DebugSession::ConsumeCachedStop() {
 	return std::nullopt;
 }
 
+void DebugSession::ResetStopState() {
+	{
+		std::lock_guard<std::mutex> lock(stopMutex_);
+		sessionGeneration_.fetch_add(1);
+		stopOccurred_ = false;
+		lastStop_ = StopEvent{};
+	}
+	// Wake waits that belong to the previous process. They detect the generation
+	// change instead of consuming a stop produced by the new process.
+	stopCv_.notify_all();
+}
+
+bool DebugSession::IsThreadOwnedByTarget(uint32_t threadId) const {
+	if (threadId == 0 || targetPid_ == 0) return false;
+
+	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+	if (snapshot == INVALID_HANDLE_VALUE) {
+		// A transient snapshot failure should not make a valid stop disappear.
+		LOG_WARN("Thread ownership validation unavailable for TID %u: %lu",
+			threadId, GetLastError());
+		return true;
+	}
+
+	THREADENTRY32 te = {};
+	te.dwSize = sizeof(te);
+	bool owned = false;
+	if (Thread32First(snapshot, &te)) {
+		do {
+			if (te.th32ThreadID == threadId) {
+				owned = te.th32OwnerProcessID == targetPid_;
+				break;
+			}
+		} while (Thread32Next(snapshot, &te));
+	}
+	CloseHandle(snapshot);
+	return owned;
+}
+
 void DebugSession::SignalStop(const std::string& reason, uint64_t addr, uint32_t threadId,
                               uint32_t bpId, const std::string& bpType) {
 	{
@@ -555,6 +602,7 @@ void DebugSession::SignalStop(const std::string& reason, uint64_t addr, uint32_t
 		lastStop_.threadId = threadId;
 		lastStop_.breakpointId = bpId;
 		lastStop_.bpType = bpType;
+		lastStop_.sessionGeneration = sessionGeneration_.load();
 	}
 	stopCv_.notify_all();
 }
