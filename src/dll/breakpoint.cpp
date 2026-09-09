@@ -197,6 +197,11 @@ void BreakpointManager::MaskBreakpointsInBuffer(uint64_t startAddress, uint8_t* 
 // VirtualProtect 직접 호출을 피하여, 사용자가 VirtualProtect에 BP를 걸어도
 // VEH 핸들러 재진입 crash가 발생하지 않도록 한다.
 bool BreakpointManager::PatchByte(uint64_t address, uint8_t byte, uint8_t* original) {
+	// Patching WriteFile (or another logger dependency) must not call the logger
+	// until the owning operation has published/updated its breakpoint metadata.
+	// It also prevents a different API breakpoint from re-entering mutex_-owned
+	// mutation paths through PatchByte diagnostics.
+	ScopedThreadLogSilence logSilence;
 	auto* ptr = reinterpret_cast<uint8_t*>(address);
 
 	// 메모리 보호 변경 (NtProtectVirtualMemory 스텁 복사본 사용)
