@@ -162,6 +162,15 @@ struct RemoveHwBreakpointRequest {
 struct ContinueRequest {
 	uint32_t threadId;
 	uint8_t  passException;  // 1 = pass exception to SEH (EXCEPTION_CONTINUE_SEARCH)
+	uint8_t  wantDetails;    // 1 = return ContinueResponse; 0 = fire-and-forget
+};
+
+// Followed by resumedCount uint32_t values, then stillStoppedCount uint32_t values.
+// The lists describe debugger-managed stops (VEH waits and veh_pause suspensions).
+struct ContinueResponse {
+	IpcStatus status;
+	uint32_t  resumedCount;
+	uint32_t  stillStoppedCount;
 };
 
 struct StepRequest {

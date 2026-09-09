@@ -14,6 +14,7 @@
 #include <tlhelp32.h>
 #include <dbghelp.h>
 #include <cstring>
+#include <set>
 #pragma comment(lib, "dbghelp.lib")
 
 // ---------------------------------------------------------------------------
@@ -642,7 +643,16 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			return;
 		}
 		auto* req = reinterpret_cast<const ContinueRequest*>(payload);
-		bool passEx = (payloadSize >= sizeof(ContinueRequest)) ? (req->passException != 0) : false;
+		bool passEx = payloadSize >= sizeof(uint32_t) + sizeof(uint8_t)
+			? (req->passException != 0) : false;
+		bool wantDetails = payloadSize >= sizeof(ContinueRequest) && req->wantDetails != 0;
+		auto stoppedThreadIds = []() {
+			std::set<uint32_t> ids;
+			for (uint32_t tid : VehHandler::Instance().GetStoppedThreadIds()) ids.insert(tid);
+			for (uint32_t tid : ThreadManager::Instance().GetSuspendedThreadIds()) ids.insert(tid);
+			return ids;
+		};
+		const auto stoppedBefore = wantDetails ? stoppedThreadIds() : std::set<uint32_t>{};
 		// VEH 핸들러에서 대기 중인 스레드를 깨운다
 		if (req->threadId == 0) {
 			VehHandler::Instance().ResumeAllStoppedThreads();
@@ -656,8 +666,30 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		} else {
 			ThreadManager::Instance().ResumeThread(req->threadId);
 		}
-		IpcStatus status = IpcStatus::Ok;
-		SendResponse(command, &status, sizeof(status));
+		if (!wantDetails) break;
+		const auto stillStopped = stoppedThreadIds();
+		std::vector<uint32_t> resumed;
+		for (uint32_t tid : stoppedBefore) {
+			if (stillStopped.find(tid) == stillStopped.end()) resumed.push_back(tid);
+		}
+
+		ContinueResponse resp{};
+		resp.status = IpcStatus::Ok;
+		resp.resumedCount = static_cast<uint32_t>(resumed.size());
+		resp.stillStoppedCount = static_cast<uint32_t>(stillStopped.size());
+		std::vector<uint8_t> response(sizeof(resp) +
+			(resumed.size() + stillStopped.size()) * sizeof(uint32_t));
+		memcpy(response.data(), &resp, sizeof(resp));
+		uint8_t* out = response.data() + sizeof(resp);
+		if (!resumed.empty()) {
+			memcpy(out, resumed.data(), resumed.size() * sizeof(uint32_t));
+			out += resumed.size() * sizeof(uint32_t);
+		}
+		for (uint32_t tid : stillStopped) {
+			memcpy(out, &tid, sizeof(tid));
+			out += sizeof(tid);
+		}
+		SendResponse(command, response.data(), static_cast<uint32_t>(response.size()));
 		break;
 	}
 

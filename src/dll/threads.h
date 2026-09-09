@@ -23,6 +23,7 @@ public:
 	bool ResumeThread(uint32_t threadId);
 	void SuspendAllExcept(uint32_t excludeThreadId);
 	void ResumeAll();
+	std::vector<uint32_t> GetSuspendedThreadIds();
 
 	bool GetContext(uint32_t threadId, CONTEXT& ctx);
 	bool SetContext(uint32_t threadId, const CONTEXT& ctx);
@@ -41,6 +42,8 @@ private:
 	HANDLE OpenThread(uint32_t threadId);
 	std::set<uint32_t> internalThreads_;
 	std::mutex internalMutex_;
+	std::set<uint32_t> suspendedThreads_;
+	std::mutex suspendedMutex_;
 };
 
 } // namespace veh

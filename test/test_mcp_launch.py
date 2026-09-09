@@ -6,6 +6,7 @@ Tests that:
 3. cached stops and exceptions do not cross a relaunch boundary
 4. an outstanding wait is cancelled when a new session replaces it
 5. both synchronous remote-thread injection methods accept real module handles
+6. selective continue reports resumed and still-stopped thread IDs
 """
 import subprocess
 import json
@@ -193,6 +194,10 @@ def test_stop_on_entry_true():
     # Now continue - should resume the OS-suspended thread
     resp = client.call_tool("veh_continue", {"threadId": 0})
     print(f"  Continue response: {resp}")
+    continue_data = tool_data(resp)
+    assert continue_data.get("resumeScope") == "all", continue_data
+    assert continue_data.get("resumedThreadIds"), continue_data
+    assert continue_data.get("stillStoppedThreadIds") == [], continue_data
 
     # Wait for process to run
     time.sleep(2)
@@ -328,6 +333,58 @@ def test_wait_is_cancelled_by_relaunch():
     return True
 
 
+def test_selective_continue_visibility():
+    """threadId=X resumes only X and reports every debugger-stopped thread."""
+    print("=== Test: selective continue visibility ===")
+    client = McpClient()
+
+    client.send("initialize", {"protocolVersion": "2024-11-05",
+                                "capabilities": {},
+                                "clientInfo": {"name": "test", "version": "1.0"}})
+    init_response = client.recv()
+    assert init_response and "result" in init_response, init_response
+
+    launched = tool_data(client.call_tool("veh_launch", {
+        "program": TARGET,
+        "stopOnEntry": False,
+    }))
+    assert "error" not in launched and launched.get("pid", 0) > 0, launched
+
+    # Add a second application thread so a selective resume has another stopped
+    # thread to leave behind. EB FE is an architecture-neutral infinite loop.
+    shellcode = tool_data(client.call_tool("veh_execute_shellcode", {
+        "shellcode": "EBFE",
+        "timeout_ms": 0,
+    }))
+    assert shellcode.get("success") is True, shellcode
+    time.sleep(0.2)
+
+    threads = tool_data(client.call_tool("veh_threads")).get("threads", [])
+    assert len(threads) >= 2, threads
+    thread_ids = sorted(t["id"] for t in threads)
+
+    paused = tool_data(client.call_tool("veh_pause", {"threadId": 0}))
+    assert paused.get("success") is True, paused
+    selected = thread_ids[0]
+    continued = tool_data(client.call_tool("veh_continue", {"threadId": selected}))
+    assert continued.get("resumeScope") == "single", continued
+    assert continued.get("requestedThreadId") == selected, continued
+    assert continued.get("resumedThreadIds") == [selected], continued
+    still_stopped = continued.get("stillStoppedThreadIds", [])
+    assert selected not in still_stopped, continued
+    assert set(thread_ids[1:]).issubset(set(still_stopped)), continued
+
+    continued_all = tool_data(client.call_tool("veh_continue", {"threadId": 0}))
+    assert continued_all.get("resumeScope") == "all", continued_all
+    assert set(still_stopped).issubset(set(continued_all.get("resumedThreadIds", []))), continued_all
+    assert continued_all.get("stillStoppedThreadIds") == [], continued_all
+
+    client.call_tool("veh_terminate")
+    client.close()
+    print("  PASSED\n")
+    return True
+
+
 if __name__ == "__main__":
     passed = 0
     failed = 0
@@ -335,7 +392,8 @@ if __name__ == "__main__":
     for test_fn in [test_stop_on_entry_false, test_stop_on_entry_true,
                     test_new_launch_clears_previous_stop,
                     test_explicit_remote_thread_methods,
-                    test_wait_is_cancelled_by_relaunch]:
+                    test_wait_is_cancelled_by_relaunch,
+                    test_selective_continue_visibility]:
         try:
             if test_fn():
                 passed += 1

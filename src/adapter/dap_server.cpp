@@ -1026,9 +1026,9 @@ void DapServer::OnContinue(const Request& req) {
 
 	// Launch + stopOnEntry: 메인 스레드가 아직 OS-suspended 상태
 	// VEH Continue 전에 먼저 OS resume 해야 함
-	ResumeMainThread();
+	ResumeMainThread(threadId);
 
-	ContinueRequest contReq;
+	ContinueRequest contReq{};
 	contReq.threadId = threadId;
 	DAP_TRACE("Continue", "threadId=" + std::to_string(threadId));
 	pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
@@ -1037,7 +1037,7 @@ void DapServer::OnContinue(const Request& req) {
 	resp.request_seq = req.seq;
 	resp.command = "continue";
 	resp.success = true;
-	resp.body = {{"allThreadsContinued", true}};
+	resp.body = {{"allThreadsContinued", threadId == 0}};
 	SendResponse(resp);
 }
 
@@ -3654,8 +3654,9 @@ void DapServer::ResolveStepRange(uint32_t threadId) {
 		+ " nextLine=" + FormatAddress(snapNext));
 }
 
-void DapServer::ResumeMainThread() {
+void DapServer::ResumeMainThread(uint32_t requestedThreadId) {
 	if (mainThreadResumed_ || launchedMainThreadId_ == 0) return;
+	if (requestedThreadId != 0 && requestedThreadId != launchedMainThreadId_) return;
 
 	HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, launchedMainThreadId_);
 	if (hThread) {
