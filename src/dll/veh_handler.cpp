@@ -204,6 +204,18 @@ bool VehHandler::IsThreadStopped(uint32_t threadId) {
 	return threadEvents_.find(threadId) != threadEvents_.end();
 }
 
+std::vector<uint32_t> VehHandler::GetStoppedThreadIds() {
+	std::lock_guard<std::mutex> lock(eventMapMutex_);
+	std::vector<uint32_t> result;
+	result.reserve(threadEvents_.size());
+	for (const auto& [threadId, event] : threadEvents_) {
+		(void)event;
+		result.push_back(threadId);
+	}
+	std::sort(result.begin(), result.end());
+	return result;
+}
+
 bool VehHandler::GetStoppedContext(uint32_t threadId, CONTEXT& ctx) {
 	std::lock_guard<std::mutex> lock(contextMapMutex_);
 	auto it = stoppedContexts_.find(threadId);

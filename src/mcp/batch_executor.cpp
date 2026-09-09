@@ -450,16 +450,33 @@ json BatchExecutor::DispatchTool(const std::string& name, const json& args) {
 			}
 		}
 
-		if (!session_.Continue(tid, passEx)) {
+		auto continueResult = session_.ContinueWithDetails(tid, passEx);
+		if (!continueResult.ok) {
 			return {{"error", "Continue failed"}};
 		}
-		if (!wait) return {{"success", true}};
+		auto addResumeDetails = [&](json& result) {
+			result["resumeScope"] = tid == 0 ? "all" : "single";
+			result["requestedThreadId"] = tid;
+			result["resumedThreadIds"] = continueResult.resumedThreadIds;
+			result["stillStoppedThreadIds"] = continueResult.stillStoppedThreadIds;
+		};
+		if (!wait) {
+			json result = {{"success", true}};
+			addResumeDetails(result);
+			return result;
+		}
 
 		auto stop = session_.WaitForStop(timeout);
-		if (stop.timeout) return {{"timeout", true}};
-		return {{"stopped", true}, {"reason", stop.reason},
+		if (stop.timeout) {
+			json result = {{"timeout", true}};
+			addResumeDetails(result);
+			return result;
+		}
+		json result = {{"stopped", true}, {"reason", stop.reason},
 		        {"address", ToHex(stop.address)}, {"threadId", stop.threadId},
 		        {"breakpointId", stop.breakpointId}};
+		addResumeDetails(result);
+		return result;
 	}
 
 	if (name == "veh_step_in") {

@@ -51,6 +51,7 @@ public:
 
 	// 스레드가 VEH 핸들러에서 정지(대기) 중인지 확인
 	bool IsThreadStopped(uint32_t threadId);
+	std::vector<uint32_t> GetStoppedThreadIds();
 
 	// 정지된 스레드의 예외 시점 컨텍스트 가져오기/설정하기
 	bool GetStoppedContext(uint32_t threadId, CONTEXT& ctx);

@@ -906,7 +906,6 @@ json McpServer::ToolRemoveDataBreakpoint(const json& args) {
 json McpServer::ToolContinue(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
-	session_.ResumeMainThread();
 	CleanupTempStepOverBp();
 
 	uint32_t threadId = JsonUint32(args, "threadId");
@@ -946,12 +945,21 @@ json McpServer::ToolContinue(const json& args) {
 		}
 	}
 
-	if (!session_.Continue(threadId, passException)) {
+	auto continueResult = session_.ContinueWithDetails(threadId, passException);
+	if (!continueResult.ok) {
 		return {{"error", IpcErrorMessage()}};
 	}
+	auto addResumeDetails = [&](json& ret) {
+		ret["resumeScope"] = threadId == 0 ? "all" : "single";
+		ret["requestedThreadId"] = threadId;
+		ret["resumedThreadIds"] = continueResult.resumedThreadIds;
+		ret["stillStoppedThreadIds"] = continueResult.stillStoppedThreadIds;
+	};
 
 	if (!wait) {
-		return {{"success", true}, {"threadId", threadId}};
+		json ret = {{"success", true}, {"threadId", threadId}};
+		addResumeDetails(ret);
+		return ret;
 	}
 
 	// Wait for a stop from the current process. A stale event is discarded and the
@@ -961,14 +969,18 @@ json McpServer::ToolContinue(const json& args) {
 	for (;;) {
 		auto now = std::chrono::steady_clock::now();
 		if (now >= deadline) {
-			return {{"timeout", true}, {"message", "No stop event within timeout. Process still running."}};
+			json ret = {{"timeout", true}, {"message", "No stop event within timeout. Process still running."}};
+			addResumeDetails(ret);
+			return ret;
 		}
 		auto remaining = std::chrono::duration_cast<std::chrono::seconds>(deadline - now);
 		int remainingSec = static_cast<int>(remaining.count());
 		if (remainingSec < 1) remainingSec = 1;
 		stopEvent = session_.WaitForStop(remainingSec, sessionGeneration);
 		if (stopEvent.timeout) {
-			return {{"timeout", true}, {"message", "No stop event within timeout. Process still running."}};
+			json ret = {{"timeout", true}, {"message", "No stop event within timeout. Process still running."}};
+			addResumeDetails(ret);
+			return ret;
 		}
 		if (stopEvent.sessionChanged) {
 			return {{"error", "Debug session changed while waiting for a stop event"}};
@@ -984,6 +996,7 @@ json McpServer::ToolContinue(const json& args) {
 		{"breakpointId", stopEvent.breakpointId}
 	};
 	if (!stopEvent.bpType.empty()) ret["breakpointType"] = stopEvent.bpType;
+	addResumeDetails(ret);
 	return ret;
 }
 
@@ -2713,9 +2726,9 @@ json McpServer::GetToolsList() {
 			{"id", {{"type", "integer"}, {"description", "Data breakpoint ID"}}}
 		 }}, {"required", json::array({"id"})}}}},
 
-		{{"name", "veh_continue"}, {"description", "Continue execution. Use wait=true to block until a breakpoint hit, exception, pause, or process exit occurs (returns stop reason, address, threadId). Use pass_exception=true to forward the current exception to the process's own SEH handler (for CFF/obfuscated INT3, etc.). Default timeout 10s, configurable."},
+		{{"name", "veh_continue"}, {"description", "Continue execution. threadId=0 resumes all debugger-stopped threads; threadId=X resumes only X and leaves the others stopped. Every executed continue reports resumedThreadIds and stillStoppedThreadIds. Use wait=true to block until a breakpoint hit, exception, pause, or process exit occurs (returns stop reason, address, threadId). Use pass_exception=true to forward the current exception to the process's own SEH handler (for CFF/obfuscated INT3, etc.). Default timeout 10s, configurable."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"threadId", {{"type", "integer"}, {"description", "Thread ID (0 = all, default: 0)"}}},
+			{"threadId", {{"type", "integer"}, {"description", "Thread ID (0 = resume all debugger-stopped threads; nonzero = resume only that thread and keep all others stopped; default: 0)"}}},
 			{"wait", {{"type", "boolean"}, {"description", "If true, block until target stops (breakpoint/exception/pause/exit). Default: false"}}},
 			{"timeout", {{"type", "integer"}, {"description", "Max seconds to wait when wait=true (1-300, default: 10)"}}},
 			{"pass_exception", {{"type", "boolean"}, {"description", "If true, pass the current exception to the process's SEH handler instead of handling it. Use for CFF/obfuscated code with INT3. Default: false"}}},

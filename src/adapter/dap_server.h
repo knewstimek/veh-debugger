@@ -82,7 +82,7 @@ private:
 
 	// Helpers
 	std::string GetDllPath();
-	void ResumeMainThread();
+	void ResumeMainThread(uint32_t requestedThreadId = 0);
 	void Cleanup(bool detachOnly = false);
 
 	Transport* transport_ = nullptr;

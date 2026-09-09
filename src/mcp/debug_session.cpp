@@ -450,10 +450,64 @@ bool DebugSession::RemoveHwBreakpoint(uint32_t id) {
 // --- Execution control ---
 
 bool DebugSession::Continue(uint32_t threadId, bool passException) {
-	ContinueRequest req;
+	ResumeMainThread(threadId);
+	ContinueRequest req{};
 	req.threadId = threadId;
 	req.passException = passException ? 1 : 0;
+	req.wantDetails = 0;
+	// Keep this path fire-and-forget: exception auto-continue can run on the pipe
+	// reader thread, which cannot synchronously wait for a response it must read.
 	return pipeClient_.SendCommand(IpcCommand::Continue, &req, sizeof(req));
+}
+
+ContinueResult DebugSession::ContinueWithDetails(uint32_t threadId, bool passException) {
+	ContinueResult result;
+	uint32_t resumedLaunchThread = ResumeMainThread(threadId);
+	ContinueRequest req{};
+	req.threadId = threadId;
+	req.passException = passException ? 1 : 0;
+	req.wantDetails = 1;
+	std::vector<uint8_t> response;
+	if (!pipeClient_.SendAndReceive(IpcCommand::Continue, &req, sizeof(req), response)) {
+		return result;
+	}
+	if (response.size() < sizeof(IpcStatus)) return result;
+	IpcStatus status{};
+	memcpy(&status, response.data(), sizeof(status));
+	result.ok = status == IpcStatus::Ok;
+	if (!result.ok) return result;
+
+	if (response.size() >= sizeof(ContinueResponse)) {
+		ContinueResponse header{};
+		memcpy(&header, response.data(), sizeof(header));
+		const uint64_t totalCount = static_cast<uint64_t>(header.resumedCount) + header.stillStoppedCount;
+		if (totalCount <= (response.size() - sizeof(header)) / sizeof(uint32_t)) {
+			const uint8_t* cursor = response.data() + sizeof(header);
+			result.resumedThreadIds.resize(header.resumedCount);
+			result.stillStoppedThreadIds.resize(header.stillStoppedCount);
+			if (header.resumedCount != 0) {
+				memcpy(result.resumedThreadIds.data(), cursor,
+					header.resumedCount * sizeof(uint32_t));
+				cursor += header.resumedCount * sizeof(uint32_t);
+			}
+			if (header.stillStoppedCount != 0) {
+				memcpy(result.stillStoppedThreadIds.data(), cursor,
+					header.stillStoppedCount * sizeof(uint32_t));
+			}
+		}
+	}
+
+	if (resumedLaunchThread != 0) result.resumedThreadIds.push_back(resumedLaunchThread);
+	if (launchedMainThreadId_ != 0 && !mainThreadResumed_) {
+		result.stillStoppedThreadIds.push_back(launchedMainThreadId_);
+	}
+	auto sortUnique = [](std::vector<uint32_t>& ids) {
+		std::sort(ids.begin(), ids.end());
+		ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+	};
+	sortUnique(result.resumedThreadIds);
+	sortUnique(result.stillStoppedThreadIds);
+	return result;
 }
 
 bool DebugSession::StepIn(uint32_t threadId) {
@@ -502,20 +556,29 @@ bool DebugSession::Pause(uint32_t threadId) {
 	return pipeClient_.SendAndReceive(IpcCommand::Pause, &req, sizeof(req), respData);
 }
 
-void DebugSession::ResumeMainThread() {
-	if (mainThreadResumed_ || launchedMainThreadId_ == 0) return;
+uint32_t DebugSession::ResumeMainThread(uint32_t requestedThreadId) {
+	if (mainThreadResumed_ || launchedMainThreadId_ == 0) return 0;
+	if (requestedThreadId != 0 && requestedThreadId != launchedMainThreadId_) return 0;
 
 	HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, launchedMainThreadId_);
 	if (hThread) {
 		DWORD prevCount = ResumeThread(hThread);
+		DWORD resumeError = prevCount == static_cast<DWORD>(-1) ? GetLastError() : ERROR_SUCCESS;
 		CloseHandle(hThread);
+		if (prevCount == static_cast<DWORD>(-1)) {
+			LOG_ERROR("DebugSession: Failed to resume main thread %u: %u",
+				launchedMainThreadId_, resumeError);
+			return 0;
+		}
 		mainThreadResumed_ = true;
 		LOG_INFO("DebugSession: Resumed main thread %u (prev suspend count: %u)",
 			launchedMainThreadId_, prevCount);
+		return launchedMainThreadId_;
 	} else {
 		LOG_ERROR("DebugSession: Failed to open main thread %u for resume: %u",
 			launchedMainThreadId_, GetLastError());
 	}
+	return 0;
 }
 
 // --- Stop event synchronization ---

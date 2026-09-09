@@ -39,6 +39,12 @@ struct StopEvent {
 	uint64_t sessionGeneration = 0;
 };
 
+struct ContinueResult {
+	bool ok = false;
+	std::vector<uint32_t> resumedThreadIds;
+	std::vector<uint32_t> stillStoppedThreadIds;
+};
+
 struct ThreadEntry {
 	uint32_t id;
 	std::string name;
@@ -179,11 +185,12 @@ public:
 
 	// --- Execution control ---
 	bool Continue(uint32_t threadId = 0, bool passException = false);
+	ContinueResult ContinueWithDetails(uint32_t threadId = 0, bool passException = false);
 	bool StepIn(uint32_t threadId);
 	bool StepOver(uint32_t threadId);
 	bool StepOut(uint32_t threadId);
 	bool Pause(uint32_t threadId = 0);
-	void ResumeMainThread();
+	uint32_t ResumeMainThread(uint32_t requestedThreadId = 0);
 
 	// Wait for stop event (blocks)
 	StopEvent WaitForStop(int timeoutSec = 10, uint64_t expectedGeneration = 0);

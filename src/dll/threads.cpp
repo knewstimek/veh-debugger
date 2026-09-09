@@ -91,6 +91,12 @@ bool ThreadManager::SuspendThread(uint32_t threadId) {
 		LOG_WARN("SuspendThread(%u) rejected: internal DLL thread (deadlock prevention)", threadId);
 		return false;
 	}
+	{
+		std::lock_guard<std::mutex> lock(suspendedMutex_);
+		if (suspendedThreads_.find(threadId) != suspendedThreads_.end()) {
+			return true;  // Do not stack duplicate debugger-owned suspend counts.
+		}
+	}
 	HANDLE h = OpenThread(threadId);
 	if (!h) return false;
 
@@ -102,6 +108,10 @@ bool ThreadManager::SuspendThread(uint32_t threadId) {
 		return false;
 	}
 
+	{
+		std::lock_guard<std::mutex> lock(suspendedMutex_);
+		suspendedThreads_.insert(threadId);
+	}
 	LOG_DEBUG("Suspended thread %u (prev count=%lu)", threadId, prev);
 	return true;
 }
@@ -118,6 +128,10 @@ bool ThreadManager::ResumeThread(uint32_t threadId) {
 		return false;
 	}
 
+	{
+		std::lock_guard<std::mutex> lock(suspendedMutex_);
+		suspendedThreads_.erase(threadId);
+	}
 	LOG_DEBUG("Resumed thread %u (prev count=%lu)", threadId, prev);
 	return true;
 }
@@ -133,11 +147,20 @@ void ThreadManager::SuspendAllExcept(uint32_t excludeThreadId) {
 }
 
 void ThreadManager::ResumeAll() {
-	auto threads = EnumerateThreads();
-	for (const auto& t : threads) {
-		ResumeThread(t.id);
+	std::vector<uint32_t> suspended;
+	{
+		std::lock_guard<std::mutex> lock(suspendedMutex_);
+		suspended.assign(suspendedThreads_.begin(), suspendedThreads_.end());
+	}
+	for (uint32_t threadId : suspended) {
+		ResumeThread(threadId);
 	}
 	LOG_DEBUG("Resumed all threads");
+}
+
+std::vector<uint32_t> ThreadManager::GetSuspendedThreadIds() {
+	std::lock_guard<std::mutex> lock(suspendedMutex_);
+	return {suspendedThreads_.begin(), suspendedThreads_.end()};
 }
 
 bool ThreadManager::GetContext(uint32_t threadId, CONTEXT& ctx) {
