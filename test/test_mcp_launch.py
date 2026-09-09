@@ -7,6 +7,7 @@ Tests that:
 4. an outstanding wait is cancelled when a new session replaces it
 5. both synchronous remote-thread injection methods accept real module handles
 6. selective continue reports resumed and still-stopped thread IDs
+7. setting a WriteFile function breakpoint cannot kill the target via logger recursion
 """
 import subprocess
 import json
@@ -385,6 +386,43 @@ def test_selective_continue_visibility():
     return True
 
 
+def test_writefile_function_breakpoint_survives():
+    """The SetBreakpoint response itself uses WriteFile on the internal pipe thread."""
+    print("=== Test: WriteFile function breakpoint survives ===")
+    client = McpClient()
+
+    client.send("initialize", {"protocolVersion": "2024-11-05",
+                                "capabilities": {},
+                                "clientInfo": {"name": "test", "version": "1.0"}})
+    init_response = client.recv()
+    assert init_response and "result" in init_response, init_response
+
+    launched = tool_data(client.call_tool("veh_launch", {
+        "program": TARGET,
+        "stopOnEntry": True,
+    }))
+    pid = launched.get("pid", 0)
+    assert "error" not in launched and pid > 0, launched
+
+    create_file = tool_data(client.call_tool("veh_set_function_breakpoint", {
+        "name": "kernel32!CreateFileW",
+    }))
+    assert create_file.get("success") is True, create_file
+
+    write_file = tool_data(client.call_tool("veh_set_function_breakpoint", {
+        "name": "kernel32!WriteFile",
+    }))
+    assert write_file.get("success") is True, write_file
+    assert check_process_alive(pid), write_file
+    threads = tool_data(client.call_tool("veh_threads"))
+    assert threads.get("threads"), threads
+
+    client.call_tool("veh_terminate")
+    client.close()
+    print("  PASSED\n")
+    return True
+
+
 if __name__ == "__main__":
     passed = 0
     failed = 0
@@ -393,7 +431,8 @@ if __name__ == "__main__":
                     test_new_launch_clears_previous_stop,
                     test_explicit_remote_thread_methods,
                     test_wait_is_cancelled_by_relaunch,
-                    test_selective_continue_visibility]:
+                    test_selective_continue_visibility,
+                    test_writefile_function_breakpoint_survives]:
         try:
             if test_fn():
                 passed += 1

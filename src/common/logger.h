@@ -9,6 +9,29 @@ namespace veh {
 
 enum class LogLevel { Debug, Info, Warning, Error };
 
+// Logging from inside a VEH callback can recursively hit an API breakpoint used
+// by stdio (notably WriteFile), or deadlock if the interrupted thread already
+// owns the logger mutex. Function-local TLS is shared by every inline call site
+// in the module (including x86 builds) and requires no API calls after init.
+inline bool& LoggerThreadSilenced() {
+	static thread_local bool silenced = false;
+	return silenced;
+}
+
+class ScopedThreadLogSilence {
+public:
+	ScopedThreadLogSilence() : previous_(LoggerThreadSilenced()) {
+		LoggerThreadSilenced() = true;
+	}
+	~ScopedThreadLogSilence() { LoggerThreadSilenced() = previous_; }
+
+	ScopedThreadLogSilence(const ScopedThreadLogSilence&) = delete;
+	ScopedThreadLogSilence& operator=(const ScopedThreadLogSilence&) = delete;
+
+private:
+	bool previous_;
+};
+
 class Logger {
 public:
 	static Logger& Instance() {
@@ -28,6 +51,7 @@ public:
 	}
 
 	void Log(LogLevel level, const char* fmt, ...) {
+		if (LoggerThreadSilenced()) return;
 		if (level < level_) return;
 
 		std::lock_guard<std::mutex> lock(mutex_);

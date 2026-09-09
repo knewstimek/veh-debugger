@@ -362,6 +362,10 @@ void VehHandler::NotifyModuleLoadStop(uint64_t base, uint32_t size, const char* 
 
 LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 	if (!installed_) return EXCEPTION_CONTINUE_SEARCH;
+	// Never enter stdio/WriteFile or the logger mutex from a VEH callback. The
+	// interrupted code may itself be the logger, and users may breakpoint any API
+	// that logging depends on.
+	ScopedThreadLogSilence logSilence;
 
 	// 재진입 방지: VEH 핸들러 안에서 호출한 API에 BP가 걸려도 재귀하지 않음
 	if (reentryTlsSlot_ != TLS_OUT_OF_INDEXES && SafeTlsGetValue(reentryTlsSlot_)) {
