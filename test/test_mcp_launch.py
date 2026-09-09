@@ -235,6 +235,7 @@ def test_new_launch_clears_previous_stop():
     }))
     assert "error" not in second and second.get("pid", 0) > 0, second
     assert second["pid"] != first["pid"]
+    terminate_process(first["pid"])
 
     exception_info = tool_data(client.call_tool("veh_exception_info"))
     assert exception_info.get("error") == "No exception recorded", exception_info
@@ -319,6 +320,7 @@ def test_wait_is_cancelled_by_relaunch():
 
     launch_result = tool_data(responses[launch_id])
     assert "error" not in launch_result and launch_result.get("pid", 0) > 0, launch_result
+    terminate_process(first["pid"])
 
     client.call_tool("veh_terminate")
     client.close()
