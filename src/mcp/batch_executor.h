@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <functional>
 
 namespace veh {
 
@@ -34,7 +35,8 @@ using json = nlohmann::json;
 
 class BatchExecutor {
 public:
-	explicit BatchExecutor(DebugSession& session);
+	using BreakpointActionSink = std::function<void(uint32_t, const json&)>;
+	explicit BatchExecutor(DebugSession& session, BreakpointActionSink actionSink = {});
 
 	// Execute a batch of steps. Returns array of step results.
 	json Execute(const json& steps);
@@ -61,6 +63,7 @@ private:
 	uint64_t ResolveAddress(const std::string& addrStr);
 
 	DebugSession& session_;
+	BreakpointActionSink actionSink_;
 	std::vector<json> results_;  // step results indexed by step number
 	std::unordered_map<std::string, json> namedVars_;  // named variables ($addr, etc.)
 	int depth_ = 0;  // nesting depth (max 20)

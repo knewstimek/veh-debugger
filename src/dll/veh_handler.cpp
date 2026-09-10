@@ -457,7 +457,39 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 				importResolve_.done.store(true, std::memory_order_release);
 				LOG_WARN("ImportResolve: max exception passes exceeded at 0x%llX", addr);
 			}
-			return EXCEPTION_CONTINUE_SEARCH;
+
+			// A foreign INT3 can be reached after the user redirects RIP (or from a
+			// program's own DebugBreak). Surface it as a debugger exception instead
+			// of letting an unhandled 0x80000003 terminate the target. Normal continue
+			// consumes the already-executed INT3; pass_exception forwards it to SEH.
+			if (!callback_) return EXCEPTION_CONTINUE_SEARCH;
+			auto result = NotifyAndWait(info, tid, DebugEventType::Exception, addr, 0, code);
+			if (result == WaitResult::Detached) return EXCEPTION_CONTINUE_SEARCH;
+			{
+				std::lock_guard<std::mutex> lock(stepFlagMutex_);
+				auto pass = passExceptionFlags_.find(tid);
+				if (pass != passExceptionFlags_.end() && pass->second) {
+					passExceptionFlags_.erase(pass);
+					stepFlags_.erase(tid);
+					return EXCEPTION_CONTINUE_SEARCH;
+				}
+				auto step = stepFlags_.find(tid);
+				if (step != stepFlags_.end() && step->second) {
+					info->ContextRecord->EFlags |= 0x100;
+					stepFlags_.erase(step);
+				}
+			}
+			// VEH receives RIP/EIP at the INT3 byte. If the user did not redirect it
+			// while stopped, normal continue skips the one-byte DebugBreak instruction;
+			// otherwise honor the explicitly edited instruction pointer.
+#ifdef _WIN64
+			if (info->ContextRecord->Rip == addr) info->ContextRecord->Rip = addr + 1;
+#else
+			if (info->ContextRecord->Eip == static_cast<DWORD>(addr)) {
+				info->ContextRecord->Eip = static_cast<DWORD>(addr + 1);
+			}
+#endif
+			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 
 		LOG_INFO("Breakpoint #%u hit at 0x%llX (tid=%u)", bp->id, addr, tid);
@@ -619,6 +651,17 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 						if (result == WaitResult::Detached) {
 							LOG_DEBUG("Thread %u (HW BP): forced resume (detach)", tid);
 							return EXCEPTION_CONTINUE_EXECUTION;
+						}
+						if (result == WaitResult::Resumed) {
+							// A step requested while stopped at a HW execute/data breakpoint must
+							// arm TF here. Unlike the software-BP path there is no rearm
+							// SINGLE_STEP that can consume stepFlags_ for us.
+							std::lock_guard<std::mutex> lock(stepFlagMutex_);
+							auto it = stepFlags_.find(tid);
+							if (it != stepFlags_.end() && it->second) {
+								info->ContextRecord->EFlags |= 0x100;
+								stepFlags_.erase(it);
+							}
 						}
 					}
 
