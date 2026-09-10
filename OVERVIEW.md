@@ -67,7 +67,7 @@ Named Pipe (`\\.\pipe\dotnet-diagnostic-{pid}`), binary framed:
 | 0x0040-0x0042 | PDB symbol resolution (SourceLine, Function, EnumLocals) |
 | 0x0050 | TraceCallers (lock-free ring buffer collection) |
 | 0x0060-0x0062 | Memory management (AllocateMemory, FreeMemory, ExecuteShellcode) |
-| 0x0070-0x0071 | Dynamic tracing (TraceRegister: DLL-internal step loop, TraceMemory: temp HW BP) |
+| 0x0070-0x0074 | Dynamic tracing (TraceRegister, TraceMemory, ResolveImport, TraceCalls, TraceBasicBlocks) |
 | 0x00F0/0x00FF | Lifecycle (Detach, Shutdown) |
 
 ### Key Events
