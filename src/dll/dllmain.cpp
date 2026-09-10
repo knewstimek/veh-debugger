@@ -231,6 +231,7 @@ DWORD WINAPI InitThread(LPVOID) {
 			case 0xC000008C: desc = "Array Bounds Exceeded"; break;
 			case 0xC000008E: desc = "Float Divide by Zero"; break;
 			case 0x80000002: desc = "Datatype Misalignment"; break;
+			case 0x80000003: desc = "Breakpoint"; break;
 			}
 			snprintf(payload.description, sizeof(payload.description), "%s", desc);
 			pipe.SendEvent(static_cast<uint32_t>(veh::IpcEvent::ExceptionOccurred),

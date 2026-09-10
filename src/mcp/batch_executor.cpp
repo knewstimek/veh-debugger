@@ -53,7 +53,8 @@ static std::vector<uint8_t> ParseHexBytes(const std::string& hexStr) {
 
 // --- BatchExecutor ---
 
-BatchExecutor::BatchExecutor(DebugSession& session) : session_(session) {}
+BatchExecutor::BatchExecutor(DebugSession& session, BreakpointActionSink actionSink)
+	: session_(session), actionSink_(std::move(actionSink)) {}
 
 uint64_t BatchExecutor::ResolveAddress(const std::string& s) {
 	if (s.empty()) return 0;
@@ -117,12 +118,30 @@ json BatchExecutor::ExecuteStep(const json& step) {
 		return {{"error", "Maximum nesting depth (20) exceeded"}};
 	}
 
+	// Some MCP schema consumers expose an unconstrained array as string[]. Accept a
+	// JSON-encoded object for backward compatibility, while keeping object-form as
+	// the canonical representation.
+	if (step.is_string()) {
+		try {
+			json decoded = json::parse(step.get<std::string>());
+			if (!decoded.is_object()) {
+				return {{"error", "String step must decode to a JSON object"}};
+			}
+			return ExecuteStep(decoded);
+		} catch (const std::exception& e) {
+			return {{"error", std::string("Invalid JSON string step: ") + e.what()}};
+		}
+	}
+	if (!step.is_object()) {
+		return {{"error", "Step must be an object or a JSON-encoded object string"}};
+	}
+
 	// Control flow: if
 	if (step.contains("if")) {
 		std::string condition = ResolveString(step["if"].get<std::string>());
 		bool result = EvaluateCondition(condition);
 		if (result && step.contains("then") && step["then"].is_array()) {
-			BatchExecutor sub(session_);
+			BatchExecutor sub(session_, actionSink_);
 			sub.depth_ = depth_ + 1;
 			sub.results_ = results_;
 			sub.namedVars_ = namedVars_;
@@ -133,7 +152,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 				results_.push_back(sub.results_[j]);
 			return {{"type", "if"}, {"condition", condition}, {"branch", "then"}, {"result", r}};
 		} else if (!result && step.contains("else") && step["else"].is_array()) {
-			BatchExecutor sub(session_);
+			BatchExecutor sub(session_, actionSink_);
 			sub.depth_ = depth_ + 1;
 			sub.results_ = results_;
 			sub.namedVars_ = namedVars_;
@@ -155,7 +174,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 		json loopResults = json::array();
 		int iterations = 0;
 		for (int i = 0; i < maxIter; i++) {
-			BatchExecutor sub(session_);
+			BatchExecutor sub(session_, actionSink_);
 			sub.depth_ = depth_ + 1;
 			sub.results_ = results_;
 			sub.namedVars_ = namedVars_;
@@ -203,7 +222,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 		json foreachResults = json::array();
 		for (size_t i = 0; i < items.size(); i++) {
 			namedVars_[varName] = items[i];
-			BatchExecutor sub(session_);
+			BatchExecutor sub(session_, actionSink_);
 			sub.depth_ = depth_ + 1;
 			sub.results_ = results_;
 			sub.namedVars_ = namedVars_;
@@ -503,9 +522,32 @@ json BatchExecutor::DispatchTool(const std::string& name, const json& args) {
 	// --- Breakpoints ---
 	if (name == "veh_set_breakpoint") {
 		uint64_t addr = hexArg("address");
+		if (addr == 0) return {{"error", "address is required or invalid"}};
+		if (args.contains("action") && !args["action"].is_array()) {
+			return {{"error", "action must be an array of batch steps"}};
+		}
 		auto r = session_.SetBreakpoint(addr);
 		if (!r.ok) return {{"error", "SetBreakpoint failed"}};
-		return {{"success", true}, {"id", r.id}, {"address", ToHex(addr)}};
+		{
+			std::lock_guard<std::mutex> lock(session_.GetBpMutex());
+			auto& bps = session_.GetSwBreakpoints();
+			auto it = std::find_if(bps.begin(), bps.end(),
+				[r](const SwBpInfo& bp) { return bp.id == r.id; });
+			if (it == bps.end()) {
+				SwBpInfo bp{};
+				bp.id = r.id;
+				bp.address = addr;
+				bps.push_back(std::move(bp));
+				it = std::prev(bps.end());
+			}
+			it->condition = args.value("condition", "");
+			it->hitCondition = args.value("hitCondition", "");
+			it->logMessage = args.value("logMessage", "");
+		}
+		if (args.contains("action") && actionSink_) actionSink_(r.id, args["action"]);
+		json result = {{"success", true}, {"id", r.id}, {"address", ToHex(addr)}};
+		if (args.contains("action")) result["hasAction"] = true;
+		return result;
 	}
 	if (name == "veh_set_module_breakpoint") {
 		if (boolArg("clear")) {
@@ -522,6 +564,13 @@ json BatchExecutor::DispatchTool(const std::string& name, const json& args) {
 	if (name == "veh_remove_breakpoint") {
 		uint32_t id = uint32Arg("id");
 		if (!session_.RemoveBreakpoint(id)) return {{"error", "RemoveBreakpoint failed"}};
+		{
+			std::lock_guard<std::mutex> lock(session_.GetBpMutex());
+			auto& bps = session_.GetSwBreakpoints();
+			bps.erase(std::remove_if(bps.begin(), bps.end(),
+				[id](const SwBpInfo& bp) { return bp.id == id; }), bps.end());
+		}
+		if (actionSink_) actionSink_(id, json());
 		return {{"success", true}, {"id", id}};
 	}
 	if (name == "veh_set_data_breakpoint") {

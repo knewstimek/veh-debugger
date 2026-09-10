@@ -492,6 +492,9 @@ json McpServer::ToolSetBreakpoint(const json& args) {
 	if (!ParseAddress(addrStr, addr)) {
 		return {{"error", "invalid address format"}};
 	}
+	if (args.contains("action") && !args["action"].is_array()) {
+		return {{"error", "action must be an array of batch steps"}};
+	}
 
 	auto bpResult = session_.SetBreakpoint(addr);
 	if (!bpResult.ok) {
@@ -524,8 +527,7 @@ json McpServer::ToolSetBreakpoint(const json& args) {
 
 	// Store action if provided
 	if (args.contains("action") && args["action"].is_array()) {
-		std::lock_guard<std::mutex> lock(session_.GetBpMutex());
-		bpActions_[bpResult.id] = args["action"];
+		StoreBreakpointAction(bpResult.id, args["action"]);
 	}
 
 	char buf[32]; snprintf(buf, sizeof(buf), "0x%llX", addr);
@@ -1009,6 +1011,7 @@ void McpServer::ResetSessionEventState() {
 	session_.ResetStopState();
 	pendingEvents_ = {};
 	pendingAutoContinue_ = {};
+	pendingBreakpointActions_ = {};
 	tempStepOverBpId_ = 0;
 	stepCompleted_ = false;
 	stepCompletedAddr_ = 0;
@@ -1040,11 +1043,28 @@ json McpServer::ToolStepIn(const json& args) {
 	CleanupTempStepOverBp();
 	uint32_t threadId = JsonUint32(args, "threadId");
 	if (threadId == 0) return {{"error", "threadId is required"}};
+	{
+		std::lock_guard<std::mutex> lock(stepMutex_);
+		stepCompleted_ = false;
+		stepCompletedAddr_ = 0;
+		stepCompletedThread_ = 0;
+	}
 
 	if (!session_.StepIn(threadId)) {
 		return {{"error", "Thread " + std::to_string(threadId) + " is not stopped (not found or already running)"}};
 	}
-	return {{"success", true}, {"threadId", threadId}};
+
+	std::unique_lock<std::mutex> lock(stepMutex_);
+	if (!stepCv_.wait_for(lock, std::chrono::seconds(5), [this, threadId]{
+			return (stepCompleted_ && stepCompletedThread_ == threadId) || !session_.IsAttached();
+		})) {
+		return {{"error", "Step timed out (threadId=" + std::to_string(threadId) + "). Thread may not be stopped or may be deadlocked."}};
+	}
+	if (!(stepCompleted_ && stepCompletedThread_ == threadId) && !session_.IsAttached()) {
+		return {{"error", "Target process exited during step"}};
+	}
+	return {{"success", true}, {"threadId", threadId},
+		{"instructionPointer", (std::ostringstream() << "0x" << std::hex << stepCompletedAddr_).str()}};
 }
 
 json McpServer::ToolStepOver(const json& args) {
@@ -1076,6 +1096,8 @@ json McpServer::ToolStepOver(const json& args) {
 	{
 		std::lock_guard<std::mutex> lock(stepMutex_);
 		stepCompleted_ = false;
+		stepCompletedAddr_ = 0;
+		stepCompletedThread_ = 0;
 	}
 
 	if (!session_.StepOver(threadId)) {
@@ -1086,15 +1108,16 @@ json McpServer::ToolStepOver(const json& args) {
 	{
 		std::unique_lock<std::mutex> lock(stepMutex_);
 		if (!stepCv_.wait_for(lock, std::chrono::seconds(5),
-				[this]{ return stepCompleted_ || !session_.IsAttached(); })) {
+				[this, threadId]{ return (stepCompleted_ && stepCompletedThread_ == threadId) || !session_.IsAttached(); })) {
 			return {{"error", "Step timed out (threadId=" + std::to_string(threadId) + "). Thread may not be stopped or may be deadlocked."}};
 		}
-		if (!stepCompleted_ && !session_.IsAttached()) {
+		if (!(stepCompleted_ && stepCompletedThread_ == threadId) && !session_.IsAttached()) {
 			return {{"error", "Target process exited during step"}};
 		}
 	}
 
-	return {{"success", true}, {"threadId", threadId}};
+	return {{"success", true}, {"threadId", threadId},
+		{"instructionPointer", (std::ostringstream() << "0x" << std::hex << stepCompletedAddr_).str()}};
 }
 
 json McpServer::ToolStepOut(const json& args) {
@@ -1685,7 +1708,9 @@ json McpServer::ToolBatch(const json& args) {
 		return {{"error", "steps (array) is required, or provide file path"}};
 	}
 
-	BatchExecutor executor(session_);
+	BatchExecutor executor(session_, [this](uint32_t id, const json& action) {
+		StoreBreakpointAction(id, action);
+	});
 	return executor.Execute(steps);
 }
 
@@ -1977,15 +2002,36 @@ json McpServer::ToolDisassemble(const json& args) {
 void McpServer::FlushEvents() {
 	std::queue<std::pair<std::string, json>> events;
 	std::queue<uint32_t> autoContinues;
+	std::queue<PendingBreakpointAction> actions;
 	{
 		std::lock_guard<std::mutex> lock(eventMutex_);
 		std::swap(events, pendingEvents_);
 		std::swap(autoContinues, pendingAutoContinue_);
+		std::swap(actions, pendingBreakpointActions_);
 	}
 	while (!events.empty()) {
 		auto& [method, params] = events.front();
 		SendNotification(method, params);
 		events.pop();
+	}
+	// Never run action commands on PipeClient's sole reader thread: commands such as
+	// SetBreakpoint need that thread to receive their response. Running here also
+	// allows actions to install breakpoints (including breakpoints with actions).
+	while (!actions.empty()) {
+		auto pending = std::move(actions.front());
+		actions.pop();
+		BatchExecutor executor(session_, [this](uint32_t id, const json& action) {
+			StoreBreakpointAction(id, action);
+		});
+		json result = executor.Execute(pending.steps);
+		if (result.dump().find("\"error\"") != std::string::npos) {
+			LOG_WARN("Breakpoint action completed with an error: %s", result.dump().c_str());
+		}
+		// Actions auto-continue by contract. An explicit veh_continue as the last
+		// action step is harmless; a second resume finds no stopped event.
+		if (!session_.Continue(pending.threadId)) {
+			LOG_WARN("Breakpoint action auto-continue failed for thread %u", pending.threadId);
+		}
 	}
 	while (!autoContinues.empty()) {
 		uint32_t tid = autoContinues.front();
@@ -1994,6 +2040,12 @@ void McpServer::FlushEvents() {
 			LOG_WARN("Auto-continue failed for thread %u", tid);
 		}
 	}
+}
+
+void McpServer::StoreBreakpointAction(uint32_t breakpointId, const json& action) {
+	std::lock_guard<std::mutex> lock(session_.GetBpMutex());
+	if (action.is_array() && !action.empty()) bpActions_[breakpointId] = action;
+	else bpActions_.erase(breakpointId);
 }
 
 // --- Condition/LogMessage helpers ---
@@ -2429,7 +2481,9 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 					}
 
 					if (!action.empty() && action.is_array()) {
-						// Execute action via BatchExecutor, then auto-continue
+						// Queue action for McpServer::Run. OnIpcEvent executes on the pipe's
+						// sole reader thread, so synchronous action IPC here would deadlock
+						// waiting for a response that only this thread can receive.
 						char buf[128];
 						snprintf(buf, sizeof(buf), "BP #%u action executing at 0x%llX (thread %u)",
 							e->breakpointId, e->address, e->threadId);
@@ -2437,12 +2491,9 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 							std::lock_guard<std::mutex> lock(eventMutex_);
 							pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
 						}
-						BatchExecutor executor(session_);
-						executor.Execute(action);
-						// Auto-continue after action
 						{
 							std::lock_guard<std::mutex> lock(eventMutex_);
-							pendingAutoContinue_.push(e->threadId);
+							pendingBreakpointActions_.push({e->threadId, std::move(action)});
 						}
 					} else {
 						// Normal stop
@@ -2474,7 +2525,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				std::lock_guard<std::mutex> lock(eventMutex_);
 				pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}});
 			}
-			// Signal synchronous waiters (ToolStepOver)
+			// Signal synchronous step waiters.
 			{
 				std::lock_guard<std::mutex> lock(stepMutex_);
 				stepCompleted_ = true;
@@ -2684,7 +2735,7 @@ json McpServer::GetToolsList() {
 			{"condition", {{"type", "string"}, {"description", "Condition expression (e.g. 'RAX==0x1000', 'RCX>5'). BP only fires when true."}}},
 			{"hitCondition", {{"type", "string"}, {"description", "Hit count threshold. BP fires only on Nth hit (e.g. '5' = fire on 5th hit)."}}},
 			{"logMessage", {{"type", "string"}, {"description", "Log message template (logpoint). Use {expr} for interpolation (e.g. 'x={RAX}'). Does NOT stop execution."}}},
-			{"action", {{"type", "array"}, {"description", "Auto-execute on BP hit (same format as veh_batch steps). After action, auto-continues. Example: [{\"tool\":\"veh_set_register\",\"args\":{\"threadId\":0,\"name\":\"RAX\",\"value\":\"1\"}},{\"tool\":\"veh_continue\"}]"}}}
+			{"action", {{"type", "array"}, {"items", {{"oneOf", json::array({json{{"type", "object"}}, json{{"type", "string"}}})}}}, {"description", "Auto-execute on BP hit (same format as veh_batch steps). Items may be step objects or JSON-encoded object strings. After action, auto-continues. Example: [{\"tool\":\"veh_set_register\",\"args\":{\"threadId\":0,\"name\":\"RAX\",\"value\":\"1\"}}]"}}}
 		 }}, {"required", json::array({"address"})}}}},
 
 		{{"name", "veh_remove_breakpoint"}, {"description", "Remove a software breakpoint by ID."},
@@ -2883,7 +2934,7 @@ json McpServer::GetToolsList() {
 			"  For-each: {steps: [{for_each: [\"0x1000\",\"0x2000\",\"0x3000\"], as: \"$addr\", do: [{tool: \"veh_write_memory\", args: {address: \"$addr\", data: \"90\"}}]}]}"
 		},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"steps", {{"type", "array"}, {"description", "Array of steps. Each step is {tool, args} or {if, then, else} or {loop, until, max} or {for_each, as, do}"}}},
+			{"steps", {{"type", "array"}, {"items", {{"oneOf", json::array({json{{"type", "object"}}, json{{"type", "string"}}})}}}, {"description", "Array of step objects, or JSON-encoded object strings for compatibility. Each decoded step is {tool, args}, {if, then, else}, {loop, until, max}, or {for_each, as, do}."}}},
 			{"file", {{"type", "string"}, {"description", "Load steps from a JSON file instead of inline. File can be a JSON array of steps or {\"steps\": [...]}. Example: veh_batch({file: \"patch_sequence.json\"})"}}}
 		 }}}}},
 

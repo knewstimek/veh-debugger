@@ -8,12 +8,16 @@ Tests that:
 5. both synchronous remote-thread injection methods accept real module handles
 6. selective continue reports resumed and still-stopped thread IDs
 7. setting a WriteFile function breakpoint cannot kill the target via logger recursion
+8. changing RIP while stopped at software/hardware execute breakpoints resumes safely
+9. step_in from a hardware execute breakpoint stops synchronously
+10. veh_batch preserves breakpoint actions and accepts JSON-encoded string steps
 """
 import subprocess
 import json
 import time
 import sys
 import os
+import tempfile
 
 MCP_EXE = os.environ.get("VEH_MCP_EXE", os.path.join(
     os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe"))
@@ -108,6 +112,15 @@ def tool_data(response):
     content = result.get("content", [{}])
     text = content[0].get("text", "") if content else ""
     return json.loads(text) if text else {}
+
+
+def resolve_function_address(client, name):
+    """Resolve a function through the public tool, then remove its temporary BP."""
+    result = tool_data(client.call_tool("veh_set_function_breakpoint", {"name": name}))
+    assert result.get("success") is True and result.get("address"), result
+    removed = tool_data(client.call_tool("veh_remove_breakpoint", {"id": result["id"]}))
+    assert removed.get("success") is True, removed
+    return result["address"]
 
 
 def test_stop_on_entry_false():
@@ -423,6 +436,157 @@ def test_writefile_function_breakpoint_survives():
     return True
 
 
+def test_breakpoint_rip_redirects():
+    """Changing RIP at either breakpoint kind must not leak a debugger exception."""
+    print("=== Test: breakpoint RIP redirects ===")
+    client = McpClient()
+    client.send("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                "clientInfo": {"name": "test", "version": "1.0"}})
+    assert "result" in client.recv()
+
+    launched = tool_data(client.call_tool("veh_launch", {"program": TARGET, "stopOnEntry": True}))
+    pid = launched.get("pid", 0)
+    assert pid > 0, launched
+    work = resolve_function_address(client, "WorkFunction")
+    allocated = tool_data(client.call_tool("veh_allocate_memory", {
+        "size": 4096, "protection": "rwx",
+    }))
+    trap_stub = allocated.get("address")
+    assert trap_stub, allocated
+    written = tool_data(client.call_tool("veh_write_memory", {
+        "address": trap_stub, "data": "CC C3",
+    }))
+    assert written.get("success") is True, written
+
+    sw = tool_data(client.call_tool("veh_set_breakpoint", {"address": work}))
+    assert sw.get("success") is True, sw
+    hit = tool_data(client.call_tool("veh_continue", {"wait": True, "timeout": 4}))
+    assert hit.get("breakpointId") == sw["id"], hit
+    tid = hit["threadId"]
+    initial_regs = tool_data(client.call_tool("veh_registers", {"threadId": tid}))["registers"]
+    ip_name = "EIP" if initial_regs.get("is32bit") else "RIP"
+    changed = tool_data(client.call_tool("veh_set_register", {
+        "threadId": tid, "name": ip_name, "value": trap_stub,
+    }))
+    assert changed.get("success") is True, changed
+    foreign_int3 = tool_data(client.call_tool("veh_continue", {"wait": True, "timeout": 4}))
+    assert foreign_int3.get("reason") == "exception", foreign_int3
+    assert foreign_int3.get("address", "").lower() == trap_stub.lower(), foreign_int3
+    hit_again = tool_data(client.call_tool("veh_continue", {"wait": True, "timeout": 4}))
+    # x86 may stay in its CRT loop without revisiting WorkFunction in this window;
+    # either a new hit or a live running target proves INT3 was consumed safely.
+    assert hit_again.get("breakpointId") == sw["id"] or hit_again.get("timeout") is True, hit_again
+    assert check_process_alive(pid), hit_again
+    assert tool_data(client.call_tool("veh_remove_breakpoint", {"id": sw["id"]})).get("success") is True
+
+    hw = tool_data(client.call_tool("veh_set_data_breakpoint", {
+        "address": work, "type": "execute", "size": 1,
+    }))
+    assert hw.get("success") is True, hw
+    # Resume from the software BP's restored instruction; the HW BP catches the
+    # following loop iteration.
+    hw_hit = tool_data(client.call_tool("veh_continue", {"wait": True, "timeout": 4}))
+    assert hw_hit.get("breakpointId") == hw["id"], hw_hit
+    tid = hw_hit["threadId"]
+    changed = tool_data(client.call_tool("veh_set_register", {
+        "threadId": tid, "name": ip_name, "value": trap_stub,
+    }))
+    assert changed.get("success") is True, changed
+    foreign_int3 = tool_data(client.call_tool("veh_continue", {"wait": True, "timeout": 4}))
+    assert foreign_int3.get("reason") == "exception", foreign_int3
+    assert foreign_int3.get("address", "").lower() == trap_stub.lower(), foreign_int3
+    hw_hit_again = tool_data(client.call_tool("veh_continue", {"wait": True, "timeout": 4}))
+    assert hw_hit_again.get("breakpointId") == hw["id"] or hw_hit_again.get("timeout") is True, hw_hit_again
+    assert check_process_alive(pid), hw_hit_again
+
+    client.call_tool("veh_terminate")
+    client.close()
+    print("  PASSED\n")
+    return True
+
+
+def test_hw_breakpoint_step_in_is_synchronous():
+    """step_in after a HW execute hit must stop again before returning."""
+    print("=== Test: HW breakpoint synchronous step_in ===")
+    client = McpClient()
+    client.send("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                "clientInfo": {"name": "test", "version": "1.0"}})
+    assert "result" in client.recv()
+    launched = tool_data(client.call_tool("veh_launch", {"program": TARGET, "stopOnEntry": True}))
+    assert launched.get("pid", 0) > 0, launched
+    work = resolve_function_address(client, "WorkFunction")
+    hw = tool_data(client.call_tool("veh_set_data_breakpoint", {
+        "address": work, "type": "execute", "size": 1,
+    }))
+    assert hw.get("success") is True, hw
+    hit = tool_data(client.call_tool("veh_continue", {"wait": True, "timeout": 4}))
+    assert hit.get("breakpointId") == hw["id"], hit
+    tid = hit["threadId"]
+    removed = tool_data(client.call_tool("veh_remove_data_breakpoint", {"id": hw["id"]}))
+    assert removed.get("success") is True, removed
+
+    stepped = tool_data(client.call_tool("veh_step_in", {"threadId": tid}))
+    assert stepped.get("success") is True and stepped.get("instructionPointer"), stepped
+    registers = tool_data(client.call_tool("veh_registers", {"threadId": tid}))
+    regs = registers.get("registers", {})
+    ip_key = "eip" if regs.get("is32bit") else "rip"
+    assert regs.get(ip_key, "").lower() == stepped["instructionPointer"].lower(), registers
+
+    client.call_tool("veh_terminate")
+    client.close()
+    print("  PASSED\n")
+    return True
+
+
+def test_batch_breakpoint_action_and_string_steps():
+    """Batch-created BP actions execute off the pipe reader and can add a nested BP."""
+    print("=== Test: batch breakpoint action and string steps ===")
+    client = McpClient()
+    client.send("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                "clientInfo": {"name": "test", "version": "1.0"}})
+    assert "result" in client.recv()
+    launched = tool_data(client.call_tool("veh_launch", {"program": TARGET, "stopOnEntry": True}))
+    assert launched.get("pid", 0) > 0, launched
+    work = resolve_function_address(client, "WorkFunction")
+    sleep_ex = resolve_function_address(client, "kernel32!SleepEx")
+
+    batch = tool_data(client.call_tool("veh_batch", {"steps": [{
+        "tool": "veh_set_breakpoint",
+        "args": {"address": work, "action": [{
+            "tool": "veh_set_breakpoint", "args": {"address": sleep_ex},
+        }]},
+    }]}))
+    outer = batch["results"][0]["result"]
+    assert outer.get("success") is True and outer.get("hasAction") is True, batch
+
+    # The outer action installs SleepEx and auto-resumes. The target naturally calls
+    # SleepEx next, proving the nested action command really ran.
+    outer_hit = tool_data(client.call_tool("veh_continue", {"wait": True, "timeout": 4}))
+    assert outer_hit.get("breakpointId") != outer["id"], outer_hit
+    listed = tool_data(client.call_tool("veh_list_breakpoints"))
+    nested = [bp for bp in listed.get("software", [])
+              if bp.get("address", "").lower() == sleep_ex.lower()]
+    assert nested and outer_hit.get("breakpointId") == nested[0]["id"], (listed, outer_hit)
+
+    # Both inline and file modes accept schema-compatible JSON string steps.
+    string_step = json.dumps({"tool": "veh_remove_breakpoint", "args": {"id": nested[0]["id"]}})
+    inline = tool_data(client.call_tool("veh_batch", {"steps": [string_step]}))
+    assert inline["results"][0]["result"].get("success") is True, inline
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
+        json.dump([json.dumps({"tool": "veh_threads", "args": {}})], f)
+        batch_file = f.name
+    try:
+        from_file = tool_data(client.call_tool("veh_batch", {"file": batch_file}))
+        assert from_file["results"][0]["result"].get("threads"), from_file
+    finally:
+        os.unlink(batch_file)
+
+    client.call_tool("veh_terminate")
+    client.close()
+    print("  PASSED\n")
+    return True
+
+
 if __name__ == "__main__":
     passed = 0
     failed = 0
@@ -432,7 +596,10 @@ if __name__ == "__main__":
                     test_explicit_remote_thread_methods,
                     test_wait_is_cancelled_by_relaunch,
                     test_selective_continue_visibility,
-                    test_writefile_function_breakpoint_survives]:
+                    test_writefile_function_breakpoint_survives,
+                    test_breakpoint_rip_redirects,
+                    test_hw_breakpoint_step_in_is_synchronous,
+                    test_batch_breakpoint_action_and_string_steps]:
         try:
             if test_fn():
                 passed += 1

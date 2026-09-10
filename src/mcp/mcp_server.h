@@ -132,8 +132,11 @@ private:
 	// Event queue for thread-safe notification delivery
 	std::queue<std::pair<std::string, json>> pendingEvents_;
 	std::queue<uint32_t> pendingAutoContinue_; // threadIds to auto-continue (from condition/logpoint)
+	struct PendingBreakpointAction { uint32_t threadId; json steps; };
+	std::queue<PendingBreakpointAction> pendingBreakpointActions_;
 	std::mutex eventMutex_;
 	void FlushEvents();
+	void StoreBreakpointAction(uint32_t breakpointId, const json& action);
 
 	// Exception filter: codes to auto-pass to SEH (set by veh_continue ignore_exceptions)
 	std::vector<uint32_t> ignoreExceptionCodes_;
