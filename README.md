@@ -83,7 +83,7 @@ veh_trace_calls(addresses=[...], duration_sec=5, resolve=true, system_only=true)
 veh_trace_basic_blocks(threadId=..., start="game.exe+0x12000", end="game.exe+0x14000",
                        max_steps=100000, timeout_ms=10000, follow_exceptions=true)
 ```
-명령마다 MCP로 보내지 않고 타겟 DLL 안에서 TF single-step과 집계를 수행한다. 반환값은 unique block/edge와 실행 횟수뿐이며, 최초 진입과 새로운 edge에서만 레지스터 및 제한된 스택 snapshot을 저장한다. 예외가 타겟의 handler에서 처리되어 실행이 재개되면 continuation 주소를 exception edge로 기록한다. 현재는 VEH로 정지된 단일 스레드가 대상이며 범위를 벗어나면 정지한다.
+명령마다 MCP로 보내지 않고 타겟 DLL 안에서 TF single-step과 집계를 수행한다. 반환값은 unique block/edge와 실행 횟수뿐이며, 최초 진입과 새로운 edge에서만 레지스터 및 제한된 스택 snapshot을 저장한다. 예외가 타겟의 handler에서 처리되어 실행이 재개되면 continuation 주소를 exception edge로 기록한다. 현재는 VEH로 정지된 단일 스레드가 대상이며 범위를 벗어나면 정지한다. `veh_batch` step과 breakpoint `action`에서도 같은 인자와 결과 형식으로 사용할 수 있으며 `$N.threadId` 같은 이전 step 참조도 지원한다.
 
 ---
 
@@ -323,7 +323,7 @@ enabled = true
 | `veh_batch` | `steps` | 다중 명령 일괄 실행 (`$N`/`$last`/`$prev` 결과 참조, if/loop/for_each 제어 흐름) |
 | `veh_trace_callers` | `address, duration_sec?` | 함수 호출자 프로파일링 (자동 resume -> N초간 caller 수집 -> 자동 pause). 유니크 caller별 히트 카운트 반환. x64: RtlVirtualUnwind (정확). x86: [ESP] (함수 진입점에서만 정확) |
 | `veh_trace_calls` | `addresses, duration_sec?, resolve?, system_only?` | call/jmp 명령이 런타임에 어디로 가는지 모니터링. 콜 사이트에 BP 설치 후 N초간 실행, 실제 타겟 주소 + API 이름 수집. `resolve=true`: thunk/trampoline을 자연스러운 call 컨텍스트에서 따라가 최종 API까지 추적 (예외 기반 난독화 대응). `system_only=true`: 시스템 DLL 타겟만 반환. 패킹된 바이너리의 IAT 복원용. |
-| `veh_trace_basic_blocks` | `threadId, start, end, max_blocks?, max_edges?, max_steps?, timeout_ms?, stack_bytes?, follow_exceptions?` | 미지의 실행 경로 발견용 basic-block/edge coverage. VEH로 정지된 단일 스레드를 DLL 내부에서 single-step하고 unique block/edge hit count만 반환. 최초 진입/새 edge에서 레지스터·스택 snapshot을 저장하며 처리된 예외 continuation도 edge로 기록. 범위 이탈 또는 설정한 제한에서 정지. |
+| `veh_trace_basic_blocks` | `threadId, start, end, max_blocks?, max_edges?, max_steps?, timeout_ms?, stack_bytes?, follow_exceptions?` | 미지의 실행 경로 발견용 basic-block/edge coverage. VEH로 정지된 단일 스레드를 DLL 내부에서 single-step하고 unique block/edge hit count만 반환. 최초 진입/새 edge에서 레지스터·스택 snapshot을 저장하며 처리된 예외 continuation도 edge로 기록. 범위 이탈 또는 설정한 제한에서 정지. `veh_batch`/breakpoint `action` 지원. |
 
 > **Non-stop 조회 (타겟 정지 불필요)**: `veh_read_memory` / `veh_read_pointer_chain` / `veh_write_memory` / `veh_dump_memory` / `veh_disassemble` / `veh_modules` 는 타겟이 **실행 중에도** 동작합니다 (DLL 내 전용 파이프 스레드가 처리 -- 다른 스레드를 멈추지 않음). GUI를 조작하면서 라이브 값을 읽을 때 BP를 걸거나 detach/attach를 왕복할 필요가 없습니다. 반대로 `veh_registers` / `veh_stack_trace` / `veh_enum_locals` / `veh_step_*` 는 스레드 컨텍스트가 필요하므로 BP 히트나 `veh_pause`로 정지된 상태에서만 동작합니다.
 

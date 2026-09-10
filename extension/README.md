@@ -18,6 +18,7 @@ Windows debugger based on **VEH (Vectored Exception Handler)** instead of the Wi
 - **4 injection methods** — CreateRemoteThread, NtCreateThreadEx, Thread Hijack, QueueUserAPC
 - **TCP remote mode** — Debug across VMs or network
 - **MCP tool server** — 39 tools for AI agent integration (Claude, Cursor, Codex, etc.)
+- **Basic-block tracing** — Collect unique executed blocks/edges and hit counts inside a bounded range without per-instruction MCP traffic; available directly, in `veh_batch`, and in breakpoint actions
 
 ## Quick Start
 

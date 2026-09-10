@@ -3,6 +3,7 @@ add_executable(veh-mcp-server
 	mcp_server.cpp
 	debug_session.cpp
 	batch_executor.cpp
+	trace_basic_blocks_tool.cpp
 	installer.cpp
 	../adapter/transport.cpp
 	../adapter/pipe_client.cpp
