@@ -73,6 +73,7 @@ enum class IpcCommand : uint32_t {
 	TraceMemory            = 0x0071,
 	ResolveImport          = 0x0072,
 	TraceCalls             = 0x0073,
+	TraceBasicBlocks       = 0x0074,
 
 	// Lifecycle
 	Heartbeat              = 0x00FE,
@@ -462,6 +463,86 @@ struct TraceCallsResponse {
 	uint32_t  uniqueCount;   // number of unique (callSite, target) pairs
 	uint32_t  totalHits;
 	// followed by: TraceCallsEntry[uniqueCount]
+};
+
+// --- TraceBasicBlocks: discover executed basic blocks and control-flow edges ---
+enum class TraceBasicBlockStopReason : uint8_t {
+	Completed       = 0,
+	LeftRange       = 1,
+	MaxSteps        = 2,
+	MaxBlocks       = 3,
+	MaxEdges        = 4,
+	Timeout         = 5,
+	Exception       = 6,
+	Cancelled       = 7,
+};
+
+enum class TraceBasicBlockEdgeKind : uint8_t {
+	Fallthrough = 0,
+	Branch      = 1,
+	Call        = 2,
+	Return      = 3,
+	Exception   = 4,
+	RangeExit   = 5,
+};
+
+struct TraceBasicBlocksRequest {
+	uint32_t threadId;       // thread currently stopped in VEH
+	uint64_t rangeStart;     // inclusive
+	uint64_t rangeEnd;       // exclusive
+	uint32_t maxBlocks;      // unique executed block entries
+	uint32_t maxEdges;       // unique observed edges
+	uint32_t maxSteps;       // instruction/exception events
+	uint32_t timeoutMs;
+	uint16_t stackBytes;     // bytes copied from SP per snapshot (max 256)
+	uint8_t  followExceptions;
+	uint8_t  reserved;
+};
+
+struct TraceBasicBlockEntry {
+	uint64_t start;
+	uint64_t end;            // exclusive, based on the bytes decoded at trace start
+	uint64_t hitCount;
+	uint32_t firstSnapshot;  // UINT32_MAX when unavailable
+};
+
+struct TraceBasicBlockEdgeEntry {
+	uint64_t source;         // source block start
+	uint64_t target;         // target block start or out-of-range address
+	uint64_t hitCount;
+	uint32_t snapshot;       // destination context on first observation
+	uint32_t exceptionCode;  // non-zero for exception edges
+	TraceBasicBlockEdgeKind kind;
+};
+
+static constexpr uint32_t kTraceBasicBlockRegisterCount = 18;
+static constexpr uint32_t kTraceBasicBlockMaxStackBytes = 256;
+
+struct TraceBasicBlockSnapshot {
+	uint64_t instructionPointer;
+	uint64_t stackPointer;
+	// x64: rax,rbx,rcx,rdx,rsi,rdi,rbp,rsp,r8-r15,rip,eflags
+	// x86: eax,ebx,ecx,edx,esi,edi,ebp,esp,0..0,eip,eflags
+	uint64_t registers[kTraceBasicBlockRegisterCount];
+	uint8_t  is32bit;
+	uint16_t stackSize;
+	uint8_t  stack[kTraceBasicBlockMaxStackBytes];
+};
+
+struct TraceBasicBlocksResponse {
+	IpcStatus status;
+	TraceBasicBlockStopReason stopReason;
+	uint8_t   truncated;
+	uint16_t  reserved;
+	uint32_t  blockCount;
+	uint32_t  edgeCount;
+	uint32_t  snapshotCount;
+	uint32_t  exceptionsFollowed;
+	uint32_t  elapsedMs;
+	uint64_t  stepsExecuted;
+	uint64_t  finalAddress;
+	// followed by TraceBasicBlockEntry[blockCount],
+	// TraceBasicBlockEdgeEntry[edgeCount], TraceBasicBlockSnapshot[snapshotCount]
 };
 
 // --- Memory management ---

@@ -1381,6 +1381,54 @@ DebugSession::TraceCallsResult DebugSession::TraceCalls(
 	return result;
 }
 
+DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
+		uint32_t threadId, uint64_t rangeStart, uint64_t rangeEnd,
+		uint32_t maxBlocks, uint32_t maxEdges, uint32_t maxSteps,
+		uint32_t timeoutMs, uint16_t stackBytes, bool followExceptions) {
+	TraceBasicBlocksResult result;
+	TraceBasicBlocksRequest req{};
+	req.threadId = threadId;
+	req.rangeStart = rangeStart;
+	req.rangeEnd = rangeEnd;
+	req.maxBlocks = maxBlocks;
+	req.maxEdges = maxEdges;
+	req.maxSteps = maxSteps;
+	req.timeoutMs = timeoutMs;
+	req.stackBytes = stackBytes;
+	req.followExceptions = followExceptions ? 1 : 0;
+
+	std::vector<uint8_t> data;
+	if (!pipeClient_.SendAndReceive(IpcCommand::TraceBasicBlocks, &req, sizeof(req), data,
+			static_cast<int>(timeoutMs) + 15000)) return result;
+	if (data.size() < sizeof(TraceBasicBlocksResponse)) return result;
+	auto* header = reinterpret_cast<const TraceBasicBlocksResponse*>(data.data());
+	if (header->status != IpcStatus::Ok) return result;
+
+	size_t required = sizeof(*header) +
+		static_cast<size_t>(header->blockCount) * sizeof(TraceBasicBlockEntry) +
+		static_cast<size_t>(header->edgeCount) * sizeof(TraceBasicBlockEdgeEntry) +
+		static_cast<size_t>(header->snapshotCount) * sizeof(TraceBasicBlockSnapshot);
+	if (required > data.size()) return result;
+
+	result.ok = true;
+	result.stopReason = header->stopReason;
+	result.truncated = header->truncated != 0;
+	result.exceptionsFollowed = header->exceptionsFollowed;
+	result.elapsedMs = header->elapsedMs;
+	result.stepsExecuted = header->stepsExecuted;
+	result.finalAddress = header->finalAddress;
+	const uint8_t* cursor = data.data() + sizeof(*header);
+	auto* blocks = reinterpret_cast<const TraceBasicBlockEntry*>(cursor);
+	result.blocks.assign(blocks, blocks + header->blockCount);
+	cursor += static_cast<size_t>(header->blockCount) * sizeof(*blocks);
+	auto* edges = reinterpret_cast<const TraceBasicBlockEdgeEntry*>(cursor);
+	result.edges.assign(edges, edges + header->edgeCount);
+	cursor += static_cast<size_t>(header->edgeCount) * sizeof(*edges);
+	auto* snapshots = reinterpret_cast<const TraceBasicBlockSnapshot*>(cursor);
+	result.snapshots.assign(snapshots, snapshots + header->snapshotCount);
+	return result;
+}
+
 // --- PDB resolve ---
 
 uint64_t DebugSession::ResolveSourceLine(const std::string& file, uint32_t line) {

@@ -277,6 +277,22 @@ public:
 	TraceCallsResult TraceCalls(const std::vector<uint64_t>& addresses, uint32_t durationMs = 5000,
 		bool resolve = false, bool systemOnly = false, uint32_t resolveMaxSteps = 2000);
 
+	struct TraceBasicBlocksResult {
+		bool ok = false;
+		TraceBasicBlockStopReason stopReason = TraceBasicBlockStopReason::Completed;
+		bool truncated = false;
+		uint32_t exceptionsFollowed = 0;
+		uint32_t elapsedMs = 0;
+		uint64_t stepsExecuted = 0;
+		uint64_t finalAddress = 0;
+		std::vector<TraceBasicBlockEntry> blocks;
+		std::vector<TraceBasicBlockEdgeEntry> edges;
+		std::vector<TraceBasicBlockSnapshot> snapshots;
+	};
+	TraceBasicBlocksResult TraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, uint64_t rangeEnd,
+		uint32_t maxBlocks = 4096, uint32_t maxEdges = 8192, uint32_t maxSteps = 100000,
+		uint32_t timeoutMs = 10000, uint16_t stackBytes = 128, bool followExceptions = true);
+
 	// --- Resolve (PDB) ---
 	uint64_t ResolveSourceLine(const std::string& file, uint32_t line);
 	uint64_t ResolveFunction(const std::string& name);

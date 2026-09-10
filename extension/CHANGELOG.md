@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **`veh_trace_basic_blocks`** -- discover unknown execution paths without a per-instruction MCP loop. Starting from a VEH-stopped thread inside a bounded address range, the injected DLL single-steps and aggregates unique basic blocks and edges with execution counts. Register/stack snapshots are captured only on initial entry and the first observation of each edge; handled exception control flow is recorded as an edge using the post-handler continuation context. `max_blocks`, `max_edges`, `max_steps`, and `timeout_ms` provide independent safety limits. Supported on x86 and x64.
+
 ## 1.1.14
 
 ### Fixed

@@ -80,6 +80,7 @@ private:
 	json ToolTraceMemory(const json& args);
 	json ToolResolveImports(const json& args);
 	json ToolTraceCalls(const json& args);
+	json ToolTraceBasicBlocks(const json& args);
 
 	// Tool list definition
 	json GetToolsList();
