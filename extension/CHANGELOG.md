@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.14
 
 ### Fixed
 - **RIP redirection to an unowned `INT3` terminated the target** -- an `0x80000003` reached after editing RIP/EIP at a software or hardware execute breakpoint was previously passed straight to the process, so an unhandled breakpoint disconnected the pipe and killed the target. Foreign INT3 instructions now surface as debugger exception stops; normal continue consumes the one-byte INT3 (while preserving an explicitly edited instruction pointer), and `pass_exception` still forwards it to the target's SEH chain.
