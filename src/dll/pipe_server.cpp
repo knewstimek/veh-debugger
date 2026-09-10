@@ -13,8 +13,11 @@
 
 #include <tlhelp32.h>
 #include <dbghelp.h>
+#include <Zydis/Zydis.h>
 #include <cstring>
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 #pragma comment(lib, "dbghelp.lib")
 
 // ---------------------------------------------------------------------------
@@ -40,6 +43,82 @@ static uint64_t ReadPtr(uint64_t addr) {
 	if (SafeReadMem(addr, &val, 4)) return val;
 #endif
 	return 0;
+}
+
+static bool DecodeBasicTraceRange(uint64_t start, uint64_t end,
+		std::vector<veh::VehHandler::TraceBasicBlocksState::Instruction>& instructions,
+		std::vector<uint64_t>& blockStarts) {
+	if (start >= end) return false;
+	ZydisDecoder decoder;
+#ifdef _WIN64
+	const ZydisMachineMode machineMode = ZYDIS_MACHINE_MODE_LONG_64;
+	const ZydisStackWidth stackWidth = ZYDIS_STACK_WIDTH_64;
+#else
+	const ZydisMachineMode machineMode = ZYDIS_MACHINE_MODE_LONG_COMPAT_32;
+	const ZydisStackWidth stackWidth = ZYDIS_STACK_WIDTH_32;
+#endif
+	if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, machineMode, stackWidth))) return false;
+
+	std::set<uint64_t> starts;
+	starts.insert(start);
+	uint64_t address = start;
+	while (address < end) {
+		uint8_t bytes[ZYDIS_MAX_INSTRUCTION_LENGTH] = {};
+		size_t available = static_cast<size_t>((end - address) < sizeof(bytes) ? (end - address) : sizeof(bytes));
+		if (!SafeReadMem(address, bytes, available)) return false;
+
+		ZydisDecodedInstruction decoded{};
+		ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT] = {};
+		uint8_t length = 1;
+		bool terminal = false;
+		veh::TraceBasicBlockEdgeKind kind = veh::TraceBasicBlockEdgeKind::Fallthrough;
+		if (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, bytes, available, &decoded, operands))) {
+			length = decoded.length;
+			switch (decoded.meta.category) {
+			case ZYDIS_CATEGORY_CALL:
+				terminal = true; kind = veh::TraceBasicBlockEdgeKind::Call; break;
+			case ZYDIS_CATEGORY_RET:
+				terminal = true; kind = veh::TraceBasicBlockEdgeKind::Return; break;
+			case ZYDIS_CATEGORY_COND_BR:
+			case ZYDIS_CATEGORY_UNCOND_BR:
+			case ZYDIS_CATEGORY_INTERRUPT:
+			case ZYDIS_CATEGORY_SYSCALL:
+			case ZYDIS_CATEGORY_SYSRET:
+				terminal = true; kind = veh::TraceBasicBlockEdgeKind::Branch; break;
+			default:
+				break;
+			}
+			if (terminal) {
+				uint64_t next = address + length;
+				if (next < end) starts.insert(next);
+				for (uint8_t i = 0; i < decoded.operand_count_visible; ++i) {
+					if (operands[i].type != ZYDIS_OPERAND_TYPE_IMMEDIATE || !operands[i].imm.is_relative)
+						continue;
+					ZyanU64 target = 0;
+					if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&decoded, &operands[i], address, &target)) &&
+						target >= start && target < end) starts.insert(target);
+				}
+			}
+		}
+
+		veh::VehHandler::TraceBasicBlocksState::Instruction meta;
+		meta.address = address;
+		meta.next = address + length;
+		meta.terminal = terminal ? 1 : 0;
+		meta.kind = kind;
+		instructions.push_back(meta);
+		if (instructions.size() > 1000000) return false;
+		address += length;
+	}
+
+	blockStarts.assign(starts.begin(), starts.end());
+	size_t blockIndex = 0;
+	for (auto& instruction : instructions) {
+		while (blockIndex + 1 < blockStarts.size() && blockStarts[blockIndex + 1] <= instruction.address)
+			++blockIndex;
+		instruction.staticBlockStart = blockStarts[blockIndex];
+	}
+	return !instructions.empty();
 }
 
 static uint64_t RegFromCtx(const CONTEXT& ctx, uint8_t idx) {
@@ -1909,6 +1988,162 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 
 		SendResponse(command, respBuf.data(), static_cast<uint32_t>(respBuf.size()));
+		break;
+	}
+
+	case IpcCommand::TraceBasicBlocks: {
+		if (payloadSize < sizeof(TraceBasicBlocksRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status)); return;
+		}
+		auto req = *reinterpret_cast<const TraceBasicBlocksRequest*>(payload);
+		if (req.threadId == 0 || req.rangeStart >= req.rangeEnd ||
+			req.rangeEnd - req.rangeStart > 4ULL * 1024 * 1024) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status)); return;
+		}
+		if (req.maxBlocks == 0) req.maxBlocks = 4096;
+		if (req.maxEdges == 0) req.maxEdges = 8192;
+		if (req.maxSteps == 0) req.maxSteps = 100000;
+		if (req.timeoutMs == 0) req.timeoutMs = 10000;
+		if (req.maxBlocks > 16384 || req.maxEdges > 32768 || req.maxSteps > 5000000 ||
+			req.timeoutMs < 100 || req.timeoutMs > 60000 ||
+			req.stackBytes > kTraceBasicBlockMaxStackBytes) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status)); return;
+		}
+
+		std::vector<VehHandler::TraceBasicBlocksState::Instruction> instructions;
+		std::vector<uint64_t> staticBlockStarts;
+		instructions.reserve(static_cast<size_t>(req.rangeEnd - req.rangeStart) / 2);
+		if (!DecodeBasicTraceRange(req.rangeStart, req.rangeEnd, instructions, staticBlockStarts)) {
+			TraceBasicBlocksResponse resp{};
+			resp.status = IpcStatus::Error;
+			SendResponse(command, &resp, sizeof(resp)); break;
+		}
+
+		auto startTick = GetTickCount64();
+		if (!VehHandler::Instance().StartTraceBasicBlocks(req.threadId, req.rangeStart, req.rangeEnd,
+				req.maxBlocks, req.maxEdges, req.maxSteps, req.stackBytes,
+				req.followExceptions != 0, std::move(instructions), std::move(staticBlockStarts))) {
+			TraceBasicBlocksResponse resp{};
+			resp.status = IpcStatus::NotFound;
+			SendResponse(command, &resp, sizeof(resp)); break;
+		}
+
+		auto& tb = VehHandler::Instance().traceBasicBlocks_;
+		while (!tb.done.load(std::memory_order_acquire) && GetTickCount64() - startTick < req.timeoutMs)
+			Sleep(2);
+		if (!tb.done.load(std::memory_order_acquire)) {
+			VehHandler::Instance().CancelTraceBasicBlocks(TraceBasicBlockStopReason::Timeout);
+			uint64_t cancelTick = GetTickCount64();
+			while (!tb.done.load(std::memory_order_acquire) && GetTickCount64() - cancelTick < 2000)
+				Sleep(2);
+		}
+		if (!tb.done.load(std::memory_order_acquire)) {
+			tb.active.store(false, std::memory_order_release);
+			TraceBasicBlocksResponse resp{};
+			resp.status = IpcStatus::Error;
+			resp.stopReason = TraceBasicBlockStopReason::Timeout;
+			resp.elapsedMs = static_cast<uint32_t>(GetTickCount64() - startTick);
+			SendResponse(command, &resp, sizeof(resp)); break;
+		}
+		// FinishBasicTrace publishes counters before the VEH thread enters its
+		// normal stopped-context wait. Give that short hand-off time to complete so
+		// register/stack tools are immediately usable when this response returns.
+		uint64_t parkTick = GetTickCount64();
+		while (!VehHandler::Instance().IsThreadStopped(req.threadId) && GetTickCount64() - parkTick < 2000)
+			Sleep(1);
+
+		struct ResultBlock {
+			TraceBasicBlockEntry entry{};
+		};
+		std::vector<ResultBlock> blocks;
+		blocks.reserve(tb.blockCount);
+		std::unordered_set<uint64_t> observedStarts;
+		std::unordered_map<uint64_t, uint32_t> firstSnapshots;
+		for (const auto& slot : tb.blockTable) {
+			if (!slot.occupied) continue;
+			observedStarts.insert(slot.start);
+			firstSnapshots[slot.start] = slot.firstSnapshot;
+		}
+		std::unordered_set<uint64_t> allBoundaries(tb.staticBlockStarts.begin(), tb.staticBlockStarts.end());
+		allBoundaries.insert(observedStarts.begin(), observedStarts.end());
+		std::unordered_set<uint64_t> observedTerminators;
+		for (const auto& slot : tb.edgeTable) {
+			if (slot.occupied) observedTerminators.insert(slot.sourceInstruction);
+		}
+
+		for (uint64_t blockStart : observedStarts) {
+			TraceBasicBlockEntry entry{};
+			entry.start = blockStart;
+			entry.end = blockStart;
+			entry.firstSnapshot = firstSnapshots[blockStart];
+			auto it = std::lower_bound(tb.instructions.begin(), tb.instructions.end(), blockStart,
+				[](const auto& instruction, uint64_t address) { return instruction.address < address; });
+			if (it != tb.instructions.end() && it->address == blockStart) {
+				entry.hitCount = it->hitCount;
+				for (auto cur = it; cur != tb.instructions.end(); ++cur) {
+					if (cur != it && cur->address != entry.end) break;
+					entry.end = cur->next;
+					if (cur->terminal || observedTerminators.count(cur->address) || allBoundaries.count(cur->next)) break;
+				}
+			}
+			blocks.push_back({entry});
+		}
+		std::sort(blocks.begin(), blocks.end(), [](const auto& a, const auto& b) {
+			return a.entry.start < b.entry.start;
+		});
+
+		std::vector<TraceBasicBlockEdgeEntry> edges;
+		edges.reserve(tb.edgeCount);
+		for (const auto& slot : tb.edgeTable) {
+			if (!slot.occupied) continue;
+			TraceBasicBlockEdgeEntry entry{};
+			entry.source = slot.sourceBlock;
+			entry.target = slot.target;
+			entry.hitCount = slot.hitCount;
+			entry.snapshot = slot.snapshot;
+			entry.exceptionCode = slot.exceptionCode;
+			entry.kind = slot.kind;
+			edges.push_back(entry);
+		}
+		std::sort(edges.begin(), edges.end(), [](const auto& a, const auto& b) {
+			if (a.source != b.source) return a.source < b.source;
+			if (a.target != b.target) return a.target < b.target;
+			return static_cast<uint8_t>(a.kind) < static_cast<uint8_t>(b.kind);
+		});
+
+		size_t responseSize = sizeof(TraceBasicBlocksResponse) +
+			blocks.size() * sizeof(TraceBasicBlockEntry) +
+			edges.size() * sizeof(TraceBasicBlockEdgeEntry) +
+			tb.snapshotCount * sizeof(TraceBasicBlockSnapshot);
+		std::vector<uint8_t> response(responseSize);
+		auto* header = reinterpret_cast<TraceBasicBlocksResponse*>(response.data());
+		memset(header, 0, sizeof(*header));
+		header->status = IpcStatus::Ok;
+		header->stopReason = tb.stopReason;
+		header->truncated = tb.truncated ? 1 : 0;
+		header->blockCount = static_cast<uint32_t>(blocks.size());
+		header->edgeCount = static_cast<uint32_t>(edges.size());
+		header->snapshotCount = tb.snapshotCount;
+		header->exceptionsFollowed = tb.exceptionsFollowed;
+		header->elapsedMs = static_cast<uint32_t>(GetTickCount64() - startTick);
+		header->stepsExecuted = tb.stepsExecuted;
+		header->finalAddress = tb.finalAddress;
+
+		uint8_t* out = response.data() + sizeof(*header);
+		for (const auto& block : blocks) {
+			memcpy(out, &block.entry, sizeof(block.entry)); out += sizeof(block.entry);
+		}
+		if (!edges.empty()) {
+			memcpy(out, edges.data(), edges.size() * sizeof(edges[0]));
+			out += edges.size() * sizeof(edges[0]);
+		}
+		if (tb.snapshotCount) {
+			memcpy(out, tb.snapshots.data(), tb.snapshotCount * sizeof(TraceBasicBlockSnapshot));
+		}
+		SendResponse(command, response.data(), static_cast<uint32_t>(response.size()));
 		break;
 	}
 

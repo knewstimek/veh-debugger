@@ -90,6 +90,11 @@ bool VehHandler::Install() {
 		return false;
 	}
 
+	continueHandler_ = AddVectoredContinueHandler(1, ContinueHandler);
+	if (!continueHandler_) {
+		LOG_WARN("AddVectoredContinueHandler failed: %lu (exception edges may be unavailable)", GetLastError());
+	}
+
 	installed_ = true;
 	LOG_INFO("VEH handler installed");
 	return true;
@@ -105,6 +110,10 @@ void VehHandler::Uninstall() {
 	if (handler_) {
 		RemoveVectoredExceptionHandler(handler_);
 		handler_ = nullptr;
+	}
+	if (continueHandler_) {
+		RemoveVectoredContinueHandler(continueHandler_);
+		continueHandler_ = nullptr;
 	}
 
 	// SyscallResolver 정리 (실행 가능 페이지 해제)
@@ -204,6 +213,16 @@ bool VehHandler::IsThreadStopped(uint32_t threadId) {
 	return threadEvents_.find(threadId) != threadEvents_.end();
 }
 
+static uint16_t SafeCopyTraceStack(uint64_t stackPointer, uint8_t* dst, uint16_t size) {
+	if (!stackPointer || !dst || !size) return 0;
+	__try {
+		memcpy(dst, reinterpret_cast<const void*>(static_cast<uintptr_t>(stackPointer)), size);
+		return size;
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		return 0;
+	}
+}
+
 std::vector<uint32_t> VehHandler::GetStoppedThreadIds() {
 	std::lock_guard<std::mutex> lock(eventMapMutex_);
 	std::vector<uint32_t> result;
@@ -235,6 +254,10 @@ bool VehHandler::SetStoppedContext(uint32_t threadId, const CONTEXT& ctx) {
 // 정적 콜백 → 싱글톤 인스턴스의 HandleException 호출
 LONG CALLBACK VehHandler::ExceptionHandler(PEXCEPTION_POINTERS info) {
 	return Instance().HandleException(info);
+}
+
+LONG CALLBACK VehHandler::ContinueHandler(PEXCEPTION_POINTERS info) {
+	return Instance().HandleContinue(info);
 }
 
 // RAII guard for TLS reentry flag (all return paths auto-clear)
@@ -360,6 +383,336 @@ void VehHandler::NotifyModuleLoadStop(uint64_t base, uint32_t size, const char* 
 	}
 }
 
+static uint64_t BasicTraceHash(uint64_t value) {
+	value ^= value >> 30;
+	value *= 0xbf58476d1ce4e5b9ULL;
+	value ^= value >> 27;
+	value *= 0x94d049bb133111ebULL;
+	return value ^ (value >> 31);
+}
+
+VehHandler::TraceBasicBlocksState::Instruction* VehHandler::FindBasicTraceInstruction(uint64_t address) {
+	auto& insns = traceBasicBlocks_.instructions;
+	size_t lo = 0, hi = insns.size();
+	while (lo < hi) {
+		size_t mid = lo + (hi - lo) / 2;
+		if (insns[mid].address < address) lo = mid + 1;
+		else hi = mid;
+	}
+	return (lo < insns.size() && insns[lo].address == address) ? &insns[lo] : nullptr;
+}
+
+uint64_t VehHandler::NormalizeBasicTraceBlockStart(uint64_t address, bool dynamicTarget) const {
+	if (dynamicTarget) return address;
+	const auto& insns = traceBasicBlocks_.instructions;
+	size_t lo = 0, hi = insns.size();
+	while (lo < hi) {
+		size_t mid = lo + (hi - lo) / 2;
+		if (insns[mid].address < address) lo = mid + 1;
+		else hi = mid;
+	}
+	if (lo < insns.size() && insns[lo].address == address)
+		return insns[lo].staticBlockStart;
+	return address;
+}
+
+uint32_t VehHandler::CaptureBasicTraceSnapshot(const CONTEXT* ctx) {
+	auto& tb = traceBasicBlocks_;
+	if (!ctx || tb.snapshotCount >= tb.snapshots.size()) return UINT32_MAX;
+	uint32_t index = tb.snapshotCount++;
+	auto& s = tb.snapshots[index];
+	memset(&s, 0, sizeof(s));
+#ifdef _WIN64
+	s.is32bit = 0;
+	s.instructionPointer = ctx->Rip;
+	s.stackPointer = ctx->Rsp;
+	uint64_t regs[kTraceBasicBlockRegisterCount] = {
+		ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx, ctx->Rsi, ctx->Rdi, ctx->Rbp, ctx->Rsp,
+		ctx->R8, ctx->R9, ctx->R10, ctx->R11, ctx->R12, ctx->R13, ctx->R14, ctx->R15,
+		ctx->Rip, ctx->EFlags
+	};
+#else
+	s.is32bit = 1;
+	s.instructionPointer = ctx->Eip;
+	s.stackPointer = ctx->Esp;
+	uint64_t regs[kTraceBasicBlockRegisterCount] = {
+		ctx->Eax, ctx->Ebx, ctx->Ecx, ctx->Edx, ctx->Esi, ctx->Edi, ctx->Ebp, ctx->Esp,
+		0, 0, 0, 0, 0, 0, 0, 0, ctx->Eip, ctx->EFlags
+	};
+#endif
+	memcpy(s.registers, regs, sizeof(regs));
+	s.stackSize = SafeCopyTraceStack(s.stackPointer, s.stack, tb.stackBytes);
+	return index;
+}
+
+bool VehHandler::RecordBasicTraceBlock(uint64_t start, const CONTEXT* ctx, uint32_t snapshot) {
+	auto& tb = traceBasicBlocks_;
+	if (tb.blockTable.empty()) return false;
+	size_t mask = tb.blockTable.size() - 1;
+	size_t index = static_cast<size_t>(BasicTraceHash(start)) & mask;
+	for (size_t probe = 0; probe < tb.blockTable.size(); ++probe) {
+		auto& slot = tb.blockTable[index];
+		if (!slot.occupied) {
+			if (tb.blockCount >= tb.maxBlocks) return false;
+			slot.occupied = 1;
+			slot.start = start;
+			slot.firstSnapshot = snapshot != UINT32_MAX ? snapshot : CaptureBasicTraceSnapshot(ctx);
+			tb.blockCount++;
+			return true;
+		}
+		if (slot.start == start) return true;
+		index = (index + 1) & mask;
+	}
+	return false;
+}
+
+bool VehHandler::RecordBasicTraceEdge(uint64_t sourceBlock, uint64_t sourceInstruction,
+		uint64_t target, TraceBasicBlockEdgeKind kind, uint32_t exceptionCode,
+		const CONTEXT* ctx, uint32_t* snapshotOut) {
+	auto& tb = traceBasicBlocks_;
+	if (tb.edgeTable.empty()) return false;
+	uint64_t key = BasicTraceHash(sourceBlock) ^ BasicTraceHash(target + 0x9e3779b97f4a7c15ULL);
+	key ^= (static_cast<uint64_t>(kind) << 56) ^ exceptionCode;
+	size_t mask = tb.edgeTable.size() - 1;
+	size_t index = static_cast<size_t>(BasicTraceHash(key)) & mask;
+	for (size_t probe = 0; probe < tb.edgeTable.size(); ++probe) {
+		auto& slot = tb.edgeTable[index];
+		if (!slot.occupied) {
+			if (tb.edgeCount >= tb.maxEdges) return false;
+			slot.occupied = 1;
+			slot.sourceBlock = sourceBlock;
+			slot.sourceInstruction = sourceInstruction;
+			slot.target = target;
+			slot.kind = kind;
+			slot.exceptionCode = exceptionCode;
+			slot.hitCount = 1;
+			slot.snapshot = CaptureBasicTraceSnapshot(ctx);
+			if (snapshotOut) *snapshotOut = slot.snapshot;
+			tb.edgeCount++;
+			return true;
+		}
+		if (slot.sourceBlock == sourceBlock && slot.target == target && slot.kind == kind &&
+			slot.exceptionCode == exceptionCode) {
+			slot.hitCount++;
+			if (snapshotOut) *snapshotOut = slot.snapshot;
+			return true;
+		}
+		index = (index + 1) & mask;
+	}
+	return false;
+}
+
+void VehHandler::FinishBasicTrace(TraceBasicBlockStopReason reason, uint64_t finalAddress, bool truncated) {
+	auto& tb = traceBasicBlocks_;
+	tb.stopReason = reason;
+	tb.finalAddress = finalAddress;
+	tb.truncated = tb.truncated || truncated;
+	tb.stopPending = false;
+	tb.pendingException = false;
+	tb.active.store(false, std::memory_order_release);
+	tb.done.store(true, std::memory_order_release);
+}
+
+bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, uint64_t rangeEnd,
+		uint32_t maxBlocks, uint32_t maxEdges, uint32_t maxSteps, uint16_t stackBytes,
+		bool followExceptions, std::vector<TraceBasicBlocksState::Instruction>&& instructions,
+		std::vector<uint64_t>&& staticBlockStarts) {
+	if (traceReg_.active.load(std::memory_order_acquire) ||
+		importResolve_.active.load(std::memory_order_acquire) ||
+		traceCalls_.active.load(std::memory_order_acquire) ||
+		traceBasicBlocks_.active.load(std::memory_order_acquire)) return false;
+
+	CONTEXT ctx{};
+	if (!GetStoppedContext(threadId, ctx)) return false;
+#ifdef _WIN64
+	uint64_t ip = ctx.Rip;
+#else
+	uint64_t ip = ctx.Eip;
+#endif
+	if (ip < rangeStart || ip >= rangeEnd || instructions.empty()) return false;
+
+	auto nextPowerOfTwo = [](size_t value) {
+		size_t result = 1;
+		while (result < value) result <<= 1;
+		return result;
+	};
+
+	auto& tb = traceBasicBlocks_;
+	tb.active.store(false, std::memory_order_relaxed);
+	tb.done.store(false, std::memory_order_relaxed);
+	tb.cancelRequested.store(false, std::memory_order_relaxed);
+	tb.threadId = threadId;
+	tb.rangeStart = rangeStart;
+	tb.rangeEnd = rangeEnd;
+	tb.maxBlocks = maxBlocks;
+	tb.maxEdges = maxEdges;
+	tb.maxSteps = maxSteps;
+	tb.stackBytes = stackBytes;
+	tb.followExceptions = followExceptions;
+	tb.instructions = std::move(instructions);
+	tb.staticBlockStarts = std::move(staticBlockStarts);
+	tb.blockTable.assign(nextPowerOfTwo(static_cast<size_t>(maxBlocks) * 2), {});
+	tb.edgeTable.assign(nextPowerOfTwo(static_cast<size_t>(maxEdges) * 2), {});
+	tb.snapshots.assign(static_cast<size_t>(maxEdges) + 1, {});
+	tb.blockCount = tb.edgeCount = tb.snapshotCount = tb.exceptionsFollowed = 0;
+	tb.stepsExecuted = 0;
+	tb.initialAddress = tb.currentBlock = tb.previousInstruction = tb.finalAddress = ip;
+	tb.stopReason = TraceBasicBlockStopReason::Completed;
+	tb.truncated = false;
+	tb.stopPending = false;
+	tb.pendingException = false;
+
+	uint32_t initialSnapshot = CaptureBasicTraceSnapshot(&ctx);
+	if (!RecordBasicTraceBlock(ip, &ctx, initialSnapshot)) return false;
+
+	// Avoid leaving a generic step flag behind: write TF into the stopped context
+	// directly, then resume it as a normal continue.
+	ctx.EFlags |= 0x100;
+	if (!SetStoppedContext(threadId, ctx)) return false;
+	tb.active.store(true, std::memory_order_release);
+	ResumeStoppedThread(threadId, false);
+	return true;
+}
+
+void VehHandler::CancelTraceBasicBlocks(TraceBasicBlockStopReason reason) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.active.load(std::memory_order_acquire)) return;
+	tb.pendingStopReason = reason;
+	tb.cancelRequested.store(true, std::memory_order_release);
+}
+
+VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
+		PEXCEPTION_POINTERS info, uint32_t tid, uint64_t addr) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.active.load(std::memory_order_acquire) || tid != tb.threadId)
+		return BasicTraceStepResult::NotActive;
+
+	if (tb.cancelRequested.load(std::memory_order_acquire) || tb.stopPending) {
+		TraceBasicBlockStopReason reason = tb.pendingStopReason;
+		FinishBasicTrace(reason, addr, reason != TraceBasicBlockStopReason::Completed);
+		return BasicTraceStepResult::Stop;
+	}
+
+	auto* previous = FindBasicTraceInstruction(tb.previousInstruction);
+	if (previous) previous->hitCount++;
+	tb.stepsExecuted++;
+
+	bool inRange = addr >= tb.rangeStart && addr < tb.rangeEnd;
+	bool nonSequential = !previous || addr != previous->next;
+	auto* current = inRange ? FindBasicTraceInstruction(addr) : nullptr;
+	bool staticBoundary = current && current->staticBlockStart == addr && tb.currentBlock != addr;
+	bool boundary = !inRange || nonSequential || staticBoundary || (previous && previous->terminal);
+	if (boundary) {
+		TraceBasicBlockEdgeKind kind = TraceBasicBlockEdgeKind::Branch;
+		if (!inRange) kind = TraceBasicBlockEdgeKind::RangeExit;
+		else if (previous && previous->terminal) kind = previous->kind;
+		else if (!nonSequential) kind = TraceBasicBlockEdgeKind::Fallthrough;
+
+		bool dynamicTarget = nonSequential && !(previous && previous->terminal);
+		uint64_t targetBlock = inRange ? NormalizeBasicTraceBlockStart(addr, dynamicTarget) : addr;
+		uint32_t snapshot = UINT32_MAX;
+		if (!RecordBasicTraceEdge(tb.currentBlock, tb.previousInstruction, targetBlock,
+				kind, 0, info->ContextRecord, &snapshot)) {
+			FinishBasicTrace(TraceBasicBlockStopReason::MaxEdges, addr, true);
+			return BasicTraceStepResult::Stop;
+		}
+		if (!inRange) {
+			FinishBasicTrace(TraceBasicBlockStopReason::LeftRange, addr);
+			return BasicTraceStepResult::Stop;
+		}
+		if (!RecordBasicTraceBlock(targetBlock, info->ContextRecord, snapshot)) {
+			FinishBasicTrace(TraceBasicBlockStopReason::MaxBlocks, addr, true);
+			return BasicTraceStepResult::Stop;
+		}
+		tb.currentBlock = targetBlock;
+	}
+
+	tb.previousInstruction = addr;
+	tb.finalAddress = addr;
+	if (tb.stepsExecuted >= tb.maxSteps) {
+		FinishBasicTrace(TraceBasicBlockStopReason::MaxSteps, addr, true);
+		return BasicTraceStepResult::Stop;
+	}
+	info->ContextRecord->EFlags |= 0x100;
+	info->ContextRecord->Dr6 = 0;
+	return BasicTraceStepResult::Continue;
+}
+
+bool VehHandler::HandleBasicTraceException(PEXCEPTION_POINTERS info, uint32_t tid,
+		uint64_t addr, DWORD code) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.active.load(std::memory_order_acquire) || tid != tb.threadId)
+		return false;
+	if (addr < tb.rangeStart || addr >= tb.rangeEnd) return false;
+	if (!tb.followExceptions) {
+		FinishBasicTrace(TraceBasicBlockStopReason::Exception, addr);
+		return false;
+	}
+
+	tb.stepsExecuted++;
+	tb.exceptionsFollowed++;
+	tb.pendingException = true;
+	tb.pendingExceptionSourceBlock = tb.currentBlock;
+	tb.pendingExceptionInstruction = addr;
+	tb.pendingExceptionCode = code;
+	if (tb.stepsExecuted >= tb.maxSteps) {
+		tb.stopPending = true;
+		tb.pendingStopReason = TraceBasicBlockStopReason::MaxSteps;
+		tb.truncated = true;
+	}
+	info->ContextRecord->EFlags |= 0x100;
+	return true;
+}
+
+LONG VehHandler::HandleContinue(PEXCEPTION_POINTERS info) {
+	if (!installed_.load(std::memory_order_acquire) || !info || !info->ContextRecord)
+		return EXCEPTION_CONTINUE_SEARCH;
+	ScopedThreadLogSilence logSilence;
+	if (reentryTlsSlot_ != TLS_OUT_OF_INDEXES && SafeTlsGetValue(reentryTlsSlot_))
+		return EXCEPTION_CONTINUE_SEARCH;
+	TlsReentryGuard reentryGuard(reentryTlsSlot_);
+#ifdef _WIN64
+	const uint32_t tid = __readgsdword(0x48);
+	const uint64_t destination = info->ContextRecord->Rip;
+#else
+	const uint32_t tid = __readfsdword(0x24);
+	const uint64_t destination = info->ContextRecord->Eip;
+#endif
+	auto& tb = traceBasicBlocks_;
+	if (!tb.active.load(std::memory_order_acquire) || tid != tb.threadId || !tb.pendingException)
+		return EXCEPTION_CONTINUE_SEARCH;
+
+	uint32_t snapshot = UINT32_MAX;
+	if (!RecordBasicTraceEdge(tb.pendingExceptionSourceBlock, tb.pendingExceptionInstruction,
+			destination, TraceBasicBlockEdgeKind::Exception, tb.pendingExceptionCode,
+			info->ContextRecord, &snapshot)) {
+		tb.stopPending = true;
+		tb.pendingStopReason = TraceBasicBlockStopReason::MaxEdges;
+		tb.truncated = true;
+	}
+	tb.pendingException = false;
+
+	if (destination < tb.rangeStart || destination >= tb.rangeEnd) {
+		tb.stopPending = true;
+		tb.pendingStopReason = TraceBasicBlockStopReason::LeftRange;
+	} else if (!tb.stopPending) {
+		uint64_t targetBlock = NormalizeBasicTraceBlockStart(destination, true);
+		if (!RecordBasicTraceBlock(targetBlock, info->ContextRecord, snapshot)) {
+			tb.stopPending = true;
+			tb.pendingStopReason = TraceBasicBlockStopReason::MaxBlocks;
+			tb.truncated = true;
+		} else {
+			tb.currentBlock = targetBlock;
+			tb.previousInstruction = destination;
+		}
+	}
+	tb.finalAddress = destination;
+	// Even when a limit was reached, one final TF event is needed to park the
+	// target through the normal stopped-context path.
+	info->ContextRecord->EFlags |= 0x100;
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+
 LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 	if (!installed_) return EXCEPTION_CONTINUE_SEARCH;
 	// Never enter stdio/WriteFile or the logger mutex from a VEH callback. The
@@ -393,6 +746,10 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		auto bp = BreakpointManager::Instance().FindByAddress(addr);
 		if (!bp) {
 			LOG_DEBUG("FindByAddress(0x%llX) returned nullopt — not our BP", addr);
+			// A target-owned INT3 can be an exception-based control-flow edge.
+			if (HandleBasicTraceException(info, tid, addr, code)) {
+				return EXCEPTION_CONTINUE_SEARCH;
+			}
 			// TraceCalls follow-through: INT3 in thunk -- pass to SEH, keep TF
 			if (traceCalls_.following.load(std::memory_order_acquire) && tid == traceCalls_.followThreadId) {
 				traceCalls_.followSteps++;
@@ -492,6 +849,13 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 
+		if (traceBasicBlocks_.active.load(std::memory_order_acquire) &&
+			tid == traceBasicBlocks_.threadId) {
+			// User breakpoints are not part of the target CFG. End the trace and
+			// surface the breakpoint through the ordinary debugger path.
+			FinishBasicTrace(TraceBasicBlockStopReason::Exception, addr);
+		}
+
 		LOG_INFO("Breakpoint #%u hit at 0x%llX (tid=%u)", bp->id, addr, tid);
 
 		// 원본 바이트 복원 (INT3 -> 원래 명령어)
@@ -575,6 +939,26 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 	}
 
 	case EXCEPTION_SINGLE_STEP: { // 0x80000004 — TF 또는 HW BP
+		// Basic-block tracing owns TF for one thread and must run before the
+		// generic rearm/HW/step paths consume this event.
+		if (traceBasicBlocks_.active.load(std::memory_order_acquire) &&
+			tid == traceBasicBlocks_.threadId) {
+			auto& traceRearm = GetPendingRearm();
+			if (traceRearm.active && traceRearm.threadId == tid) {
+				BreakpointManager::Instance().RearmBreakpoint(traceRearm.address);
+				traceRearm = {0, 0, false, false};
+			}
+			auto traceResult = HandleBasicTraceSingleStep(info, tid, addr);
+			if (traceResult == BasicTraceStepResult::Continue)
+				return EXCEPTION_CONTINUE_EXECUTION;
+			if (traceResult == BasicTraceStepResult::Stop) {
+				NotifyAndWait(info, tid, DebugEventType::SingleStepComplete, addr, 0, code);
+				HwBreakpointManager::Instance().ClearFromContext(*info->ContextRecord);
+				HwBreakpointManager::Instance().ApplyToContext(*info->ContextRecord);
+				return EXCEPTION_CONTINUE_EXECUTION;
+			}
+		}
+
 		// 1) 소프트 브레이크포인트 재활성화 대기 중인 경우
 		auto& rearm = GetPendingRearm();
 		if (rearm.active) {
@@ -814,6 +1198,10 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 	}
 
 	default: {
+		if (HandleBasicTraceException(info, tid, addr, code)) {
+			return EXCEPTION_CONTINUE_SEARCH;
+		}
+
 		// TraceCalls follow-through: pass exceptions to SEH, keep TF
 		if (traceCalls_.following.load(std::memory_order_acquire) && tid == traceCalls_.followThreadId) {
 			traceCalls_.followSteps++;

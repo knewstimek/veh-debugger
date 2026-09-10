@@ -3,8 +3,38 @@
 #include <windows.h>
 #include <cstdio>
 #include <cstring>
+#include <intrin.h>
 
 volatile int g_counter = 0;
+
+__declspec(noinline) int TraceCoverageTarget(volatile int value) {
+	int result = value;
+	for (int i = 0; i < 4; ++i) {
+		if ((result + i) & 1)
+			result += i + 3;
+		else
+			result ^= i + 7;
+	}
+	return result;
+}
+
+__declspec(noinline) int TraceExceptionCoverageTarget() {
+	volatile int result = 0;
+	__ud2();
+	result = 7;
+	return result;
+}
+
+LONG CALLBACK TraceCoverageExceptionHandler(PEXCEPTION_POINTERS info) {
+	if (!info || info->ExceptionRecord->ExceptionCode != EXCEPTION_ILLEGAL_INSTRUCTION)
+		return EXCEPTION_CONTINUE_SEARCH;
+#ifdef _WIN64
+	info->ContextRecord->Rip += 2;
+#else
+	info->ContextRecord->Eip += 2;
+#endif
+	return EXCEPTION_CONTINUE_EXECUTION;
+}
 
 void WorkFunction() {
 	int localCounter = g_counter;
@@ -30,8 +60,15 @@ int main(int argc, char* argv[]) {
 	}
 
 	printf("Press Ctrl+C to exit.\n\n");
+	bool traceExceptionMode = argc > 1 && strcmp(argv[1], "--trace-exception") == 0;
+	if (traceExceptionMode)
+		AddVectoredExceptionHandler(0, TraceCoverageExceptionHandler);
 
 	while (true) {
+		if (traceExceptionMode)
+			g_counter += TraceExceptionCoverageTarget();
+		else
+			g_counter = TraceCoverageTarget(g_counter);
 		WorkFunction();
 		SleepEx(1000, TRUE);  // alertable wait — APC 인젝션 테스트 가능
 	}

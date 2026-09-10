@@ -15,7 +15,7 @@ Being in-process has a second effect. A Windows Debug API debugger attaches only
 The same debugging engine, exposed over two protocols.
 
 - **DAP**: directly in the VSCode debug panel. Source BPs, stepping, disassembly, register editing.
-- **MCP**: Claude, Cursor, Codex, etc. call 39 tools directly. No GUI in the loop -- the agent composes and automates debugging operations as functions, *programming* the debugger rather than *driving* it.
+- **MCP**: Claude, Cursor, Codex, etc. call 40 tools directly. No GUI in the loop -- the agent composes and automates debugging operations as functions, *programming* the debugger rather than *driving* it.
 
 ## Scenarios
 
@@ -76,13 +76,22 @@ veh_trace_calls(addresses=[...], duration_sec=5, resolve=true, system_only=true)
 ```
 Collects the runtime target address + API name for each call/jmp. `resolve=true` follows thunks/trampolines to the end. For IAT reconstruction on packed binaries.
 
+**Discover an unknown protected-code path**
+
+Stop at the protected-code entry, then collect basic-block and edge coverage until execution leaves the range or a safety limit is reached.
+```
+veh_trace_basic_blocks(threadId=..., start="game.exe+0x12000", end="game.exe+0x14000",
+                       max_steps=100000, timeout_ms=10000, follow_exceptions=true)
+```
+The target DLL performs TF single-stepping and aggregation internally, with no per-instruction MCP traffic. It returns only unique blocks/edges and hit counts, capturing registers plus a bounded stack snapshot on initial entry and each newly observed edge. If a target exception handler resumes execution, the continuation address is recorded as an exception edge. The current implementation traces one VEH-stopped thread and stops when it leaves the range.
+
 ---
 
 ## Features
 
 - **VEH-based**: Uses VEH instead of Windows Debug API - bypasses PEB/NtQuery-based anti-debug checks (Themida, VMProtect, etc.)
 - **Full DAP support**: Works with VSCode, MCP debug tools, and any DAP-compatible client
-- **MCP tool server**: 39 tools for AI agents (Claude, Cursor, Codex, etc.) to directly control the debugger
+- **MCP tool server**: 40 tools for AI agents (Claude, Cursor, Codex, etc.) to directly control the debugger
 - **TCP mode**: Remote debugging via `--tcp --port=PORT`
 - **Remote access**: `--remote` / `--bind=0.0.0.0` for VM/network debugging
 - **32/64-bit**: Debug both x86 and x64 processes (separate 32-bit DLL build; WoW64 injection for 32-bit targets)
@@ -115,7 +124,7 @@ veh-debug-adapter.exe              veh-mcp-server.exe
 |-----------|------|
 | `veh-debugger.dll` (`vcruntime_net.dll`) | Injected into target. Registers VEH handler, manages breakpoints, queries threads/stack/memory |
 | `veh-debug-adapter.exe` | DAP protocol server. DLL injection, Named Pipe IPC, JSON-RPC processing |
-| `veh-mcp-server.exe` | MCP tool server. 39 tools for AI agents to directly control the debugger |
+| `veh-mcp-server.exe` | MCP tool server. 40 tools for AI agents to directly control the debugger |
 | VSCode Extension | launch.json schema, adapter path configuration (minimal wrapper) |
 
 ## Build
@@ -256,7 +265,7 @@ enabled = true
 
 Restart the agent/IDE after configuring to activate.
 
-**MCP Tools (39)**
+**MCP Tools (40)**
 
 | Tool | Args | Description |
 |------|------|-------------|
@@ -299,6 +308,7 @@ Restart the agent/IDE after configuring to activate.
 | `veh_batch` | `steps` | Execute multiple commands in one call ($N/$last/$prev variable refs, if/loop/for_each control flow) |
 | `veh_trace_callers` | `address, duration_sec?` | Profile function callers (auto-resume -> collect for N seconds -> auto-pause). Returns unique callers with hit counts. x64: RtlVirtualUnwind (accurate). x86: [ESP] (accurate only at function entry) |
 | `veh_trace_calls` | `addresses, duration_sec?, resolve?, system_only?` | Monitor where call/jmp instructions go at runtime. Sets BPs on call sites, runs program for N seconds, collects actual targets with API names. `resolve=true`: follow thunks/trampolines in natural call context to final API (handles exception-based obfuscation). `system_only=true`: return only system DLL targets. For IAT reconstruction on packed binaries. |
+| `veh_trace_basic_blocks` | `threadId, start, end, max_blocks?, max_edges?, max_steps?, timeout_ms?, stack_bytes?, follow_exceptions?` | Discover unknown execution paths with DLL-internal basic-block/edge coverage. Returns unique block/edge hit counts and captures register/stack snapshots only at initial entry and new edges. Records handled exception continuations as edges. Stops on range exit or configured limits. |
 
 > **Non-stop inspection (no target stop required)**: `veh_read_memory` / `veh_read_pointer_chain` / `veh_write_memory` / `veh_dump_memory` / `veh_disassemble` / `veh_modules` work while the target is **running** (serviced by a dedicated pipe thread inside the DLL -- other threads are never frozen). You don't need a breakpoint or a detach/attach round-trip to read live values during GUI interaction. In contrast, `veh_registers` / `veh_stack_trace` / `veh_enum_locals` / `veh_step_*` need a thread context, so they only work when stopped at a breakpoint or after `veh_pause`.
 

@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "../common/ipc_protocol.h"
 
 namespace veh {
 
@@ -87,6 +88,75 @@ public:
 		uint32_t followSteps = 0;
 	};
 	TraceCallsState traceCalls_;
+
+	// TraceBasicBlocks: one stopped thread is single-stepped entirely inside the
+	// injected DLL. All storage is allocated before the thread resumes; the VEH
+	// callback only performs bounded lookups and writes into fixed-size tables.
+	struct TraceBasicBlocksState {
+		struct Instruction {
+			uint64_t address = 0;
+			uint64_t next = 0;
+			uint64_t staticBlockStart = 0;
+			uint64_t hitCount = 0;
+			uint8_t terminal = 0;
+			TraceBasicBlockEdgeKind kind = TraceBasicBlockEdgeKind::Fallthrough;
+		};
+		struct BlockSlot {
+			uint64_t start = 0;
+			uint32_t firstSnapshot = UINT32_MAX;
+			uint8_t occupied = 0;
+		};
+		struct EdgeSlot {
+			uint64_t sourceBlock = 0;
+			uint64_t sourceInstruction = 0;
+			uint64_t target = 0;
+			uint64_t hitCount = 0;
+			uint32_t snapshot = UINT32_MAX;
+			uint32_t exceptionCode = 0;
+			TraceBasicBlockEdgeKind kind = TraceBasicBlockEdgeKind::Fallthrough;
+			uint8_t occupied = 0;
+		};
+
+		std::atomic<bool> active{false};
+		std::atomic<bool> done{false};
+		std::atomic<bool> cancelRequested{false};
+		uint32_t threadId = 0;
+		uint64_t rangeStart = 0;
+		uint64_t rangeEnd = 0;
+		uint32_t maxBlocks = 0;
+		uint32_t maxEdges = 0;
+		uint32_t maxSteps = 0;
+		uint16_t stackBytes = 0;
+		bool followExceptions = false;
+		std::vector<Instruction> instructions;
+		std::vector<uint64_t> staticBlockStarts;
+		std::vector<BlockSlot> blockTable;
+		std::vector<EdgeSlot> edgeTable;
+		std::vector<TraceBasicBlockSnapshot> snapshots;
+		uint32_t blockCount = 0;
+		uint32_t edgeCount = 0;
+		uint32_t snapshotCount = 0;
+		uint32_t exceptionsFollowed = 0;
+		uint64_t stepsExecuted = 0;
+		uint64_t initialAddress = 0;
+		uint64_t currentBlock = 0;
+		uint64_t previousInstruction = 0;
+		uint64_t finalAddress = 0;
+		TraceBasicBlockStopReason stopReason = TraceBasicBlockStopReason::Completed;
+		bool truncated = false;
+		bool stopPending = false;
+		TraceBasicBlockStopReason pendingStopReason = TraceBasicBlockStopReason::Completed;
+		bool pendingException = false;
+		uint64_t pendingExceptionSourceBlock = 0;
+		uint64_t pendingExceptionInstruction = 0;
+		uint32_t pendingExceptionCode = 0;
+	};
+	TraceBasicBlocksState traceBasicBlocks_;
+	bool StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, uint64_t rangeEnd,
+		uint32_t maxBlocks, uint32_t maxEdges, uint32_t maxSteps, uint16_t stackBytes,
+		bool followExceptions, std::vector<TraceBasicBlocksState::Instruction>&& instructions,
+		std::vector<uint64_t>&& staticBlockStarts);
+	void CancelTraceBasicBlocks(TraceBasicBlockStopReason reason);
 
 	// TraceRegister: single-step loop inside VEH, no IPC per step
 	struct TraceRegState {
@@ -189,7 +259,20 @@ public:
 
 private:
 	static LONG CALLBACK ExceptionHandler(PEXCEPTION_POINTERS info);
+	static LONG CALLBACK ContinueHandler(PEXCEPTION_POINTERS info);
 	LONG HandleException(PEXCEPTION_POINTERS info);
+	LONG HandleContinue(PEXCEPTION_POINTERS info);
+	enum class BasicTraceStepResult { NotActive, Continue, Stop };
+	BasicTraceStepResult HandleBasicTraceSingleStep(PEXCEPTION_POINTERS info, uint32_t tid, uint64_t addr);
+	bool HandleBasicTraceException(PEXCEPTION_POINTERS info, uint32_t tid, uint64_t addr, DWORD code);
+	void FinishBasicTrace(TraceBasicBlockStopReason reason, uint64_t finalAddress, bool truncated = false);
+	uint32_t CaptureBasicTraceSnapshot(const CONTEXT* ctx);
+	bool RecordBasicTraceBlock(uint64_t start, const CONTEXT* ctx, uint32_t snapshot = UINT32_MAX);
+	bool RecordBasicTraceEdge(uint64_t sourceBlock, uint64_t sourceInstruction, uint64_t target,
+		TraceBasicBlockEdgeKind kind, uint32_t exceptionCode, const CONTEXT* ctx,
+		uint32_t* snapshotOut = nullptr);
+	TraceBasicBlocksState::Instruction* FindBasicTraceInstruction(uint64_t address);
+	uint64_t NormalizeBasicTraceBlockStart(uint64_t address, bool dynamicTarget) const;
 
 	// 공통 패턴: 컨텍스트 저장 -> 이벤트 생성 -> 콜백 -> 대기 -> 컨텍스트 복원
 	// 4개 예외 경로(BP, HW BP, step complete, exception)에서 공유
@@ -200,6 +283,7 @@ private:
 	HANDLE GetOrCreateThreadEvent(uint32_t threadId);
 
 	PVOID handler_ = nullptr;
+	PVOID continueHandler_ = nullptr;
 	DebugEventCallback callback_;
 	std::atomic<bool> installed_{false};
 	// Install() 직렬화 - InitThread와 ServerThread가 동시에 들어와도
