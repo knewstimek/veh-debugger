@@ -1,4 +1,5 @@
 #include "batch_executor.h"
+#include "trace_basic_blocks_tool.h"
 #include "common/logger.h"
 #include <sstream>
 #include <iomanip>
@@ -872,6 +873,17 @@ json BatchExecutor::DispatchTool(const std::string& name, const json& args) {
 			}
 		}
 		return ret;
+	}
+	if (name == "veh_trace_basic_blocks") {
+		return ExecuteTraceBasicBlocksTool(session_, args,
+			[this](const std::string& text, uint64_t& value) {
+				try {
+					value = ResolveAddress(text);
+					return value != 0;
+				} catch (...) {
+					return false;
+				}
+			});
 	}
 	if (name == "veh_attach" || name == "veh_launch" || name == "veh_detach") {
 		return {{"error", name + " is not available in batch mode (session lifecycle)"}};

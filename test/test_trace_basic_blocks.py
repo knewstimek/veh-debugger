@@ -84,14 +84,37 @@ def main():
         assert trace["snapshots"], trace
         assert sum(block["hits"] for block in trace["blocks"]) > 0, trace
 
+        # Batch dispatch must use the same implementation and result shape as a
+        # direct call. The continue result also verifies $N.threadId expansion.
+        batch = client.tool("veh_batch", {"steps": [
+            {"tool": "veh_continue", "args": {"wait": True, "timeout": 10}},
+            {"tool": "veh_trace_basic_blocks", "args": {
+                "threadId": "$0.threadId", "start": hex(start), "end": hex(start + 0x100),
+                "max_blocks": 4096, "max_edges": 8192, "max_steps": 1000,
+                "timeout_ms": 5000, "stack_bytes": 32,
+            }},
+        ]}, timeout=20)
+        assert batch.get("totalSteps") == 2, batch
+        batch_stop = batch["results"][0]["result"]
+        assert batch_stop.get("reason") == "breakpoint", batch_stop
+        batch_trace = batch["results"][1]["result"]
+        assert "error" not in batch_trace, batch_trace
+        assert set(batch_trace) == set(trace), (batch_trace, trace)
+        assert batch_trace["register_order"] == trace["register_order"], batch_trace
+        assert len(batch_trace["blocks"]) >= 2, batch_trace
+        assert len(batch_trace["edges"]) >= 1, batch_trace
+
         # The independent instruction limit must stop and park the thread without
         # waiting for range exit.
-        stop = client.tool("veh_continue", {"wait": True, "timeout": 10}, timeout=15)
-        assert stop.get("reason") == "breakpoint", stop
-        limited = client.tool("veh_trace_basic_blocks", {
-            "threadId": stop["threadId"], "start": hex(start), "end": hex(start + 0x100),
-            "max_steps": 3, "timeout_ms": 5000, "stack_bytes": 0,
-        }, timeout=15)
+        limited_batch = client.tool("veh_batch", {"steps": [
+            {"tool": "veh_continue", "args": {"wait": True, "timeout": 10}},
+            {"tool": "veh_trace_basic_blocks", "args": {
+                "threadId": "$0.threadId", "start": hex(start), "end": hex(start + 0x100),
+                "max_steps": 3, "timeout_ms": 5000, "stack_bytes": 0,
+            }},
+        ]}, timeout=20)
+        assert limited_batch.get("totalSteps") == 2, limited_batch
+        limited = limited_batch["results"][1]["result"]
         assert limited.get("stop_reason") == "max_steps", limited
         assert limited.get("truncated") is True, limited
 
@@ -118,6 +141,8 @@ def main():
             "blocks": len(trace["blocks"]),
             "edges": len(trace["edges"]),
             "steps": trace["steps_executed"],
+            "batch_blocks": len(batch_trace["blocks"]),
+            "batch_edges": len(batch_trace["edges"]),
             "exception_edges": sum(edge.get("kind") == "exception" for edge in exception_trace["edges"]),
         }))
     finally:

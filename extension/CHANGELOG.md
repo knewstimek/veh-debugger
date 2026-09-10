@@ -1,11 +1,9 @@
 # Changelog
 
-## Unreleased
+## 1.1.14
 
 ### Added
-- **`veh_trace_basic_blocks`** -- discover unknown execution paths without a per-instruction MCP loop. Starting from a VEH-stopped thread inside a bounded address range, the injected DLL single-steps and aggregates unique basic blocks and edges with execution counts. Register/stack snapshots are captured only on initial entry and the first observation of each edge; handled exception control flow is recorded as an edge using the post-handler continuation context. `max_blocks`, `max_edges`, `max_steps`, and `timeout_ms` provide independent safety limits. Supported on x86 and x64.
-
-## 1.1.14
+- **`veh_trace_basic_blocks`** -- discover unknown execution paths without a per-instruction MCP loop. Starting from a VEH-stopped thread inside a bounded address range, the injected DLL single-steps and aggregates unique basic blocks and edges with execution counts. Register/stack snapshots are captured only on initial entry and the first observation of each edge; handled exception control flow is recorded as an edge using the post-handler continuation context. `max_blocks`, `max_edges`, `max_steps`, and `timeout_ms` provide independent safety limits. Supported on x86 and x64. The tool is also available in `veh_batch` and breakpoint `action` arrays with direct-call result parity and batch references such as `$N.threadId`.
 
 ### Fixed
 - **RIP redirection to an unowned `INT3` terminated the target** -- an `0x80000003` reached after editing RIP/EIP at a software or hardware execute breakpoint was previously passed straight to the process, so an unhandled breakpoint disconnected the pipe and killed the target. Foreign INT3 instructions now surface as debugger exception stops; normal continue consumes the one-byte INT3 (while preserving an explicitly edited instruction pointer), and `pass_exception` still forwards it to the target's SEH chain.
