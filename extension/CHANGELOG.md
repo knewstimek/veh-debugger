@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **Release documentation synchronization** -- corrected the packaged extension's MCP tool count to 40 and updated the IPC overview to include the full dynamic-tracing command range through `TraceBasicBlocks` (`0x0074`).
+
 ## 1.1.14
 
 ### Added
