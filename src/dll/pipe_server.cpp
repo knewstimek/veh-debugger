@@ -45,6 +45,31 @@ static uint64_t ReadPtr(uint64_t addr) {
 	return 0;
 }
 
+// Register IDs stored in trace metadata match TraceBasicBlockSnapshot's GPR
+// order. Segment/vector registers are intentionally unsupported here.
+static uint8_t BasicTraceRegisterIndex(ZydisMachineMode mode, ZydisRegister reg) {
+	if (reg == ZYDIS_REGISTER_NONE) return 0xFF;
+	reg = ZydisRegisterGetLargestEnclosing(mode, reg);
+	switch (reg) {
+#ifdef _WIN64
+	case ZYDIS_REGISTER_RAX: return 0; case ZYDIS_REGISTER_RBX: return 1;
+	case ZYDIS_REGISTER_RCX: return 2; case ZYDIS_REGISTER_RDX: return 3;
+	case ZYDIS_REGISTER_RSI: return 4; case ZYDIS_REGISTER_RDI: return 5;
+	case ZYDIS_REGISTER_RBP: return 6; case ZYDIS_REGISTER_RSP: return 7;
+	case ZYDIS_REGISTER_R8: return 8; case ZYDIS_REGISTER_R9: return 9;
+	case ZYDIS_REGISTER_R10: return 10; case ZYDIS_REGISTER_R11: return 11;
+	case ZYDIS_REGISTER_R12: return 12; case ZYDIS_REGISTER_R13: return 13;
+	case ZYDIS_REGISTER_R14: return 14; case ZYDIS_REGISTER_R15: return 15;
+#else
+	case ZYDIS_REGISTER_EAX: return 0; case ZYDIS_REGISTER_EBX: return 1;
+	case ZYDIS_REGISTER_ECX: return 2; case ZYDIS_REGISTER_EDX: return 3;
+	case ZYDIS_REGISTER_ESI: return 4; case ZYDIS_REGISTER_EDI: return 5;
+	case ZYDIS_REGISTER_EBP: return 6; case ZYDIS_REGISTER_ESP: return 7;
+#endif
+	default: return 0xFF;
+	}
+}
+
 static bool DecodeBasicTraceRange(uint64_t start, uint64_t end,
 		std::vector<veh::VehHandler::TraceBasicBlocksState::Instruction>& instructions,
 		std::vector<uint64_t>& blockStarts) {
@@ -71,6 +96,9 @@ static bool DecodeBasicTraceRange(uint64_t start, uint64_t end,
 		ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT] = {};
 		uint8_t length = 1;
 		bool terminal = false;
+		bool indirect = false;
+		veh::VehHandler::TraceBasicBlocksState::Instruction meta;
+		meta.address = address;
 		veh::TraceBasicBlockEdgeKind kind = veh::TraceBasicBlockEdgeKind::Fallthrough;
 		if (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, bytes, available, &decoded, operands))) {
 			length = decoded.length;
@@ -88,6 +116,11 @@ static bool DecodeBasicTraceRange(uint64_t start, uint64_t end,
 			default:
 				break;
 			}
+			if (terminal && (decoded.meta.category == ZYDIS_CATEGORY_CALL ||
+					decoded.meta.category == ZYDIS_CATEGORY_UNCOND_BR) &&
+					decoded.operand_count_visible > 0) {
+				indirect = operands[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE;
+			}
 			if (terminal) {
 				uint64_t next = address + length;
 				if (next < end) starts.insert(next);
@@ -99,12 +132,65 @@ static bool DecodeBasicTraceRange(uint64_t start, uint64_t end,
 						target >= start && target < end) starts.insert(target);
 				}
 			}
+
+			bool repeated = (decoded.attributes & (ZYDIS_ATTRIB_HAS_REP |
+				ZYDIS_ATTRIB_HAS_REPE | ZYDIS_ATTRIB_HAS_REPNE)) != 0;
+			if (decoded.cpu_flags) {
+				meta.readsFlags = decoded.cpu_flags->tested != 0;
+				meta.writesFlags = (decoded.cpu_flags->modified | decoded.cpu_flags->set_0 |
+					decoded.cpu_flags->set_1 | decoded.cpu_flags->undefined) != 0;
+			}
+			if ((decoded.mnemonic == ZYDIS_MNEMONIC_XOR || decoded.mnemonic == ZYDIS_MNEMONIC_SUB) &&
+				decoded.operand_count_visible >= 2 && operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+				operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+				ZydisRegisterGetLargestEnclosing(machineMode, operands[0].reg.value) ==
+				ZydisRegisterGetLargestEnclosing(machineMode, operands[1].reg.value))
+				meta.clearsDependencies = 1;
+			for (uint8_t i = 0; i < decoded.operand_count; ++i) {
+				const auto& operand = operands[i];
+				if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+					uint8_t reg = BasicTraceRegisterIndex(machineMode, operand.reg.value);
+					if (reg < 16) {
+						if (operand.actions & ZYDIS_OPERAND_ACTION_READ) meta.readRegisterMask |= 1u << reg;
+						if (operand.actions & ZYDIS_OPERAND_ACTION_WRITE) meta.writeRegisterMask |= 1u << reg;
+					}
+					continue;
+				}
+				if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY) continue;
+				bool readable = (operand.actions & ZYDIS_OPERAND_ACTION_READ) != 0;
+				bool writable = (operand.actions & ZYDIS_OPERAND_ACTION_WRITE) != 0;
+				if (!readable && !writable) continue;
+				bool unsupported = repeated || operand.size == 0 ||
+					operand.size > veh::kTraceMemoryMaxValueBytes * 8 ||
+					operand.mem.segment == ZYDIS_REGISTER_FS || operand.mem.segment == ZYDIS_REGISTER_GS ||
+					(writable && meta.writeOperandCount >= veh::VehHandler::TraceBasicBlocksState::kMaxWriteOperands) ||
+					(readable && meta.readOperandCount >= veh::VehHandler::TraceBasicBlocksState::kMaxReadOperands);
+				if (unsupported) {
+					if (writable) meta.unsupportedWrites++;
+					if (readable) meta.unsupportedReads++;
+					continue;
+				}
+				veh::VehHandler::TraceBasicBlocksState::WriteOperand parsed{};
+				parsed.size = static_cast<uint8_t>((operand.size + 7) / 8);
+				parsed.scale = operand.mem.scale;
+				parsed.displacement = operand.mem.disp.has_displacement ? operand.mem.disp.value : 0;
+				parsed.ripRelative = operand.mem.base == ZYDIS_REGISTER_RIP ? 1 : 0;
+				parsed.base = parsed.ripRelative ? 0xFF : BasicTraceRegisterIndex(machineMode, operand.mem.base);
+				parsed.index = BasicTraceRegisterIndex(machineMode, operand.mem.index);
+				if ((!parsed.ripRelative && operand.mem.base != ZYDIS_REGISTER_NONE && parsed.base == 0xFF) ||
+					(operand.mem.index != ZYDIS_REGISTER_NONE && parsed.index == 0xFF)) {
+					if (writable) meta.unsupportedWrites++;
+					if (readable) meta.unsupportedReads++;
+					continue;
+				}
+				if (writable) meta.writeOperands[meta.writeOperandCount++] = parsed;
+				if (readable) meta.readOperands[meta.readOperandCount++] = parsed;
+			}
 		}
 
-		veh::VehHandler::TraceBasicBlocksState::Instruction meta;
-		meta.address = address;
 		meta.next = address + length;
 		meta.terminal = terminal ? 1 : 0;
+		meta.indirect = indirect ? 1 : 0;
 		meta.kind = kind;
 		instructions.push_back(meta);
 		if (instructions.size() > 1000000) return false;
@@ -899,6 +985,53 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 					resp.status = IpcStatus::Ok;
 				}
 			}
+		}
+		SendResponse(command, &resp, sizeof(resp));
+		break;
+	}
+
+	case IpcCommand::SetRegisters: {
+		SetRegistersResponse resp{IpcStatus::InvalidArgs};
+		if (payloadSize < sizeof(SetRegistersRequest)) {
+			SendResponse(command, &resp, sizeof(resp));
+			return;
+		}
+		auto* req = reinterpret_cast<const SetRegistersRequest*>(payload);
+		CONTEXT ctx{};
+		// Checkpoint restore is intentionally restricted to a VEH-stopped context;
+		// applying a whole context to a running/suspended thread is not atomic with
+		// respect to the debugger's stop lifecycle.
+		if (!VehHandler::Instance().GetStoppedContext(req->threadId, ctx)) {
+			resp.status = IpcStatus::NotFound;
+			SendResponse(command, &resp, sizeof(resp));
+			break;
+		}
+#ifdef _WIN64
+		ctx.Rax=req->regs.rax; ctx.Rbx=req->regs.rbx; ctx.Rcx=req->regs.rcx; ctx.Rdx=req->regs.rdx;
+		ctx.Rsi=req->regs.rsi; ctx.Rdi=req->regs.rdi; ctx.Rbp=req->regs.rbp; ctx.Rsp=req->regs.rsp;
+		ctx.R8=req->regs.r8; ctx.R9=req->regs.r9; ctx.R10=req->regs.r10; ctx.R11=req->regs.r11;
+		ctx.R12=req->regs.r12; ctx.R13=req->regs.r13; ctx.R14=req->regs.r14; ctx.R15=req->regs.r15;
+		ctx.Rip=req->regs.rip; ctx.EFlags=static_cast<DWORD>(req->regs.rflags);
+		memcpy(ctx.FltSave.XmmRegisters, req->regs.xmm, sizeof(req->regs.xmm));
+#else
+		ctx.Eax=static_cast<DWORD>(req->regs.rax); ctx.Ebx=static_cast<DWORD>(req->regs.rbx);
+		ctx.Ecx=static_cast<DWORD>(req->regs.rcx); ctx.Edx=static_cast<DWORD>(req->regs.rdx);
+		ctx.Esi=static_cast<DWORD>(req->regs.rsi); ctx.Edi=static_cast<DWORD>(req->regs.rdi);
+		ctx.Ebp=static_cast<DWORD>(req->regs.rbp); ctx.Esp=static_cast<DWORD>(req->regs.rsp);
+		ctx.Eip=static_cast<DWORD>(req->regs.rip); ctx.EFlags=static_cast<DWORD>(req->regs.rflags);
+#endif
+		resp.status = VehHandler::Instance().SetStoppedContext(req->threadId, ctx)
+			? IpcStatus::Ok : IpcStatus::Error;
+		SendResponse(command, &resp, sizeof(resp));
+		break;
+	}
+
+	case IpcCommand::IsThreadStopped: {
+		IsThreadStoppedResponse resp{IpcStatus::InvalidArgs, 0};
+		if (payloadSize >= sizeof(IsThreadStoppedRequest)) {
+			auto* req = reinterpret_cast<const IsThreadStoppedRequest*>(payload);
+			resp.status = IpcStatus::Ok;
+			resp.stopped = VehHandler::Instance().IsThreadStopped(req->threadId) ? 1 : 0;
 		}
 		SendResponse(command, &resp, sizeof(resp));
 		break;
@@ -2006,7 +2139,12 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		if (req.maxEdges == 0) req.maxEdges = 8192;
 		if (req.maxSteps == 0) req.maxSteps = 100000;
 		if (req.timeoutMs == 0) req.timeoutMs = 10000;
+		if (req.collectMemoryWrites && req.maxMemoryWrites == 0) req.maxMemoryWrites = 4096;
+		if (req.collectMemoryReads && req.maxMemoryReads == 0) req.maxMemoryReads = 4096;
 		if (req.maxBlocks > 16384 || req.maxEdges > 32768 || req.maxSteps > 5000000 ||
+			(req.collectMemoryWrites && req.maxMemoryWrites > 16384) ||
+			(req.collectMemoryReads && req.maxMemoryReads > 16384) ||
+			req.dependencySourceCount > kTraceDependencyMaxSources ||
 			req.timeoutMs < 100 || req.timeoutMs > 60000 ||
 			req.stackBytes > kTraceBasicBlockMaxStackBytes) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -2025,7 +2163,11 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		auto startTick = GetTickCount64();
 		if (!VehHandler::Instance().StartTraceBasicBlocks(req.threadId, req.rangeStart, req.rangeEnd,
 				req.maxBlocks, req.maxEdges, req.maxSteps, req.stackBytes,
-				req.followExceptions != 0, std::move(instructions), std::move(staticBlockStarts))) {
+				req.followExceptions != 0, req.collectMemoryWrites != 0, req.maxMemoryWrites,
+				req.collectMemoryReads != 0, req.maxMemoryReads,
+				req.dependencySources, req.dependencySourceCount,
+				req.startCondition, req.stopCondition, req.collectCondition,
+				std::move(instructions), std::move(staticBlockStarts))) {
 			TraceBasicBlocksResponse resp{};
 			resp.status = IpcStatus::NotFound;
 			SendResponse(command, &resp, sizeof(resp)); break;
@@ -2101,11 +2243,14 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			if (!slot.occupied) continue;
 			TraceBasicBlockEdgeEntry entry{};
 			entry.source = slot.sourceBlock;
+			entry.sourceInstruction = slot.sourceInstruction;
 			entry.target = slot.target;
 			entry.hitCount = slot.hitCount;
 			entry.snapshot = slot.snapshot;
 			entry.exceptionCode = slot.exceptionCode;
+			entry.dependencyMask = slot.dependencyMask;
 			entry.kind = slot.kind;
+			entry.indirect = slot.indirect;
 			edges.push_back(entry);
 		}
 		std::sort(edges.begin(), edges.end(), [](const auto& a, const auto& b) {
@@ -2114,10 +2259,97 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			return static_cast<uint8_t>(a.kind) < static_cast<uint8_t>(b.kind);
 		});
 
+		std::vector<TraceBasicBlockMemoryWriteEntry> memoryWrites;
+		memoryWrites.reserve(tb.memoryWriteCount);
+		std::unordered_map<uint64_t, uint64_t> targetLastSteps;
+		for (const auto& edge : tb.edgeTable) {
+			if (!edge.occupied) continue;
+			auto& step = targetLastSteps[edge.target];
+			if (edge.firstStep > step) step = edge.firstStep;
+		}
+		for (const auto& slot : tb.memoryWriteTable) {
+			if (!slot.occupied) continue;
+			TraceBasicBlockMemoryWriteEntry entry{};
+			entry.instruction = slot.instruction;
+			entry.address = slot.address;
+			entry.hitCount = slot.hitCount;
+			entry.firstStep = slot.firstStep;
+			entry.dependencyMask = slot.dependencyMask;
+			entry.size = slot.size;
+			entry.flags = kTraceMemoryValueValid;
+			if (IsExecutableAddr(slot.address)) {
+				entry.flags |= kTraceMemoryExecutable;
+				uint64_t executedAddress = 0;
+				auto instruction = std::lower_bound(tb.instructions.begin(), tb.instructions.end(), slot.address,
+					[](const auto& item, uint64_t address) { return item.address < address; });
+				if (instruction != tb.instructions.end() &&
+					instruction->address - slot.address < slot.size &&
+					instruction->lastHitStep > slot.firstStep)
+					executedAddress = instruction->address;
+				if (!executedAddress) {
+					for (uint8_t offset = 0; offset < slot.size; ++offset) {
+						auto target = targetLastSteps.find(slot.address + offset);
+						if (target != targetLastSteps.end() && target->second > slot.firstStep) {
+							executedAddress = target->first;
+							break;
+						}
+					}
+				}
+				if (executedAddress) {
+					entry.flags |= kTraceMemoryExecutedAfterWrite;
+					entry.executedAddress = executedAddress;
+				}
+			}
+			memcpy(entry.before, slot.before, slot.size);
+			memcpy(entry.after, slot.after, slot.size);
+			memoryWrites.push_back(entry);
+		}
+		std::sort(memoryWrites.begin(), memoryWrites.end(), [](const auto& a, const auto& b) {
+			if (a.instruction != b.instruction) return a.instruction < b.instruction;
+			if (a.address != b.address) return a.address < b.address;
+			return memcmp(a.before, b.before, std::min(a.size, b.size)) < 0;
+		});
+		std::vector<TraceBasicBlockMemoryReadEntry> memoryReads;
+		memoryReads.reserve(tb.memoryReadCount);
+		for (const auto& slot : tb.memoryReadTable) {
+			if (!slot.occupied) continue;
+			TraceBasicBlockMemoryReadEntry entry{};
+			entry.instruction = slot.instruction; entry.address = slot.address;
+			entry.hitCount = slot.hitCount; entry.dependencyMask = slot.dependencyMask;
+			entry.size = slot.size; entry.flags = kTraceMemoryValueValid;
+			memcpy(entry.value, slot.value, slot.size); memoryReads.push_back(entry);
+		}
+		std::sort(memoryReads.begin(), memoryReads.end(), [](const auto& a, const auto& b) {
+			if (a.instruction != b.instruction) return a.instruction < b.instruction;
+			if (a.address != b.address) return a.address < b.address;
+			return memcmp(a.value, b.value, std::min(a.size, b.size)) < 0;
+		});
+		std::vector<TraceBasicBlockExceptionEntry> exceptionEvents;
+		exceptionEvents.reserve(tb.exceptionsFollowed);
+		for (const auto& slot : tb.edgeTable) {
+			if (!slot.occupied || slot.kind != TraceBasicBlockEdgeKind::Exception) continue;
+			TraceBasicBlockExceptionEntry entry{};
+			entry.code = slot.exceptionCode;
+			entry.faultSnapshot = slot.faultSnapshot;
+			entry.continuationSnapshot = slot.snapshot;
+			entry.faultRip = slot.sourceInstruction;
+			entry.faultAddress = slot.faultAddress;
+			entry.continuation = slot.target;
+			entry.hitCount = slot.hitCount;
+			exceptionEvents.push_back(entry);
+		}
+		std::sort(exceptionEvents.begin(), exceptionEvents.end(), [](const auto& a, const auto& b) {
+			if (a.faultRip != b.faultRip) return a.faultRip < b.faultRip;
+			return a.continuation < b.continuation;
+		});
+
 		size_t responseSize = sizeof(TraceBasicBlocksResponse) +
 			blocks.size() * sizeof(TraceBasicBlockEntry) +
 			edges.size() * sizeof(TraceBasicBlockEdgeEntry) +
-			tb.snapshotCount * sizeof(TraceBasicBlockSnapshot);
+			tb.snapshotCount * sizeof(TraceBasicBlockSnapshot) +
+			memoryWrites.size() * sizeof(TraceBasicBlockMemoryWriteEntry) +
+			memoryReads.size() * sizeof(TraceBasicBlockMemoryReadEntry) +
+			exceptionEvents.size() * sizeof(TraceBasicBlockExceptionEntry);
 		std::vector<uint8_t> response(responseSize);
 		auto* header = reinterpret_cast<TraceBasicBlocksResponse*>(response.data());
 		memset(header, 0, sizeof(*header));
@@ -2127,6 +2359,19 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		header->blockCount = static_cast<uint32_t>(blocks.size());
 		header->edgeCount = static_cast<uint32_t>(edges.size());
 		header->snapshotCount = tb.snapshotCount;
+		header->memoryWriteCount = static_cast<uint32_t>(memoryWrites.size());
+		header->unsupportedMemoryWrites = tb.unsupportedMemoryWrites;
+		header->memoryWritesTruncated = tb.memoryWritesTruncated ? 1 : 0;
+		header->exceptionEventCount = static_cast<uint32_t>(exceptionEvents.size());
+		header->filteredSteps = tb.filteredSteps;
+		header->startConditionMet = tb.startConditionMet ? 1 : 0;
+		header->memoryReadCount = static_cast<uint32_t>(memoryReads.size());
+		header->unsupportedMemoryReads = tb.unsupportedMemoryReads;
+		header->memoryReadsTruncated = tb.memoryReadsTruncated ? 1 : 0;
+		header->dependencyIncomplete = tb.dependencyIncomplete ? 1 : 0;
+		memcpy(header->finalRegisterDependencies, tb.registerDependencies,
+			sizeof(header->finalRegisterDependencies));
+		header->finalFlagsDependencies = tb.flagsDependencies;
 		header->exceptionsFollowed = tb.exceptionsFollowed;
 		header->elapsedMs = static_cast<uint32_t>(GetTickCount64() - startTick);
 		header->stepsExecuted = tb.stepsExecuted;
@@ -2142,6 +2387,18 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 		if (tb.snapshotCount) {
 			memcpy(out, tb.snapshots.data(), tb.snapshotCount * sizeof(TraceBasicBlockSnapshot));
+			out += tb.snapshotCount * sizeof(TraceBasicBlockSnapshot);
+		}
+		if (!memoryWrites.empty()) {
+			memcpy(out, memoryWrites.data(), memoryWrites.size() * sizeof(memoryWrites[0]));
+			out += memoryWrites.size() * sizeof(memoryWrites[0]);
+		}
+		if (!memoryReads.empty()) {
+			memcpy(out, memoryReads.data(), memoryReads.size() * sizeof(memoryReads[0]));
+			out += memoryReads.size() * sizeof(memoryReads[0]);
+		}
+		if (!exceptionEvents.empty()) {
+			memcpy(out, exceptionEvents.data(), exceptionEvents.size() * sizeof(exceptionEvents[0]));
 		}
 		SendResponse(command, response.data(), static_cast<uint32_t>(response.size()));
 		break;

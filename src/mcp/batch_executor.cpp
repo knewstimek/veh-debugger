@@ -54,8 +54,10 @@ static std::vector<uint8_t> ParseHexBytes(const std::string& hexStr) {
 
 // --- BatchExecutor ---
 
-BatchExecutor::BatchExecutor(DebugSession& session, BreakpointActionSink actionSink)
-	: session_(session), actionSink_(std::move(actionSink)) {}
+BatchExecutor::BatchExecutor(DebugSession& session, BreakpointActionSink actionSink,
+		GenericToolSink genericToolSink)
+	: session_(session), actionSink_(std::move(actionSink)),
+	  genericToolSink_(std::move(genericToolSink)) {}
 
 uint64_t BatchExecutor::ResolveAddress(const std::string& s) {
 	if (s.empty()) return 0;
@@ -142,7 +144,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 		std::string condition = ResolveString(step["if"].get<std::string>());
 		bool result = EvaluateCondition(condition);
 		if (result && step.contains("then") && step["then"].is_array()) {
-			BatchExecutor sub(session_, actionSink_);
+			BatchExecutor sub(session_, actionSink_, genericToolSink_);
 			sub.depth_ = depth_ + 1;
 			sub.results_ = results_;
 			sub.namedVars_ = namedVars_;
@@ -153,7 +155,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 				results_.push_back(sub.results_[j]);
 			return {{"type", "if"}, {"condition", condition}, {"branch", "then"}, {"result", r}};
 		} else if (!result && step.contains("else") && step["else"].is_array()) {
-			BatchExecutor sub(session_, actionSink_);
+			BatchExecutor sub(session_, actionSink_, genericToolSink_);
 			sub.depth_ = depth_ + 1;
 			sub.results_ = results_;
 			sub.namedVars_ = namedVars_;
@@ -175,7 +177,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 		json loopResults = json::array();
 		int iterations = 0;
 		for (int i = 0; i < maxIter; i++) {
-			BatchExecutor sub(session_, actionSink_);
+			BatchExecutor sub(session_, actionSink_, genericToolSink_);
 			sub.depth_ = depth_ + 1;
 			sub.results_ = results_;
 			sub.namedVars_ = namedVars_;
@@ -223,7 +225,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 		json foreachResults = json::array();
 		for (size_t i = 0; i < items.size(); i++) {
 			namedVars_[varName] = items[i];
-			BatchExecutor sub(session_, actionSink_);
+			BatchExecutor sub(session_, actionSink_, genericToolSink_);
 			sub.depth_ = depth_ + 1;
 			sub.results_ = results_;
 			sub.namedVars_ = namedVars_;
@@ -888,6 +890,8 @@ json BatchExecutor::DispatchTool(const std::string& name, const json& args) {
 	if (name == "veh_attach" || name == "veh_launch" || name == "veh_detach") {
 		return {{"error", name + " is not available in batch mode (session lifecycle)"}};
 	}
+	if (genericToolSink_ && name.rfind("veh_checkpoint_", 0) == 0)
+		return genericToolSink_(name, args);
 
 	return {{"error", "Unknown tool: " + name}};
 }

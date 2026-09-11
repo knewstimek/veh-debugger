@@ -762,6 +762,25 @@ bool DebugSession::SetRegister(uint32_t threadId, uint32_t regIndex, uint64_t va
 	return false;
 }
 
+bool DebugSession::SetRegisters(uint32_t threadId, const RegisterSet& regs) {
+	SetRegistersRequest req{};
+	req.threadId = threadId;
+	req.regs = regs;
+	std::vector<uint8_t> response;
+	if (!pipeClient_.SendAndReceive(IpcCommand::SetRegisters, &req, sizeof(req), response)) return false;
+	if (response.size() < sizeof(SetRegistersResponse)) return false;
+	return reinterpret_cast<const SetRegistersResponse*>(response.data())->status == IpcStatus::Ok;
+}
+
+bool DebugSession::IsThreadStopped(uint32_t threadId) {
+	IsThreadStoppedRequest req{threadId};
+	std::vector<uint8_t> response;
+	if (!pipeClient_.SendAndReceive(IpcCommand::IsThreadStopped, &req, sizeof(req), response)) return false;
+	if (response.size() < sizeof(IsThreadStoppedResponse)) return false;
+	auto* result = reinterpret_cast<const IsThreadStoppedResponse*>(response.data());
+	return result->status == IpcStatus::Ok && result->stopped != 0;
+}
+
 std::vector<ModuleEntry> DebugSession::GetModules() {
 	std::vector<ModuleEntry> result;
 	std::vector<uint8_t> respData;
@@ -1384,7 +1403,12 @@ DebugSession::TraceCallsResult DebugSession::TraceCalls(
 DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		uint32_t threadId, uint64_t rangeStart, uint64_t rangeEnd,
 		uint32_t maxBlocks, uint32_t maxEdges, uint32_t maxSteps,
-		uint32_t timeoutMs, uint16_t stackBytes, bool followExceptions) {
+		uint32_t timeoutMs, uint16_t stackBytes, bool followExceptions,
+		bool collectMemoryWrites, uint32_t maxMemoryWrites,
+		bool collectMemoryReads, uint32_t maxMemoryReads,
+		const std::vector<TraceDependencySource>& dependencySources,
+		const TraceCondition& startCondition, const TraceCondition& stopCondition,
+		const TraceCondition& collectCondition) {
 	TraceBasicBlocksResult result;
 	TraceBasicBlocksRequest req{};
 	req.threadId = threadId;
@@ -1396,6 +1420,16 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	req.timeoutMs = timeoutMs;
 	req.stackBytes = stackBytes;
 	req.followExceptions = followExceptions ? 1 : 0;
+	req.collectMemoryWrites = collectMemoryWrites ? 1 : 0;
+	req.maxMemoryWrites = maxMemoryWrites;
+	req.collectMemoryReads = collectMemoryReads ? 1 : 0;
+	req.maxMemoryReads = maxMemoryReads;
+	req.dependencySourceCount = static_cast<uint8_t>(std::min<size_t>(dependencySources.size(), kTraceDependencyMaxSources));
+	if (req.dependencySourceCount) memcpy(req.dependencySources, dependencySources.data(),
+		static_cast<size_t>(req.dependencySourceCount) * sizeof(req.dependencySources[0]));
+	req.startCondition = startCondition;
+	req.stopCondition = stopCondition;
+	req.collectCondition = collectCondition;
 
 	std::vector<uint8_t> data;
 	if (!pipeClient_.SendAndReceive(IpcCommand::TraceBasicBlocks, &req, sizeof(req), data,
@@ -1407,7 +1441,10 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	size_t required = sizeof(*header) +
 		static_cast<size_t>(header->blockCount) * sizeof(TraceBasicBlockEntry) +
 		static_cast<size_t>(header->edgeCount) * sizeof(TraceBasicBlockEdgeEntry) +
-		static_cast<size_t>(header->snapshotCount) * sizeof(TraceBasicBlockSnapshot);
+		static_cast<size_t>(header->snapshotCount) * sizeof(TraceBasicBlockSnapshot) +
+		static_cast<size_t>(header->memoryWriteCount) * sizeof(TraceBasicBlockMemoryWriteEntry) +
+		static_cast<size_t>(header->memoryReadCount) * sizeof(TraceBasicBlockMemoryReadEntry) +
+		static_cast<size_t>(header->exceptionEventCount) * sizeof(TraceBasicBlockExceptionEntry);
 	if (required > data.size()) return result;
 
 	result.ok = true;
@@ -1417,6 +1454,16 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	result.elapsedMs = header->elapsedMs;
 	result.stepsExecuted = header->stepsExecuted;
 	result.finalAddress = header->finalAddress;
+	result.unsupportedMemoryWrites = header->unsupportedMemoryWrites;
+	result.memoryWritesTruncated = header->memoryWritesTruncated != 0;
+	result.filteredSteps = header->filteredSteps;
+	result.startConditionMet = header->startConditionMet != 0;
+	result.unsupportedMemoryReads = header->unsupportedMemoryReads;
+	result.memoryReadsTruncated = header->memoryReadsTruncated != 0;
+	result.dependencyIncomplete = header->dependencyIncomplete != 0;
+	memcpy(result.finalRegisterDependencies, header->finalRegisterDependencies,
+		sizeof(result.finalRegisterDependencies));
+	result.finalFlagsDependencies = header->finalFlagsDependencies;
 	const uint8_t* cursor = data.data() + sizeof(*header);
 	auto* blocks = reinterpret_cast<const TraceBasicBlockEntry*>(cursor);
 	result.blocks.assign(blocks, blocks + header->blockCount);
@@ -1426,6 +1473,15 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	cursor += static_cast<size_t>(header->edgeCount) * sizeof(*edges);
 	auto* snapshots = reinterpret_cast<const TraceBasicBlockSnapshot*>(cursor);
 	result.snapshots.assign(snapshots, snapshots + header->snapshotCount);
+	cursor += static_cast<size_t>(header->snapshotCount) * sizeof(*snapshots);
+	auto* memoryWrites = reinterpret_cast<const TraceBasicBlockMemoryWriteEntry*>(cursor);
+	result.memoryWrites.assign(memoryWrites, memoryWrites + header->memoryWriteCount);
+	cursor += static_cast<size_t>(header->memoryWriteCount) * sizeof(*memoryWrites);
+	auto* memoryReads = reinterpret_cast<const TraceBasicBlockMemoryReadEntry*>(cursor);
+	result.memoryReads.assign(memoryReads, memoryReads + header->memoryReadCount);
+	cursor += static_cast<size_t>(header->memoryReadCount) * sizeof(*memoryReads);
+	auto* exceptionEvents = reinterpret_cast<const TraceBasicBlockExceptionEntry*>(cursor);
+	result.exceptionEvents.assign(exceptionEvents, exceptionEvents + header->exceptionEventCount);
 	return result;
 }
 

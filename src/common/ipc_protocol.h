@@ -50,6 +50,8 @@ enum class IpcCommand : uint32_t {
 	GetRegisters           = 0x0022,
 	GetModules             = 0x0023,
 	SetRegister            = 0x0024,
+	SetRegisters           = 0x0025,
+	IsThreadStopped        = 0x0026,
 
 	// Memory
 	ReadMemory             = 0x0030,
@@ -282,6 +284,18 @@ struct SetRegisterResponse {
 	IpcStatus status;
 };
 
+struct SetRegistersRequest {
+	uint32_t threadId;
+	RegisterSet regs;
+};
+
+struct SetRegistersResponse {
+	IpcStatus status;
+};
+
+struct IsThreadStoppedRequest { uint32_t threadId; };
+struct IsThreadStoppedResponse { IpcStatus status; uint8_t stopped; };
+
 // Module info
 struct ModuleInfo {
 	uint64_t baseAddress;
@@ -475,6 +489,7 @@ enum class TraceBasicBlockStopReason : uint8_t {
 	Timeout         = 5,
 	Exception       = 6,
 	Cancelled       = 7,
+	Condition       = 8,
 };
 
 enum class TraceBasicBlockEdgeKind : uint8_t {
@@ -486,6 +501,56 @@ enum class TraceBasicBlockEdgeKind : uint8_t {
 	RangeExit   = 5,
 };
 
+enum class TraceConditionOperandKind : uint8_t {
+	None = 0,
+	Register = 1,
+	MemoryAtRegister = 2,
+	Immediate = 3,
+};
+
+enum class TraceConditionComparison : uint8_t {
+	Equal = 0,
+	NotEqual = 1,
+	Less = 2,
+	LessEqual = 3,
+	Greater = 4,
+	GreaterEqual = 5,
+};
+
+struct TraceConditionOperand {
+	uint64_t immediate;
+	int64_t offset;
+	TraceConditionOperandKind kind;
+	uint8_t registerIndex;
+	uint8_t size;
+	uint8_t reserved;
+};
+
+struct TraceConditionClause {
+	TraceConditionOperand lhs;
+	TraceConditionOperand rhs;
+	TraceConditionComparison comparison;
+	uint8_t reserved[7];
+};
+
+static constexpr uint8_t kTraceConditionMaxClauses = 4;
+struct TraceCondition {
+	TraceConditionClause clauses[kTraceConditionMaxClauses];
+	uint8_t clauseCount;
+	uint8_t matchAny;
+	uint8_t reserved[6];
+};
+
+enum class TraceDependencySourceKind : uint8_t { Register = 0, Memory = 1 };
+struct TraceDependencySource {
+	uint64_t address;
+	uint64_t size;
+	TraceDependencySourceKind kind;
+	uint8_t registerIndex;
+	uint8_t reserved[6];
+};
+static constexpr uint8_t kTraceDependencyMaxSources = 32;
+
 struct TraceBasicBlocksRequest {
 	uint32_t threadId;       // thread currently stopped in VEH
 	uint64_t rangeStart;     // inclusive
@@ -496,7 +561,16 @@ struct TraceBasicBlocksRequest {
 	uint32_t timeoutMs;
 	uint16_t stackBytes;     // bytes copied from SP per snapshot (max 256)
 	uint8_t  followExceptions;
-	uint8_t  reserved;
+	uint8_t  collectMemoryWrites;
+	uint32_t maxMemoryWrites; // unique before/after transitions
+	TraceCondition startCondition;
+	TraceCondition stopCondition;
+	TraceCondition collectCondition;
+	uint8_t collectMemoryReads;
+	uint8_t dependencySourceCount;
+	uint16_t reserved2;
+	uint32_t maxMemoryReads;
+	TraceDependencySource dependencySources[kTraceDependencyMaxSources];
 };
 
 struct TraceBasicBlockEntry {
@@ -508,11 +582,14 @@ struct TraceBasicBlockEntry {
 
 struct TraceBasicBlockEdgeEntry {
 	uint64_t source;         // source block start
+	uint64_t sourceInstruction; // instruction that transferred control
 	uint64_t target;         // target block start or out-of-range address
 	uint64_t hitCount;
 	uint32_t snapshot;       // destination context on first observation
 	uint32_t exceptionCode;  // non-zero for exception edges
+	uint32_t dependencyMask; // sources influencing the control-transfer instruction
 	TraceBasicBlockEdgeKind kind;
+	uint8_t  indirect;       // call/jump target came from a register or memory operand
 };
 
 static constexpr uint32_t kTraceBasicBlockRegisterCount = 18;
@@ -529,6 +606,45 @@ struct TraceBasicBlockSnapshot {
 	uint8_t  stack[kTraceBasicBlockMaxStackBytes];
 };
 
+static constexpr uint8_t kTraceMemoryValueValid = 0x01;
+static constexpr uint8_t kTraceMemoryExecutable = 0x02;
+static constexpr uint8_t kTraceMemoryExecutedAfterWrite = 0x04;
+static constexpr uint32_t kTraceMemoryMaxValueBytes = 16;
+
+struct TraceBasicBlockMemoryWriteEntry {
+	uint64_t instruction;
+	uint64_t address;
+	uint64_t hitCount;
+	uint64_t firstStep;
+	uint64_t executedAddress;
+	uint32_t dependencyMask;
+	uint8_t  size;
+	uint8_t  flags;
+	uint8_t  before[kTraceMemoryMaxValueBytes];
+	uint8_t  after[kTraceMemoryMaxValueBytes];
+};
+
+struct TraceBasicBlockMemoryReadEntry {
+	uint64_t instruction;
+	uint64_t address;
+	uint64_t hitCount;
+	uint32_t dependencyMask;
+	uint8_t size;
+	uint8_t flags;
+	uint8_t value[kTraceMemoryMaxValueBytes];
+};
+
+struct TraceBasicBlockExceptionEntry {
+	uint32_t code;
+	uint32_t faultSnapshot;
+	uint32_t continuationSnapshot;
+	uint32_t reserved;
+	uint64_t faultRip;
+	uint64_t faultAddress;
+	uint64_t continuation;
+	uint64_t hitCount;
+};
+
 struct TraceBasicBlocksResponse {
 	IpcStatus status;
 	TraceBasicBlockStopReason stopReason;
@@ -537,12 +653,27 @@ struct TraceBasicBlocksResponse {
 	uint32_t  blockCount;
 	uint32_t  edgeCount;
 	uint32_t  snapshotCount;
+	uint32_t  memoryWriteCount;
+	uint32_t  unsupportedMemoryWrites;
+	uint32_t  memoryWritesTruncated;
+	uint32_t  exceptionEventCount;
+	uint32_t  filteredSteps;
+	uint8_t   startConditionMet;
+	uint32_t  memoryReadCount;
+	uint32_t  unsupportedMemoryReads;
+	uint32_t  memoryReadsTruncated;
+	uint32_t  dependencyIncomplete;
+	uint32_t  finalRegisterDependencies[16];
+	uint32_t  finalFlagsDependencies;
 	uint32_t  exceptionsFollowed;
 	uint32_t  elapsedMs;
 	uint64_t  stepsExecuted;
 	uint64_t  finalAddress;
 	// followed by TraceBasicBlockEntry[blockCount],
-	// TraceBasicBlockEdgeEntry[edgeCount], TraceBasicBlockSnapshot[snapshotCount]
+	// TraceBasicBlockEdgeEntry[edgeCount], TraceBasicBlockSnapshot[snapshotCount],
+	// TraceBasicBlockMemoryWriteEntry[memoryWriteCount],
+	// TraceBasicBlockMemoryReadEntry[memoryReadCount],
+	// TraceBasicBlockExceptionEntry[exceptionEventCount]
 };
 
 // --- Memory management ---

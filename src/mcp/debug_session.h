@@ -207,6 +207,8 @@ public:
 	std::vector<StackFrame> GetStackTrace(uint32_t threadId, uint32_t maxFrames = 20);
 	std::optional<RegisterSet> GetRegisters(uint32_t threadId);
 	bool SetRegister(uint32_t threadId, uint32_t regIndex, uint64_t value);
+	bool SetRegisters(uint32_t threadId, const RegisterSet& regs);
+	bool IsThreadStopped(uint32_t threadId);
 	std::vector<ModuleEntry> GetModules();
 	std::vector<LocalVarEntry> EnumLocals(uint32_t threadId, uint64_t instrAddr, uint64_t frameBase);
 
@@ -285,13 +287,30 @@ public:
 		uint32_t elapsedMs = 0;
 		uint64_t stepsExecuted = 0;
 		uint64_t finalAddress = 0;
+		uint32_t unsupportedMemoryWrites = 0;
+		bool memoryWritesTruncated = false;
+		uint32_t filteredSteps = 0;
+		bool startConditionMet = true;
+		uint32_t unsupportedMemoryReads = 0;
+		bool memoryReadsTruncated = false;
+		bool dependencyIncomplete = false;
+		uint32_t finalRegisterDependencies[16]{};
+		uint32_t finalFlagsDependencies = 0;
 		std::vector<TraceBasicBlockEntry> blocks;
 		std::vector<TraceBasicBlockEdgeEntry> edges;
 		std::vector<TraceBasicBlockSnapshot> snapshots;
+		std::vector<TraceBasicBlockMemoryWriteEntry> memoryWrites;
+		std::vector<TraceBasicBlockMemoryReadEntry> memoryReads;
+		std::vector<TraceBasicBlockExceptionEntry> exceptionEvents;
 	};
 	TraceBasicBlocksResult TraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, uint64_t rangeEnd,
 		uint32_t maxBlocks = 4096, uint32_t maxEdges = 8192, uint32_t maxSteps = 100000,
-		uint32_t timeoutMs = 10000, uint16_t stackBytes = 128, bool followExceptions = true);
+		uint32_t timeoutMs = 10000, uint16_t stackBytes = 128, bool followExceptions = true,
+		bool collectMemoryWrites = false, uint32_t maxMemoryWrites = 4096,
+		bool collectMemoryReads = false, uint32_t maxMemoryReads = 4096,
+		const std::vector<TraceDependencySource>& dependencySources = {},
+		const TraceCondition& startCondition = {}, const TraceCondition& stopCondition = {},
+		const TraceCondition& collectCondition = {});
 
 	// --- Resolve (PDB) ---
 	uint64_t ResolveSourceLine(const std::string& file, uint32_t line);

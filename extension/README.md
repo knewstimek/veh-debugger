@@ -17,8 +17,9 @@ Windows debugger based on **VEH (Vectored Exception Handler)** instead of the Wi
 - **Log points** — Log `{RAX}`, `{*0x7FF600}` to Debug Console without stopping execution
 - **4 injection methods** — CreateRemoteThread, NtCreateThreadEx, Thread Hijack, QueueUserAPC
 - **TCP remote mode** — Debug across VMs or network
-- **MCP tool server** — 40 tools for AI agent integration (Claude, Cursor, Codex, etc.)
-- **Basic-block tracing** — Collect unique executed blocks/edges and hit counts inside a bounded range without per-instruction MCP traffic; available directly, in `veh_batch`, and in breakpoint actions
+- **MCP tool server** — 44 tools for AI agent integration (Claude, Cursor, Codex, etc.)
+- **Bounded semantic tracing** — blocks/edges, hot paths, indirect targets, memory reads/writes, conservative dependency origins, conditions, and handled exception continuations
+- **Bounded semantic tracing** — Collect blocks/edges, register deltas, hot/loop summaries, indirect targets, memory regions, exception contexts, conditional windows, and optional memory-write/write-to-execute evidence without per-instruction MCP traffic
 
 ## Quick Start
 

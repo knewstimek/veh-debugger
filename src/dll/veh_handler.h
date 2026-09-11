@@ -93,12 +93,36 @@ public:
 	// injected DLL. All storage is allocated before the thread resumes; the VEH
 	// callback only performs bounded lookups and writes into fixed-size tables.
 	struct TraceBasicBlocksState {
+		static constexpr uint8_t kMaxWriteOperands = 2;
+		static constexpr uint8_t kMaxReadOperands = 4;
+		struct WriteOperand {
+			int64_t displacement = 0;
+			uint8_t base = 0xFF;
+			uint8_t index = 0xFF;
+			uint8_t scale = 0;
+			uint8_t size = 0;
+			uint8_t ripRelative = 0;
+		};
 		struct Instruction {
 			uint64_t address = 0;
 			uint64_t next = 0;
 			uint64_t staticBlockStart = 0;
 			uint64_t hitCount = 0;
+			uint64_t lastHitStep = 0;
 			uint8_t terminal = 0;
+			uint8_t indirect = 0;
+			uint8_t writeOperandCount = 0;
+			uint8_t unsupportedWrites = 0;
+			WriteOperand writeOperands[kMaxWriteOperands]{};
+			uint8_t readOperandCount = 0;
+			uint8_t unsupportedReads = 0;
+			WriteOperand readOperands[kMaxReadOperands]{};
+			uint32_t readRegisterMask = 0;
+			uint32_t writeRegisterMask = 0;
+			uint8_t readsFlags = 0;
+			uint8_t writesFlags = 0;
+			uint8_t clearsDependencies = 0;
+			uint32_t lastDependencyMask = 0;
 			TraceBasicBlockEdgeKind kind = TraceBasicBlockEdgeKind::Fallthrough;
 		};
 		struct BlockSlot {
@@ -106,14 +130,59 @@ public:
 			uint32_t firstSnapshot = UINT32_MAX;
 			uint8_t occupied = 0;
 		};
+		struct MemoryWriteSlot {
+			uint64_t instruction = 0;
+			uint64_t address = 0;
+			uint64_t hitCount = 0;
+			uint64_t firstStep = 0;
+			uint8_t size = 0;
+			uint8_t before[kTraceMemoryMaxValueBytes]{};
+			uint8_t after[kTraceMemoryMaxValueBytes]{};
+			uint32_t dependencyMask = 0;
+			uint8_t occupied = 0;
+		};
+		struct PendingWrite {
+			uint64_t instruction = 0;
+			uint64_t address = 0;
+			uint8_t size = 0;
+			uint8_t before[kTraceMemoryMaxValueBytes]{};
+			uint32_t dependencyMask = 0;
+		};
+		struct MemoryReadSlot {
+			uint64_t instruction = 0;
+			uint64_t address = 0;
+			uint64_t hitCount = 0;
+			uint32_t dependencyMask = 0;
+			uint8_t size = 0;
+			uint8_t value[kTraceMemoryMaxValueBytes]{};
+			uint8_t occupied = 0;
+		};
+		struct PendingRead {
+			uint64_t instruction = 0;
+			uint64_t address = 0;
+			uint32_t dependencyMask = 0;
+			uint8_t size = 0;
+			uint8_t value[kTraceMemoryMaxValueBytes]{};
+		};
+		struct MemoryTaintSlot {
+			uint64_t address = 0;
+			uint32_t dependencyMask = 0;
+			uint8_t size = 0;
+			uint8_t occupied = 0;
+		};
 		struct EdgeSlot {
 			uint64_t sourceBlock = 0;
 			uint64_t sourceInstruction = 0;
 			uint64_t target = 0;
 			uint64_t hitCount = 0;
+			uint64_t firstStep = 0;
 			uint32_t snapshot = UINT32_MAX;
 			uint32_t exceptionCode = 0;
+			uint64_t faultAddress = 0;
+			uint32_t faultSnapshot = UINT32_MAX;
 			TraceBasicBlockEdgeKind kind = TraceBasicBlockEdgeKind::Fallthrough;
+			uint8_t indirect = 0;
+			uint32_t dependencyMask = 0;
 			uint8_t occupied = 0;
 		};
 
@@ -128,15 +197,46 @@ public:
 		uint32_t maxSteps = 0;
 		uint16_t stackBytes = 0;
 		bool followExceptions = false;
+		bool collectMemoryWrites = false;
+		uint32_t maxMemoryWrites = 0;
+		bool collectMemoryReads = false;
+		uint32_t maxMemoryReads = 0;
+		uint8_t dependencySourceCount = 0;
+		TraceDependencySource dependencySources[kTraceDependencyMaxSources]{};
+		TraceCondition startCondition{};
+		TraceCondition stopCondition{};
+		TraceCondition collectCondition{};
+		bool startConditionMet = true;
+		bool collectWindowActive = true;
+		uint32_t filteredSteps = 0;
 		std::vector<Instruction> instructions;
 		std::vector<uint64_t> staticBlockStarts;
 		std::vector<BlockSlot> blockTable;
 		std::vector<EdgeSlot> edgeTable;
+		std::vector<MemoryWriteSlot> memoryWriteTable;
+		std::vector<MemoryReadSlot> memoryReadTable;
+		std::vector<MemoryTaintSlot> memoryTaintTable;
 		std::vector<TraceBasicBlockSnapshot> snapshots;
 		uint32_t blockCount = 0;
 		uint32_t edgeCount = 0;
 		uint32_t snapshotCount = 0;
 		uint32_t exceptionsFollowed = 0;
+		uint32_t memoryWriteCount = 0;
+		uint32_t unsupportedMemoryWrites = 0;
+		bool memoryWritesTruncated = false;
+		uint32_t memoryReadCount = 0;
+		uint32_t unsupportedMemoryReads = 0;
+		bool memoryReadsTruncated = false;
+		bool dependencyIncomplete = false;
+		uint32_t registerDependencies[16]{};
+		uint32_t flagsDependencies = 0;
+		uint32_t pendingRegisterWriteMask = 0;
+		uint32_t pendingDependencyMask = 0;
+		uint8_t pendingWritesFlags = 0;
+		uint8_t pendingReadCount = 0;
+		PendingRead pendingReads[kMaxReadOperands]{};
+		uint8_t pendingWriteCount = 0;
+		PendingWrite pendingWrites[kMaxWriteOperands]{};
 		uint64_t stepsExecuted = 0;
 		uint64_t initialAddress = 0;
 		uint64_t currentBlock = 0;
@@ -147,14 +247,22 @@ public:
 		bool stopPending = false;
 		TraceBasicBlockStopReason pendingStopReason = TraceBasicBlockStopReason::Completed;
 		bool pendingException = false;
+		bool pendingExceptionCollect = true;
 		uint64_t pendingExceptionSourceBlock = 0;
 		uint64_t pendingExceptionInstruction = 0;
 		uint32_t pendingExceptionCode = 0;
+		uint64_t pendingExceptionFaultAddress = 0;
+		TraceBasicBlockSnapshot pendingExceptionSnapshot{};
 	};
 	TraceBasicBlocksState traceBasicBlocks_;
 	bool StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, uint64_t rangeEnd,
 		uint32_t maxBlocks, uint32_t maxEdges, uint32_t maxSteps, uint16_t stackBytes,
-		bool followExceptions, std::vector<TraceBasicBlocksState::Instruction>&& instructions,
+		bool followExceptions, bool collectMemoryWrites, uint32_t maxMemoryWrites,
+		bool collectMemoryReads, uint32_t maxMemoryReads,
+		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
+		const TraceCondition& startCondition, const TraceCondition& stopCondition,
+		const TraceCondition& collectCondition,
+		std::vector<TraceBasicBlocksState::Instruction>&& instructions,
 		std::vector<uint64_t>&& staticBlockStarts);
 	void CancelTraceBasicBlocks(TraceBasicBlockStopReason reason);
 
@@ -266,13 +374,22 @@ private:
 	BasicTraceStepResult HandleBasicTraceSingleStep(PEXCEPTION_POINTERS info, uint32_t tid, uint64_t addr);
 	bool HandleBasicTraceException(PEXCEPTION_POINTERS info, uint32_t tid, uint64_t addr, DWORD code);
 	void FinishBasicTrace(TraceBasicBlockStopReason reason, uint64_t finalAddress, bool truncated = false);
+	void FillBasicTraceSnapshot(const CONTEXT* ctx, TraceBasicBlockSnapshot& snapshot);
 	uint32_t CaptureBasicTraceSnapshot(const CONTEXT* ctx);
 	bool RecordBasicTraceBlock(uint64_t start, const CONTEXT* ctx, uint32_t snapshot = UINT32_MAX);
 	bool RecordBasicTraceEdge(uint64_t sourceBlock, uint64_t sourceInstruction, uint64_t target,
-		TraceBasicBlockEdgeKind kind, uint32_t exceptionCode, const CONTEXT* ctx,
-		uint32_t* snapshotOut = nullptr);
+		TraceBasicBlockEdgeKind kind, uint32_t exceptionCode, bool indirect, const CONTEXT* ctx,
+		uint32_t* snapshotOut = nullptr, uint64_t faultAddress = 0,
+		const TraceBasicBlockSnapshot* faultSnapshot = nullptr);
 	TraceBasicBlocksState::Instruction* FindBasicTraceInstruction(uint64_t address);
 	uint64_t NormalizeBasicTraceBlockStart(uint64_t address, bool dynamicTarget) const;
+	void PrepareBasicTraceMemoryWrites(const TraceBasicBlocksState::Instruction* instruction,
+		const CONTEXT* ctx);
+	void CompleteBasicTraceMemoryWrites();
+	bool RecordBasicTraceMemoryWrite(const TraceBasicBlocksState::PendingWrite& pending,
+		const uint8_t* after);
+	bool RecordBasicTraceMemoryRead(const TraceBasicBlocksState::PendingRead& pending);
+	bool EvaluateBasicTraceCondition(const TraceCondition& condition, const CONTEXT* ctx) const;
 
 	// 공통 패턴: 컨텍스트 저장 -> 이벤트 생성 -> 콜백 -> 대기 -> 컨텍스트 복원
 	// 4개 예외 경로(BP, HW BP, step complete, exception)에서 공유

@@ -18,7 +18,8 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 
 - **Adapter** (`src/adapter/`): DAP protocol handler, DLL injection, PDB symbol engine
 - **DLL** (`src/dll/`): VEH handler, breakpoint/stepping, pipe server, stack walking
-- **MCP** (`src/mcp/`): 39-tool MCP server for AI agents
+- **Semantic trace**: bounded blocks/edges, register deltas, memory reads/writes, conservative dependency bitsets, conditions, region metadata, and exception continuations
+- **MCP** (`src/mcp/`): 44-tool MCP server for AI agents
 - **Common** (`src/common/`): IPC protocol definitions, logger
 
 ## Key Files
@@ -41,7 +42,7 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 | `src/common/ipc_protocol.h` | All IPC command/event/struct definitions (shared) |
 | `src/common/logger.h` | Logging utility |
 | `src/mcp/debug_session.cpp/h` | DebugSession class - pure C++ IPC wrapper, no JSON dependency. Used by MCP (and future veh_batch) |
-| `src/mcp/mcp_server.cpp/h` | MCP JSON-RPC server, 39 debugger tools (delegates to DebugSession) |
+| `src/mcp/mcp_server.cpp/h` | MCP JSON-RPC server, 44 debugger tools (delegates to DebugSession) |
 | `src/mcp/installer.cpp/h` | Auto-install to Claude/Cursor/Windsurf/Codex configs |
 
 ## IPC Protocol
@@ -62,7 +63,7 @@ Named Pipe (`\\.\pipe\dotnet-diagnostic-{pid}`), binary framed:
 |-------|----------|
 | 0x0001-0x0005 | Breakpoint set/remove (SW + HW) |
 | 0x0010-0x0016 | Execution control (Continue, StepOver/Into/Out, Pause) |
-| 0x0020-0x0024 | State queries (Threads, StackTrace, Registers, SetRegister) |
+| 0x0020-0x0026 | State queries and restore (Threads, StackTrace, Registers, atomic SetRegisters, stopped-context query) |
 | 0x0030-0x0031 | Memory read/write |
 | 0x0040-0x0042 | PDB symbol resolution (SourceLine, Function, EnumLocals) |
 | 0x0050 | TraceCallers (lock-free ring buffer collection) |
@@ -143,6 +144,62 @@ Records which code paths call a given function by placing a trace BP and collect
 - No mutex, no heap allocation (deadlock risk if BP hits inside malloc/HeapAlloc)
 - Lock-free ring buffer: `traceBuffer_[65536]` + `atomic<uint32_t> traceWriteIdx_`
 - `__try/__except` wrapper for stack read (guard against invalid ESP/RSP)
+
+## TraceBasicBlocks
+
+Single-steps one VEH-stopped thread inside a bounded address range while all
+storage is allocated before resume. The VEH path updates fixed-size open-addressed
+block/edge tables and captures snapshots only for initial entry and newly observed
+edges; it performs no JSON work or heap allocation.
+
+The response contains unique block/edge hit counts, ranked hot blocks/edges, and
+the source instruction for each edge. Calls and unconditional branches whose
+decoded target operand is a register or memory location are marked indirect and
+grouped by instruction with their runtime targets and hit counts. For each first-
+observed edge, the MCP layer compares the source block's entry snapshot with the
+edge destination snapshot and emits changed general registers and flags as a
+block-level `register_delta`. RIP/EIP is omitted from the delta because it changes
+on every edge and adds no state-transition signal.
+
+Optional memory-write collection decodes at most two writable memory operands per
+instruction before resume. The VEH path resolves their effective addresses from
+the pre-instruction context and copies up to 16 before bytes; the following TF
+event copies after bytes and inserts the transition into a preallocated hash
+table. Identical `(instruction, address, before, after)` transitions are counted,
+and capacity loss is surfaced as `memory_writes_truncated`. REP operations, wider
+operands, FS/GS-relative operands, and inaccessible values increment
+`unsupported_memory_writes`. After the thread is parked, the pipe thread may use
+`VirtualQuery` safely to classify executable destinations and correlates write
+step numbers with later instruction/edge steps to report write-to-execute links.
+
+Trace conditions are parsed by the MCP layer into fixed `TraceCondition` records
+(up to four homogeneous AND/OR comparisons). The VEH callback evaluates only the
+compiled operands against `CONTEXT` or an SEH-protected register-relative memory
+read. `filteredSteps` and `startConditionMet` make skipped windows observable.
+Post-processing caches `VirtualQueryEx` regions and labels pointer-like values as
+image/mapped/private/stack plus protection and guard state. It also emits measured
+re-entry summaries (`loop_folds`) rather than assigning VM dispatcher semantics.
+Exception edges retain a fault snapshot, optional fault address, continuation
+snapshot, and hit count. Windows does not expose the executed SEH handler through
+this continue callback, so no speculative handler address is returned.
+
+## Session-local Checkpoints
+
+`veh_checkpoint_create` stores one VEH-stopped thread's GPR/flags (and x64 XMM)
+plus up to 16 explicitly selected committed ranges. A checkpoint is owned by the
+current MCP debug-session generation, with limits of 16 MiB per checkpoint, 16
+checkpoints, and 64 MiB total. It is cleared on detach, terminate, or relaunch.
+
+Restore first validates each range's allocation base/type/bounds and builds a
+current-memory rollback image. It writes selected ranges, atomically replaces the
+stored VEH context through `SetRegisters`, and rolls memory back if either stage
+fails. Segment/debug registers, other threads, allocation/heap metadata, handles,
+kernel objects, files, and sockets are intentionally outside the contract. A
+compatible allocation recreated at exactly the same address cannot be reliably
+distinguished by Windows metadata; callers should recreate a checkpoint after
+mapping churn. `veh_checkpoint_diff` reports GPR/flags, x64 XMM indices, and at
+most 1024 changed byte spans. All four operations are available in `veh_batch`
+and breakpoint actions.
 
 ## SyscallResolver (WinAPI BP Immunity)
 

@@ -40,7 +40,7 @@ private:
 		void OnResourcesList(const json& id, const json& params);
 		void OnResourceTemplatesList(const json& id, const json& params);
 
-	// Tool implementations (31 tools + veh_batch)
+	// Tool implementations (44 tools total)
 	json ToolAttach(const json& args);
 	json ToolLaunch(const json& args);
 	json ToolDetach(const json& args);
@@ -81,6 +81,10 @@ private:
 	json ToolResolveImports(const json& args);
 	json ToolTraceCalls(const json& args);
 	json ToolTraceBasicBlocks(const json& args);
+	json ToolCheckpointCreate(const json& args);
+	json ToolCheckpointRestore(const json& args);
+	json ToolCheckpointDiff(const json& args);
+	json ToolCheckpointDelete(const json& args);
 
 	// Tool list definition
 	json GetToolsList();
@@ -119,6 +123,28 @@ private:
 	std::mutex exceptionMutex_;
 
 	std::mutex sendMutex_;
+
+	struct CheckpointRegion {
+		uint64_t address = 0;
+		uint64_t allocationBase = 0;
+		uint64_t regionBase = 0;
+		uint64_t regionSize = 0;
+		uint32_t type = 0;
+		uint32_t protection = 0;
+		std::vector<uint8_t> bytes;
+	};
+	struct Checkpoint {
+		uint64_t id = 0;
+		uint64_t sessionGeneration = 0;
+		uint32_t threadId = 0;
+		RegisterSet registers{};
+		std::vector<CheckpointRegion> regions;
+		size_t byteSize = 0;
+	};
+	std::mutex checkpointMutex_;
+	std::unordered_map<uint64_t, Checkpoint> checkpoints_;
+	uint64_t nextCheckpointId_ = 1;
+	size_t checkpointBytes_ = 0;
 
 	// Temp breakpoint for StepOver CALL skip (guarded by eventMutex_)
 	uint32_t tempStepOverBpId_ = 0;
