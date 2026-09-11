@@ -1,5 +1,5 @@
 """DAP StepIn Test - F11 동작 확인"""
-import subprocess, json, sys, time, os
+import subprocess, json, sys, time, os, queue, threading
 
 ADAPTER = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-debug-adapter.exe")
 TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
@@ -8,11 +8,42 @@ LOG = os.path.join(os.path.dirname(__file__), "stepin-test-adapter.log")
 
 proc = subprocess.Popen(
     [ADAPTER, f"--log={LOG}", "--log-level=debug"],
-    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     bufsize=0
 )
 
 seq = [0]
+messages = queue.Queue()
+
+
+def _read_messages():
+    """Parse DAP frames on a dedicated blocking reader thread."""
+    while True:
+        line = proc.stdout.readline()
+        if not line:
+            return
+        if not line.lower().startswith(b"content-length:"):
+            continue
+        try:
+            length = int(line.split(b":", 1)[1].strip())
+        except ValueError:
+            continue
+        while True:
+            header = proc.stdout.readline()
+            if not header or header in (b"\r\n", b"\n"):
+                break
+        if not header:
+            return
+        body = proc.stdout.read(length)
+        if len(body) != length:
+            return
+        try:
+            messages.put(json.loads(body))
+        except json.JSONDecodeError:
+            continue
+
+
+threading.Thread(target=_read_messages, daemon=True).start()
 
 def send(cmd, args=None):
     seq[0] += 1
@@ -24,22 +55,10 @@ def send(cmd, args=None):
     proc.stdin.flush()
 
 def recv(timeout=5):
-    buf = b""
-    start = time.time()
-    while time.time() - start < timeout:
-        ch = proc.stdout.read(1)
-        if not ch:
-            time.sleep(0.01)
-            continue
-        buf += ch
-        if buf.endswith(b"\r\n\r\n"):
-            for line in buf.decode().split("\r\n"):
-                if line.startswith("Content-Length:"):
-                    length = int(line.split(":")[1].strip())
-                    body = proc.stdout.read(length)
-                    return json.loads(body)
-            buf = b""
-    return None
+    try:
+        return messages.get(timeout=timeout)
+    except queue.Empty:
+        return None
 
 def recv_until(predicate, timeout=15):
     msgs = []
@@ -79,16 +98,22 @@ if not launch_resp or not launch_resp.get("success"):
     sys.exit(1)
 print(f"2. launch: success=True")
 
-# 3. Set breakpoint at line 24 (WorkFunction call)
+# 3. Set breakpoint at the WorkFunction call site. Resolve the source line
+# dynamically so additions to test_target do not silently invalidate the test.
+with open(SOURCE, "r", encoding="utf-8") as source_file:
+    work_call_line = next(
+        index for index, line in enumerate(source_file, 1)
+        if line.strip() == "WorkFunction();"
+    )
 send("setBreakpoints", {
     "source": {"path": SOURCE},
-    "breakpoints": [{"line": 24}]
+    "breakpoints": [{"line": work_call_line}]
 })
 bp_resp, _ = recv_until(lambda m: m.get("command") == "setBreakpoints")
 if bp_resp:
     bps = bp_resp.get("body", {}).get("breakpoints", [])
     for bp in bps:
-        print(f"3. BP line 24: verified={bp.get('verified')} id={bp.get('id')}")
+        print(f"3. BP line {work_call_line}: verified={bp.get('verified')} id={bp.get('id')}")
 
 # 4. ConfigurationDone
 send("configurationDone")
@@ -99,9 +124,13 @@ print(f"4. configurationDone")
 stopped, _ = recv_until(lambda m: m.get("type") == "event" and m.get("event") == "stopped", timeout=5)
 if stopped:
     print(f"   stopped: reason={stopped['body'].get('reason')}")
+else:
+    print("FAIL: no entry stop")
+    proc.kill()
+    sys.exit(1)
 
 # 5. Continue to BP
-send("continue", {"threadId": 1})
+send("continue", {"threadId": stopped["body"]["threadId"]})
 recv_until(lambda m: m.get("command") == "continue")
 bp_hit, _ = recv_until(
     lambda m: m.get("type") == "event" and m.get("event") == "stopped"
@@ -112,7 +141,7 @@ if not bp_hit:
     sys.exit(1)
 
 tid = bp_hit["body"]["threadId"]
-print(f"5. BP hit at line 24! threadId={tid}")
+print(f"5. BP hit at line {work_call_line}! threadId={tid}")
 
 # 6. Stack before
 send("stackTrace", {"threadId": tid, "startFrame": 0, "levels": 3})
@@ -166,6 +195,10 @@ for i in range(5):
 # Cleanup
 print("\nCleaning up...")
 send("disconnect", {"terminateDebuggee": True})
-time.sleep(1)
-proc.kill()
+recv_until(lambda m: m.get("command") == "disconnect", timeout=5)
+try:
+    proc.wait(timeout=5)
+except subprocess.TimeoutExpired:
+    proc.kill()
+    proc.wait(timeout=3)
 print("\n=== StepIn Test Complete ===")
