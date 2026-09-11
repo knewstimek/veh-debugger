@@ -8,6 +8,8 @@ import json
 import time
 import sys
 import os
+import queue
+import threading
 
 MCP_EXE = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe")
 TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
@@ -19,10 +21,22 @@ class McpClient:
             [MCP_EXE],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
         )
         self.seq = 0
         self.notifications = []
+        self.messages = queue.Queue()
+        self.reader = threading.Thread(target=self._read_messages, daemon=True)
+        self.reader.start()
+
+    def _read_messages(self):
+        """Keep the blocking pipe read off the timeout-owning test thread."""
+        for line in iter(self.proc.stdout.readline, b""):
+            try:
+                message = json.loads(line.decode().strip())
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            self.messages.put(message)
 
     def send(self, method, params=None):
         self.seq += 1
@@ -35,17 +49,10 @@ class McpClient:
         return self.seq
 
     def recv(self, timeout=10):
-        start = time.time()
-        while time.time() - start < timeout:
-            line = self.proc.stdout.readline()
-            if line:
-                line = line.decode().strip()
-                if line:
-                    try:
-                        return json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-        return None
+        try:
+            return self.messages.get(timeout=timeout)
+        except queue.Empty:
+            return None
 
     def recv_response(self, req_id, timeout=10):
         start = time.time()
@@ -140,7 +147,7 @@ def run_test(name, func):
         traceback.print_exc()
     finally:
         try:
-            c.call_tool("veh_detach", timeout=3)
+            c.call_tool("veh_terminate", timeout=5)
         except:
             pass
         c.close()
