@@ -6,6 +6,8 @@
 #include <intrin.h>
 
 volatile int g_counter = 0;
+volatile int g_trace_memory = 0;
+void* volatile g_trace_executable = nullptr;
 
 __declspec(noinline) int TraceCoverageTarget(volatile int value) {
 	int result = value;
@@ -14,8 +16,23 @@ __declspec(noinline) int TraceCoverageTarget(volatile int value) {
 			result += i + 3;
 		else
 			result ^= i + 7;
+		g_trace_memory = result;
 	}
 	return result;
+}
+
+__declspec(noinline) int TraceIndirectTargetA(int value) { return value + 11; }
+__declspec(noinline) int TraceIndirectTargetB(int value) { return value ^ 0x35; }
+
+__declspec(noinline) int TraceIndirectCoverageTarget(volatile int value) {
+	int (__cdecl * volatile target)(int) = (value & 1) ? TraceIndirectTargetA : TraceIndirectTargetB;
+	return target(value);
+}
+
+__declspec(noinline) void TraceExecutableWriteTarget() {
+	auto* code = static_cast<volatile unsigned char*>(g_trace_executable);
+	*code = 0xC3; // ret, valid in both x86 and x64 mode
+	reinterpret_cast<void(*)()>(g_trace_executable)();
 }
 
 __declspec(noinline) int TraceExceptionCoverageTarget() {
@@ -60,6 +77,10 @@ int main(int argc, char* argv[]) {
 	}
 
 	printf("Press Ctrl+C to exit.\n\n");
+	g_trace_executable = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE,
+		PAGE_EXECUTE_READWRITE);
+	if (!g_trace_executable) return 2;
+	*static_cast<unsigned char*>(g_trace_executable) = 0xC3;
 	bool traceExceptionMode = argc > 1 && strcmp(argv[1], "--trace-exception") == 0;
 	if (traceExceptionMode)
 		AddVectoredExceptionHandler(0, TraceCoverageExceptionHandler);
@@ -69,6 +90,8 @@ int main(int argc, char* argv[]) {
 			g_counter += TraceExceptionCoverageTarget();
 		else
 			g_counter = TraceCoverageTarget(g_counter);
+		g_counter = TraceIndirectCoverageTarget(g_counter);
+		TraceExecutableWriteTarget();
 		WorkFunction();
 		SleepEx(1000, TRUE);  // alertable wait — APC 인젝션 테스트 가능
 	}

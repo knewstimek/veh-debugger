@@ -36,7 +36,9 @@ using json = nlohmann::json;
 class BatchExecutor {
 public:
 	using BreakpointActionSink = std::function<void(uint32_t, const json&)>;
-	explicit BatchExecutor(DebugSession& session, BreakpointActionSink actionSink = {});
+	using GenericToolSink = std::function<json(const std::string&, const json&)>;
+	explicit BatchExecutor(DebugSession& session, BreakpointActionSink actionSink = {},
+		GenericToolSink genericToolSink = {});
 
 	// Execute a batch of steps. Returns array of step results.
 	json Execute(const json& steps);
@@ -64,6 +66,7 @@ private:
 
 	DebugSession& session_;
 	BreakpointActionSink actionSink_;
+	GenericToolSink genericToolSink_;
 	std::vector<json> results_;  // step results indexed by step number
 	std::unordered_map<std::string, json> namedVars_;  // named variables ($addr, etc.)
 	int depth_ = 0;  // nesting depth (max 20)

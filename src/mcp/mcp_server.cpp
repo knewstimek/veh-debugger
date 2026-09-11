@@ -303,6 +303,10 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 		else if (name == "veh_resolve_imports")       result = ToolResolveImports(args);
 		else if (name == "veh_trace_calls")           result = ToolTraceCalls(args);
 		else if (name == "veh_trace_basic_blocks")    result = ToolTraceBasicBlocks(args);
+		else if (name == "veh_checkpoint_create")     result = ToolCheckpointCreate(args);
+		else if (name == "veh_checkpoint_restore")    result = ToolCheckpointRestore(args);
+		else if (name == "veh_checkpoint_diff")       result = ToolCheckpointDiff(args);
+		else if (name == "veh_checkpoint_delete")     result = ToolCheckpointDelete(args);
 		else {
 			SendError(id, -32602, "Unknown tool: " + name);
 			return;
@@ -1021,6 +1025,11 @@ void McpServer::ResetSessionEventState() {
 	lastException_ = {};
 	ignoreExceptionCodes_.clear();
 	bpActions_.clear();
+	{
+		std::lock_guard<std::mutex> checkpointLock(checkpointMutex_);
+		checkpoints_.clear();
+		checkpointBytes_ = 0;
+	}
 }
 
 bool McpServer::IsCurrentStopEvent(const StopEvent& event) {
@@ -1712,6 +1721,12 @@ json McpServer::ToolBatch(const json& args) {
 
 	BatchExecutor executor(session_, [this](uint32_t id, const json& action) {
 		StoreBreakpointAction(id, action);
+	}, [this](const std::string& name, const json& toolArgs) {
+		if (name == "veh_checkpoint_create") return ToolCheckpointCreate(toolArgs);
+		if (name == "veh_checkpoint_restore") return ToolCheckpointRestore(toolArgs);
+		if (name == "veh_checkpoint_diff") return ToolCheckpointDiff(toolArgs);
+		if (name == "veh_checkpoint_delete") return ToolCheckpointDelete(toolArgs);
+		return json{{"error", "Unsupported batch tool: " + name}};
 	});
 	return executor.Execute(steps);
 }
@@ -1954,6 +1969,256 @@ json McpServer::ToolTraceBasicBlocks(const json& args) {
 		[this](const std::string& text, uint64_t& value) { return ParseAddress(text, value); });
 }
 
+static std::string CheckpointHex(uint64_t value) {
+	char buffer[24]; snprintf(buffer, sizeof(buffer), "0x%llX", value);
+	return buffer;
+}
+
+static bool CheckpointId(const json& args, const char* key, uint64_t& value) {
+	if (!args.contains(key)) return false;
+	const auto& item = args[key];
+	if (item.is_number_unsigned()) { value = item.get<uint64_t>(); return value != 0; }
+	if (item.is_number_integer()) {
+		auto signedValue = item.get<int64_t>(); value = signedValue > 0 ? uint64_t(signedValue) : 0; return value != 0;
+	}
+	if (item.is_string()) {
+		try { size_t used = 0; value = std::stoull(item.get<std::string>(), &used, 0);
+			return value != 0 && used == item.get_ref<const std::string&>().size(); }
+		catch (...) { return false; }
+	}
+	return false;
+}
+
+static std::vector<std::pair<const char*, uint64_t>> CheckpointRegisters(const RegisterSet& r) {
+	if (r.is32bit) return {{"eax",r.rax},{"ebx",r.rbx},{"ecx",r.rcx},{"edx",r.rdx},
+		{"esi",r.rsi},{"edi",r.rdi},{"ebp",r.rbp},{"esp",r.rsp},
+		{"eip",r.rip},{"eflags",r.rflags}};
+	return {{"rax",r.rax},{"rbx",r.rbx},{"rcx",r.rcx},{"rdx",r.rdx},
+		{"rsi",r.rsi},{"rdi",r.rdi},{"rbp",r.rbp},{"rsp",r.rsp},
+		{"r8",r.r8},{"r9",r.r9},{"r10",r.r10},{"r11",r.r11},
+		{"r12",r.r12},{"r13",r.r13},{"r14",r.r14},{"r15",r.r15},
+		{"rip",r.rip},{"eflags",r.rflags}};
+}
+
+json McpServer::ToolCheckpointCreate(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+	uint32_t threadId = JsonUint32(args, "threadId");
+	if (!threadId) return {{"error", "threadId is required"}};
+	if (!session_.IsThreadStopped(threadId))
+		return {{"error", "checkpoint requires a VEH-stopped thread"}};
+	auto registers = session_.GetRegisters(threadId);
+	if (!registers) return {{"error", "failed to capture thread context"}};
+	if (args.contains("regions") && !args["regions"].is_array())
+		return {{"error", "regions must be an array"}};
+	const json regionsArg = args.value("regions", json::array());
+	if (regionsArg.size() > 16) return {{"error", "at most 16 memory regions are allowed"}};
+
+	Checkpoint checkpoint;
+	checkpoint.sessionGeneration = session_.GetSessionGeneration();
+	checkpoint.threadId = threadId;
+	checkpoint.registers = *registers;
+	size_t totalBytes = 0;
+	for (const auto& requested : regionsArg) {
+		if (!requested.is_object() || !requested.contains("address") || !requested.contains("size"))
+			return {{"error", "each region requires address and size"}};
+		uint64_t address = 0;
+		if (requested["address"].is_string()) {
+			if (!ParseAddress(requested["address"].get<std::string>(), address))
+				return {{"error", "invalid checkpoint region address"}};
+		} else if (requested["address"].is_number_unsigned() || requested["address"].is_number_integer()) {
+			address = requested["address"].get<uint64_t>();
+		} else return {{"error", "invalid checkpoint region address"}};
+		uint64_t size = 0;
+		if (requested["size"].is_number_unsigned() || requested["size"].is_number_integer())
+			size = requested["size"].get<uint64_t>();
+		else if (requested["size"].is_string()) {
+			try { size_t used=0; size=std::stoull(requested["size"].get<std::string>(), &used, 0);
+				if (used != requested["size"].get_ref<const std::string&>().size()) size=0; }
+			catch (...) { size=0; }
+		}
+		if (!address || !size || size > 4ULL * 1024 * 1024 || totalBytes + size > 16ULL * 1024 * 1024)
+			return {{"error", "each region must be 1-4 MiB and total captured memory must not exceed 16 MiB"}};
+		if (address + size < address) return {{"error", "checkpoint region overflows address space"}};
+		for (const auto& existing : checkpoint.regions) {
+			uint64_t existingEnd = existing.address + existing.bytes.size();
+			if (address < existingEnd && existing.address < address + size)
+				return {{"error", "checkpoint regions must not overlap"}};
+		}
+		MEMORY_BASIC_INFORMATION mbi{};
+		if (!VirtualQueryEx(session_.GetTargetProcess(), reinterpret_cast<LPCVOID>(uintptr_t(address)),
+				&mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT)
+			return {{"error", "checkpoint region is not committed memory"}};
+		uint64_t regionBase = reinterpret_cast<uint64_t>(mbi.BaseAddress);
+		if (address + size > regionBase + mbi.RegionSize)
+			return {{"error", "a checkpoint range may not cross a VirtualQuery region boundary"}};
+		auto bytes = session_.ReadMemory(address, static_cast<uint32_t>(size));
+		if (bytes.size() != size) return {{"error", "failed to read checkpoint region"}};
+		CheckpointRegion region;
+		region.address = address;
+		region.allocationBase = reinterpret_cast<uint64_t>(mbi.AllocationBase);
+		region.regionBase = regionBase;
+		region.regionSize = mbi.RegionSize;
+		region.type = mbi.Type;
+		region.protection = mbi.Protect;
+		region.bytes = std::move(bytes);
+		checkpoint.regions.push_back(std::move(region));
+		totalBytes += size;
+	}
+	checkpoint.byteSize = totalBytes;
+	{
+		std::lock_guard<std::mutex> lock(checkpointMutex_);
+		if (checkpoints_.size() >= 16) return {{"error", "checkpoint limit reached (16)"}};
+		if (checkpointBytes_ + totalBytes > 64ULL * 1024 * 1024)
+			return {{"error", "checkpoint memory budget exceeded (64 MiB)"}};
+		checkpoint.id = nextCheckpointId_++;
+		checkpointBytes_ += totalBytes;
+		checkpoints_.emplace(checkpoint.id, checkpoint);
+	}
+	json regions = json::array();
+	for (const auto& region : checkpoint.regions)
+		regions.push_back({{"address",CheckpointHex(region.address)}, {"size",region.bytes.size()},
+			{"allocation_base",CheckpointHex(region.allocationBase)}});
+	return {{"id",checkpoint.id}, {"threadId",threadId}, {"memory_bytes",totalBytes},
+		{"regions",std::move(regions)},
+		{"context_scope",registers->is32bit ? "x86-gpr-flags" : "x64-gpr-flags-xmm"},
+		{"limitations",json::array({"selected memory only","no heap metadata, handles, kernel state, or other threads"})}};
+}
+
+json McpServer::ToolCheckpointRestore(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+	uint64_t id = 0;
+	if (!CheckpointId(args, "id", id)) return {{"error", "valid checkpoint id is required"}};
+	Checkpoint checkpoint;
+	{
+		std::lock_guard<std::mutex> lock(checkpointMutex_);
+		auto found = checkpoints_.find(id);
+		if (found == checkpoints_.end()) return {{"error", "checkpoint not found"}};
+		checkpoint = found->second;
+	}
+	if (checkpoint.sessionGeneration != session_.GetSessionGeneration())
+		return {{"error", "checkpoint belongs to a previous debug session"}};
+	if (!session_.IsThreadStopped(checkpoint.threadId))
+		return {{"error", "checkpoint thread must be VEH-stopped before restore"}};
+
+	std::vector<std::vector<uint8_t>> rollback;
+	rollback.reserve(checkpoint.regions.size());
+	for (const auto& region : checkpoint.regions) {
+		MEMORY_BASIC_INFORMATION mbi{};
+		if (!VirtualQueryEx(session_.GetTargetProcess(), reinterpret_cast<LPCVOID>(uintptr_t(region.address)),
+				&mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
+			reinterpret_cast<uint64_t>(mbi.AllocationBase) != region.allocationBase ||
+			mbi.Type != region.type || region.address + region.bytes.size() >
+				reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize)
+			return {{"error", "memory mapping changed since checkpoint; restore refused"},
+				{"address",CheckpointHex(region.address)}};
+		auto current = session_.ReadMemory(region.address, static_cast<uint32_t>(region.bytes.size()));
+		if (current.size() != region.bytes.size())
+			return {{"error", "failed to prepare restore rollback image"}};
+		rollback.push_back(std::move(current));
+	}
+	size_t written = 0;
+	for (; written < checkpoint.regions.size(); ++written) {
+		const auto& region = checkpoint.regions[written];
+		if (!session_.WriteMemory(region.address, region.bytes.data(), static_cast<uint32_t>(region.bytes.size()))) {
+			for (size_t i = 0; i <= written && i < rollback.size(); ++i)
+				session_.WriteMemory(checkpoint.regions[i].address, rollback[i].data(),
+					static_cast<uint32_t>(rollback[i].size()));
+			return {{"error", "memory restore failed; rollback attempted"}, {"failed_region",written}};
+		}
+	}
+	if (!session_.SetRegisters(checkpoint.threadId, checkpoint.registers)) {
+		for (size_t i = 0; i < rollback.size(); ++i)
+			session_.WriteMemory(checkpoint.regions[i].address, rollback[i].data(),
+				static_cast<uint32_t>(rollback[i].size()));
+		return {{"error", "context restore failed; memory rollback attempted"}};
+	}
+	return {{"restored",true}, {"id",id}, {"threadId",checkpoint.threadId},
+		{"regions",checkpoint.regions.size()}, {"memory_bytes",checkpoint.byteSize},
+		{"warning","external process state (other threads, handles, allocations, files, sockets) was not restored"}};
+}
+
+json McpServer::ToolCheckpointDiff(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+	uint64_t id = 0;
+	if (!CheckpointId(args, "id", id)) return {{"error", "valid checkpoint id is required"}};
+	Checkpoint before, after;
+	bool compareCurrent = !args.contains("other_id");
+	{
+		std::lock_guard<std::mutex> lock(checkpointMutex_);
+		auto found = checkpoints_.find(id);
+		if (found == checkpoints_.end()) return {{"error", "checkpoint not found"}};
+		before = found->second;
+		if (!compareCurrent) {
+			uint64_t otherId = 0;
+			if (!CheckpointId(args, "other_id", otherId)) return {{"error", "invalid other_id"}};
+			auto other = checkpoints_.find(otherId);
+			if (other == checkpoints_.end()) return {{"error", "other checkpoint not found"}};
+			after = other->second;
+		}
+	}
+	if (before.sessionGeneration != session_.GetSessionGeneration() ||
+		(!compareCurrent && after.sessionGeneration != before.sessionGeneration))
+		return {{"error", "checkpoint session mismatch"}};
+	if (compareCurrent) {
+		if (!session_.IsThreadStopped(before.threadId))
+			return {{"error", "checkpoint thread must be VEH-stopped to diff current state"}};
+		auto registers = session_.GetRegisters(before.threadId);
+		if (!registers) return {{"error", "failed to read current context"}};
+		after.threadId = before.threadId;
+		after.registers = *registers;
+		for (const auto& region : before.regions) {
+			CheckpointRegion current = region;
+			current.bytes = session_.ReadMemory(region.address, static_cast<uint32_t>(region.bytes.size()));
+			if (current.bytes.size() != region.bytes.size())
+				return {{"error", "failed to read current memory for diff"}, {"address",CheckpointHex(region.address)}};
+			after.regions.push_back(std::move(current));
+		}
+	}
+	if (before.threadId != after.threadId || before.regions.size() != after.regions.size())
+		return {{"error", "checkpoints have incompatible thread or region layouts"}};
+	json registerChanges = json::object();
+	auto beforeRegs = CheckpointRegisters(before.registers);
+	auto afterRegs = CheckpointRegisters(after.registers);
+	for (size_t i = 0; i < beforeRegs.size(); ++i)
+		if (beforeRegs[i].second != afterRegs[i].second)
+			registerChanges[beforeRegs[i].first] = {{"before",CheckpointHex(beforeRegs[i].second)},
+				{"after",CheckpointHex(afterRegs[i].second)}};
+	json xmmChanges = json::array();
+	if (!before.registers.is32bit) for (size_t i = 0; i < 16; ++i)
+		if (memcmp(before.registers.xmm[i], after.registers.xmm[i], 16) != 0) xmmChanges.push_back(i);
+	json memoryChanges = json::array();
+	bool truncated = false;
+	for (size_t regionIndex = 0; regionIndex < before.regions.size(); ++regionIndex) {
+		const auto& left = before.regions[regionIndex];
+		const auto& right = after.regions[regionIndex];
+		if (left.address != right.address || left.bytes.size() != right.bytes.size())
+			return {{"error", "checkpoints have incompatible region layouts"}};
+		for (size_t offset = 0; offset < left.bytes.size();) {
+			if (left.bytes[offset] == right.bytes[offset]) { ++offset; continue; }
+			size_t start = offset;
+			while (offset < left.bytes.size() && left.bytes[offset] != right.bytes[offset]) ++offset;
+			if (memoryChanges.size() == 1024) { truncated = true; break; }
+			memoryChanges.push_back({{"address",CheckpointHex(left.address + start)},
+				{"offset",start}, {"size",offset-start}});
+		}
+		if (truncated) break;
+	}
+	return {{"id",id}, {"against",compareCurrent ? json("current") : args["other_id"]},
+		{"register_delta",std::move(registerChanges)}, {"xmm_changed",std::move(xmmChanges)},
+		{"memory_changes",std::move(memoryChanges)}, {"truncated",truncated}};
+}
+
+json McpServer::ToolCheckpointDelete(const json& args) {
+	uint64_t id = 0;
+	if (!CheckpointId(args, "id", id)) return {{"error", "valid checkpoint id is required"}};
+	std::lock_guard<std::mutex> lock(checkpointMutex_);
+	auto found = checkpoints_.find(id);
+	if (found == checkpoints_.end()) return {{"deleted",false}, {"id",id}};
+	checkpointBytes_ -= found->second.byteSize;
+	checkpoints_.erase(found);
+	return {{"deleted",true}, {"id",id}};
+}
+
 json McpServer::ToolModules(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
@@ -2030,6 +2295,12 @@ void McpServer::FlushEvents() {
 		actions.pop();
 		BatchExecutor executor(session_, [this](uint32_t id, const json& action) {
 			StoreBreakpointAction(id, action);
+		}, [this](const std::string& name, const json& toolArgs) {
+			if (name == "veh_checkpoint_create") return ToolCheckpointCreate(toolArgs);
+			if (name == "veh_checkpoint_restore") return ToolCheckpointRestore(toolArgs);
+			if (name == "veh_checkpoint_diff") return ToolCheckpointDiff(toolArgs);
+			if (name == "veh_checkpoint_delete") return ToolCheckpointDelete(toolArgs);
+			return json{{"error", "Unsupported action tool: " + name}};
 		});
 		json result = executor.Execute(pending.steps);
 		if (result.dump().find("\"error\"") != std::string::npos) {
@@ -2895,7 +3166,7 @@ json McpServer::GetToolsList() {
 			{"system_only", {{"type", "boolean"}, {"description", "Only resolve to system DLLs. Default: false"}}}
 		 }}, {"required", json::array({"addresses"})}}}},
 
-		{{"name", "veh_trace_basic_blocks"}, {"description", "Discover the executed control-flow path in an address range. Single-steps one VEH-stopped thread entirely inside the injected DLL, returning only unique basic blocks/edges with hit counts. Captures registers and a bounded stack snapshot on initial entry and first observation of each edge. Stops on range exit or block/edge/step/time limits; optionally follows exception-based control flow."},
+		{{"name", "veh_trace_basic_blocks"}, {"description", "Bounded semantic trace for one VEH-stopped thread. Returns unique blocks/edges, register deltas, hot/loop summaries, indirect targets, memory-region metadata, and rich exception events. Optional memory-write collection records before/after transitions and executable write-to-execute links. Compiled start/stop/collect conditions avoid per-instruction MCP traffic."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID currently stopped by VEH; its RIP/EIP must be inside the range"}}},
 			{"start", {{"type", "string"}, {"description", "Inclusive range start (hex or module+RVA)"}}},
@@ -2905,8 +3176,40 @@ json McpServer::GetToolsList() {
 			{"max_steps", {{"type", "integer"}, {"description", "Maximum instruction/exception events (default 100000, max 5000000)"}}},
 			{"timeout_ms", {{"type", "integer"}, {"description", "Wall-clock limit (default 10000, max 60000)"}}},
 			{"stack_bytes", {{"type", "integer"}, {"description", "Bytes to capture from SP per snapshot (default 128, max 256; 0 disables stack bytes)"}}},
-			{"follow_exceptions", {{"type", "boolean"}, {"description", "Pass target exceptions to its handlers and record handled continuations as edges (default true)"}}}
+			{"follow_exceptions", {{"type", "boolean"}, {"description", "Pass target exceptions to its handlers and record handled continuations as edges (default true)"}}},
+			{"collect_memory_writes", {{"type", "boolean"}, {"description", "Collect bounded memory-write before/after transitions (default false)"}}},
+			{"max_memory_writes", {{"type", "integer"}, {"description", "Maximum unique memory-write transitions (default 4096, max 16384)"}}}
+			,{"collect_memory_reads", {{"type", "boolean"}, {"description", "Collect bounded memory-read address/value observations (default false)"}}}
+			,{"max_memory_reads", {{"type", "integer"}, {"description", "Maximum unique memory-read observations (default 4096, max 16384)"}}}
+			,{"dependency_sources", {{"type", "array"}, {"maxItems", 32}, {"description", "Conservative dependency sources: register names or {address,size,label?} memory ranges"}}}
+			,{"start_condition", {{"type", "string"}, {"description", "Begin collection when a register/memory comparison becomes true; supports up to four && or || clauses"}}}
+			,{"stop_condition", {{"type", "string"}, {"description", "Stop trace when a register/memory comparison becomes true"}}}
+			,{"collect_condition", {{"type", "string"}, {"description", "Collect only while a register/memory comparison is true"}}}
 		 }}, {"required", json::array({"threadId", "start", "end"})}}}},
+
+		{{"name", "veh_checkpoint_create"}, {"description", "Capture one VEH-stopped thread's GPR/flags (plus x64 XMM) and explicitly selected memory ranges. Checkpoints are session-local and bounded; they do not capture other threads, handles, allocations, files, sockets, or kernel state."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"threadId", {{"type", "integer"}, {"description", "VEH-stopped thread to capture"}}},
+			{"regions", {{"type", "array"}, {"maxItems", 16}, {"items", {{"type", "object"}, {"properties", {
+				{"address", {{"type", "string"}}}, {"size", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4194304}}}
+			}} , {"required", json::array({"address", "size"})}}}, {"description", "Non-overlapping committed ranges; max 16 MiB total"}}}
+		 }}, {"required", json::array({"threadId"})}}}},
+
+		{{"name", "veh_checkpoint_restore"}, {"description", "Restore selected memory and the captured thread context. Refuses changed mappings, rolls memory back on failure, and requires the original thread to be VEH-stopped."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"id", {{"description", "Checkpoint ID returned by veh_checkpoint_create"}}}
+		 }}, {"required", json::array({"id"})}}}},
+
+		{{"name", "veh_checkpoint_diff"}, {"description", "Compare a checkpoint with current stopped-thread state or another compatible checkpoint. Returns register changes and bounded changed-memory spans."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"id", {{"description", "Base checkpoint ID"}}},
+			{"other_id", {{"description", "Optional checkpoint ID; omit to compare with current state"}}}
+		 }}, {"required", json::array({"id"})}}}},
+
+		{{"name", "veh_checkpoint_delete"}, {"description", "Delete a session-local checkpoint and release its memory budget."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"id", {{"description", "Checkpoint ID to delete"}}}
+		 }}, {"required", json::array({"id"})}}}},
 
 		{{"name", "veh_dump_memory"}, {"description", "Dump memory to a binary file. Reads in 1MB chunks, supports up to 64MB. Avoids token overhead of hex string encoding."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {

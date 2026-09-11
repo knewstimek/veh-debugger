@@ -15,7 +15,7 @@ in-process라는 점에서 하나 더. Windows Debug API 디버거는 프로세�
 같은 디버깅 엔진을 두 프로토콜로 노출한다.
 
 - **DAP**: VSCode 디버그 패널에서 직접. 소스 BP, 스텝, 디스어셈블리, 레지스터 편집.
-- **MCP**: Claude, Cursor, Codex 등이 40개 도구를 직접 호출. GUI를 거치지 않고 디버깅 연산을 함수처럼 조합·자동화한다 — 에이전트가 디버거를 '조종'하는 게 아니라 primitive로 '프로그래밍'한다.
+- **MCP**: Claude, Cursor, Codex 등이 44개 도구를 직접 호출. GUI를 거치지 않고 디버깅 연산을 함수처럼 조합·자동화한다 — 에이전트가 디버거를 '조종'하는 게 아니라 primitive로 '프로그래밍'한다.
 
 ## 실전 시나리오
 
@@ -81,9 +81,16 @@ veh_trace_calls(addresses=[...], duration_sec=5, resolve=true, system_only=true)
 보호 코드 진입점에서 정지한 뒤, 지정 범위를 벗어나거나 제한에 도달할 때까지 basic block과 edge coverage를 수집한다.
 ```
 veh_trace_basic_blocks(threadId=..., start="game.exe+0x12000", end="game.exe+0x14000",
-                       max_steps=100000, timeout_ms=10000, follow_exceptions=true)
+                       max_steps=100000, timeout_ms=10000, follow_exceptions=true,
+                       collect_memory_writes=true, max_memory_writes=4096,
+                       collect_memory_reads=true,
+                       dependency_sources=["rcx", {"address":"game.exe+0x5000","size":4,"label":"input"}])
 ```
-명령마다 MCP로 보내지 않고 타겟 DLL 안에서 TF single-step과 집계를 수행한다. 반환값은 unique block/edge와 실행 횟수뿐이며, 최초 진입과 새로운 edge에서만 레지스터 및 제한된 스택 snapshot을 저장한다. 예외가 타겟의 handler에서 처리되어 실행이 재개되면 continuation 주소를 exception edge로 기록한다. 현재는 VEH로 정지된 단일 스레드가 대상이며 범위를 벗어나면 정지한다. `veh_batch` step과 breakpoint `action`에서도 같은 인자와 결과 형식으로 사용할 수 있으며 `$N.threadId` 같은 이전 step 참조도 지원한다.
+명령마다 MCP로 보내지 않고 타겟 DLL 안에서 TF single-step과 bounded 집계를 수행한다. unique block/edge, register delta, hot path, indirect target profile을 반환하며, `collect_memory_writes=true`이면 명령 실행 전후의 메모리 write 값을 최대 `max_memory_writes`개 unique transition으로 압축한다. 실행 가능 페이지에 대한 write와 이후 변경 범위 실행도 연결해서 표시한다. REP 계열, 16바이트 초과 operand, FS/GS segment write처럼 정확히 모델링하지 못한 경우는 `unsupported_memory_writes`에 집계하며 누락을 숨기지 않는다. 최초 진입과 새로운 edge에서만 레지스터 및 제한된 스택 snapshot을 저장하고, 처리된 예외 continuation도 edge로 기록한다. 현재는 VEH로 정지된 단일 스레드가 대상이며 범위를 벗어나면 정지한다. `veh_batch` step과 breakpoint `action`에서도 같은 결과 형식을 사용한다.
+
+`collect_memory_reads=true`는 주소·크기·값을 `max_memory_reads` 한도에서 deduplicate한다. `dependency_sources`에는 최대 32개의 레지스터 이름 또는 `{address,size,label?}` 메모리 범위를 지정할 수 있고, 결과의 edge/read/write/final register에는 conservative origin bitset을 label 배열로 반환한다. 이는 full symbolic taint가 아니라 GPR·flags와 동일 주소/크기의 memory flow만 추적하는 실험 기능이다. REP, 16바이트 초과, FS/GS 및 지원하지 않는 vector flow는 unsupported count로 드러내며, 조건부 수집 공백이 있으면 `dependency_incomplete=true`로 완전성을 보장하지 않음을 알린다.
+
+`start_condition`, `stop_condition`, `collect_condition`은 `r12 == 0x1234`, `[r13-8] != 0`, `rip < 0x140000000 || rip >= 0x150000000` 형태를 지원한다. 비교 연산은 `== != < <= > >=`, 메모리 폭은 `byte/word/dword/qword [reg±offset]`으로 지정할 수 있고 기본값은 포인터 폭이다. 한 조건에서 최대 4개 절을 같은 `&&` 또는 `||`로 연결할 수 있으며 두 논리 연산자의 혼합은 거부한다. 결과의 주소에는 가능한 경우 `image`, `mapped`, `private`, `stack` 및 protection/guard 분류가 붙고, `loop_folds`는 반복 진입 block 후보만 제공하며 dispatcher 의미 판정은 하지 않는다. `exceptions`에는 code, fault RIP/address, continuation, fault/continuation snapshot이 포함된다. 실제로 실행된 SEH handler 주소는 안정적으로 관측되지 않으므로 추측해 반환하지 않는다.
 
 ---
 
@@ -91,7 +98,7 @@ veh_trace_basic_blocks(threadId=..., start="game.exe+0x12000", end="game.exe+0x1
 
 - **VEH 기반**: Windows Debug API 대신 VEH를 사용하여 안티디버그 우회에 유리
 - **DAP 전체 지원**: VSCode, MCP debug 도구 등 모든 DAP 호환 클라이언트에서 사용 가능
-- **MCP 도구 서버**: AI 에이전트(Claude, Codex 등)가 직접 디버거를 제어하는 40개 도구 제공
+- **MCP 도구 서버**: AI 에이전트(Claude, Codex 등)가 직접 디버거를 제어하는 44개 도구 제공
 - **TCP 모드**: `--tcp --port=PORT`로 원격 디버깅/MCP 연동 지원
 - **원격 접속**: `--remote` / `--bind=0.0.0.0`으로 VM/네트워크 너머 디버깅
 - **32/64비트 지원**: x86/x64 프로세스 모두 디버깅 (32비트 타겟은 별도 32비트 DLL 빌드 + WoW64 인젝션)
@@ -124,7 +131,7 @@ veh-debug-adapter.exe              veh-mcp-server.exe
 |---------|------|
 | `veh-debugger.dll` (`vcruntime_net.dll`) | 타겟 프로세스에 인젝션. VEH 핸들러 등록, 브레이크포인트 관리, 스레드/스택/메모리 조회 |
 | `veh-debug-adapter.exe` | DAP 프로토콜 서버. DLL 인젝션, Named Pipe 통신, JSON-RPC 처리 |
-| `veh-mcp-server.exe` | MCP 도구 서버. AI 에이전트가 40개 도구로 디버거 직접 제어 |
+| `veh-mcp-server.exe` | MCP 도구 서버. AI 에이전트가 44개 도구로 디버거 직접 제어 |
 | VSCode Extension | launch.json 스키마 정의, 어댑터 경로 설정 (최소 래퍼) |
 
 ## 빌드
@@ -280,7 +287,7 @@ enabled = true
 
 설정 후 에이전트/IDE를 재시작하면 활성화됩니다.
 
-**MCP 도구 목록 (40개)**
+**MCP 도구 목록 (44개)**
 
 | 도구 | 인자 | 설명 |
 |------|------|------|
@@ -323,7 +330,11 @@ enabled = true
 | `veh_batch` | `steps` | 다중 명령 일괄 실행 (`$N`/`$last`/`$prev` 결과 참조, if/loop/for_each 제어 흐름) |
 | `veh_trace_callers` | `address, duration_sec?` | 함수 호출자 프로파일링 (자동 resume -> N초간 caller 수집 -> 자동 pause). 유니크 caller별 히트 카운트 반환. x64: RtlVirtualUnwind (정확). x86: [ESP] (함수 진입점에서만 정확) |
 | `veh_trace_calls` | `addresses, duration_sec?, resolve?, system_only?` | call/jmp 명령이 런타임에 어디로 가는지 모니터링. 콜 사이트에 BP 설치 후 N초간 실행, 실제 타겟 주소 + API 이름 수집. `resolve=true`: thunk/trampoline을 자연스러운 call 컨텍스트에서 따라가 최종 API까지 추적 (예외 기반 난독화 대응). `system_only=true`: 시스템 DLL 타겟만 반환. 패킹된 바이너리의 IAT 복원용. |
-| `veh_trace_basic_blocks` | `threadId, start, end, max_blocks?, max_edges?, max_steps?, timeout_ms?, stack_bytes?, follow_exceptions?` | 미지의 실행 경로 발견용 basic-block/edge coverage. VEH로 정지된 단일 스레드를 DLL 내부에서 single-step하고 unique block/edge hit count만 반환. 최초 진입/새 edge에서 레지스터·스택 snapshot을 저장하며 처리된 예외 continuation도 edge로 기록. 범위 이탈 또는 설정한 제한에서 정지. `veh_batch`/breakpoint `action` 지원. |
+| `veh_trace_basic_blocks` | `threadId, start, end, ..., collect_memory_writes?, collect_memory_reads?, dependency_sources?, start_condition?, stop_condition?, collect_condition?` | DLL 내부 bounded trace. block/edge, delta, hot/loop, memory read/write, 제한된 dependency, region 및 exception event를 반환한다. |
+| `veh_checkpoint_create` | `threadId, regions?` | VEH 정지 스레드의 GPR/flags(x64는 XMM 포함)와 선택 메모리 범위를 세션 로컬 checkpoint로 저장한다. |
+| `veh_checkpoint_restore` | `id` | 동일 스레드가 VEH 정지된 상태에서 context와 선택 메모리를 복원한다. 변경된 매핑은 거부하고 실패 시 메모리 rollback을 시도한다. |
+| `veh_checkpoint_diff` | `id, other_id?` | checkpoint와 현재 상태 또는 다른 checkpoint의 register 및 변경 메모리 구간을 비교한다. |
+| `veh_checkpoint_delete` | `id` | checkpoint를 삭제하고 서버 메모리 예산을 반환한다. |
 
 > **Non-stop 조회 (타겟 정지 불필요)**: `veh_read_memory` / `veh_read_pointer_chain` / `veh_write_memory` / `veh_dump_memory` / `veh_disassemble` / `veh_modules` 는 타겟이 **실행 중에도** 동작합니다 (DLL 내 전용 파이프 스레드가 처리 -- 다른 스레드를 멈추지 않음). GUI를 조작하면서 라이브 값을 읽을 때 BP를 걸거나 detach/attach를 왕복할 필요가 없습니다. 반대로 `veh_registers` / `veh_stack_trace` / `veh_enum_locals` / `veh_step_*` 는 스레드 컨텍스트가 필요하므로 BP 히트나 `veh_pause`로 정지된 상태에서만 동작합니다.
 

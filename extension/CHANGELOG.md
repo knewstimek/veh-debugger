@@ -3,7 +3,14 @@
 ## Unreleased
 
 ### Changed
-- **Release documentation synchronization** -- corrected the packaged extension's MCP tool count to 40 and updated the IPC overview to include the full dynamic-tracing command range through `TraceBasicBlocks` (`0x0074`).
+- **Release documentation synchronization** -- corrected the packaged extension's MCP tool count to 44 and updated the IPC overview through `TraceBasicBlocks` (`0x0074`) and atomic stopped-context restore (`0x0026`).
+
+### Added
+- **Experimental memory-read and dependency trace** -- `veh_trace_basic_blocks` can opt into bounded, deduplicated memory-read values and track up to 32 explicit register or memory origins through GPRs, flags, exact-address memory writes, and control-flow edges. Unsupported operands, truncation, and filtered-window incompleteness are reported explicitly; this is conservative taint-lite rather than symbolic execution.
+- **Semantic summaries for `veh_trace_basic_blocks`** -- trace results now include block-level register deltas on first-observed edges, ranked hot blocks/edges, source instruction addresses, and profiles of runtime targets reached by indirect calls/jumps. Collection remains bounded inside the existing DLL trace and has direct-call/`veh_batch` parity.
+- **Bounded memory-write tracing** -- `collect_memory_writes` captures effective address, size, and before/after bytes without allocating in the VEH path, deduplicates identical transitions up to `max_memory_writes`, and explicitly reports truncation and unsupported operands. Writes to executable pages are linked to a later observed execution of the changed range using trace step order.
+- **Conditional trace windows and richer analysis** -- `start_condition`, `stop_condition`, and `collect_condition` compile up to four register or register-relative-memory comparisons into fixed trace bytecode. Results classify address regions, summarize repeated re-entry blocks in `loop_folds`, and expose exception code, fault RIP/address, continuation, hit count, and both context snapshots without guessing an unobserved SEH handler address.
+- **Session-local checkpoints** -- four new tools create, restore, diff, and delete a bounded checkpoint containing one VEH-stopped thread context and selected memory. Restore validates mapping fingerprints and rolls back memory on failure; lifecycle changes clear checkpoints. Direct calls, `veh_batch`, and breakpoint actions share the same store.
 
 ## 1.1.14
 
