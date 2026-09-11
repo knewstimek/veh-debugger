@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.15 - 2026-09-11
 
 ### Changed
 - **Release documentation synchronization** -- corrected the packaged extension's MCP tool count to 44 and updated the IPC overview through `TraceBasicBlocks` (`0x0074`) and atomic stopped-context restore (`0x0026`).
