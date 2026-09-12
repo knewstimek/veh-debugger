@@ -7,7 +7,7 @@
 
 namespace veh {
 
-enum class LogLevel { Debug, Info, Warning, Error };
+enum class LogLevel { Debug, Info, Warning, Error, Off };
 
 // Logging from inside a VEH callback can recursively hit an API breakpoint used
 // by stdio (notably WriteFile), or deadlock if the interrupted thread already

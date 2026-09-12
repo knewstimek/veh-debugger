@@ -142,11 +142,9 @@ DWORD WINAPI InitThread(LPVOID) {
 	// 시스템 dbghelp.dll 선로드 (타겟 폴더의 구버전 방지)
 	PreloadSystemDbgHelp();
 
-	// DLL 로그를 파일로 출력 (디버깅용)
-	char logPath[MAX_PATH];
-	snprintf(logPath, sizeof(logPath), "veh_dll_%u.log", GetCurrentProcessId());
-	veh::Logger::Instance().SetFile(logPath);
-	veh::Logger::Instance().SetLevel(veh::LogLevel::Debug);
+	// Injected DLL logging is disabled by default.  In particular, do not create
+	// a veh_dll_<pid>.log file in the target's current working directory.
+	veh::Logger::Instance().SetLevel(veh::LogLevel::Off);
 
 	// 파이프 서버 시작
 	uint32_t pid = GetCurrentProcessId();
