@@ -1,58 +1,62 @@
-# VEH Debugger v1.0.4 수동 테스트 가이드
+# VEH Debugger test guide
 
-## 사전 준비
+Automated DAP/MCP integration tests are the primary validation path. Use manual
+VSCode testing only for UI behavior that the protocol harnesses cannot cover.
 
-1. **관리자 권한**으로 VSCode 실행 (DLL 인젝션에 필요)
-2. vsix 설치: `code --install-extension veh-debugger-win32-x64-1.0.4.vsix`
-   또는 Extensions 패널 → ... → Install from VSIX
+## Prerequisites
 
-## 테스트 방법
+Build both target architectures:
 
-### 방법 A: Launch (자동 실행)
-1. VSCode에서 `test/` 폴더를 열기
-2. F5 → "VEH: Launch test_target" 선택
-3. stopOnEntry=true이므로 진입점에서 자동 중단
+```powershell
+cmake -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+cmake -B build32 -G "Visual Studio 17 2022" -A Win32
+cmake --build build32 --config Release
+```
 
-### 방법 B: Attach (직접 붙이기)
-1. 관리자 CMD에서 `test\build\Release\test_target.exe` 실행
-2. 출력된 PID 확인
-3. VSCode F5 → "VEH: Attach to PID" → PID 입력
-4. 중단 후 Pause(F6) 누르면 현재 위치에서 정지
+Run tests from the repository root. Test harnesses must use real timeouts,
+`try/finally` cleanup, and must terminate and wait for every process they start.
 
-## 테스트 항목
+## Core integration coverage
 
-### 1. Hover 미리보기
-- Disassembly 뷰 열기: Command Palette → "Open Disassembly View"
-- 레지스터 이름(RAX, RCX 등)에 마우스 올리기 → 값 표시되는지 확인
-- 주소(0x...)에 마우스 올리기 → 메모리 값 표시되는지 확인
+```powershell
+py -3 test/test_step.py
+py -3 test/test_stepin.py
+py -3 test/test_bp_masking.py
+py -3 test/test_batch.py
+py -3 test/test_mcp_launch.py
+py -3 test/test_mcp_deep.py
+py -3 test/test_mcp_new_features.py
+py -3 test/test_trace_basic_blocks.py
+```
 
-### 2. 레지스터 수정
-- Variables 패널에서 "Registers" scope 확인
-- 레지스터 값 더블클릭 → 새 값 입력 (예: 0x1234)
-- ⚠ DLL에 SetRegister 핸들러가 없으면 에러 메시지 표시됨 (정상)
+For architecture-sensitive MCP behavior, rerun the applicable test against the
+x86 build:
 
-### 3. 조건부 브레이크포인트
-- Disassembly에서 주소 클릭 → BP 설정
-- BP 우클릭 → "Edit Condition..." → `RAX==0x0` 같은 조건 입력
-- Continue → 조건 만족 시에만 중단되는지 확인
-- 조건 불만족 시 자동 계속 실행
+```powershell
+$env:VEH_TEST_BUILD_DIR = (Resolve-Path build32).Path
+py -3 test/test_trace_basic_blocks.py
+Remove-Item Env:VEH_TEST_BUILD_DIR
+```
 
-### 4. Hit Count 브레이크포인트
-- BP 우클릭 → "Edit Condition..." → Hit Count 탭 → 숫자 입력 (예: 5)
-- Continue 반복 → N번째 히트에서 중단되는지 확인
+After a test run, inspect only processes whose executable path belongs to the
+build directory used by that run. Before terminating a leftover, verify its full
+parent chain and do not touch unrelated terminal or agent sessions.
 
-### 5. Log Points
-- Disassembly에서 라인 번호 옆 우클릭 → "Add Logpoint..."
-- 메시지 입력: `counter hit! RAX={RAX} RCX={RCX}`
-- Continue → Debug Console에 메시지 출력되는지 확인 (중단 없이)
+## Optional VSCode UI smoke test
 
-## 기대 결과
+Install the freshly packaged VSIX or run the extension development host, then use
+a launch configuration pointing at `build/bin/Release/test_target.exe`.
 
-| 기능 | 예상 동작 |
-|------|-----------|
-| Hover (레지스터) | 레지스터 값 hex로 표시 |
-| Hover (주소) | [0xADDR] = 0x... 형태로 메모리 값 표시 |
-| 레지스터 수정 | DLL 미지원시 에러 메시지 |
-| 조건부 BP | 조건 불만족 → 자동 Continue |
-| Hit Count | N번째에서 정지 |
-| Log Point | Debug Console에 치환된 메시지 출력 |
+Verify:
+
+- launch and attach stop with the expected thread and address;
+- hover displays register and memory values;
+- register edits are applied after continue;
+- conditional and hit-count breakpoints filter correctly;
+- log points write to Debug Console without stopping;
+- step-in, step-over, and step-out stop at the expected instructions;
+- x86 targets load `vcruntime_net32.dll` and expose 32-bit registers.
+
+Do not use a hard-coded extension version or depend on a repository-local
+`.vscode/launch.json`; those files are intentionally local configuration.

@@ -1,4 +1,4 @@
-Follow the release procedure in `CLAUDE.md` exactly before publishing any release.
+- Publish a release only when the user explicitly authorizes it and chooses the version. Follow `RELEASING.md` exactly.
 
 - After a successful VEH Debugger build, use the `agent-tool` `copy` tool to deploy `veh-mcp-server.exe`, `veh-debug-adapter.exe`, and the required `vcruntime_net*.dll` beside `agent-tool.exe`, verifying exact paths and copied hashes first.
 - When this repository has a changelog or release-notes file, record completed user-facing changes under an `Unreleased` section as part of the same task so the next release notes are ready.

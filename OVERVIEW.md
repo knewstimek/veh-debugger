@@ -159,6 +159,16 @@ transition. Each record carries the trace-step sequence and thread ID. Exhaustin
 `max_events` marks the ordered stream incomplete without stopping aggregate
 collection; this is block-transition ordering rather than instruction-level history.
 
+### Analysis boundary
+
+The injected debugger is a bounded runtime-observation engine: it records measured
+blocks, transitions, state changes, memory observations, exceptions, and explicit
+incompleteness. VM-specific conclusions such as dispatcher identification,
+VIP/VSP inference, handler semantics, virtual CFG recovery, symbolic validation,
+and IR generation belong in an external analyzer. Keeping that boundary avoids
+embedding assumptions about a particular protector or virtual machine in the
+debugger protocol.
+
 The response contains unique block/edge hit counts, ranked hot blocks/edges, and
 the source instruction for each edge. Calls and unconditional branches whose
 decoded target operand is a register or memory location are marked indirect and
@@ -289,11 +299,15 @@ Pattern: reader thread copies state under lock, then uses local copy outside loc
 ```bash
 cmake -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
+cmake -B build32 -G "Visual Studio 17 2022" -A Win32
+cmake --build build32 --config Release --target veh-debugger
 ```
 
-Output: `build/bin/Release/` -> `veh-debug-adapter.exe`, `vcruntime_net.dll`, `veh-mcp-server.exe`
+Output: `build/bin/Release/` -> `veh-debug-adapter.exe`, `vcruntime_net.dll`, `veh-mcp-server.exe`; `build32/bin/Release/` -> `vcruntime_net32.dll`
 
 Deploy to: `~/.vscode/extensions/knewstimek.veh-debugger-{version}/bin/`
+
+See `RELEASING.md` for the version synchronization, validation, packaging, and publishing procedure.
 
 ## Logging & Diagnostics
 
@@ -318,8 +332,8 @@ cmake -B build -DVEH_DAP_TRACE=ON
 Output: `C:\tmp\veh_dap_trace.log` (REQUEST, setBreakpoints, setInstructionBreakpoints)
 
 ### DLL-side logging
-The DLL (`vcruntime_net.dll`) uses the same `Logger` class (default: stderr).
-Since the DLL runs inside the target process, stderr goes nowhere unless the target has a console.
+Injected DLL file/stderr logging is disabled by default, so it does not create
+`veh_dll_<pid>.log` in the target working directory.
 A few critical paths also use `OutputDebugStringW` - view with DebugView (Sysinternals).
 
 ## Test
@@ -335,7 +349,8 @@ Tests speak DAP protocol directly via stdin/stdout to the adapter process.
 ```bash
 py -3 test/test_mcp_launch.py       # MCP launch + detach
 py -3 test/test_mcp_stepover.py     # MCP StepOver CALL skip
-py -3 test/test_mcp_new_features.py # 8 new MCP tools (source BP, func BP, evaluate, etc.)
-py -3 test/test_mcp_deep.py         # 28 deep integration tests (value verification)
+py -3 test/test_mcp_new_features.py # source/function BP, evaluate, and related tools
+py -3 test/test_mcp_deep.py         # deep integration scenarios with value verification
 py -3 test/test_mcp_trace_callers.py # TraceCallers tool
+py -3 test/test_trace_basic_blocks.py # semantic trace, ordered events, batch/action parity
 ```
