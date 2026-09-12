@@ -1415,6 +1415,8 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		const TraceCondition& collectCondition) {
 	TraceBasicBlocksResult result;
 	TraceBasicBlocksRequest req{};
+	req.wireVersion = kTraceBasicBlocksWireVersion;
+	req.requestSize = sizeof(req);
 	req.threadId = threadId;
 	req.rangeStart = rangeStart;
 	req.rangeEnd = rangeEnd;
@@ -1447,11 +1449,15 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	std::vector<uint8_t> data;
 	if (!pipeClient_.SendAndReceive(IpcCommand::TraceBasicBlocks, &req, sizeof(req), data,
 			static_cast<int>(timeoutMs) + 15000)) return result;
-	if (data.size() < sizeof(TraceBasicBlocksResponse)) return result;
+	if (data.size() < sizeof(IpcStatus)) return result;
+	result.status = *reinterpret_cast<const IpcStatus*>(data.data());
+	if (data.size() < kTraceBasicBlocksResponseV3Size) return result;
 	auto* header = reinterpret_cast<const TraceBasicBlocksResponse*>(data.data());
-	if (header->status != IpcStatus::Ok) return result;
-
-	size_t required = sizeof(*header) +
+	size_t headerSize = header->headerSize;
+	auto requiredSize = [&](size_t candidate) {
+		uint32_t registerEventCount = candidate >= kTraceBasicBlocksResponseV4Size ?
+			header->registerEventCount : 0;
+		return candidate +
 		static_cast<size_t>(header->blockCount) * sizeof(TraceBasicBlockEntry) +
 		static_cast<size_t>(header->edgeCount) * sizeof(TraceBasicBlockEdgeEntry) +
 		static_cast<size_t>(header->snapshotCount) * sizeof(TraceBasicBlockSnapshot) +
@@ -1460,10 +1466,31 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		static_cast<size_t>(header->exceptionEventCount) * sizeof(TraceBasicBlockExceptionEntry) +
 		static_cast<size_t>(header->eventCount) * sizeof(TraceBasicBlockEventEntry) +
 		static_cast<size_t>(header->memoryEventCount) * sizeof(TraceBasicBlockMemoryEventEntry) +
-		static_cast<size_t>(header->registerEventCount) * sizeof(TraceBasicBlockRegisterEventEntry) +
+		static_cast<size_t>(registerEventCount) * sizeof(TraceBasicBlockRegisterEventEntry) +
 		static_cast<size_t>(header->codeVersionCount) * sizeof(TraceBasicBlockCodeVersionEntry) +
 		header->codeByteCount;
-	if (required > data.size()) return result;
+	};
+	if (headerSize == 0) {
+		if (data.size() >= kTraceBasicBlocksResponseV4Size &&
+			requiredSize(kTraceBasicBlocksResponseV4Size) == data.size())
+			headerSize = kTraceBasicBlocksResponseV4Size;
+		else if (requiredSize(kTraceBasicBlocksResponseV3Size) == data.size())
+			headerSize = kTraceBasicBlocksResponseV3Size;
+		else return result;
+	}
+	if (headerSize < kTraceBasicBlocksResponseV3Size || headerSize > data.size() ||
+		requiredSize(headerSize) != data.size()) return result;
+	if (headerSize >= kTraceBasicBlocksResponseV5Size) {
+		result.startFailure = static_cast<TraceBasicBlocksStartFailure>(header->startFailureReason);
+		result.stopped = header->stopped != 0;
+		result.ipInRange = header->ipInRange != 0;
+		result.decodeSucceeded = header->decodeSucceeded != 0;
+		result.decodedInstructionCount = header->decodedInstructionCount;
+		result.normalizedIp = header->normalizedIp;
+		result.normalizedRangeStart = header->normalizedRangeStart;
+		result.normalizedRangeEnd = header->normalizedRangeEnd;
+	}
+	if (header->status != IpcStatus::Ok) return result;
 
 	result.ok = true;
 	result.stopReason = header->stopReason;
@@ -1490,14 +1517,16 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	result.memoryEventsTruncated = header->memoryEventsTruncated != 0;
 	result.memoryEventSchemaVersion = header->memoryEventSchemaVersion;
 	result.memoryEventsDropped = header->memoryEventsDropped;
-	result.registerEventCollectionEnabled = header->registerEventCollectionEnabled != 0;
-	result.registerEventsTruncated = header->registerEventsTruncated != 0;
-	result.registerEventSchemaVersion = header->registerEventSchemaVersion;
-	result.registerEventsDropped = header->registerEventsDropped;
+	if (headerSize >= kTraceBasicBlocksResponseV4Size) {
+		result.registerEventCollectionEnabled = header->registerEventCollectionEnabled != 0;
+		result.registerEventsTruncated = header->registerEventsTruncated != 0;
+		result.registerEventSchemaVersion = header->registerEventSchemaVersion;
+		result.registerEventsDropped = header->registerEventsDropped;
+	}
 	memcpy(result.finalRegisterDependencies, header->finalRegisterDependencies,
 		sizeof(result.finalRegisterDependencies));
 	result.finalFlagsDependencies = header->finalFlagsDependencies;
-	const uint8_t* cursor = data.data() + sizeof(*header);
+	const uint8_t* cursor = data.data() + headerSize;
 	auto* blocks = reinterpret_cast<const TraceBasicBlockEntry*>(cursor);
 	result.blocks.assign(blocks, blocks + header->blockCount);
 	cursor += static_cast<size_t>(header->blockCount) * sizeof(*blocks);
@@ -1522,9 +1551,11 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	auto* memoryEvents = reinterpret_cast<const TraceBasicBlockMemoryEventEntry*>(cursor);
 	result.memoryEvents.assign(memoryEvents, memoryEvents + header->memoryEventCount);
 	cursor += static_cast<size_t>(header->memoryEventCount) * sizeof(*memoryEvents);
-	auto* registerEvents = reinterpret_cast<const TraceBasicBlockRegisterEventEntry*>(cursor);
-	result.registerEvents.assign(registerEvents, registerEvents + header->registerEventCount);
-	cursor += static_cast<size_t>(header->registerEventCount) * sizeof(*registerEvents);
+	if (headerSize >= kTraceBasicBlocksResponseV4Size) {
+		auto* registerEvents = reinterpret_cast<const TraceBasicBlockRegisterEventEntry*>(cursor);
+		result.registerEvents.assign(registerEvents, registerEvents + header->registerEventCount);
+		cursor += static_cast<size_t>(header->registerEventCount) * sizeof(*registerEvents);
+	}
 	auto* codeVersions = reinterpret_cast<const TraceBasicBlockCodeVersionEntry*>(cursor);
 	result.codeVersions.assign(codeVersions, codeVersions + header->codeVersionCount);
 	cursor += static_cast<size_t>(header->codeVersionCount) * sizeof(*codeVersions);

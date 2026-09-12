@@ -2138,15 +2138,54 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 	}
 
 	case IpcCommand::TraceBasicBlocks: {
-		if (payloadSize < sizeof(TraceBasicBlocksRequest)) {
+		if (payloadSize < kTraceBasicBlocksRequestV3Size) {
 			IpcStatus status = IpcStatus::InvalidArgs;
 			SendResponse(command, &status, sizeof(status)); return;
 		}
-		auto req = *reinterpret_cast<const TraceBasicBlocksRequest*>(payload);
+		TraceBasicBlocksRequest req{};
+		memcpy(&req, payload, std::min<size_t>(payloadSize, sizeof(req)));
+		const bool explicitCurrentWire = req.wireVersion >= kTraceBasicBlocksWireVersion &&
+			req.requestSize >= kTraceBasicBlocksRequestV4Size && req.requestSize <= payloadSize;
+		const uint16_t responseHeaderSize = explicitCurrentWire ? kTraceBasicBlocksResponseV5Size :
+			(payloadSize >= kTraceBasicBlocksRequestV4Size ?
+				kTraceBasicBlocksResponseV4Size : kTraceBasicBlocksResponseV3Size);
+		CONTEXT stoppedContext{};
+		const bool stopped = VehHandler::Instance().IsThreadStopped(req.threadId);
+		const bool hasStoppedContext = VehHandler::Instance().GetStoppedContext(req.threadId, stoppedContext);
+#ifdef _WIN64
+		const uint64_t normalizedIp = hasStoppedContext ? stoppedContext.Rip : 0;
+#else
+		const uint64_t normalizedIp = hasStoppedContext ? stoppedContext.Eip : 0;
+#endif
+		auto sendTraceFailure = [&](IpcStatus status, TraceBasicBlocksStartFailure reason,
+				bool decodeSucceeded, uint32_t decodedInstructionCount) {
+			std::vector<uint8_t> response(responseHeaderSize);
+			auto* header = reinterpret_cast<TraceBasicBlocksResponse*>(response.data());
+			memset(header, 0, responseHeaderSize);
+			header->status = status;
+			header->headerSize = responseHeaderSize;
+			if (responseHeaderSize >= kTraceBasicBlocksResponseV5Size) {
+				header->startFailureReason = static_cast<uint8_t>(reason);
+				header->stopped = stopped && hasStoppedContext ? 1 : 0;
+				header->ipInRange = hasStoppedContext && normalizedIp >= req.rangeStart &&
+					normalizedIp < req.rangeEnd ? 1 : 0;
+				header->decodeSucceeded = decodeSucceeded ? 1 : 0;
+				header->decodedInstructionCount = decodedInstructionCount;
+				header->normalizedIp = normalizedIp;
+				header->normalizedRangeStart = req.rangeStart;
+				header->normalizedRangeEnd = req.rangeEnd;
+			}
+			SendResponse(command, response.data(), static_cast<uint32_t>(response.size()));
+		};
+		if ((req.requestSize != 0 && !explicitCurrentWire) ||
+			(req.wireVersion != 0 && req.wireVersion < kTraceBasicBlocksWireVersion)) {
+			sendTraceFailure(IpcStatus::InvalidArgs, TraceBasicBlocksStartFailure::InvalidArguments, false, 0);
+			return;
+		}
 		if (req.threadId == 0 || req.rangeStart >= req.rangeEnd ||
 			req.rangeEnd - req.rangeStart > 4ULL * 1024 * 1024) {
-			IpcStatus status = IpcStatus::InvalidArgs;
-			SendResponse(command, &status, sizeof(status)); return;
+			sendTraceFailure(IpcStatus::InvalidArgs, TraceBasicBlocksStartFailure::InvalidArguments, false, 0);
+			return;
 		}
 		if (req.maxBlocks == 0) req.maxBlocks = 4096;
 		if (req.maxEdges == 0) req.maxEdges = 8192;
@@ -2172,17 +2211,20 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			req.dependencySourceCount > kTraceDependencyMaxSources ||
 			req.timeoutMs < 100 || req.timeoutMs > 60000 ||
 			req.stackBytes > kTraceBasicBlockMaxStackBytes) {
-			IpcStatus status = IpcStatus::InvalidArgs;
-			SendResponse(command, &status, sizeof(status)); return;
+			sendTraceFailure(IpcStatus::InvalidArgs, TraceBasicBlocksStartFailure::InvalidArguments, false, 0);
+			return;
 		}
 
 		std::vector<VehHandler::TraceBasicBlocksState::Instruction> instructions;
 		std::vector<uint64_t> staticBlockStarts;
 		instructions.reserve(static_cast<size_t>(req.rangeEnd - req.rangeStart) / 2);
-		if (!DecodeBasicTraceRange(req.rangeStart, req.rangeEnd, instructions, staticBlockStarts)) {
-			TraceBasicBlocksResponse resp{};
-			resp.status = IpcStatus::Error;
-			SendResponse(command, &resp, sizeof(resp)); break;
+		const bool decodeSucceeded = DecodeBasicTraceRange(
+			req.rangeStart, req.rangeEnd, instructions, staticBlockStarts);
+		const uint32_t decodedInstructionCount = static_cast<uint32_t>(instructions.size());
+		if (!decodeSucceeded) {
+			sendTraceFailure(IpcStatus::Error, TraceBasicBlocksStartFailure::DecodeFailed,
+				false, decodedInstructionCount);
+			break;
 		}
 
 		auto startTick = GetTickCount64();
@@ -2197,9 +2239,13 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				req.dependencySources, req.dependencySourceCount,
 				req.startCondition, req.stopCondition, req.collectCondition,
 				std::move(instructions), std::move(staticBlockStarts))) {
-			TraceBasicBlocksResponse resp{};
-			resp.status = IpcStatus::NotFound;
-			SendResponse(command, &resp, sizeof(resp)); break;
+			TraceBasicBlocksStartFailure reason = TraceBasicBlocksStartFailure::StartRejected;
+			if (!stopped || !hasStoppedContext) reason = TraceBasicBlocksStartFailure::ThreadNotStopped;
+			else if (normalizedIp < req.rangeStart || normalizedIp >= req.rangeEnd)
+				reason = TraceBasicBlocksStartFailure::InstructionPointerOutsideRange;
+			sendTraceFailure(IpcStatus::NotFound, reason, true,
+				decodedInstructionCount);
+			break;
 		}
 
 		auto& tb = VehHandler::Instance().traceBasicBlocks_;
@@ -2213,11 +2259,14 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 		if (!tb.done.load(std::memory_order_acquire)) {
 			tb.active.store(false, std::memory_order_release);
-			TraceBasicBlocksResponse resp{};
-			resp.status = IpcStatus::Error;
-			resp.stopReason = TraceBasicBlockStopReason::Timeout;
-			resp.elapsedMs = static_cast<uint32_t>(GetTickCount64() - startTick);
-			SendResponse(command, &resp, sizeof(resp)); break;
+			std::vector<uint8_t> response(responseHeaderSize);
+			auto* header = reinterpret_cast<TraceBasicBlocksResponse*>(response.data());
+			memset(header, 0, responseHeaderSize);
+			header->status = IpcStatus::Error;
+			header->stopReason = TraceBasicBlockStopReason::Timeout;
+			header->headerSize = responseHeaderSize;
+			header->elapsedMs = static_cast<uint32_t>(GetTickCount64() - startTick);
+			SendResponse(command, response.data(), static_cast<uint32_t>(response.size())); break;
 		}
 		// FinishBasicTrace publishes counters before the VEH thread enters its
 		// normal stopped-context wait. Give that short hand-off time to complete so
@@ -2372,7 +2421,9 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			return a.continuation < b.continuation;
 		});
 
-		size_t responseSize = sizeof(TraceBasicBlocksResponse) +
+		const uint32_t responseRegisterEventCount =
+			responseHeaderSize >= kTraceBasicBlocksResponseV4Size ? tb.registerEventCount : 0;
+		size_t responseSize = responseHeaderSize +
 			blocks.size() * sizeof(TraceBasicBlockEntry) +
 			edges.size() * sizeof(TraceBasicBlockEdgeEntry) +
 			tb.snapshotCount * sizeof(TraceBasicBlockSnapshot) +
@@ -2381,13 +2432,14 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			exceptionEvents.size() * sizeof(TraceBasicBlockExceptionEntry);
 		responseSize += static_cast<size_t>(tb.eventCount) * sizeof(TraceBasicBlockEventEntry);
 		responseSize += static_cast<size_t>(tb.memoryEventCount) * sizeof(TraceBasicBlockMemoryEventEntry);
-		responseSize += static_cast<size_t>(tb.registerEventCount) * sizeof(TraceBasicBlockRegisterEventEntry);
+		responseSize += static_cast<size_t>(responseRegisterEventCount) * sizeof(TraceBasicBlockRegisterEventEntry);
 		responseSize += static_cast<size_t>(tb.codeVersionCount) * sizeof(TraceBasicBlockCodeVersionEntry);
 		responseSize += tb.codeByteCount;
 		std::vector<uint8_t> response(responseSize);
 		auto* header = reinterpret_cast<TraceBasicBlocksResponse*>(response.data());
-		memset(header, 0, sizeof(*header));
+		memset(header, 0, responseHeaderSize);
 		header->status = IpcStatus::Ok;
+		header->headerSize = responseHeaderSize;
 		header->stopReason = tb.stopReason;
 		header->truncated = tb.truncated ? 1 : 0;
 		header->blockCount = static_cast<uint32_t>(blocks.size());
@@ -2425,14 +2477,25 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		header->memoryEventsTruncated = tb.memoryEventsTruncated ? 1 : 0;
 		header->memoryEventSchemaVersion = req.collectMemoryEvents ? 1 : 0;
 		header->memoryEventsDropped = tb.memoryEventsDropped;
-		header->registerEventCount = tb.registerEventCount;
-		header->registerEventCollectionEnabled = req.collectRegisterEvents ? 1 : 0;
-		header->registerEventsTruncated = tb.registerEventsTruncated ? 1 : 0;
-		header->registerEventSchemaVersion = req.collectRegisterEvents ? 1 : 0;
-		header->registerEventsDropped = tb.registerEventsDropped;
+		if (responseHeaderSize >= kTraceBasicBlocksResponseV4Size) {
+			header->registerEventCount = responseRegisterEventCount;
+			header->registerEventCollectionEnabled = req.collectRegisterEvents ? 1 : 0;
+			header->registerEventsTruncated = tb.registerEventsTruncated ? 1 : 0;
+			header->registerEventSchemaVersion = req.collectRegisterEvents ? 1 : 0;
+			header->registerEventsDropped = tb.registerEventsDropped;
+		}
+		if (responseHeaderSize >= kTraceBasicBlocksResponseV5Size) {
+			header->stopped = stopped && hasStoppedContext ? 1 : 0;
+			header->ipInRange = 1;
+			header->decodeSucceeded = 1;
+			header->decodedInstructionCount = decodedInstructionCount;
+			header->normalizedIp = normalizedIp;
+			header->normalizedRangeStart = req.rangeStart;
+			header->normalizedRangeEnd = req.rangeEnd;
+		}
 		if (req.collectCode) header->eventSchemaVersion = 2;
 
-		uint8_t* out = response.data() + sizeof(*header);
+		uint8_t* out = response.data() + responseHeaderSize;
 		for (const auto& block : blocks) {
 			memcpy(out, &block.entry, sizeof(block.entry)); out += sizeof(block.entry);
 		}
@@ -2465,10 +2528,10 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				static_cast<size_t>(tb.memoryEventCount) * sizeof(tb.memoryEvents[0]));
 			out += static_cast<size_t>(tb.memoryEventCount) * sizeof(tb.memoryEvents[0]);
 		}
-		if (tb.registerEventCount) {
+		if (responseRegisterEventCount) {
 			memcpy(out, tb.registerEvents.data(),
-				static_cast<size_t>(tb.registerEventCount) * sizeof(tb.registerEvents[0]));
-			out += static_cast<size_t>(tb.registerEventCount) * sizeof(tb.registerEvents[0]);
+				static_cast<size_t>(responseRegisterEventCount) * sizeof(tb.registerEvents[0]));
+			out += static_cast<size_t>(responseRegisterEventCount) * sizeof(tb.registerEvents[0]);
 		}
 		if (tb.codeVersionCount) {
 			memcpy(out, tb.codeVersions.data(), static_cast<size_t>(tb.codeVersionCount) * sizeof(tb.codeVersions[0]));

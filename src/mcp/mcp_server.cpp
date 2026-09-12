@@ -3166,7 +3166,7 @@ json McpServer::GetToolsList() {
 			{"system_only", {{"type", "boolean"}, {"description", "Only resolve to system DLLs. Default: false"}}}
 		 }}, {"required", json::array({"addresses"})}}}},
 
-		{{"name", "veh_trace_basic_blocks"}, {"description", "Bounded semantic trace for one VEH-stopped thread. Returns versioned aggregate metadata and unique blocks/edges; optional ordered streams cover transitions, per-occurrence memory accesses, instruction register deltas, and runtime code versions in one sequence space. Also reports hot/loop summaries, indirect targets, memory observations, and exception events."},
+		{{"name", "veh_trace_basic_blocks"}, {"description", "Bounded semantic trace for one VEH-stopped thread. Returns versioned aggregate metadata and unique blocks/edges; optional ordered streams cover transitions, per-occurrence memory accesses, instruction register deltas, and runtime code versions in one sequence space. Startup failures report structured stopped/IP/range/decode diagnostics. Also reports hot/loop summaries, indirect targets, memory observations, and exception events."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID currently stopped by VEH; its RIP/EIP must be inside the range"}}},
 			{"start", {{"type", "string"}, {"description", "Inclusive range start (hex or module+RVA)"}}},

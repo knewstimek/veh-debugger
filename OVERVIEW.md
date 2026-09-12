@@ -153,6 +153,12 @@ block/edge tables and captures snapshots only for initial entry and newly observ
 edges; it performs no JSON work or heap allocation.
 
 Responses declare aggregate schema version 4, mode, and the selected OS thread.
+The IPC reuses reserved prefix fields for an explicit wire version and request/header
+size. A current peer also recognizes schema-v3 and schema-v4 payload lengths and
+serializes the matching legacy response header, keeping the following variable
+arrays at the offset expected by each caller. Current start failures return a typed
+reason together with stopped/context availability, normalized IP/range, and decode
+status/count; legacy peers retain their original result shape.
 Optional `collect_events` preallocates a bounded array before resume and appends
 event-schema-v1 records for the initial block entry and every observed block
 transition. Each record carries the trace-step sequence and thread ID. Exhausting

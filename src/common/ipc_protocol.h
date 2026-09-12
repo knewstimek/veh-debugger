@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -568,12 +569,12 @@ struct TraceBasicBlocksRequest {
 	TraceCondition collectCondition;
 	uint8_t collectMemoryReads;
 	uint8_t dependencySourceCount;
-	uint16_t reserved2;
+	uint16_t wireVersion;      // 0 for legacy clients; current protocol version otherwise
 	uint32_t maxMemoryReads;
 	TraceDependencySource dependencySources[kTraceDependencyMaxSources];
 	uint8_t collectEvents;     // ordered basic-block entry/transition stream
 	uint8_t collectCode;       // runtime block bytes and version mapping
-	uint8_t reserved3[2];
+	uint16_t requestSize;      // 0 for legacy clients; bytes understood by the sender
 	uint32_t maxEvents;
 	uint32_t maxCodeBytes;
 	uint32_t maxCodeVersions;
@@ -584,6 +585,13 @@ struct TraceBasicBlocksRequest {
 	uint8_t reserved5[3];
 	uint32_t maxRegisterEvents;
 };
+
+static constexpr uint16_t kTraceBasicBlocksWireVersion = 5;
+static constexpr uint16_t kTraceBasicBlocksRequestV3Size =
+	static_cast<uint16_t>(offsetof(TraceBasicBlocksRequest, collectRegisterEvents));
+static constexpr uint16_t kTraceBasicBlocksRequestV4Size =
+	static_cast<uint16_t>(sizeof(TraceBasicBlocksRequest));
+static_assert(kTraceBasicBlocksRequestV3Size < kTraceBasicBlocksRequestV4Size);
 
 struct TraceBasicBlockEntry {
 	uint64_t start;
@@ -730,7 +738,7 @@ struct TraceBasicBlocksResponse {
 	IpcStatus status;
 	TraceBasicBlockStopReason stopReason;
 	uint8_t   truncated;
-	uint16_t  reserved;
+	uint16_t  headerSize;      // 0 for legacy responses; array payload begins here otherwise
 	uint32_t  blockCount;
 	uint32_t  edgeCount;
 	uint32_t  snapshotCount;
@@ -770,6 +778,14 @@ struct TraceBasicBlocksResponse {
 	uint8_t   registerEventsTruncated;
 	uint16_t  registerEventSchemaVersion;
 	uint64_t  registerEventsDropped;
+	uint8_t   startFailureReason;
+	uint8_t   stopped;
+	uint8_t   ipInRange;
+	uint8_t   decodeSucceeded;
+	uint32_t  decodedInstructionCount;
+	uint64_t  normalizedIp;
+	uint64_t  normalizedRangeStart;
+	uint64_t  normalizedRangeEnd;
 	// followed by TraceBasicBlockEntry[blockCount],
 	// TraceBasicBlockEdgeEntry[edgeCount], TraceBasicBlockSnapshot[snapshotCount],
 	// TraceBasicBlockMemoryWriteEntry[memoryWriteCount],
@@ -780,6 +796,25 @@ struct TraceBasicBlocksResponse {
 	// TraceBasicBlockRegisterEventEntry[registerEventCount],
 	// TraceBasicBlockCodeVersionEntry[codeVersionCount], uint8_t codeBytes[codeByteCount]
 };
+
+enum class TraceBasicBlocksStartFailure : uint8_t {
+	None = 0,
+	InvalidArguments = 1,
+	DecodeFailed = 2,
+	ThreadNotStopped = 3,
+	InstructionPointerOutsideRange = 4,
+	CollectorBusy = 5,
+	StartRejected = 6,
+};
+
+static constexpr uint16_t kTraceBasicBlocksResponseV3Size =
+	static_cast<uint16_t>(offsetof(TraceBasicBlocksResponse, registerEventCount));
+static constexpr uint16_t kTraceBasicBlocksResponseV4Size =
+	static_cast<uint16_t>(offsetof(TraceBasicBlocksResponse, startFailureReason));
+static constexpr uint16_t kTraceBasicBlocksResponseV5Size =
+	static_cast<uint16_t>(sizeof(TraceBasicBlocksResponse));
+static_assert(kTraceBasicBlocksResponseV3Size < kTraceBasicBlocksResponseV4Size);
+static_assert(kTraceBasicBlocksResponseV4Size < kTraceBasicBlocksResponseV5Size);
 
 // --- Memory management ---
 struct AllocateMemoryRequest {

@@ -281,6 +281,15 @@ public:
 
 	struct TraceBasicBlocksResult {
 		bool ok = false;
+		IpcStatus status = IpcStatus::Error;
+		TraceBasicBlocksStartFailure startFailure = TraceBasicBlocksStartFailure::None;
+		bool stopped = false;
+		bool ipInRange = false;
+		bool decodeSucceeded = false;
+		uint32_t decodedInstructionCount = 0;
+		uint64_t normalizedIp = 0;
+		uint64_t normalizedRangeStart = 0;
+		uint64_t normalizedRangeEnd = 0;
 		TraceBasicBlockStopReason stopReason = TraceBasicBlockStopReason::Completed;
 		bool truncated = false;
 		uint32_t exceptionsFollowed = 0;
