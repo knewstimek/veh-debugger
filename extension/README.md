@@ -18,8 +18,7 @@ Windows debugger based on **VEH (Vectored Exception Handler)** instead of the Wi
 - **4 injection methods** — CreateRemoteThread, NtCreateThreadEx, Thread Hijack, QueueUserAPC
 - **TCP remote mode** — Debug across VMs or network
 - **MCP tool server** — 44 tools for AI agent integration (Claude, Cursor, Codex, etc.)
-- **Bounded semantic tracing** — blocks/edges, hot paths, indirect targets, memory reads/writes, conservative dependency origins, conditions, and handled exception continuations
-- **Bounded semantic tracing** — Collect blocks/edges, register deltas, hot/loop summaries, indirect targets, memory regions, exception contexts, conditional windows, and optional memory-write/write-to-execute evidence without per-instruction MCP traffic
+- **Bounded semantic tracing** — Aggregate blocks/edges, register deltas, hot/loop summaries, indirect targets, memory observations, dependencies, conditions, handled exceptions, and optional versioned ordered block-transition events without per-instruction MCP traffic
 
 ## Quick Start
 
@@ -75,7 +74,7 @@ This is equivalent to Cheat Engine's "Find out what writes to this address" / "F
 
 ## MCP Tool Server (AI Integration)
 
-The bundled `veh-mcp-server.exe` exposes 40 debugging tools via the Model Context Protocol, allowing AI agents to directly control the debugger.
+The bundled `veh-mcp-server.exe` exposes 44 debugging tools via the Model Context Protocol, allowing AI agents to directly control the debugger.
 
 ```bash
 # Auto-install to all supported agents

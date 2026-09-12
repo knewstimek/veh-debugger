@@ -26,6 +26,8 @@ cmake_install.cmake
 .vs/
 .vscode/settings.json
 .vscode/launch.json
+.claude/
+.codegraph.db
 *.user
 *.suo
 
@@ -35,11 +37,13 @@ extension/out/
 extension/node_modules/
 extension/bin/
 *.vsix
+extension/veh-debugger-*-bin.zip
 
 # OS
 Thumbs.db
 .DS_Store
 Desktop.ini
+/nul
 
 # Logs
 *.log
@@ -52,6 +56,10 @@ dap_stdio_test.py
 test_dap.py
 test_detach_reattach.py
 *.test_output
+__pycache__/
+*.py[cod]
+/crackme_out.txt
+/test_bp_stderr.txt
 
 # Personal config (not for repo)
 CLAUDE.md

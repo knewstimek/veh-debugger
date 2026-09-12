@@ -5,6 +5,9 @@
 ### Added
 - **Versioned ordered basic-block events** -- `veh_trace_basic_blocks` now identifies its aggregate response with `schema_version`, `mode`, and `thread_id`. Optional `collect_events` records a bounded event-schema-v1 stream containing the initial block entry and every observed block transition in execution order, each with its trace-step `sequence` and OS `thread_id`; `max_events`, `events_truncated`, and ordering completeness metadata make partial streams explicit. Direct calls, `veh_batch`, and breakpoint actions use the same implementation and result semantics.
 
+### Changed
+- **Tracked and repeatable release procedure** -- release policy now lives in `RELEASING.md`, with a validation/packaging helper that synchronizes x64/x86 artifacts without committing or publishing. Stale v1.0.4 test guidance, the packaged README's outdated MCP count and duplicate trace entry, obsolete DLL logging/test-count documentation, and generated-artifact ignore rules were refreshed; the completed dated trace proposal was reduced to its durable debugger/analyzer design boundary in `OVERVIEW.md`.
+
 ### Fixed
 - **Injected DLL no longer leaves runtime logs in the target directory** -- DLL logging is disabled by default instead of unconditionally creating `veh_dll_<pid>.log` in the process working directory. Adapter and MCP logging remain available through their explicit log-file options.
 
