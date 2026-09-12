@@ -185,6 +185,10 @@ public:
 			uint32_t dependencyMask = 0;
 			uint8_t occupied = 0;
 		};
+		struct CodeVersionSlot {
+			TraceBasicBlockCodeVersionEntry entry{};
+			uint8_t occupied = 0;
+		};
 
 		std::atomic<bool> active{false};
 		std::atomic<bool> done{false};
@@ -203,6 +207,9 @@ public:
 		uint32_t maxMemoryReads = 0;
 		bool collectEvents = false;
 		uint32_t maxEvents = 0;
+		bool collectCode = false;
+		uint32_t maxCodeBytes = 0;
+		uint32_t maxCodeVersions = 0;
 		uint8_t dependencySourceCount = 0;
 		TraceDependencySource dependencySources[kTraceDependencyMaxSources]{};
 		TraceCondition startCondition{};
@@ -220,6 +227,10 @@ public:
 		std::vector<MemoryTaintSlot> memoryTaintTable;
 		std::vector<TraceBasicBlockSnapshot> snapshots;
 		std::vector<TraceBasicBlockEventEntry> events;
+		std::vector<CodeVersionSlot> codeVersionTable;
+		std::vector<TraceBasicBlockCodeVersionEntry> codeVersions;
+		std::vector<uint8_t> codeBytes;
+		std::vector<uint8_t> codeScratch;
 		uint32_t blockCount = 0;
 		uint32_t edgeCount = 0;
 		uint32_t snapshotCount = 0;
@@ -233,6 +244,9 @@ public:
 		bool dependencyIncomplete = false;
 		bool eventsTruncated = false;
 		uint32_t eventCount = 0;
+		uint32_t codeVersionCount = 0;
+		uint32_t codeByteCount = 0;
+		bool codeTruncated = false;
 		uint32_t registerDependencies[16]{};
 		uint32_t flagsDependencies = 0;
 		uint32_t pendingRegisterWriteMask = 0;
@@ -265,6 +279,7 @@ public:
 		bool followExceptions, bool collectMemoryWrites, uint32_t maxMemoryWrites,
 		bool collectMemoryReads, uint32_t maxMemoryReads,
 		bool collectEvents, uint32_t maxEvents,
+		bool collectCode, uint32_t maxCodeBytes, uint32_t maxCodeVersions,
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition,
@@ -398,7 +413,8 @@ private:
 	void RecordBasicTraceEvent(TraceBasicBlockEventType type, uint64_t sequence,
 		uint64_t source, uint64_t sourceInstruction, uint64_t target,
 		TraceBasicBlockEdgeKind edgeKind = TraceBasicBlockEdgeKind::Fallthrough,
-		uint32_t exceptionCode = 0, bool indirect = false);
+		uint32_t exceptionCode = 0, bool indirect = false, uint32_t codeVersion = UINT32_MAX);
+	uint32_t CaptureBasicTraceCodeVersion(uint64_t blockStart, uint64_t sequence);
 	bool EvaluateBasicTraceCondition(const TraceCondition& condition, const CONTEXT* ctx) const;
 
 	// 공통 패턴: 컨텍스트 저장 -> 이벤트 생성 -> 콜백 -> 대기 -> 컨텍스트 복원

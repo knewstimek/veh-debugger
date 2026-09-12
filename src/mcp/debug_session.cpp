@@ -1407,6 +1407,7 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		bool collectMemoryWrites, uint32_t maxMemoryWrites,
 		bool collectMemoryReads, uint32_t maxMemoryReads,
 		bool collectEvents, uint32_t maxEvents,
+		bool collectCode, uint32_t maxCodeBytes, uint32_t maxCodeVersions,
 		const std::vector<TraceDependencySource>& dependencySources,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition) {
@@ -1425,8 +1426,11 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	req.maxMemoryWrites = maxMemoryWrites;
 	req.collectMemoryReads = collectMemoryReads ? 1 : 0;
 	req.maxMemoryReads = maxMemoryReads;
-	req.collectEvents = collectEvents ? 1 : 0;
+	req.collectEvents = (collectEvents || collectCode) ? 1 : 0;
 	req.maxEvents = maxEvents;
+	req.collectCode = collectCode ? 1 : 0;
+	req.maxCodeBytes = maxCodeBytes;
+	req.maxCodeVersions = maxCodeVersions;
 	req.dependencySourceCount = static_cast<uint8_t>(std::min<size_t>(dependencySources.size(), kTraceDependencyMaxSources));
 	if (req.dependencySourceCount) memcpy(req.dependencySources, dependencySources.data(),
 		static_cast<size_t>(req.dependencySourceCount) * sizeof(req.dependencySources[0]));
@@ -1448,7 +1452,9 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		static_cast<size_t>(header->memoryWriteCount) * sizeof(TraceBasicBlockMemoryWriteEntry) +
 		static_cast<size_t>(header->memoryReadCount) * sizeof(TraceBasicBlockMemoryReadEntry) +
 		static_cast<size_t>(header->exceptionEventCount) * sizeof(TraceBasicBlockExceptionEntry) +
-		static_cast<size_t>(header->eventCount) * sizeof(TraceBasicBlockEventEntry);
+		static_cast<size_t>(header->eventCount) * sizeof(TraceBasicBlockEventEntry) +
+		static_cast<size_t>(header->codeVersionCount) * sizeof(TraceBasicBlockCodeVersionEntry) +
+		header->codeByteCount;
 	if (required > data.size()) return result;
 
 	result.ok = true;
@@ -1469,6 +1475,9 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	result.eventCollectionEnabled = header->eventCollectionEnabled != 0;
 	result.eventsTruncated = header->eventsTruncated != 0;
 	result.eventSchemaVersion = header->eventSchemaVersion;
+	result.codeCollectionEnabled = header->codeCollectionEnabled != 0;
+	result.codeTruncated = header->codeTruncated != 0;
+	result.codeSchemaVersion = header->codeSchemaVersion;
 	memcpy(result.finalRegisterDependencies, header->finalRegisterDependencies,
 		sizeof(result.finalRegisterDependencies));
 	result.finalFlagsDependencies = header->finalFlagsDependencies;
@@ -1493,6 +1502,11 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	cursor += static_cast<size_t>(header->exceptionEventCount) * sizeof(*exceptionEvents);
 	auto* events = reinterpret_cast<const TraceBasicBlockEventEntry*>(cursor);
 	result.events.assign(events, events + header->eventCount);
+	cursor += static_cast<size_t>(header->eventCount) * sizeof(*events);
+	auto* codeVersions = reinterpret_cast<const TraceBasicBlockCodeVersionEntry*>(cursor);
+	result.codeVersions.assign(codeVersions, codeVersions + header->codeVersionCount);
+	cursor += static_cast<size_t>(header->codeVersionCount) * sizeof(*codeVersions);
+	result.codeBytes.assign(cursor, cursor + header->codeByteCount);
 	return result;
 }
 

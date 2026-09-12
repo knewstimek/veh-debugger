@@ -85,7 +85,9 @@ def main():
                            if tool.get("name") == "veh_trace_basic_blocks"), None)
         assert trace_tool, listed
         trace_properties = trace_tool["inputSchema"]["properties"]
-        assert "collect_events" in trace_properties and "max_events" in trace_properties, trace_tool
+        assert all(name in trace_properties for name in (
+            "collect_events", "max_events", "collect_code", "max_code_bytes", "max_code_versions"
+        )), trace_tool
         launch = client.tool("veh_launch", {"program": TARGET, "stopOnEntry": True})
         assert launch.get("success"), launch
 
@@ -115,6 +117,9 @@ def main():
             "max_memory_reads": 64,
             "collect_events": True,
             "max_events": 256,
+            "collect_code": True,
+            "max_code_bytes": 4096,
+            "max_code_versions": 256,
             "dependency_sources": dependency_sources,
         }, timeout=15)
         assert "error" not in trace, trace
@@ -124,7 +129,7 @@ def main():
         assert trace["thread_id"] == thread_id, trace
         assert trace["ordering"] == {
             "available": True, "granularity": "basic_block_transitions",
-            "event_schema_version": 1, "complete": True,
+            "event_schema_version": 2, "complete": True,
         }, trace
         assert trace["events"] and trace["events"][0]["type"] == "block_entry", trace
         assert all(event["thread_id"] == thread_id for event in trace["events"]), trace
@@ -132,6 +137,12 @@ def main():
             event["sequence"] for event in trace["events"]), trace
         assert any(event["type"] == "edge" for event in trace["events"]), trace
         assert trace["events_truncated"] is False, trace
+        assert trace["code_capture"]["available"] is True, trace
+        assert trace["code_capture"]["complete"] is True, trace
+        assert trace["code_versions"] and trace["code_truncated"] is False, trace
+        assert all(version["bytes"] and version["size"] > 0 for version in trace["code_versions"]), trace
+        assert all("code_version" in event for event in trace["events"]
+                   if event["type"] == "block_entry" or event.get("kind") != "range_exit"), trace
         assert trace["snapshots"], trace
         assert sum(block["hits"] for block in trace["blocks"]) > 0, trace
         assert trace["hot_blocks"] and trace["hot_edges"], trace
@@ -166,6 +177,7 @@ def main():
                 "timeout_ms": 5000, "stack_bytes": 32,
                 "collect_memory_writes": True, "max_memory_writes": 64,
                 "collect_events": True, "max_events": 256,
+                "collect_code": True, "max_code_bytes": 4096, "max_code_versions": 256,
             }},
         ]}, timeout=20)
         assert batch.get("totalSteps") == 2, batch
@@ -178,6 +190,7 @@ def main():
         assert len(batch_trace["blocks"]) >= 2, batch_trace
         assert len(batch_trace["edges"]) >= 1, batch_trace
         assert batch_trace["ordering"]["available"] is True, batch_trace
+        assert batch_trace["code_capture"]["available"] is True and batch_trace["code_versions"], batch_trace
         assert all(event["thread_id"] == batch_stop["threadId"]
                    for event in batch_trace["events"]), batch_trace
 
@@ -255,6 +268,7 @@ def main():
                     "threadId": thread_id, "start": hex(start), "end": hex(start + 0x100),
                     "max_steps": 1000, "timeout_ms": 5000, "stack_bytes": 0,
                     "collect_events": True, "max_events": 256,
+                    "collect_code": True, "max_code_bytes": 4096, "max_code_versions": 256,
                 }},
                 {"tool": "veh_set_breakpoint", "args": {"address": "$0.final_address"}},
             ],
@@ -379,6 +393,59 @@ def main():
         assert lea_trace["memory_reads"] == [], lea_trace
         assert client.tool("veh_free_memory", {"address": hex(lea_start)}).get("success")
 
+        # A loop that rewrites its own XOR immediate produces two runtime byte
+        # versions of the same block. Ordered edge occurrences must identify
+        # which retained version was entered at each trace sequence.
+        smc_code = bytes.fromhex("80 35 FF FF FF FF 01 EB F7")
+        smc = client.tool("veh_allocate_memory", {"size": 4096, "protection": "rwx"})
+        assert smc.get("success"), smc
+        smc_start = int(smc["address"], 0)
+        assert client.tool("veh_write_memory", {
+            "address": hex(smc_start), "data": smc_code.hex(" "),
+        }).get("success")
+        assert client.tool("veh_set_register", {
+            "threadId": checkpoint_thread, "name": "rip", "value": hex(smc_start),
+        }).get("success")
+        smc_trace = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(smc_start),
+            "end": hex(smc_start + len(smc_code)), "max_steps": 4,
+            "timeout_ms": 5000, "stack_bytes": 0,
+            "collect_code": True, "max_code_bytes": 64,
+            "max_code_versions": 8, "max_events": 16,
+        }, timeout=15)
+        assert smc_trace.get("stop_reason") == "max_steps", smc_trace
+        assert smc_trace["ordering"]["event_schema_version"] == 2, smc_trace
+        assert smc_trace["code_capture"] == {
+            "available": True, "schema_version": 1, "complete": True,
+            "bytes_captured": 18, "versions_captured": 2,
+        }, smc_trace
+        versions = smc_trace["code_versions"]
+        assert len(versions) == 2 and versions[0]["block"] == versions[1]["block"], smc_trace
+        assert versions[0]["hash"] != versions[1]["hash"], smc_trace
+        occurrences = [(event["sequence"], event.get("code_version"))
+                       for event in smc_trace["events"]]
+        assert occurrences == [(0, 0), (2, 1), (4, 1)], smc_trace
+
+        assert client.tool("veh_write_memory", {
+            "address": hex(smc_start), "data": smc_code.hex(" "),
+        }).get("success")
+        assert client.tool("veh_set_register", {
+            "threadId": checkpoint_thread, "name": "rip", "value": hex(smc_start),
+        }).get("success")
+        limited_code = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(smc_start),
+            "end": hex(smc_start + len(smc_code)), "max_steps": 1,
+            "timeout_ms": 5000, "stack_bytes": 0,
+            "collect_code": True, "max_code_bytes": 1,
+            "max_code_versions": 1, "max_events": 4,
+        }, timeout=15)
+        assert limited_code["code_truncated"] is True, limited_code
+        assert limited_code["code_capture"]["complete"] is False, limited_code
+        assert client.tool("veh_set_register", {
+            "threadId": checkpoint_thread, "name": "rip", "value": saved["rip"],
+        }).get("success")
+        assert client.tool("veh_free_memory", {"address": hex(smc_start)}).get("success")
+
         terminated = client.tool("veh_terminate")
         assert terminated.get("success"), terminated
         launch = client.tool("veh_launch", {
@@ -415,6 +482,7 @@ def main():
             "memory_writes": len(trace["memory_writes"]),
             "executed_writes": sum(bool(w.get("executed_after_write")) for w in executable_trace["executable_writes"]),
             "lea_dependencies": lea_trace["final_dependencies"]["rax"],
+            "code_versions": len(smc_trace["code_versions"]),
             "checkpoint_restored": True,
         }))
     finally:

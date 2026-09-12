@@ -572,8 +572,11 @@ struct TraceBasicBlocksRequest {
 	uint32_t maxMemoryReads;
 	TraceDependencySource dependencySources[kTraceDependencyMaxSources];
 	uint8_t collectEvents;     // ordered basic-block entry/transition stream
-	uint8_t reserved3[3];
+	uint8_t collectCode;       // runtime block bytes and version mapping
+	uint8_t reserved3[2];
 	uint32_t maxEvents;
+	uint32_t maxCodeBytes;
+	uint32_t maxCodeVersions;
 };
 
 struct TraceBasicBlockEntry {
@@ -663,10 +666,21 @@ struct TraceBasicBlockEventEntry {
 	uint64_t target;
 	uint32_t threadId;
 	uint32_t exceptionCode;
+	uint32_t codeVersion;      // version id for the entered target, UINT32_MAX when unavailable
 	TraceBasicBlockEventType type;
 	TraceBasicBlockEdgeKind edgeKind;
 	uint8_t indirect;
-	uint8_t reserved[5];
+	uint8_t reserved[1];
+};
+
+struct TraceBasicBlockCodeVersionEntry {
+	uint64_t blockStart;
+	uint64_t blockEnd;
+	uint64_t hash;
+	uint64_t firstSequence;
+	uint32_t id;
+	uint32_t dataOffset;
+	uint32_t size;
 };
 
 struct TraceBasicBlocksResponse {
@@ -698,12 +712,18 @@ struct TraceBasicBlocksResponse {
 	uint8_t   eventCollectionEnabled;
 	uint8_t   eventsTruncated;
 	uint16_t  eventSchemaVersion;
+	uint32_t  codeVersionCount;
+	uint32_t  codeByteCount;
+	uint8_t   codeCollectionEnabled;
+	uint8_t   codeTruncated;
+	uint16_t  codeSchemaVersion;
 	// followed by TraceBasicBlockEntry[blockCount],
 	// TraceBasicBlockEdgeEntry[edgeCount], TraceBasicBlockSnapshot[snapshotCount],
 	// TraceBasicBlockMemoryWriteEntry[memoryWriteCount],
 	// TraceBasicBlockMemoryReadEntry[memoryReadCount],
 	// TraceBasicBlockExceptionEntry[exceptionEventCount],
-	// TraceBasicBlockEventEntry[eventCount]
+	// TraceBasicBlockEventEntry[eventCount],
+	// TraceBasicBlockCodeVersionEntry[codeVersionCount], uint8_t codeBytes[codeByteCount]
 };
 
 // --- Memory management ---

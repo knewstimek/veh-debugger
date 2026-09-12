@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- **Bounded runtime code versions** -- `veh_trace_basic_blocks` can opt into `collect_code`, which snapshots and deduplicates executed block bytes under independent total byte/version budgets and maps each retained version to ordered event sequences. Self-modifying code retains distinct runtime evidence; explicit code/event schema metadata and truncation flags distinguish complete from partial capture across direct, `veh_batch`, and breakpoint-action use.
 - **Versioned ordered basic-block events** -- `veh_trace_basic_blocks` now identifies its aggregate response with `schema_version`, `mode`, and `thread_id`. Optional `collect_events` records a bounded event-schema-v1 stream containing the initial block entry and every observed block transition in execution order, each with its trace-step `sequence` and OS `thread_id`; `max_events`, `events_truncated`, and ordering completeness metadata make partial streams explicit. Direct calls, `veh_batch`, and breakpoint actions use the same implementation and result semantics.
 
 ### Changed
