@@ -1,7 +1,9 @@
 """Integration smoke test for veh_trace_basic_blocks."""
 import json
 import os
+import queue
 import subprocess
+import threading
 import time
 
 
@@ -18,6 +20,16 @@ class Client:
             stderr=subprocess.PIPE,
         )
         self.seq = 0
+        self.responses = queue.Queue()
+        self.reader = threading.Thread(target=self._read_responses, daemon=True)
+        self.reader.start()
+
+    def _read_responses(self):
+        try:
+            for line in self.proc.stdout:
+                self.responses.put(json.loads(line))
+        finally:
+            self.responses.put(None)
 
     def call(self, method, params=None, timeout=20):
         self.seq += 1
@@ -27,14 +39,18 @@ class Client:
         self.proc.stdin.write((json.dumps(request) + "\n").encode())
         self.proc.stdin.flush()
         deadline = time.time() + timeout
-        while time.time() < deadline:
-            line = self.proc.stdout.readline()
-            if not line:
-                continue
-            message = json.loads(line)
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise TimeoutError(method)
+            try:
+                message = self.responses.get(timeout=remaining)
+            except queue.Empty as error:
+                raise TimeoutError(method) from error
+            if message is None:
+                raise RuntimeError(f"MCP server exited while waiting for {method}")
             if message.get("id") == self.seq:
                 return message
-        raise TimeoutError(method)
 
     def tool(self, name, arguments=None, timeout=20):
         response = self.call("tools/call", {"name": name, "arguments": arguments or {}}, timeout)
@@ -46,8 +62,14 @@ class Client:
             self.tool("veh_terminate", timeout=5)
         except Exception:
             pass
-        self.proc.terminate()
-        self.proc.wait(timeout=5)
+        finally:
+            if self.proc.poll() is None:
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+                    self.proc.wait(timeout=5)
 
 
 def main():
@@ -59,7 +81,11 @@ def main():
             "capabilities": {},
         })
         listed = client.call("tools/list")["result"]["tools"]
-        assert any(tool.get("name") == "veh_trace_basic_blocks" for tool in listed), listed
+        trace_tool = next((tool for tool in listed
+                           if tool.get("name") == "veh_trace_basic_blocks"), None)
+        assert trace_tool, listed
+        trace_properties = trace_tool["inputSchema"]["properties"]
+        assert "collect_events" in trace_properties and "max_events" in trace_properties, trace_tool
         launch = client.tool("veh_launch", {"program": TARGET, "stopOnEntry": True})
         assert launch.get("success"), launch
 
@@ -87,11 +113,25 @@ def main():
             "max_memory_writes": 64,
             "collect_memory_reads": True,
             "max_memory_reads": 64,
+            "collect_events": True,
+            "max_events": 256,
             "dependency_sources": dependency_sources,
         }, timeout=15)
         assert "error" not in trace, trace
         assert len(trace["blocks"]) >= 2, trace
         assert len(trace["edges"]) >= 1, trace
+        assert trace["schema_version"] == 2 and trace["mode"] == "aggregated", trace
+        assert trace["thread_id"] == thread_id, trace
+        assert trace["ordering"] == {
+            "available": True, "granularity": "basic_block_transitions",
+            "event_schema_version": 1, "complete": True,
+        }, trace
+        assert trace["events"] and trace["events"][0]["type"] == "block_entry", trace
+        assert all(event["thread_id"] == thread_id for event in trace["events"]), trace
+        assert [event["sequence"] for event in trace["events"]] == sorted(
+            event["sequence"] for event in trace["events"]), trace
+        assert any(event["type"] == "edge" for event in trace["events"]), trace
+        assert trace["events_truncated"] is False, trace
         assert trace["snapshots"], trace
         assert sum(block["hits"] for block in trace["blocks"]) > 0, trace
         assert trace["hot_blocks"] and trace["hot_edges"], trace
@@ -125,6 +165,7 @@ def main():
                 "max_blocks": 4096, "max_edges": 8192, "max_steps": 1000,
                 "timeout_ms": 5000, "stack_bytes": 32,
                 "collect_memory_writes": True, "max_memory_writes": 64,
+                "collect_events": True, "max_events": 256,
             }},
         ]}, timeout=20)
         assert batch.get("totalSteps") == 2, batch
@@ -136,6 +177,9 @@ def main():
         assert batch_trace["register_order"] == trace["register_order"], batch_trace
         assert len(batch_trace["blocks"]) >= 2, batch_trace
         assert len(batch_trace["edges"]) >= 1, batch_trace
+        assert batch_trace["ordering"]["available"] is True, batch_trace
+        assert all(event["thread_id"] == batch_stop["threadId"]
+                   for event in batch_trace["events"]), batch_trace
 
         truncated_batch = client.tool("veh_batch", {"steps": [
             {"tool": "veh_continue", "args": {"wait": True, "timeout": 10}},
@@ -144,6 +188,7 @@ def main():
                 "max_steps": 1000, "timeout_ms": 5000, "stack_bytes": 0,
                 "collect_memory_writes": True, "max_memory_writes": 1,
                 "collect_memory_reads": True, "max_memory_reads": 1,
+                "collect_events": True, "max_events": 1,
             }},
         ]}, timeout=20)
         truncated_writes = truncated_batch["results"][1]["result"]
@@ -151,6 +196,9 @@ def main():
         assert truncated_writes["memory_writes_truncated"] is True, truncated_writes
         assert len(truncated_writes["memory_reads"]) == 1, truncated_writes
         assert truncated_writes["memory_reads_truncated"] is True, truncated_writes
+        assert len(truncated_writes["events"]) == 1, truncated_writes
+        assert truncated_writes["events_truncated"] is True, truncated_writes
+        assert truncated_writes["ordering"]["complete"] is False, truncated_writes
 
         conditional_batch = client.tool("veh_batch", {"steps": [
             {"tool": "veh_continue", "args": {"wait": True, "timeout": 10}},
@@ -196,6 +244,30 @@ def main():
         limited = limited_batch["results"][1]["result"]
         assert limited.get("stop_reason") == "max_steps", limited
         assert limited.get("truncated") is True, limited
+
+        # Breakpoint actions use BatchExecutor too. The trace action installs a
+        # sentinel breakpoint at its returned final_address; hitting that new
+        # breakpoint proves the trace completed and its result was referenceable.
+        action_bp = client.tool("veh_set_breakpoint", {
+            "address": hex(start),
+            "action": [
+                {"tool": "veh_trace_basic_blocks", "args": {
+                    "threadId": thread_id, "start": hex(start), "end": hex(start + 0x100),
+                    "max_steps": 1000, "timeout_ms": 5000, "stack_bytes": 0,
+                    "collect_events": True, "max_events": 256,
+                }},
+                {"tool": "veh_set_breakpoint", "args": {"address": "$0.final_address"}},
+            ],
+        })
+        assert action_bp.get("success") and action_bp.get("hasAction"), action_bp
+        action_stop = client.tool("veh_continue", {"wait": True, "timeout": 10}, timeout=15)
+        assert action_stop.get("reason") == "breakpoint", action_stop
+        assert action_stop.get("breakpointId") != action_bp["id"], action_stop
+        assert client.tool("veh_remove_breakpoint", {
+            "id": action_stop["breakpointId"],
+        }).get("success"), action_stop
+        restored_bp = client.tool("veh_set_breakpoint", {"address": hex(start), "action": []})
+        assert restored_bp.get("success"), restored_bp
 
         # An indirect call site must be identified from its decoded operand and
         # grouped by the destinations actually observed at runtime.

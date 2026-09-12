@@ -571,6 +571,9 @@ struct TraceBasicBlocksRequest {
 	uint16_t reserved2;
 	uint32_t maxMemoryReads;
 	TraceDependencySource dependencySources[kTraceDependencyMaxSources];
+	uint8_t collectEvents;     // ordered basic-block entry/transition stream
+	uint8_t reserved3[3];
+	uint32_t maxEvents;
 };
 
 struct TraceBasicBlockEntry {
@@ -645,6 +648,27 @@ struct TraceBasicBlockExceptionEntry {
 	uint64_t hitCount;
 };
 
+enum class TraceBasicBlockEventType : uint8_t {
+	BlockEntry = 0,
+	Edge = 1,
+};
+
+// Version 1 ordered-event record. Sequence is the trace step number and every
+// record is scoped to threadId. BlockEntry uses target for the entered block;
+// Edge supplies source/sourceInstruction/target and edgeKind.
+struct TraceBasicBlockEventEntry {
+	uint64_t sequence;
+	uint64_t source;
+	uint64_t sourceInstruction;
+	uint64_t target;
+	uint32_t threadId;
+	uint32_t exceptionCode;
+	TraceBasicBlockEventType type;
+	TraceBasicBlockEdgeKind edgeKind;
+	uint8_t indirect;
+	uint8_t reserved[5];
+};
+
 struct TraceBasicBlocksResponse {
 	IpcStatus status;
 	TraceBasicBlockStopReason stopReason;
@@ -669,11 +693,17 @@ struct TraceBasicBlocksResponse {
 	uint32_t  elapsedMs;
 	uint64_t  stepsExecuted;
 	uint64_t  finalAddress;
+	uint32_t  threadId;
+	uint32_t  eventCount;
+	uint8_t   eventCollectionEnabled;
+	uint8_t   eventsTruncated;
+	uint16_t  eventSchemaVersion;
 	// followed by TraceBasicBlockEntry[blockCount],
 	// TraceBasicBlockEdgeEntry[edgeCount], TraceBasicBlockSnapshot[snapshotCount],
 	// TraceBasicBlockMemoryWriteEntry[memoryWriteCount],
 	// TraceBasicBlockMemoryReadEntry[memoryReadCount],
-	// TraceBasicBlockExceptionEntry[exceptionEventCount]
+	// TraceBasicBlockExceptionEntry[exceptionEventCount],
+	// TraceBasicBlockEventEntry[eventCount]
 };
 
 // --- Memory management ---

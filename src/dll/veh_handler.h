@@ -201,6 +201,8 @@ public:
 		uint32_t maxMemoryWrites = 0;
 		bool collectMemoryReads = false;
 		uint32_t maxMemoryReads = 0;
+		bool collectEvents = false;
+		uint32_t maxEvents = 0;
 		uint8_t dependencySourceCount = 0;
 		TraceDependencySource dependencySources[kTraceDependencyMaxSources]{};
 		TraceCondition startCondition{};
@@ -217,6 +219,7 @@ public:
 		std::vector<MemoryReadSlot> memoryReadTable;
 		std::vector<MemoryTaintSlot> memoryTaintTable;
 		std::vector<TraceBasicBlockSnapshot> snapshots;
+		std::vector<TraceBasicBlockEventEntry> events;
 		uint32_t blockCount = 0;
 		uint32_t edgeCount = 0;
 		uint32_t snapshotCount = 0;
@@ -228,6 +231,8 @@ public:
 		uint32_t unsupportedMemoryReads = 0;
 		bool memoryReadsTruncated = false;
 		bool dependencyIncomplete = false;
+		bool eventsTruncated = false;
+		uint32_t eventCount = 0;
 		uint32_t registerDependencies[16]{};
 		uint32_t flagsDependencies = 0;
 		uint32_t pendingRegisterWriteMask = 0;
@@ -259,6 +264,7 @@ public:
 		uint32_t maxBlocks, uint32_t maxEdges, uint32_t maxSteps, uint16_t stackBytes,
 		bool followExceptions, bool collectMemoryWrites, uint32_t maxMemoryWrites,
 		bool collectMemoryReads, uint32_t maxMemoryReads,
+		bool collectEvents, uint32_t maxEvents,
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition,
@@ -389,6 +395,10 @@ private:
 	bool RecordBasicTraceMemoryWrite(const TraceBasicBlocksState::PendingWrite& pending,
 		const uint8_t* after);
 	bool RecordBasicTraceMemoryRead(const TraceBasicBlocksState::PendingRead& pending);
+	void RecordBasicTraceEvent(TraceBasicBlockEventType type, uint64_t sequence,
+		uint64_t source, uint64_t sourceInstruction, uint64_t target,
+		TraceBasicBlockEdgeKind edgeKind = TraceBasicBlockEdgeKind::Fallthrough,
+		uint32_t exceptionCode = 0, bool indirect = false);
 	bool EvaluateBasicTraceCondition(const TraceCondition& condition, const CONTEXT* ctx) const;
 
 	// 공통 패턴: 컨텍스트 저장 -> 이벤트 생성 -> 콜백 -> 대기 -> 컨텍스트 복원
