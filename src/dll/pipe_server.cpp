@@ -2152,14 +2152,17 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		if (req.timeoutMs == 0) req.timeoutMs = 10000;
 		if (req.collectMemoryWrites && req.maxMemoryWrites == 0) req.maxMemoryWrites = 4096;
 		if (req.collectMemoryReads && req.maxMemoryReads == 0) req.maxMemoryReads = 4096;
-		if ((req.collectEvents || req.collectCode) && req.maxEvents == 0) req.maxEvents = 8192;
+		if ((req.collectEvents || req.collectCode || req.collectMemoryEvents) && req.maxEvents == 0)
+			req.maxEvents = 8192;
+		if (req.collectMemoryEvents && req.maxMemoryEvents == 0) req.maxMemoryEvents = 8192;
 		if (req.collectCode && req.maxCodeBytes == 0) req.maxCodeBytes = 262144;
 		if (req.collectCode && req.maxCodeVersions == 0) req.maxCodeVersions = 4096;
-		if (req.collectCode) req.collectEvents = 1;
+		if (req.collectCode || req.collectMemoryEvents) req.collectEvents = 1;
 		if (req.maxBlocks > 16384 || req.maxEdges > 32768 || req.maxSteps > 5000000 ||
 			(req.collectMemoryWrites && req.maxMemoryWrites > 16384) ||
 			(req.collectMemoryReads && req.maxMemoryReads > 16384) ||
 			(req.collectEvents && req.maxEvents > 32768) ||
+			(req.collectMemoryEvents && req.maxMemoryEvents > 65536) ||
 			(req.collectCode && (req.maxCodeBytes > 4U * 1024 * 1024 ||
 				req.maxCodeVersions > 16384 || req.maxCodeBytes == 0 || req.maxCodeVersions == 0)) ||
 			req.dependencySourceCount > kTraceDependencyMaxSources ||
@@ -2185,6 +2188,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				req.collectMemoryReads != 0, req.maxMemoryReads,
 				req.collectEvents != 0, req.maxEvents,
 				req.collectCode != 0, req.maxCodeBytes, req.maxCodeVersions,
+				req.collectMemoryEvents != 0, req.maxMemoryEvents,
 				req.dependencySources, req.dependencySourceCount,
 				req.startCondition, req.stopCondition, req.collectCondition,
 				std::move(instructions), std::move(staticBlockStarts))) {
@@ -2371,6 +2375,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			memoryReads.size() * sizeof(TraceBasicBlockMemoryReadEntry) +
 			exceptionEvents.size() * sizeof(TraceBasicBlockExceptionEntry);
 		responseSize += static_cast<size_t>(tb.eventCount) * sizeof(TraceBasicBlockEventEntry);
+		responseSize += static_cast<size_t>(tb.memoryEventCount) * sizeof(TraceBasicBlockMemoryEventEntry);
 		responseSize += static_cast<size_t>(tb.codeVersionCount) * sizeof(TraceBasicBlockCodeVersionEntry);
 		responseSize += tb.codeByteCount;
 		std::vector<uint8_t> response(responseSize);
@@ -2409,6 +2414,11 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		header->codeCollectionEnabled = req.collectCode ? 1 : 0;
 		header->codeTruncated = tb.codeTruncated ? 1 : 0;
 		header->codeSchemaVersion = 1;
+		header->memoryEventCount = tb.memoryEventCount;
+		header->memoryEventCollectionEnabled = req.collectMemoryEvents ? 1 : 0;
+		header->memoryEventsTruncated = tb.memoryEventsTruncated ? 1 : 0;
+		header->memoryEventSchemaVersion = req.collectMemoryEvents ? 1 : 0;
+		header->memoryEventsDropped = tb.memoryEventsDropped;
 		if (req.collectCode) header->eventSchemaVersion = 2;
 
 		uint8_t* out = response.data() + sizeof(*header);
@@ -2438,6 +2448,11 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		if (tb.eventCount) {
 			memcpy(out, tb.events.data(), static_cast<size_t>(tb.eventCount) * sizeof(tb.events[0]));
 			out += static_cast<size_t>(tb.eventCount) * sizeof(tb.events[0]);
+		}
+		if (tb.memoryEventCount) {
+			memcpy(out, tb.memoryEvents.data(),
+				static_cast<size_t>(tb.memoryEventCount) * sizeof(tb.memoryEvents[0]));
+			out += static_cast<size_t>(tb.memoryEventCount) * sizeof(tb.memoryEvents[0]);
 		}
 		if (tb.codeVersionCount) {
 			memcpy(out, tb.codeVersions.data(), static_cast<size_t>(tb.codeVersionCount) * sizeof(tb.codeVersions[0]));

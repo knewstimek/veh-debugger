@@ -84,13 +84,16 @@ veh_trace_basic_blocks(threadId=..., start="game.exe+0x12000", end="game.exe+0x1
                        max_steps=100000, timeout_ms=10000, follow_exceptions=true,
                        collect_memory_writes=true, max_memory_writes=4096,
 				       collect_memory_reads=true,
+				       collect_memory_events=true, max_memory_events=8192,
 				       collect_events=true, max_events=8192,
 				       collect_code=true, max_code_bytes=262144, max_code_versions=4096,
                        dependency_sources=["rcx", {"address":"game.exe+0x5000","size":4,"label":"input"}])
 ```
 명령마다 MCP로 보내지 않고 타겟 DLL 안에서 TF single-step과 bounded 집계를 수행한다. unique block/edge, register delta, hot path, indirect target profile을 반환하며, `collect_memory_writes=true`이면 명령 실행 전후의 메모리 write 값을 최대 `max_memory_writes`개 unique transition으로 압축한다. 실행 가능 페이지에 대한 write와 이후 변경 범위 실행도 연결해서 표시한다. REP 계열, 16바이트 초과 operand, FS/GS segment write처럼 정확히 모델링하지 못한 경우는 `unsupported_memory_writes`에 집계하며 누락을 숨기지 않는다. 최초 진입과 새로운 edge에서만 레지스터 및 제한된 스택 snapshot을 저장하고, 처리된 예외 continuation도 edge로 기록한다. 현재는 VEH로 정지된 단일 스레드가 대상이며 범위를 벗어나면 정지한다. `veh_batch` step과 breakpoint `action`에서도 같은 결과 형식을 사용한다.
 
-응답은 `schema_version=2`, `mode=aggregated`, `thread_id`로 집계 의미와 스레드 범위를 명시한다. 기본 집계만으로는 실행 순서를 복원할 수 없다. `collect_events=true`를 사용하면 initial block entry와 이후 모든 block transition을 event-schema-v1의 `events` 배열에 실행 순서대로 기록하며 각 항목에 trace-step `sequence`와 OS `thread_id`가 포함된다. 이 스트림은 명령어 단위가 아닌 basic-block transition 단위이고, `max_events`를 넘으면 집계는 계속하면서 `events_truncated=true` 및 `ordering.complete=false`를 반환한다.
+응답은 `schema_version=3`, `mode=aggregated`, `thread_id`로 집계 의미와 스레드 범위를 명시한다. 기본 집계만으로는 실행 순서를 복원할 수 없다. `collect_events=true`를 사용하면 initial block entry와 이후 모든 block transition을 event-schema-v1의 `events` 배열에 실행 순서대로 기록하며 각 항목에 trace-step `sequence`와 OS `thread_id`가 포함된다. 이 스트림은 명령어 단위가 아닌 basic-block transition 단위이고, `max_events`를 넘으면 집계는 계속하면서 `events_truncated=true` 및 `ordering.complete=false`를 반환한다.
+
+`collect_memory_events=true`는 ordered block event 수집을 함께 활성화하고 동일한 trace-step sequence 공간에 per-occurrence read/write를 보존한다. 각 `memory_events` 항목은 thread/instruction/effective address/size와 logical `access_index`, read value 또는 write before/after, dependency origin을 포함한다. 별도 `max_memory_events` 예산을 넘겨도 aggregate trace는 계속되며 `memory_events_truncated`, 정확한 `memory_events_dropped`, `memory_ordering.complete=false`로 손실을 표시한다. 동일 명령에서 여러 operand 또는 read-modify-write가 발생해도 kind와 access index로 구분된다.
 
 `collect_code=true`는 ordered event 수집도 활성화하고 실행 시점 block bytes를 unique `(block, version)`으로 보존한다. event-schema-v2의 `code_version`이 `code_versions` 항목과 연결되므로 self-modifying code도 어느 sequence에서 어느 bytes가 실행됐는지 구분할 수 있다. `max_code_bytes`와 `max_code_versions`는 독립된 총량 제한이며 초과 시 집계는 계속하고 `code_truncated=true`, `code_capture.complete=false`를 반환한다.
 
@@ -336,7 +339,7 @@ enabled = true
 | `veh_batch` | `steps` | 다중 명령 일괄 실행 (`$N`/`$last`/`$prev` 결과 참조, if/loop/for_each 제어 흐름) |
 | `veh_trace_callers` | `address, duration_sec?` | 함수 호출자 프로파일링 (자동 resume -> N초간 caller 수집 -> 자동 pause). 유니크 caller별 히트 카운트 반환. x64: RtlVirtualUnwind (정확). x86: [ESP] (함수 진입점에서만 정확) |
 | `veh_trace_calls` | `addresses, duration_sec?, resolve?, system_only?` | call/jmp 명령이 런타임에 어디로 가는지 모니터링. 콜 사이트에 BP 설치 후 N초간 실행, 실제 타겟 주소 + API 이름 수집. `resolve=true`: thunk/trampoline을 자연스러운 call 컨텍스트에서 따라가 최종 API까지 추적 (예외 기반 난독화 대응). `system_only=true`: 시스템 DLL 타겟만 반환. 패킹된 바이너리의 IAT 복원용. |
-| `veh_trace_basic_blocks` | `threadId, start, end, ..., collect_events?, collect_code?, max_code_bytes?, max_code_versions?, ...` | DLL 내부 bounded trace. versioned aggregate metadata와 선택적 ordered transition/runtime code-version stream 및 block/edge, delta, memory, dependency, region, exception을 반환한다. |
+| `veh_trace_basic_blocks` | `threadId, start, end, ..., collect_events?, collect_memory_events?, max_memory_events?, collect_code?, ...` | DLL 내부 bounded trace. versioned aggregate metadata와 선택적 ordered block/code/memory occurrence stream 및 block/edge, delta, memory, dependency, region, exception을 반환한다. |
 | `veh_checkpoint_create` | `threadId, regions?` | VEH 정지 스레드의 GPR/flags(x64는 XMM 포함)와 선택 메모리 범위를 세션 로컬 checkpoint로 저장한다. |
 | `veh_checkpoint_restore` | `id` | 동일 스레드가 VEH 정지된 상태에서 context와 선택 메모리를 복원한다. 변경된 매핑은 거부하고 실패 시 메모리 rollback을 시도한다. |
 | `veh_checkpoint_diff` | `id, other_id?` | checkpoint와 현재 상태 또는 다른 checkpoint의 register 및 변경 메모리 구간을 비교한다. |

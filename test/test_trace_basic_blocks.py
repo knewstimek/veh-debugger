@@ -5,6 +5,7 @@ import queue
 import subprocess
 import threading
 import time
+from collections import Counter
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -86,7 +87,8 @@ def main():
         assert trace_tool, listed
         trace_properties = trace_tool["inputSchema"]["properties"]
         assert all(name in trace_properties for name in (
-            "collect_events", "max_events", "collect_code", "max_code_bytes", "max_code_versions"
+            "collect_events", "max_events", "collect_code", "max_code_bytes", "max_code_versions",
+            "collect_memory_events", "max_memory_events",
         )), trace_tool
         launch = client.tool("veh_launch", {"program": TARGET, "stopOnEntry": True})
         assert launch.get("success"), launch
@@ -115,6 +117,8 @@ def main():
             "max_memory_writes": 64,
             "collect_memory_reads": True,
             "max_memory_reads": 64,
+            "collect_memory_events": True,
+            "max_memory_events": 256,
             "collect_events": True,
             "max_events": 256,
             "collect_code": True,
@@ -125,7 +129,7 @@ def main():
         assert "error" not in trace, trace
         assert len(trace["blocks"]) >= 2, trace
         assert len(trace["edges"]) >= 1, trace
-        assert trace["schema_version"] == 2 and trace["mode"] == "aggregated", trace
+        assert trace["schema_version"] == 3 and trace["mode"] == "aggregated", trace
         assert trace["thread_id"] == thread_id, trace
         assert trace["ordering"] == {
             "available": True, "granularity": "basic_block_transitions",
@@ -137,6 +141,36 @@ def main():
             event["sequence"] for event in trace["events"]), trace
         assert any(event["type"] == "edge" for event in trace["events"]), trace
         assert trace["events_truncated"] is False, trace
+        assert trace["memory_ordering"] == {
+            "available": True, "granularity": "instruction_memory_accesses",
+            "event_schema_version": 1, "complete": True,
+            "events_captured": len(trace["memory_events"]), "events_dropped": 0,
+        }, trace
+        assert trace["memory_events"] and trace["memory_events_truncated"] is False, trace
+        assert trace["memory_events_dropped"] == 0, trace
+        assert all(event["thread_id"] == thread_id for event in trace["memory_events"]), trace
+        assert [event["sequence"] for event in trace["memory_events"]] == sorted(
+            event["sequence"] for event in trace["memory_events"]), trace
+        assert len({(event["sequence"], event["kind"], event["access_index"])
+                    for event in trace["memory_events"]}) == len(trace["memory_events"]), trace
+        assert all((event["kind"] == "read" and "value" in event) or
+                   (event["kind"] == "write" and "before" in event and "after" in event)
+                   for event in trace["memory_events"]), trace
+        assert any(event.get("dependencies") for event in trace["memory_events"]), trace
+
+        write_occurrences = Counter(
+            (event["instruction"], event["address"], event["size"],
+             event["before"], event["after"])
+            for event in trace["memory_events"] if event["kind"] == "write")
+        read_occurrences = Counter(
+            (event["instruction"], event["address"], event["size"], event["value"])
+            for event in trace["memory_events"] if event["kind"] == "read")
+        assert all(write_occurrences[(item["instruction"], item["address"], item["size"],
+                                      item["before"], item["after"])] == item["hits"]
+                   for item in trace["memory_writes"]), trace
+        assert all(read_occurrences[(item["instruction"], item["address"], item["size"],
+                                     item["value"])] == item["hits"]
+                   for item in trace["memory_reads"]), trace
         assert trace["code_capture"]["available"] is True, trace
         assert trace["code_capture"]["complete"] is True, trace
         assert trace["code_versions"] and trace["code_truncated"] is False, trace
@@ -176,6 +210,7 @@ def main():
                 "max_blocks": 4096, "max_edges": 8192, "max_steps": 1000,
                 "timeout_ms": 5000, "stack_bytes": 32,
                 "collect_memory_writes": True, "max_memory_writes": 64,
+                "collect_memory_events": True, "max_memory_events": 256,
                 "collect_events": True, "max_events": 256,
                 "collect_code": True, "max_code_bytes": 4096, "max_code_versions": 256,
             }},
@@ -193,6 +228,8 @@ def main():
         assert batch_trace["code_capture"]["available"] is True and batch_trace["code_versions"], batch_trace
         assert all(event["thread_id"] == batch_stop["threadId"]
                    for event in batch_trace["events"]), batch_trace
+        assert all(event["thread_id"] == batch_stop["threadId"]
+                   for event in batch_trace["memory_events"]), batch_trace
 
         truncated_batch = client.tool("veh_batch", {"steps": [
             {"tool": "veh_continue", "args": {"wait": True, "timeout": 10}},
@@ -201,7 +238,8 @@ def main():
                 "max_steps": 1000, "timeout_ms": 5000, "stack_bytes": 0,
                 "collect_memory_writes": True, "max_memory_writes": 1,
                 "collect_memory_reads": True, "max_memory_reads": 1,
-                "collect_events": True, "max_events": 1,
+                "collect_memory_events": True, "max_memory_events": 1,
+                "max_events": 1,
             }},
         ]}, timeout=20)
         truncated_writes = truncated_batch["results"][1]["result"]
@@ -212,6 +250,12 @@ def main():
         assert len(truncated_writes["events"]) == 1, truncated_writes
         assert truncated_writes["events_truncated"] is True, truncated_writes
         assert truncated_writes["ordering"]["complete"] is False, truncated_writes
+        assert len(truncated_writes["memory_events"]) == 1, truncated_writes
+        assert truncated_writes["memory_events_truncated"] is True, truncated_writes
+        assert truncated_writes["memory_events_dropped"] > 0, truncated_writes
+        assert truncated_writes["memory_ordering"]["complete"] is False, truncated_writes
+        assert truncated_writes["memory_ordering"]["events_dropped"] == \
+            truncated_writes["memory_events_dropped"], truncated_writes
 
         conditional_batch = client.tool("veh_batch", {"steps": [
             {"tool": "veh_continue", "args": {"wait": True, "timeout": 10}},
@@ -267,6 +311,7 @@ def main():
                 {"tool": "veh_trace_basic_blocks", "args": {
                     "threadId": thread_id, "start": hex(start), "end": hex(start + 0x100),
                     "max_steps": 1000, "timeout_ms": 5000, "stack_bytes": 0,
+                    "collect_memory_events": True, "max_memory_events": 256,
                     "collect_events": True, "max_events": 256,
                     "collect_code": True, "max_code_bytes": 4096, "max_code_versions": 256,
                 }},
@@ -361,23 +406,30 @@ def main():
         orphaned_checkpoint = client.tool("veh_checkpoint_create", {"threadId": checkpoint_thread})
         assert orphaned_checkpoint.get("id"), orphaned_checkpoint
 
-        # On x64, LEA's source is a Zydis memory-form operand even though the
+        # LEA's source is a Zydis memory-form operand even though the
         # instruction reads no memory. Its base/index origins must reach the
         # largest enclosing destination register; writing EAX defines RAX via
         # architectural zero-extension. Run this immediately before terminating
         # the target so the synthetic register state cannot affect other cases.
         saved = client.tool("veh_registers", {"threadId": checkpoint_thread})["registers"]
+        is_32bit = "eip" in saved
+        ip_name = "eip" if is_32bit else "rip"
         lea_code = client.tool("veh_allocate_memory", {"size": 4096, "protection": "rwx"})
         assert lea_code.get("success"), lea_code
         lea_start = int(lea_code["address"], 0)
-        resume_address = int(saved["rip"], 0)
-        code = (bytes.fromhex("81 F1 78 56 34 12 8D 04 0A 49 BB") +
-                resume_address.to_bytes(8, "little") + bytes.fromhex("41 FF E3"))
+        resume_address = int(saved[ip_name], 0)
+        if is_32bit:
+            code = (bytes.fromhex("81 F1 78 56 34 12 8D 04 0A BB") +
+                    resume_address.to_bytes(4, "little") + bytes.fromhex("FF E3"))
+        else:
+            code = (bytes.fromhex("81 F1 78 56 34 12 8D 04 0A 49 BB") +
+                    resume_address.to_bytes(8, "little") + bytes.fromhex("41 FF E3"))
         assert client.tool("veh_write_memory", {
             "address": hex(lea_start), "data": code.hex(" "),
         }).get("success")
-        for name, value in (("rcx", "0x11111111"), ("rdx", "0x22222222"),
-                            ("rip", hex(lea_start))):
+        rcx_name, rdx_name = (("ecx", "edx") if is_32bit else ("rcx", "rdx"))
+        for name, value in ((rcx_name, "0x11111111"), (rdx_name, "0x22222222"),
+                            (ip_name, hex(lea_start))):
             assert client.tool("veh_set_register", {
                 "threadId": checkpoint_thread, "name": name, "value": value,
             }).get("success")
@@ -386,25 +438,29 @@ def main():
             "end": hex(lea_start + len(code)), "max_steps": 16,
             "timeout_ms": 5000, "stack_bytes": 0,
             "collect_memory_reads": True, "max_memory_reads": 16,
-            "dependency_sources": ["rcx", "rdx"],
+            "dependency_sources": [rcx_name, rdx_name],
         }, timeout=15)
         assert lea_trace.get("stop_reason") == "left_range", lea_trace
-        assert set(lea_trace["final_dependencies"].get("rax", [])) == {"rcx", "rdx"}, lea_trace
+        destination_name = "eax" if is_32bit else "rax"
+        assert set(lea_trace["final_dependencies"].get(destination_name, [])) == \
+            {rcx_name, rdx_name}, lea_trace
         assert lea_trace["memory_reads"] == [], lea_trace
         assert client.tool("veh_free_memory", {"address": hex(lea_start)}).get("success")
 
         # A loop that rewrites its own XOR immediate produces two runtime byte
         # versions of the same block. Ordered edge occurrences must identify
         # which retained version was entered at each trace sequence.
-        smc_code = bytes.fromhex("80 35 FF FF FF FF 01 EB F7")
         smc = client.tool("veh_allocate_memory", {"size": 4096, "protection": "rwx"})
         assert smc.get("success"), smc
         smc_start = int(smc["address"], 0)
+        smc_code = (bytes.fromhex("80 35") +
+                    ((smc_start + 6).to_bytes(4, "little") if is_32bit else bytes.fromhex("FF FF FF FF")) +
+                    bytes.fromhex("01 EB F7"))
         assert client.tool("veh_write_memory", {
             "address": hex(smc_start), "data": smc_code.hex(" "),
         }).get("success")
         assert client.tool("veh_set_register", {
-            "threadId": checkpoint_thread, "name": "rip", "value": hex(smc_start),
+            "threadId": checkpoint_thread, "name": ip_name, "value": hex(smc_start),
         }).get("success")
         smc_trace = client.tool("veh_trace_basic_blocks", {
             "threadId": checkpoint_thread, "start": hex(smc_start),
@@ -430,7 +486,7 @@ def main():
             "address": hex(smc_start), "data": smc_code.hex(" "),
         }).get("success")
         assert client.tool("veh_set_register", {
-            "threadId": checkpoint_thread, "name": "rip", "value": hex(smc_start),
+            "threadId": checkpoint_thread, "name": ip_name, "value": hex(smc_start),
         }).get("success")
         limited_code = client.tool("veh_trace_basic_blocks", {
             "threadId": checkpoint_thread, "start": hex(smc_start),
@@ -442,7 +498,7 @@ def main():
         assert limited_code["code_truncated"] is True, limited_code
         assert limited_code["code_capture"]["complete"] is False, limited_code
         assert client.tool("veh_set_register", {
-            "threadId": checkpoint_thread, "name": "rip", "value": saved["rip"],
+            "threadId": checkpoint_thread, "name": ip_name, "value": saved[ip_name],
         }).get("success")
         assert client.tool("veh_free_memory", {"address": hex(smc_start)}).get("success")
 
@@ -480,8 +536,9 @@ def main():
             "exception_edges": sum(edge.get("kind") == "exception" for edge in exception_trace["edges"]),
             "indirect_sites": len(indirect_trace["indirect_branches"]),
             "memory_writes": len(trace["memory_writes"]),
+            "memory_events": len(trace["memory_events"]),
             "executed_writes": sum(bool(w.get("executed_after_write")) for w in executable_trace["executable_writes"]),
-            "lea_dependencies": lea_trace["final_dependencies"]["rax"],
+            "lea_dependencies": lea_trace["final_dependencies"][destination_name],
             "code_versions": len(smc_trace["code_versions"]),
             "checkpoint_restored": True,
         }))
