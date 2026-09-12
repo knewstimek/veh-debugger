@@ -672,6 +672,27 @@ bool VehHandler::RecordBasicTraceMemoryRead(const TraceBasicBlocksState::Pending
 	return false;
 }
 
+void VehHandler::RecordBasicTraceEvent(TraceBasicBlockEventType type, uint64_t sequence,
+		uint64_t source, uint64_t sourceInstruction, uint64_t target,
+		TraceBasicBlockEdgeKind edgeKind, uint32_t exceptionCode, bool indirect) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.collectEvents) return;
+	if (tb.eventCount >= tb.events.size()) {
+		tb.eventsTruncated = true;
+		return;
+	}
+	auto& event = tb.events[tb.eventCount++];
+	event.sequence = sequence;
+	event.source = source;
+	event.sourceInstruction = sourceInstruction;
+	event.target = target;
+	event.threadId = tb.threadId;
+	event.exceptionCode = exceptionCode;
+	event.type = type;
+	event.edgeKind = edgeKind;
+	event.indirect = indirect ? 1 : 0;
+}
+
 void VehHandler::CompleteBasicTraceMemoryWrites() {
 	auto& tb = traceBasicBlocks_;
 	for (uint8_t i = 0; i < tb.pendingReadCount; ++i)
@@ -793,6 +814,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		uint32_t maxBlocks, uint32_t maxEdges, uint32_t maxSteps, uint16_t stackBytes,
 		bool followExceptions, bool collectMemoryWrites, uint32_t maxMemoryWrites,
 		bool collectMemoryReads, uint32_t maxMemoryReads,
+		bool collectEvents, uint32_t maxEvents,
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition,
@@ -834,6 +856,8 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.maxMemoryWrites = maxMemoryWrites;
 	tb.collectMemoryReads = collectMemoryReads;
 	tb.maxMemoryReads = maxMemoryReads;
+	tb.collectEvents = collectEvents;
+	tb.maxEvents = maxEvents;
 	tb.dependencySourceCount = dependencySourceCount;
 	memset(tb.dependencySources, 0, sizeof(tb.dependencySources));
 	if (dependencySourceCount) memcpy(tb.dependencySources, dependencySources,
@@ -858,12 +882,16 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	else
 		tb.memoryTaintTable.clear();
 	tb.snapshots.assign(static_cast<size_t>(maxEdges) * 2 + 1, {});
+	if (collectEvents) tb.events.assign(maxEvents, {});
+	else tb.events.clear();
 	tb.blockCount = tb.edgeCount = tb.snapshotCount = tb.exceptionsFollowed = 0;
 	tb.memoryWriteCount = tb.unsupportedMemoryWrites = 0;
 	tb.memoryWritesTruncated = false;
 	tb.memoryReadCount = tb.unsupportedMemoryReads = 0;
 	tb.memoryReadsTruncated = false;
 	tb.dependencyIncomplete = false;
+	tb.eventsTruncated = false;
+	tb.eventCount = 0;
 	memset(tb.registerDependencies, 0, sizeof(tb.registerDependencies));
 	tb.flagsDependencies = 0;
 	for (uint8_t source = 0; source < dependencySourceCount; ++source)
@@ -887,6 +915,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	if (tb.collectWindowActive) {
 		uint32_t initialSnapshot = CaptureBasicTraceSnapshot(&ctx);
 		if (!RecordBasicTraceBlock(ip, &ctx, initialSnapshot)) return false;
+		RecordBasicTraceEvent(TraceBasicBlockEventType::BlockEntry, 0, 0, 0, ip);
 	}
 
 	// Avoid leaving a generic step flag behind: write TF into the stopped context
@@ -940,6 +969,8 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 					FinishBasicTrace(TraceBasicBlockStopReason::MaxBlocks, addr, true);
 					return BasicTraceStepResult::Stop;
 				}
+				RecordBasicTraceEvent(TraceBasicBlockEventType::BlockEntry,
+					tb.stepsExecuted, 0, 0, addr);
 				PrepareBasicTraceMemoryWrites(current, info->ContextRecord);
 			}
 		}
@@ -972,6 +1003,8 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 				FinishBasicTrace(TraceBasicBlockStopReason::MaxBlocks, addr, true);
 				return BasicTraceStepResult::Stop;
 			}
+			RecordBasicTraceEvent(TraceBasicBlockEventType::BlockEntry,
+				tb.stepsExecuted, 0, 0, addr);
 			PrepareBasicTraceMemoryWrites(current, info->ContextRecord);
 		}
 		if (tb.stepsExecuted >= tb.maxSteps) {
@@ -1005,6 +1038,9 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 			FinishBasicTrace(TraceBasicBlockStopReason::MaxEdges, addr, true);
 			return BasicTraceStepResult::Stop;
 		}
+		RecordBasicTraceEvent(TraceBasicBlockEventType::Edge, tb.stepsExecuted,
+			tb.currentBlock, tb.previousInstruction, targetBlock, kind, 0,
+			previous && previous->indirect != 0);
 		if (!inRange) {
 			FinishBasicTrace(TraceBasicBlockStopReason::LeftRange, addr);
 			return BasicTraceStepResult::Stop;
@@ -1135,6 +1171,10 @@ LONG VehHandler::HandleContinue(PEXCEPTION_POINTERS info) {
 		tb.stopPending = true;
 		tb.pendingStopReason = TraceBasicBlockStopReason::MaxEdges;
 		tb.truncated = true;
+	} else {
+		RecordBasicTraceEvent(TraceBasicBlockEventType::Edge, tb.stepsExecuted,
+			tb.pendingExceptionSourceBlock, tb.pendingExceptionInstruction, destination,
+			TraceBasicBlockEdgeKind::Exception, tb.pendingExceptionCode, false);
 	}
 	tb.pendingException = false;
 

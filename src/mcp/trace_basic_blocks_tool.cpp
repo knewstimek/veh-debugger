@@ -275,6 +275,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	int maxMemoryWrites = TraceJsonInt(args, "max_memory_writes", 4096);
 	bool collectMemoryReads = TraceJsonBool(args, "collect_memory_reads", false);
 	int maxMemoryReads = TraceJsonInt(args, "max_memory_reads", 4096);
+	bool collectEvents = TraceJsonBool(args, "collect_events", false);
+	int maxEvents = TraceJsonInt(args, "max_events", 8192);
 	if (maxBlocks < 1 || maxBlocks > 16384) return {{"error", "max_blocks must be 1-16384"}};
 	if (maxEdges < 1 || maxEdges > 32768) return {{"error", "max_edges must be 1-32768"}};
 	if (maxSteps < 1 || maxSteps > 5000000) return {{"error", "max_steps must be 1-5000000"}};
@@ -285,6 +287,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		return {{"error", "max_memory_writes must be 1-16384"}};
 	if (maxMemoryReads < 1 || maxMemoryReads > 16384)
 		return {{"error", "max_memory_reads must be 1-16384"}};
+	if (maxEvents < 1 || maxEvents > 32768)
+		return {{"error", "max_events must be 1-32768"}};
 	std::vector<TraceDependencySource> dependencySources;
 	std::vector<std::string> dependencyLabels;
 	if (args.contains("dependency_sources")) {
@@ -324,7 +328,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		static_cast<uint32_t>(maxSteps), static_cast<uint32_t>(timeoutMs),
 		static_cast<uint16_t>(stackBytes), followExceptions,
 		collectMemoryWrites, static_cast<uint32_t>(maxMemoryWrites),
-		collectMemoryReads, static_cast<uint32_t>(maxMemoryReads), dependencySources,
+		collectMemoryReads, static_cast<uint32_t>(maxMemoryReads),
+		collectEvents, static_cast<uint32_t>(maxEvents), dependencySources,
 		startCondition, stopCondition, collectCondition);
 	if (!result.ok)
 		return {{"error", "TraceBasicBlocks failed (thread must be VEH-stopped and RIP must be inside the range)"}};
@@ -587,8 +592,32 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		if (!continuationRegion.is_null()) value["continuation_region"] = std::move(continuationRegion);
 		exceptions.push_back(std::move(value));
 	}
+	json events = json::array();
+	for (const auto& event : result.events) {
+		json value = {{"sequence", event.sequence}, {"thread_id", event.threadId}};
+		if (event.type == TraceBasicBlockEventType::BlockEntry) {
+			value["type"] = "block_entry";
+			value["block"] = hex(event.target);
+		} else {
+			value["type"] = "edge";
+			value["source"] = hex(event.source);
+			value["source_instruction"] = hex(event.sourceInstruction);
+			value["target"] = hex(event.target);
+			value["kind"] = edgeKind(event.edgeKind);
+			if (event.indirect) value["indirect"] = true;
+			if (event.exceptionCode) value["exception_code"] = hex(event.exceptionCode);
+		}
+		events.push_back(std::move(value));
+	}
+	json ordering = {{"available", result.eventCollectionEnabled},
+		{"granularity", "basic_block_transitions"},
+		{"event_schema_version", result.eventSchemaVersion},
+		{"complete", result.eventCollectionEnabled && !result.eventsTruncated}};
 
-	return {{"stop_reason", stopReason(result.stopReason)}, {"truncated", result.truncated},
+	return {{"schema_version", 2}, {"mode", "aggregated"},
+		{"thread_id", result.threadId}, {"ordering", std::move(ordering)},
+		{"events", std::move(events)}, {"events_truncated", result.eventsTruncated},
+		{"stop_reason", stopReason(result.stopReason)}, {"truncated", result.truncated},
 		{"steps_executed", result.stepsExecuted}, {"elapsed_ms", result.elapsedMs},
 		{"filtered_steps", result.filteredSteps}, {"start_condition_met", result.startConditionMet},
 		{"final_address", hex(result.finalAddress)}, {"exceptions_followed", result.exceptionsFollowed},

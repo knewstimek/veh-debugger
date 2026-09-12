@@ -152,6 +152,13 @@ storage is allocated before resume. The VEH path updates fixed-size open-address
 block/edge tables and captures snapshots only for initial entry and newly observed
 edges; it performs no JSON work or heap allocation.
 
+Responses declare aggregate schema version 2, mode, and the selected OS thread.
+Optional `collect_events` preallocates a bounded array before resume and appends
+event-schema-v1 records for the initial block entry and every observed block
+transition. Each record carries the trace-step sequence and thread ID. Exhausting
+`max_events` marks the ordered stream incomplete without stopping aggregate
+collection; this is block-transition ordering rather than instruction-level history.
+
 The response contains unique block/edge hit counts, ranked hot blocks/edges, and
 the source instruction for each edge. Calls and unconditional branches whose
 decoded target operand is a register or memory location are marked indirect and

@@ -2141,9 +2141,11 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		if (req.timeoutMs == 0) req.timeoutMs = 10000;
 		if (req.collectMemoryWrites && req.maxMemoryWrites == 0) req.maxMemoryWrites = 4096;
 		if (req.collectMemoryReads && req.maxMemoryReads == 0) req.maxMemoryReads = 4096;
+		if (req.collectEvents && req.maxEvents == 0) req.maxEvents = 8192;
 		if (req.maxBlocks > 16384 || req.maxEdges > 32768 || req.maxSteps > 5000000 ||
 			(req.collectMemoryWrites && req.maxMemoryWrites > 16384) ||
 			(req.collectMemoryReads && req.maxMemoryReads > 16384) ||
+			(req.collectEvents && req.maxEvents > 32768) ||
 			req.dependencySourceCount > kTraceDependencyMaxSources ||
 			req.timeoutMs < 100 || req.timeoutMs > 60000 ||
 			req.stackBytes > kTraceBasicBlockMaxStackBytes) {
@@ -2165,6 +2167,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				req.maxBlocks, req.maxEdges, req.maxSteps, req.stackBytes,
 				req.followExceptions != 0, req.collectMemoryWrites != 0, req.maxMemoryWrites,
 				req.collectMemoryReads != 0, req.maxMemoryReads,
+				req.collectEvents != 0, req.maxEvents,
 				req.dependencySources, req.dependencySourceCount,
 				req.startCondition, req.stopCondition, req.collectCondition,
 				std::move(instructions), std::move(staticBlockStarts))) {
@@ -2350,6 +2353,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			memoryWrites.size() * sizeof(TraceBasicBlockMemoryWriteEntry) +
 			memoryReads.size() * sizeof(TraceBasicBlockMemoryReadEntry) +
 			exceptionEvents.size() * sizeof(TraceBasicBlockExceptionEntry);
+		responseSize += static_cast<size_t>(tb.eventCount) * sizeof(TraceBasicBlockEventEntry);
 		std::vector<uint8_t> response(responseSize);
 		auto* header = reinterpret_cast<TraceBasicBlocksResponse*>(response.data());
 		memset(header, 0, sizeof(*header));
@@ -2376,6 +2380,11 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		header->elapsedMs = static_cast<uint32_t>(GetTickCount64() - startTick);
 		header->stepsExecuted = tb.stepsExecuted;
 		header->finalAddress = tb.finalAddress;
+		header->threadId = req.threadId;
+		header->eventCount = tb.eventCount;
+		header->eventCollectionEnabled = req.collectEvents ? 1 : 0;
+		header->eventsTruncated = tb.eventsTruncated ? 1 : 0;
+		header->eventSchemaVersion = 1;
 
 		uint8_t* out = response.data() + sizeof(*header);
 		for (const auto& block : blocks) {
@@ -2399,6 +2408,10 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 		if (!exceptionEvents.empty()) {
 			memcpy(out, exceptionEvents.data(), exceptionEvents.size() * sizeof(exceptionEvents[0]));
+			out += exceptionEvents.size() * sizeof(exceptionEvents[0]);
+		}
+		if (tb.eventCount) {
+			memcpy(out, tb.events.data(), static_cast<size_t>(tb.eventCount) * sizeof(tb.events[0]));
 		}
 		SendResponse(command, response.data(), static_cast<uint32_t>(response.size()));
 		break;

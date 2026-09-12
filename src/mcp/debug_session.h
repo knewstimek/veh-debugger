@@ -294,6 +294,10 @@ public:
 		uint32_t unsupportedMemoryReads = 0;
 		bool memoryReadsTruncated = false;
 		bool dependencyIncomplete = false;
+		uint32_t threadId = 0;
+		bool eventCollectionEnabled = false;
+		bool eventsTruncated = false;
+		uint16_t eventSchemaVersion = 0;
 		uint32_t finalRegisterDependencies[16]{};
 		uint32_t finalFlagsDependencies = 0;
 		std::vector<TraceBasicBlockEntry> blocks;
@@ -302,12 +306,14 @@ public:
 		std::vector<TraceBasicBlockMemoryWriteEntry> memoryWrites;
 		std::vector<TraceBasicBlockMemoryReadEntry> memoryReads;
 		std::vector<TraceBasicBlockExceptionEntry> exceptionEvents;
+		std::vector<TraceBasicBlockEventEntry> events;
 	};
 	TraceBasicBlocksResult TraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, uint64_t rangeEnd,
 		uint32_t maxBlocks = 4096, uint32_t maxEdges = 8192, uint32_t maxSteps = 100000,
 		uint32_t timeoutMs = 10000, uint16_t stackBytes = 128, bool followExceptions = true,
 		bool collectMemoryWrites = false, uint32_t maxMemoryWrites = 4096,
 		bool collectMemoryReads = false, uint32_t maxMemoryReads = 4096,
+		bool collectEvents = false, uint32_t maxEvents = 8192,
 		const std::vector<TraceDependencySource>& dependencySources = {},
 		const TraceCondition& startCondition = {}, const TraceCondition& stopCondition = {},
 		const TraceCondition& collectCondition = {});
