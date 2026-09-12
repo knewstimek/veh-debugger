@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Injected DLL no longer leaves runtime logs in the target directory** -- DLL logging is disabled by default instead of unconditionally creating `veh_dll_<pid>.log` in the process working directory. Adapter and MCP logging remain available through their explicit log-file options.
+
 ## 1.1.15 - 2026-09-11
 
 ### Changed
