@@ -559,6 +559,7 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
 			uint64_t base = operand.base == 0xFF ? 0 : BasicTraceContextRegister(ctx, operand.base);
 			uint64_t index = operand.index == 0xFF ? 0 : BasicTraceContextRegister(ctx, operand.index);
 			address = base + index * operand.scale + static_cast<uint64_t>(operand.displacement);
+			if (operand.preDecrementStack) address -= operand.size;
 #ifndef _WIN64
 			address = static_cast<uint32_t>(address);
 #endif

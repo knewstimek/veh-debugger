@@ -406,14 +406,81 @@ def main():
         orphaned_checkpoint = client.tool("veh_checkpoint_create", {"threadId": checkpoint_thread})
         assert orphaned_checkpoint.get("id"), orphaned_checkpoint
 
+        # PUSH writes at post-decrement SP, while POP reads from the current SP.
+        # Verify both architectures report the same concrete slot and value.
+        saved = client.tool("veh_registers", {"threadId": checkpoint_thread})["registers"]
+        is_32bit = "eip" in saved
+        ip_name = "eip" if is_32bit else "rip"
+        sp_name = "esp" if is_32bit else "rsp"
+        accumulator_name = "eax" if is_32bit else "rax"
+        pointer_size = 4 if is_32bit else 8
+        pushed_value = 0x11223344 if is_32bit else 0x1122334455667788
+        expected_stack_address = int(saved[sp_name], 0) - pointer_size
+        original_stack_slot = client.tool("veh_read_memory", {
+            "address": hex(expected_stack_address), "size": pointer_size,
+        })["hex"]
+        sentinel_before = bytes([0xA5] * pointer_size).hex(" ")
+        assert client.tool("veh_write_memory", {
+            "address": hex(expected_stack_address), "data": sentinel_before,
+        }).get("success")
+        stack_code = client.tool("veh_allocate_memory", {"size": 4096, "protection": "rwx"})
+        assert stack_code.get("success"), stack_code
+        stack_start = int(stack_code["address"], 0)
+        resume_address = int(saved[ip_name], 0)
+        if is_32bit:
+            code = (bytes.fromhex("50 58 FF 25") + (stack_start + 8).to_bytes(4, "little") +
+                    resume_address.to_bytes(4, "little"))
+        else:
+            code = bytes.fromhex("50 58 FF 25 00 00 00 00") + resume_address.to_bytes(8, "little")
+        assert client.tool("veh_write_memory", {
+            "address": hex(stack_start), "data": code.hex(" "),
+        }).get("success")
+        assert client.tool("veh_set_register", {
+            "threadId": checkpoint_thread, "name": accumulator_name, "value": hex(pushed_value),
+        }).get("success")
+        assert client.tool("veh_set_register", {
+            "threadId": checkpoint_thread, "name": ip_name, "value": hex(stack_start),
+        }).get("success")
+        stack_trace = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(stack_start),
+            "end": hex(stack_start + len(code)), "max_steps": 8,
+            "timeout_ms": 5000, "stack_bytes": 0,
+            "collect_memory_writes": True, "max_memory_writes": 8,
+            "collect_memory_reads": True, "max_memory_reads": 8,
+            "collect_memory_events": True, "max_memory_events": 8,
+            "dependency_sources": [accumulator_name],
+        }, timeout=15)
+        assert stack_trace.get("stop_reason") == "left_range", stack_trace
+        push_event = next(event for event in stack_trace["memory_events"]
+                          if event["kind"] == "write" and
+                          int(event["instruction"], 0) == stack_start)
+        pop_event = next(event for event in stack_trace["memory_events"]
+                         if event["kind"] == "read" and
+                         int(event["instruction"], 0) == stack_start + 1)
+        expected_value = pushed_value.to_bytes(pointer_size, "little").hex(" ")
+        assert push_event["sequence"] == 1 and pop_event["sequence"] == 2, stack_trace
+        assert int(push_event["address"], 0) == expected_stack_address, stack_trace
+        assert push_event["before"] == sentinel_before, stack_trace
+        assert push_event["after"] == expected_value, stack_trace
+        assert int(pop_event["address"], 0) == expected_stack_address, stack_trace
+        assert pop_event["value"] == expected_value, stack_trace
+        assert push_event.get("dependencies") == [accumulator_name], stack_trace
+        assert pop_event.get("dependencies") == [accumulator_name], stack_trace
+        aggregate_push = next(item for item in stack_trace["memory_writes"]
+                              if int(item["instruction"], 0) == stack_start)
+        assert aggregate_push["address"] == push_event["address"], stack_trace
+        assert aggregate_push["before"] == push_event["before"], stack_trace
+        assert aggregate_push["after"] == push_event["after"], stack_trace
+        assert client.tool("veh_write_memory", {
+            "address": hex(expected_stack_address), "data": original_stack_slot,
+        }).get("success")
+        assert client.tool("veh_free_memory", {"address": hex(stack_start)}).get("success")
+
         # LEA's source is a Zydis memory-form operand even though the
         # instruction reads no memory. Its base/index origins must reach the
         # largest enclosing destination register; writing EAX defines RAX via
         # architectural zero-extension. Run this immediately before terminating
         # the target so the synthetic register state cannot affect other cases.
-        saved = client.tool("veh_registers", {"threadId": checkpoint_thread})["registers"]
-        is_32bit = "eip" in saved
-        ip_name = "eip" if is_32bit else "rip"
         lea_code = client.tool("veh_allocate_memory", {"size": 4096, "protection": "rwx"})
         assert lea_code.get("success"), lea_code
         lea_start = int(lea_code["address"], 0)
