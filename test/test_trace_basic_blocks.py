@@ -101,6 +101,33 @@ def main():
         thread_id = stop["threadId"]
         start = int(bp["address"], 0)
         regs = client.tool("veh_registers", {"threadId": thread_id})["registers"]
+
+        # Start rejection must expose the exact stopped/IP/range/decode decision.
+        # Starting one byte after the current EIP/RIP keeps the range readable
+        # while deliberately excluding the stopped instruction pointer.
+        rejected = client.tool("veh_trace_basic_blocks", {
+            "threadId": thread_id, "start": hex(start + 1), "end": hex(start + 0x100),
+            "max_steps": 8, "timeout_ms": 1000,
+        })
+        failure = rejected.get("failure", {})
+        assert failure.get("reason") == "instruction_pointer_outside_range", rejected
+        assert failure.get("status") == "not_found" and failure.get("status_code") == 2, rejected
+        assert failure.get("stopped") is True and failure.get("ip_in_range") is False, rejected
+        assert failure.get("decode_succeeded") is True, rejected
+        assert failure.get("decoded_instruction_count", 0) > 0, rejected
+        assert int(failure["normalized_ip"], 0) == start, rejected
+        assert int(failure["normalized_start"], 0) == start + 1, rejected
+        assert int(failure["normalized_end"], 0) == start + 0x100, rejected
+
+        rejected_batch = client.tool("veh_batch", {"steps": [{
+            "tool": "veh_trace_basic_blocks", "args": {
+                "threadId": thread_id, "start": hex(start + 1), "end": hex(start + 0x100),
+                "max_steps": 8, "timeout_ms": 1000,
+            },
+        }]})
+        batch_failure = rejected_batch["results"][0]["result"]["failure"]
+        assert batch_failure == failure, rejected_batch
+
         if "rsp" in regs:
             dependency_sources = ["rcx"]
         else:

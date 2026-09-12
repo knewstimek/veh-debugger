@@ -349,13 +349,45 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		collectMemoryEvents, static_cast<uint32_t>(maxMemoryEvents),
 		collectRegisterEvents, static_cast<uint32_t>(maxRegisterEvents),
 		dependencySources, startCondition, stopCondition, collectCondition);
-	if (!result.ok)
-		return {{"error", "TraceBasicBlocks failed (thread must be VEH-stopped and RIP must be inside the range)"}};
-
 	auto hex = [](uint64_t value) {
 		char buffer[24]; snprintf(buffer, sizeof(buffer), "0x%llX", value);
 		return std::string(buffer);
 	};
+	if (!result.ok) {
+		auto failureName = [](TraceBasicBlocksStartFailure reason) {
+			switch (reason) {
+			case TraceBasicBlocksStartFailure::InvalidArguments: return "invalid_arguments";
+			case TraceBasicBlocksStartFailure::DecodeFailed: return "decode_failed";
+			case TraceBasicBlocksStartFailure::ThreadNotStopped: return "thread_not_stopped";
+			case TraceBasicBlocksStartFailure::InstructionPointerOutsideRange: return "instruction_pointer_outside_range";
+			case TraceBasicBlocksStartFailure::CollectorBusy: return "collector_busy";
+			case TraceBasicBlocksStartFailure::StartRejected: return "start_rejected";
+			default: return "legacy_or_invalid_response";
+			}
+		};
+		const char* reason = failureName(result.startFailure);
+		auto statusName = [](IpcStatus status) {
+			switch (status) {
+			case IpcStatus::Ok: return "ok";
+			case IpcStatus::NotFound: return "not_found";
+			case IpcStatus::InvalidArgs: return "invalid_args";
+			default: return "error";
+			}
+		};
+		json failure = {{"reason", reason}, {"status", statusName(result.status)},
+			{"status_code", static_cast<uint32_t>(result.status)}};
+		if (result.startFailure != TraceBasicBlocksStartFailure::None) {
+			failure["stopped"] = result.stopped;
+			failure["ip_in_range"] = result.ipInRange;
+			failure["decode_succeeded"] = result.decodeSucceeded;
+			failure["decoded_instruction_count"] = result.decodedInstructionCount;
+			failure["normalized_ip"] = hex(result.normalizedIp);
+			failure["normalized_start"] = hex(result.normalizedRangeStart);
+			failure["normalized_end"] = hex(result.normalizedRangeEnd);
+		}
+		return {{"error", std::string("TraceBasicBlocks failed: ") + reason},
+			{"failure", std::move(failure)}};
+	}
 	TraceRegionClassifier regions(session.GetTargetProcess());
 	auto stopReason = [](TraceBasicBlockStopReason reason) {
 		switch (reason) {
