@@ -545,8 +545,10 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
 	tb.pendingDependencyMask = 0;
 	tb.pendingWritesFlags = 0;
 	if (!instruction || !ctx) return;
-	if (tb.collectMemoryWrites) tb.unsupportedMemoryWrites += instruction->unsupportedWrites;
-	if (tb.collectMemoryReads) tb.unsupportedMemoryReads += instruction->unsupportedReads;
+	if (tb.collectMemoryWrites || tb.collectMemoryEvents)
+		tb.unsupportedMemoryWrites += instruction->unsupportedWrites;
+	if (tb.collectMemoryReads || tb.collectMemoryEvents)
+		tb.unsupportedMemoryReads += instruction->unsupportedReads;
 	uint32_t dependency = instruction->readsFlags ? tb.flagsDependencies : 0;
 	for (uint8_t reg = 0; reg < 16; ++reg)
 		if (instruction->readRegisterMask & (1u << reg)) dependency |= tb.registerDependencies[reg];
@@ -585,13 +587,14 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
 			}
 		}
 		dependency |= readDependency;
-		if (tb.collectMemoryReads) {
+		if (tb.collectMemoryReads || tb.collectMemoryEvents) {
 			auto& pending = tb.pendingReads[tb.pendingReadCount];
 			pending = {};
 			pending.instruction = instruction->address;
 			pending.address = address;
 			pending.size = operand.size;
 			pending.dependencyMask = readDependency;
+			pending.accessIndex = i;
 			if (!SafeCopyTraceValue(address, pending.value, operand.size)) tb.unsupportedMemoryReads++;
 			else tb.pendingReadCount++;
 		}
@@ -601,7 +604,7 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
 	tb.pendingRegisterWriteMask = instruction->writeRegisterMask;
 	tb.pendingWritesFlags = instruction->writesFlags;
 	const_cast<TraceBasicBlocksState::Instruction*>(instruction)->lastDependencyMask = dependency;
-	if (!tb.collectMemoryWrites && !tb.dependencySourceCount) return;
+	if (!tb.collectMemoryWrites && !tb.collectMemoryEvents && !tb.dependencySourceCount) return;
 	for (uint8_t i = 0; i < instruction->writeOperandCount; ++i) {
 		const auto& operand = instruction->writeOperands[i];
 		uint64_t address = effectiveAddress(operand);
@@ -611,6 +614,7 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
 		pending.address = address;
 		pending.size = operand.size;
 		pending.dependencyMask = dependency;
+		pending.accessIndex = static_cast<uint8_t>(instruction->readOperandCount + i);
 		if (!SafeCopyTraceValue(address, pending.before, operand.size)) {
 			tb.unsupportedMemoryWrites++;
 			continue;
@@ -680,6 +684,53 @@ bool VehHandler::RecordBasicTraceMemoryRead(const TraceBasicBlocksState::Pending
 		index = (index + 1) & mask;
 	}
 	return false;
+}
+
+void VehHandler::RecordBasicTraceMemoryEvent(
+		const TraceBasicBlocksState::PendingRead& pending, uint64_t sequence) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.collectMemoryEvents) return;
+	if (tb.memoryEventCount >= tb.memoryEvents.size()) {
+		tb.memoryEventsTruncated = true;
+		tb.memoryEventsDropped++;
+		return;
+	}
+	auto& event = tb.memoryEvents[tb.memoryEventCount++];
+	event = {};
+	event.sequence = sequence;
+	event.instruction = pending.instruction;
+	event.address = pending.address;
+	event.threadId = tb.threadId;
+	event.dependencyMask = pending.dependencyMask;
+	event.size = pending.size;
+	event.kind = TraceMemoryAccessKind::Read;
+	event.accessIndex = pending.accessIndex;
+	event.flags = kTraceMemoryValueValid;
+	memcpy(event.value, pending.value, pending.size);
+}
+
+void VehHandler::RecordBasicTraceMemoryEvent(
+		const TraceBasicBlocksState::PendingWrite& pending, const uint8_t* after, uint64_t sequence) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.collectMemoryEvents) return;
+	if (tb.memoryEventCount >= tb.memoryEvents.size()) {
+		tb.memoryEventsTruncated = true;
+		tb.memoryEventsDropped++;
+		return;
+	}
+	auto& event = tb.memoryEvents[tb.memoryEventCount++];
+	event = {};
+	event.sequence = sequence;
+	event.instruction = pending.instruction;
+	event.address = pending.address;
+	event.threadId = tb.threadId;
+	event.dependencyMask = pending.dependencyMask;
+	event.size = pending.size;
+	event.kind = TraceMemoryAccessKind::Write;
+	event.accessIndex = pending.accessIndex;
+	event.flags = kTraceMemoryValueValid;
+	memcpy(event.before, pending.before, pending.size);
+	memcpy(event.after, after, pending.size);
 }
 
 void VehHandler::RecordBasicTraceEvent(TraceBasicBlockEventType type, uint64_t sequence,
@@ -757,8 +808,12 @@ uint32_t VehHandler::CaptureBasicTraceCodeVersion(uint64_t blockStart, uint64_t 
 
 void VehHandler::CompleteBasicTraceMemoryWrites() {
 	auto& tb = traceBasicBlocks_;
-	for (uint8_t i = 0; i < tb.pendingReadCount; ++i)
-		if (!RecordBasicTraceMemoryRead(tb.pendingReads[i])) tb.memoryReadsTruncated = true;
+	const uint64_t sequence = tb.stepsExecuted + 1;
+	for (uint8_t i = 0; i < tb.pendingReadCount; ++i) {
+		RecordBasicTraceMemoryEvent(tb.pendingReads[i], sequence);
+		if (tb.collectMemoryReads && !RecordBasicTraceMemoryRead(tb.pendingReads[i]))
+			tb.memoryReadsTruncated = true;
+	}
 	tb.pendingReadCount = 0;
 	for (uint8_t i = 0; i < tb.pendingWriteCount; ++i) {
 		uint8_t after[kTraceMemoryMaxValueBytes]{};
@@ -767,6 +822,7 @@ void VehHandler::CompleteBasicTraceMemoryWrites() {
 			tb.unsupportedMemoryWrites++;
 			continue;
 		}
+		RecordBasicTraceMemoryEvent(pending, after, sequence);
 		if (tb.collectMemoryWrites && !RecordBasicTraceMemoryWrite(pending, after)) tb.memoryWritesTruncated = true;
 		if (!tb.memoryTaintTable.empty()) {
 			size_t mask = tb.memoryTaintTable.size() - 1;
@@ -878,6 +934,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		bool collectMemoryReads, uint32_t maxMemoryReads,
 		bool collectEvents, uint32_t maxEvents,
 		bool collectCode, uint32_t maxCodeBytes, uint32_t maxCodeVersions,
+		bool collectMemoryEvents, uint32_t maxMemoryEvents,
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition,
@@ -924,6 +981,8 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.collectCode = collectCode;
 	tb.maxCodeBytes = maxCodeBytes;
 	tb.maxCodeVersions = maxCodeVersions;
+	tb.collectMemoryEvents = collectMemoryEvents;
+	tb.maxMemoryEvents = maxMemoryEvents;
 	tb.dependencySourceCount = dependencySourceCount;
 	memset(tb.dependencySources, 0, sizeof(tb.dependencySources));
 	if (dependencySourceCount) memcpy(tb.dependencySources, dependencySources,
@@ -950,6 +1009,8 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.snapshots.assign(static_cast<size_t>(maxEdges) * 2 + 1, {});
 	if (collectEvents) tb.events.assign(maxEvents, {});
 	else tb.events.clear();
+	if (collectMemoryEvents) tb.memoryEvents.assign(maxMemoryEvents, {});
+	else tb.memoryEvents.clear();
 	if (collectCode) {
 		tb.codeVersionTable.assign(nextPowerOfTwo(static_cast<size_t>(maxCodeVersions) * 2), {});
 		tb.codeVersions.assign(maxCodeVersions, {});
@@ -966,6 +1027,9 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.dependencyIncomplete = false;
 	tb.eventsTruncated = false;
 	tb.eventCount = 0;
+	tb.memoryEventCount = 0;
+	tb.memoryEventsDropped = 0;
+	tb.memoryEventsTruncated = false;
 	tb.codeVersionCount = tb.codeByteCount = 0;
 	tb.codeTruncated = false;
 	memset(tb.registerDependencies, 0, sizeof(tb.registerDependencies));

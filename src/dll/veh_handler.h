@@ -147,6 +147,7 @@ public:
 			uint8_t size = 0;
 			uint8_t before[kTraceMemoryMaxValueBytes]{};
 			uint32_t dependencyMask = 0;
+			uint8_t accessIndex = 0;
 		};
 		struct MemoryReadSlot {
 			uint64_t instruction = 0;
@@ -163,6 +164,7 @@ public:
 			uint32_t dependencyMask = 0;
 			uint8_t size = 0;
 			uint8_t value[kTraceMemoryMaxValueBytes]{};
+			uint8_t accessIndex = 0;
 		};
 		struct MemoryTaintSlot {
 			uint64_t address = 0;
@@ -210,6 +212,8 @@ public:
 		bool collectCode = false;
 		uint32_t maxCodeBytes = 0;
 		uint32_t maxCodeVersions = 0;
+		bool collectMemoryEvents = false;
+		uint32_t maxMemoryEvents = 0;
 		uint8_t dependencySourceCount = 0;
 		TraceDependencySource dependencySources[kTraceDependencyMaxSources]{};
 		TraceCondition startCondition{};
@@ -227,6 +231,7 @@ public:
 		std::vector<MemoryTaintSlot> memoryTaintTable;
 		std::vector<TraceBasicBlockSnapshot> snapshots;
 		std::vector<TraceBasicBlockEventEntry> events;
+		std::vector<TraceBasicBlockMemoryEventEntry> memoryEvents;
 		std::vector<CodeVersionSlot> codeVersionTable;
 		std::vector<TraceBasicBlockCodeVersionEntry> codeVersions;
 		std::vector<uint8_t> codeBytes;
@@ -244,6 +249,9 @@ public:
 		bool dependencyIncomplete = false;
 		bool eventsTruncated = false;
 		uint32_t eventCount = 0;
+		uint32_t memoryEventCount = 0;
+		uint64_t memoryEventsDropped = 0;
+		bool memoryEventsTruncated = false;
 		uint32_t codeVersionCount = 0;
 		uint32_t codeByteCount = 0;
 		bool codeTruncated = false;
@@ -280,6 +288,7 @@ public:
 		bool collectMemoryReads, uint32_t maxMemoryReads,
 		bool collectEvents, uint32_t maxEvents,
 		bool collectCode, uint32_t maxCodeBytes, uint32_t maxCodeVersions,
+		bool collectMemoryEvents, uint32_t maxMemoryEvents,
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition,
@@ -410,6 +419,9 @@ private:
 	bool RecordBasicTraceMemoryWrite(const TraceBasicBlocksState::PendingWrite& pending,
 		const uint8_t* after);
 	bool RecordBasicTraceMemoryRead(const TraceBasicBlocksState::PendingRead& pending);
+	void RecordBasicTraceMemoryEvent(const TraceBasicBlocksState::PendingRead& pending, uint64_t sequence);
+	void RecordBasicTraceMemoryEvent(const TraceBasicBlocksState::PendingWrite& pending,
+		const uint8_t* after, uint64_t sequence);
 	void RecordBasicTraceEvent(TraceBasicBlockEventType type, uint64_t sequence,
 		uint64_t source, uint64_t sourceInstruction, uint64_t target,
 		TraceBasicBlockEdgeKind edgeKind = TraceBasicBlockEdgeKind::Fallthrough,

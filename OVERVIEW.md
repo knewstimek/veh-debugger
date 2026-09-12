@@ -152,12 +152,20 @@ storage is allocated before resume. The VEH path updates fixed-size open-address
 block/edge tables and captures snapshots only for initial entry and newly observed
 edges; it performs no JSON work or heap allocation.
 
-Responses declare aggregate schema version 2, mode, and the selected OS thread.
+Responses declare aggregate schema version 3, mode, and the selected OS thread.
 Optional `collect_events` preallocates a bounded array before resume and appends
 event-schema-v1 records for the initial block entry and every observed block
 transition. Each record carries the trace-step sequence and thread ID. Exhausting
 `max_events` marks the ordered stream incomplete without stopping aggregate
 collection; this is block-transition ordering rather than instruction-level history.
+
+Optional `collect_memory_events` implies ordered block events and preallocates an
+independent per-occurrence memory-event array. Each successful modeled read/write
+uses the same trace-step sequence as block/code events and records the OS thread,
+instruction, effective address, size, logical access index, observed values, and
+dependency mask. Exhaustion increments an exact dropped count while aggregate
+collection continues. REP, wide, segmented, inaccessible, and faulting operations
+retain the existing explicit unsupported/incomplete boundaries.
 
 Optional `collect_code` implies ordered events and preallocates separate byte and
 version budgets. At each observed block transition the DLL snapshots the decoded

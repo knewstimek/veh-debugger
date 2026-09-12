@@ -577,6 +577,9 @@ struct TraceBasicBlocksRequest {
 	uint32_t maxEvents;
 	uint32_t maxCodeBytes;
 	uint32_t maxCodeVersions;
+	uint8_t collectMemoryEvents; // ordered per-occurrence memory access stream
+	uint8_t reserved4[3];
+	uint32_t maxMemoryEvents;
 };
 
 struct TraceBasicBlockEntry {
@@ -673,6 +676,29 @@ struct TraceBasicBlockEventEntry {
 	uint8_t reserved[1];
 };
 
+enum class TraceMemoryAccessKind : uint8_t {
+	Read = 0,
+	Write = 1,
+};
+
+// Ordered memory access record. Sequence shares the trace-step space used by
+// TraceBasicBlockEventEntry. accessIndex distinguishes multiple logical memory
+// accesses performed by one instruction occurrence.
+struct TraceBasicBlockMemoryEventEntry {
+	uint64_t sequence;
+	uint64_t instruction;
+	uint64_t address;
+	uint32_t threadId;
+	uint32_t dependencyMask;
+	uint8_t size;
+	TraceMemoryAccessKind kind;
+	uint8_t accessIndex;
+	uint8_t flags;
+	uint8_t value[kTraceMemoryMaxValueBytes];  // read value
+	uint8_t before[kTraceMemoryMaxValueBytes]; // write value before execution
+	uint8_t after[kTraceMemoryMaxValueBytes];  // write value after execution
+};
+
 struct TraceBasicBlockCodeVersionEntry {
 	uint64_t blockStart;
 	uint64_t blockEnd;
@@ -717,12 +743,18 @@ struct TraceBasicBlocksResponse {
 	uint8_t   codeCollectionEnabled;
 	uint8_t   codeTruncated;
 	uint16_t  codeSchemaVersion;
+	uint32_t  memoryEventCount;
+	uint8_t   memoryEventCollectionEnabled;
+	uint8_t   memoryEventsTruncated;
+	uint16_t  memoryEventSchemaVersion;
+	uint64_t  memoryEventsDropped;
 	// followed by TraceBasicBlockEntry[blockCount],
 	// TraceBasicBlockEdgeEntry[edgeCount], TraceBasicBlockSnapshot[snapshotCount],
 	// TraceBasicBlockMemoryWriteEntry[memoryWriteCount],
 	// TraceBasicBlockMemoryReadEntry[memoryReadCount],
 	// TraceBasicBlockExceptionEntry[exceptionEventCount],
 	// TraceBasicBlockEventEntry[eventCount],
+	// TraceBasicBlockMemoryEventEntry[memoryEventCount],
 	// TraceBasicBlockCodeVersionEntry[codeVersionCount], uint8_t codeBytes[codeByteCount]
 };
 

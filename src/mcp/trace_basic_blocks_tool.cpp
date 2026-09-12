@@ -280,6 +280,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	bool collectCode = TraceJsonBool(args, "collect_code", false);
 	int maxCodeBytes = TraceJsonInt(args, "max_code_bytes", 262144);
 	int maxCodeVersions = TraceJsonInt(args, "max_code_versions", 4096);
+	bool collectMemoryEvents = TraceJsonBool(args, "collect_memory_events", false);
+	int maxMemoryEvents = TraceJsonInt(args, "max_memory_events", 8192);
 	if (maxBlocks < 1 || maxBlocks > 16384) return {{"error", "max_blocks must be 1-16384"}};
 	if (maxEdges < 1 || maxEdges > 32768) return {{"error", "max_edges must be 1-32768"}};
 	if (maxSteps < 1 || maxSteps > 5000000) return {{"error", "max_steps must be 1-5000000"}};
@@ -296,6 +298,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		return {{"error", "max_code_bytes must be 1-4194304"}};
 	if (maxCodeVersions < 1 || maxCodeVersions > 16384)
 		return {{"error", "max_code_versions must be 1-16384"}};
+	if (maxMemoryEvents < 1 || maxMemoryEvents > 65536)
+		return {{"error", "max_memory_events must be 1-65536"}};
 	std::vector<TraceDependencySource> dependencySources;
 	std::vector<std::string> dependencyLabels;
 	if (args.contains("dependency_sources")) {
@@ -338,6 +342,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		collectMemoryReads, static_cast<uint32_t>(maxMemoryReads),
 		collectEvents, static_cast<uint32_t>(maxEvents),
 		collectCode, static_cast<uint32_t>(maxCodeBytes), static_cast<uint32_t>(maxCodeVersions),
+		collectMemoryEvents, static_cast<uint32_t>(maxMemoryEvents),
 		dependencySources, startCondition, stopCondition, collectCondition);
 	if (!result.ok)
 		return {{"error", "TraceBasicBlocks failed (thread must be VEH-stopped and RIP must be inside the range)"}};
@@ -622,6 +627,28 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		{"granularity", "basic_block_transitions"},
 		{"event_schema_version", result.eventSchemaVersion},
 		{"complete", result.eventCollectionEnabled && !result.eventsTruncated}};
+	json memoryEvents = json::array();
+	for (const auto& event : result.memoryEvents) {
+		json value = {{"sequence", event.sequence}, {"thread_id", event.threadId},
+			{"instruction", hex(event.instruction)}, {"address", hex(event.address)},
+			{"size", event.size}, {"access_index", event.accessIndex}};
+		if (event.kind == TraceMemoryAccessKind::Read) {
+			value["kind"] = "read";
+			value["value"] = bytes(event.value, event.size);
+		} else {
+			value["kind"] = "write";
+			value["before"] = bytes(event.before, event.size);
+			value["after"] = bytes(event.after, event.size);
+		}
+		if (event.dependencyMask) value["dependencies"] = dependencies(event.dependencyMask);
+		memoryEvents.push_back(std::move(value));
+	}
+	json memoryOrdering = {{"available", result.memoryEventCollectionEnabled},
+		{"granularity", "instruction_memory_accesses"},
+		{"event_schema_version", result.memoryEventSchemaVersion},
+		{"complete", result.memoryEventCollectionEnabled && !result.memoryEventsTruncated},
+		{"events_captured", result.memoryEvents.size()},
+		{"events_dropped", result.memoryEventsDropped}};
 	json codeVersions = json::array();
 	for (const auto& version : result.codeVersions) {
 		if (static_cast<size_t>(version.dataOffset) + version.size > result.codeBytes.size()) continue;
@@ -635,9 +662,13 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		{"complete", result.codeCollectionEnabled && !result.codeTruncated && !result.eventsTruncated},
 		{"bytes_captured", result.codeBytes.size()}, {"versions_captured", result.codeVersions.size()}};
 
-	return {{"schema_version", 2}, {"mode", "aggregated"},
+	return {{"schema_version", 3}, {"mode", "aggregated"},
 		{"thread_id", result.threadId}, {"ordering", std::move(ordering)},
 		{"events", std::move(events)}, {"events_truncated", result.eventsTruncated},
+		{"memory_ordering", std::move(memoryOrdering)},
+		{"memory_events", std::move(memoryEvents)},
+		{"memory_events_truncated", result.memoryEventsTruncated},
+		{"memory_events_dropped", result.memoryEventsDropped},
 		{"code_capture", std::move(codeCapture)}, {"code_versions", std::move(codeVersions)},
 		{"code_truncated", result.codeTruncated},
 		{"stop_reason", stopReason(result.stopReason)}, {"truncated", result.truncated},
