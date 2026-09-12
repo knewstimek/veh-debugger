@@ -580,6 +580,9 @@ struct TraceBasicBlocksRequest {
 	uint8_t collectMemoryEvents; // ordered per-occurrence memory access stream
 	uint8_t reserved4[3];
 	uint32_t maxMemoryEvents;
+	uint8_t collectRegisterEvents; // ordered per-occurrence register delta stream
+	uint8_t reserved5[3];
+	uint32_t maxRegisterEvents;
 };
 
 struct TraceBasicBlockEntry {
@@ -699,6 +702,20 @@ struct TraceBasicBlockMemoryEventEntry {
 	uint8_t after[kTraceMemoryMaxValueBytes];  // write value after execution
 };
 
+// Ordered register delta record. One record is retained for every completed
+// instruction occurrence in the collection window, including an empty delta.
+// IP is identified by instruction/sequence and is excluded from changedMask.
+struct TraceBasicBlockRegisterEventEntry {
+	uint64_t sequence;
+	uint64_t instruction;
+	uint32_t threadId;
+	uint32_t changedMask; // bits 0-15: GPRs, bit 17: EFLAGS
+	uint64_t before[kTraceBasicBlockRegisterCount];
+	uint64_t after[kTraceBasicBlockRegisterCount];
+	uint8_t is32bit;
+	uint8_t reserved[7];
+};
+
 struct TraceBasicBlockCodeVersionEntry {
 	uint64_t blockStart;
 	uint64_t blockEnd;
@@ -748,6 +765,11 @@ struct TraceBasicBlocksResponse {
 	uint8_t   memoryEventsTruncated;
 	uint16_t  memoryEventSchemaVersion;
 	uint64_t  memoryEventsDropped;
+	uint32_t  registerEventCount;
+	uint8_t   registerEventCollectionEnabled;
+	uint8_t   registerEventsTruncated;
+	uint16_t  registerEventSchemaVersion;
+	uint64_t  registerEventsDropped;
 	// followed by TraceBasicBlockEntry[blockCount],
 	// TraceBasicBlockEdgeEntry[edgeCount], TraceBasicBlockSnapshot[snapshotCount],
 	// TraceBasicBlockMemoryWriteEntry[memoryWriteCount],
@@ -755,6 +777,7 @@ struct TraceBasicBlocksResponse {
 	// TraceBasicBlockExceptionEntry[exceptionEventCount],
 	// TraceBasicBlockEventEntry[eventCount],
 	// TraceBasicBlockMemoryEventEntry[memoryEventCount],
+	// TraceBasicBlockRegisterEventEntry[registerEventCount],
 	// TraceBasicBlockCodeVersionEntry[codeVersionCount], uint8_t codeBytes[codeByteCount]
 };
 

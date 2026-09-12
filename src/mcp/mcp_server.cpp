@@ -3166,7 +3166,7 @@ json McpServer::GetToolsList() {
 			{"system_only", {{"type", "boolean"}, {"description", "Only resolve to system DLLs. Default: false"}}}
 		 }}, {"required", json::array({"addresses"})}}}},
 
-		{{"name", "veh_trace_basic_blocks"}, {"description", "Bounded semantic trace for one VEH-stopped thread. Returns versioned aggregate metadata and unique blocks/edges; collect_events adds ordered transitions, collect_memory_events adds per-occurrence memory accesses in the same sequence space, and collect_code maps runtime block-code versions to events. Also reports register deltas, hot/loop summaries, indirect targets, memory observations, and exception events."},
+		{{"name", "veh_trace_basic_blocks"}, {"description", "Bounded semantic trace for one VEH-stopped thread. Returns versioned aggregate metadata and unique blocks/edges; optional ordered streams cover transitions, per-occurrence memory accesses, instruction register deltas, and runtime code versions in one sequence space. Also reports hot/loop summaries, indirect targets, memory observations, and exception events."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID currently stopped by VEH; its RIP/EIP must be inside the range"}}},
 			{"start", {{"type", "string"}, {"description", "Inclusive range start (hex or module+RVA)"}}},
@@ -3183,6 +3183,8 @@ json McpServer::GetToolsList() {
 			,{"max_memory_reads", {{"type", "integer"}, {"description", "Maximum unique memory-read observations (default 4096, max 16384)"}}}
 			,{"collect_memory_events", {{"type", "boolean"}, {"description", "Collect bounded per-occurrence memory reads/writes with sequence, thread ID, values, and dependencies; implies collect_events (default false)"}}}
 			,{"max_memory_events", {{"type", "integer"}, {"description", "Maximum ordered memory-access events retained; further accesses increment the dropped count (default 8192, max 65536)"}}}
+			,{"collect_register_events", {{"type", "boolean"}, {"description", "Collect one bounded register-delta event per completed instruction occurrence with sequence and thread ID; implies collect_events (default false)"}}}
+			,{"max_register_events", {{"type", "integer"}, {"description", "Maximum ordered instruction register-delta events retained; further occurrences increment the dropped count (default 8192, max 65536)"}}}
 			,{"collect_events", {{"type", "boolean"}, {"description", "Collect every observed block entry/transition in execution order with sequence and thread ID (default false)"}}}
 			,{"max_events", {{"type", "integer"}, {"description", "Maximum ordered events retained without stopping aggregate collection (default 8192, max 32768)"}}}
 			,{"collect_code", {{"type", "boolean"}, {"description", "Capture runtime bytes for unique executed block versions and map version IDs to ordered events; implies collect_events (default false)"}}}
