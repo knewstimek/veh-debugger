@@ -188,6 +188,8 @@ static bool DecodeBasicTraceRange(uint64_t start, uint64_t end,
 				parsed.ripRelative = operand.mem.base == ZYDIS_REGISTER_RIP ? 1 : 0;
 				parsed.base = parsed.ripRelative ? 0xFF : BasicTraceRegisterIndex(machineMode, operand.mem.base);
 				parsed.index = BasicTraceRegisterIndex(machineMode, operand.mem.index);
+				parsed.preDecrementStack = writable && decoded.meta.category == ZYDIS_CATEGORY_PUSH &&
+					parsed.base == 7 ? 1 : 0;
 				if ((!parsed.ripRelative && operand.mem.base != ZYDIS_REGISTER_NONE && parsed.base == 0xFF) ||
 					(operand.mem.index != ZYDIS_REGISTER_NONE && parsed.index == 0xFF)) {
 					if (writable) meta.unsupportedWrites++;

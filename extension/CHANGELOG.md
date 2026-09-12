@@ -11,6 +11,7 @@
 - **Tracked and repeatable release procedure** -- release policy now lives in `RELEASING.md`, with a validation/packaging helper that synchronizes x64/x86 artifacts without committing or publishing. Stale v1.0.4 test guidance, the packaged README's outdated MCP count and duplicate trace entry, obsolete DLL logging/test-count documentation, and generated-artifact ignore rules were refreshed; the completed dated trace proposal was reduced to its durable debugger/analyzer design boundary in `OVERVIEW.md`.
 
 ### Fixed
+- **Pre-decrement stack writes in memory traces** -- x86/x64 `push`-family instructions now capture the actual post-decrement stack destination and its before/after values instead of reading the unchanged old-SP address. Ordered push writes and the matching pop reads therefore agree on address and value.
 - **LEA dependency propagation** -- `veh_trace_basic_blocks` now carries a LEA address expression's base/index register origins into the largest enclosing destination register (including x64 EAX-to-RAX zero-extension) without reporting the address expression as a memory read.
 - **Injected DLL no longer leaves runtime logs in the target directory** -- DLL logging is disabled by default instead of unconditionally creating `veh_dll_<pid>.log` in the process working directory. Adapter and MCP logging remain available through their explicit log-file options.
 

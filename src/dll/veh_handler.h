@@ -102,6 +102,7 @@ public:
 			uint8_t scale = 0;
 			uint8_t size = 0;
 			uint8_t ripRelative = 0;
+			uint8_t preDecrementStack = 0;
 		};
 		struct Instruction {
 			uint64_t address = 0;
