@@ -3166,7 +3166,7 @@ json McpServer::GetToolsList() {
 			{"system_only", {{"type", "boolean"}, {"description", "Only resolve to system DLLs. Default: false"}}}
 		 }}, {"required", json::array({"addresses"})}}}},
 
-		{{"name", "veh_trace_basic_blocks"}, {"description", "Bounded semantic trace for one VEH-stopped thread. Returns versioned aggregate metadata and unique blocks/edges; collect_events optionally adds a bounded ordered stream of block entries/transitions with sequence and thread ID. Also reports register deltas, hot/loop summaries, indirect targets, memory observations, and exception events."},
+		{{"name", "veh_trace_basic_blocks"}, {"description", "Bounded semantic trace for one VEH-stopped thread. Returns versioned aggregate metadata and unique blocks/edges; collect_events adds ordered transitions, while collect_code captures bounded runtime block-code versions and maps them to events. Also reports register deltas, hot/loop summaries, indirect targets, memory observations, and exception events."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID currently stopped by VEH; its RIP/EIP must be inside the range"}}},
 			{"start", {{"type", "string"}, {"description", "Inclusive range start (hex or module+RVA)"}}},
@@ -3183,6 +3183,9 @@ json McpServer::GetToolsList() {
 			,{"max_memory_reads", {{"type", "integer"}, {"description", "Maximum unique memory-read observations (default 4096, max 16384)"}}}
 			,{"collect_events", {{"type", "boolean"}, {"description", "Collect every observed block entry/transition in execution order with sequence and thread ID (default false)"}}}
 			,{"max_events", {{"type", "integer"}, {"description", "Maximum ordered events retained without stopping aggregate collection (default 8192, max 32768)"}}}
+			,{"collect_code", {{"type", "boolean"}, {"description", "Capture runtime bytes for unique executed block versions and map version IDs to ordered events; implies collect_events (default false)"}}}
+			,{"max_code_bytes", {{"type", "integer"}, {"description", "Total stored code-byte budget across unique versions (default 262144, max 4194304)"}}}
+			,{"max_code_versions", {{"type", "integer"}, {"description", "Maximum unique block code versions retained (default 4096, max 16384)"}}}
 			,{"dependency_sources", {{"type", "array"}, {"maxItems", 32}, {"description", "Conservative dependency sources: register names or {address,size,label?} memory ranges"}}}
 			,{"start_condition", {{"type", "string"}, {"description", "Begin collection when a register/memory comparison becomes true; supports up to four && or || clauses"}}}
 			,{"stop_condition", {{"type", "string"}, {"description", "Stop trace when a register/memory comparison becomes true"}}}

@@ -233,6 +233,16 @@ static bool SafeCopyTraceValue(uint64_t address, uint8_t* dst, uint8_t size) {
 	}
 }
 
+static bool SafeCopyTraceCode(uint64_t address, uint8_t* dst, size_t size) {
+	if (!address || !dst || !size) return false;
+	__try {
+		memcpy(dst, reinterpret_cast<const void*>(static_cast<uintptr_t>(address)), size);
+		return true;
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+}
+
 std::vector<uint32_t> VehHandler::GetStoppedThreadIds() {
 	std::lock_guard<std::mutex> lock(eventMapMutex_);
 	std::vector<uint32_t> result;
@@ -674,7 +684,7 @@ bool VehHandler::RecordBasicTraceMemoryRead(const TraceBasicBlocksState::Pending
 
 void VehHandler::RecordBasicTraceEvent(TraceBasicBlockEventType type, uint64_t sequence,
 		uint64_t source, uint64_t sourceInstruction, uint64_t target,
-		TraceBasicBlockEdgeKind edgeKind, uint32_t exceptionCode, bool indirect) {
+		TraceBasicBlockEdgeKind edgeKind, uint32_t exceptionCode, bool indirect, uint32_t codeVersion) {
 	auto& tb = traceBasicBlocks_;
 	if (!tb.collectEvents) return;
 	if (tb.eventCount >= tb.events.size()) {
@@ -688,9 +698,61 @@ void VehHandler::RecordBasicTraceEvent(TraceBasicBlockEventType type, uint64_t s
 	event.target = target;
 	event.threadId = tb.threadId;
 	event.exceptionCode = exceptionCode;
+	event.codeVersion = codeVersion;
 	event.type = type;
 	event.edgeKind = edgeKind;
 	event.indirect = indirect ? 1 : 0;
+}
+
+uint32_t VehHandler::CaptureBasicTraceCodeVersion(uint64_t blockStart, uint64_t sequence) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.collectCode) return UINT32_MAX;
+	auto* first = FindBasicTraceInstruction(blockStart);
+	if (!first) { tb.codeTruncated = true; return UINT32_MAX; }
+	uint64_t blockEnd = first->next;
+	for (auto* current = first; !current->terminal;) {
+		auto* next = FindBasicTraceInstruction(current->next);
+		if (!next || next->address != blockEnd || next->staticBlockStart != first->staticBlockStart) break;
+		blockEnd = next->next;
+		current = next;
+	}
+	uint64_t wideSize = blockEnd - blockStart;
+	if (!wideSize || wideSize > tb.codeScratch.size() || wideSize > UINT32_MAX) {
+		tb.codeTruncated = true; return UINT32_MAX;
+	}
+	uint32_t size = static_cast<uint32_t>(wideSize);
+	if (!SafeCopyTraceCode(blockStart, tb.codeScratch.data(), size)) {
+		tb.codeTruncated = true; return UINT32_MAX;
+	}
+	uint64_t hash = 1469598103934665603ULL;
+	for (uint32_t i = 0; i < size; ++i) { hash ^= tb.codeScratch[i]; hash *= 1099511628211ULL; }
+	size_t mask = tb.codeVersionTable.size() - 1;
+	size_t index = static_cast<size_t>(BasicTraceHash(blockStart) ^ BasicTraceHash(hash) ^ size) & mask;
+	for (size_t probe = 0; probe < tb.codeVersionTable.size(); ++probe) {
+		auto& slot = tb.codeVersionTable[index];
+		if (!slot.occupied) {
+			if (tb.codeVersionCount >= tb.maxCodeVersions ||
+				tb.codeByteCount + size > tb.maxCodeBytes) {
+				tb.codeTruncated = true; return UINT32_MAX;
+			}
+			slot.occupied = 1;
+			slot.entry.blockStart = blockStart; slot.entry.blockEnd = blockEnd;
+			slot.entry.hash = hash; slot.entry.firstSequence = sequence;
+			slot.entry.id = tb.codeVersionCount; slot.entry.dataOffset = tb.codeByteCount;
+			slot.entry.size = size;
+			memcpy(tb.codeBytes.data() + tb.codeByteCount, tb.codeScratch.data(), size);
+			tb.codeByteCount += size;
+			tb.codeVersions[tb.codeVersionCount] = slot.entry;
+			return tb.codeVersionCount++;
+		}
+		const auto& entry = slot.entry;
+		if (entry.blockStart == blockStart && entry.size == size && entry.hash == hash &&
+			memcmp(tb.codeBytes.data() + entry.dataOffset, tb.codeScratch.data(), size) == 0)
+			return entry.id;
+		index = (index + 1) & mask;
+	}
+	tb.codeTruncated = true;
+	return UINT32_MAX;
 }
 
 void VehHandler::CompleteBasicTraceMemoryWrites() {
@@ -815,6 +877,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		bool followExceptions, bool collectMemoryWrites, uint32_t maxMemoryWrites,
 		bool collectMemoryReads, uint32_t maxMemoryReads,
 		bool collectEvents, uint32_t maxEvents,
+		bool collectCode, uint32_t maxCodeBytes, uint32_t maxCodeVersions,
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition,
@@ -858,6 +921,9 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.maxMemoryReads = maxMemoryReads;
 	tb.collectEvents = collectEvents;
 	tb.maxEvents = maxEvents;
+	tb.collectCode = collectCode;
+	tb.maxCodeBytes = maxCodeBytes;
+	tb.maxCodeVersions = maxCodeVersions;
 	tb.dependencySourceCount = dependencySourceCount;
 	memset(tb.dependencySources, 0, sizeof(tb.dependencySources));
 	if (dependencySourceCount) memcpy(tb.dependencySources, dependencySources,
@@ -884,6 +950,14 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.snapshots.assign(static_cast<size_t>(maxEdges) * 2 + 1, {});
 	if (collectEvents) tb.events.assign(maxEvents, {});
 	else tb.events.clear();
+	if (collectCode) {
+		tb.codeVersionTable.assign(nextPowerOfTwo(static_cast<size_t>(maxCodeVersions) * 2), {});
+		tb.codeVersions.assign(maxCodeVersions, {});
+		tb.codeBytes.assign(maxCodeBytes, 0);
+		tb.codeScratch.assign(maxCodeBytes, 0);
+	} else {
+		tb.codeVersionTable.clear(); tb.codeVersions.clear(); tb.codeBytes.clear(); tb.codeScratch.clear();
+	}
 	tb.blockCount = tb.edgeCount = tb.snapshotCount = tb.exceptionsFollowed = 0;
 	tb.memoryWriteCount = tb.unsupportedMemoryWrites = 0;
 	tb.memoryWritesTruncated = false;
@@ -892,6 +966,8 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.dependencyIncomplete = false;
 	tb.eventsTruncated = false;
 	tb.eventCount = 0;
+	tb.codeVersionCount = tb.codeByteCount = 0;
+	tb.codeTruncated = false;
 	memset(tb.registerDependencies, 0, sizeof(tb.registerDependencies));
 	tb.flagsDependencies = 0;
 	for (uint8_t source = 0; source < dependencySourceCount; ++source)
@@ -915,7 +991,9 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	if (tb.collectWindowActive) {
 		uint32_t initialSnapshot = CaptureBasicTraceSnapshot(&ctx);
 		if (!RecordBasicTraceBlock(ip, &ctx, initialSnapshot)) return false;
-		RecordBasicTraceEvent(TraceBasicBlockEventType::BlockEntry, 0, 0, 0, ip);
+		uint32_t version = CaptureBasicTraceCodeVersion(ip, 0);
+		RecordBasicTraceEvent(TraceBasicBlockEventType::BlockEntry, 0, 0, 0, ip,
+			TraceBasicBlockEdgeKind::Fallthrough, 0, false, version);
 	}
 
 	// Avoid leaving a generic step flag behind: write TF into the stopped context
@@ -969,8 +1047,9 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 					FinishBasicTrace(TraceBasicBlockStopReason::MaxBlocks, addr, true);
 					return BasicTraceStepResult::Stop;
 				}
+				uint32_t version = CaptureBasicTraceCodeVersion(addr, tb.stepsExecuted);
 				RecordBasicTraceEvent(TraceBasicBlockEventType::BlockEntry,
-					tb.stepsExecuted, 0, 0, addr);
+					tb.stepsExecuted, 0, 0, addr, TraceBasicBlockEdgeKind::Fallthrough, 0, false, version);
 				PrepareBasicTraceMemoryWrites(current, info->ContextRecord);
 			}
 		}
@@ -1003,8 +1082,9 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 				FinishBasicTrace(TraceBasicBlockStopReason::MaxBlocks, addr, true);
 				return BasicTraceStepResult::Stop;
 			}
+			uint32_t version = CaptureBasicTraceCodeVersion(addr, tb.stepsExecuted);
 			RecordBasicTraceEvent(TraceBasicBlockEventType::BlockEntry,
-				tb.stepsExecuted, 0, 0, addr);
+				tb.stepsExecuted, 0, 0, addr, TraceBasicBlockEdgeKind::Fallthrough, 0, false, version);
 			PrepareBasicTraceMemoryWrites(current, info->ContextRecord);
 		}
 		if (tb.stepsExecuted >= tb.maxSteps) {
@@ -1038,9 +1118,10 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 			FinishBasicTrace(TraceBasicBlockStopReason::MaxEdges, addr, true);
 			return BasicTraceStepResult::Stop;
 		}
+		uint32_t version = inRange ? CaptureBasicTraceCodeVersion(targetBlock, tb.stepsExecuted) : UINT32_MAX;
 		RecordBasicTraceEvent(TraceBasicBlockEventType::Edge, tb.stepsExecuted,
 			tb.currentBlock, tb.previousInstruction, targetBlock, kind, 0,
-			previous && previous->indirect != 0);
+			previous && previous->indirect != 0, version);
 		if (!inRange) {
 			FinishBasicTrace(TraceBasicBlockStopReason::LeftRange, addr);
 			return BasicTraceStepResult::Stop;
@@ -1172,9 +1253,11 @@ LONG VehHandler::HandleContinue(PEXCEPTION_POINTERS info) {
 		tb.pendingStopReason = TraceBasicBlockStopReason::MaxEdges;
 		tb.truncated = true;
 	} else {
+		uint32_t version = destination >= tb.rangeStart && destination < tb.rangeEnd ?
+			CaptureBasicTraceCodeVersion(destination, tb.stepsExecuted) : UINT32_MAX;
 		RecordBasicTraceEvent(TraceBasicBlockEventType::Edge, tb.stepsExecuted,
 			tb.pendingExceptionSourceBlock, tb.pendingExceptionInstruction, destination,
-			TraceBasicBlockEdgeKind::Exception, tb.pendingExceptionCode, false);
+			TraceBasicBlockEdgeKind::Exception, tb.pendingExceptionCode, false, version);
 	}
 	tb.pendingException = false;
 

@@ -159,6 +159,13 @@ transition. Each record carries the trace-step sequence and thread ID. Exhaustin
 `max_events` marks the ordered stream incomplete without stopping aggregate
 collection; this is block-transition ordering rather than instruction-level history.
 
+Optional `collect_code` implies ordered events and preallocates separate byte and
+version budgets. At each observed block transition the DLL snapshots the decoded
+block region, deduplicates `(block, bytes)` versions, and places the version id on
+the corresponding event-schema-v2 record. Budget exhaustion marks code capture
+incomplete without stopping aggregate collection, so runtime bytes remain usable
+evidence for self-modifying code without pretending the post-trace image is equal.
+
 ### Analysis boundary
 
 The injected debugger is a bounded runtime-observation engine: it records measured
