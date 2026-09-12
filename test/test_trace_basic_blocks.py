@@ -89,6 +89,7 @@ def main():
         assert all(name in trace_properties for name in (
             "collect_events", "max_events", "collect_code", "max_code_bytes", "max_code_versions",
             "collect_memory_events", "max_memory_events",
+            "collect_register_events", "max_register_events",
         )), trace_tool
         launch = client.tool("veh_launch", {"program": TARGET, "stopOnEntry": True})
         assert launch.get("success"), launch
@@ -119,6 +120,8 @@ def main():
             "max_memory_reads": 64,
             "collect_memory_events": True,
             "max_memory_events": 256,
+            "collect_register_events": True,
+            "max_register_events": 256,
             "collect_events": True,
             "max_events": 256,
             "collect_code": True,
@@ -129,7 +132,7 @@ def main():
         assert "error" not in trace, trace
         assert len(trace["blocks"]) >= 2, trace
         assert len(trace["edges"]) >= 1, trace
-        assert trace["schema_version"] == 3 and trace["mode"] == "aggregated", trace
+        assert trace["schema_version"] == 4 and trace["mode"] == "aggregated", trace
         assert trace["thread_id"] == thread_id, trace
         assert trace["ordering"] == {
             "available": True, "granularity": "basic_block_transitions",
@@ -157,6 +160,20 @@ def main():
                    (event["kind"] == "write" and "before" in event and "after" in event)
                    for event in trace["memory_events"]), trace
         assert any(event.get("dependencies") for event in trace["memory_events"]), trace
+        assert trace["register_ordering"] == {
+            "available": True, "granularity": "instruction_register_deltas",
+            "event_schema_version": 1,
+            "scope": "completed_instruction_occurrences_in_collection_window",
+            "complete": True, "events_captured": len(trace["register_events"]),
+            "events_dropped": 0,
+        }, trace
+        assert trace["register_events"] and trace["register_events_truncated"] is False, trace
+        assert trace["register_events_dropped"] == 0, trace
+        assert all(event["thread_id"] == thread_id for event in trace["register_events"]), trace
+        assert [event["sequence"] for event in trace["register_events"]] == \
+            list(range(1, trace["steps_executed"] + 1)), trace
+        assert all("instruction" in event and "changes" in event
+                   for event in trace["register_events"]), trace
 
         write_occurrences = Counter(
             (event["instruction"], event["address"], event["size"],
@@ -211,6 +228,7 @@ def main():
                 "timeout_ms": 5000, "stack_bytes": 32,
                 "collect_memory_writes": True, "max_memory_writes": 64,
                 "collect_memory_events": True, "max_memory_events": 256,
+                "collect_register_events": True, "max_register_events": 256,
                 "collect_events": True, "max_events": 256,
                 "collect_code": True, "max_code_bytes": 4096, "max_code_versions": 256,
             }},
@@ -230,6 +248,8 @@ def main():
                    for event in batch_trace["events"]), batch_trace
         assert all(event["thread_id"] == batch_stop["threadId"]
                    for event in batch_trace["memory_events"]), batch_trace
+        assert all(event["thread_id"] == batch_stop["threadId"]
+                   for event in batch_trace["register_events"]), batch_trace
 
         truncated_batch = client.tool("veh_batch", {"steps": [
             {"tool": "veh_continue", "args": {"wait": True, "timeout": 10}},
@@ -239,6 +259,7 @@ def main():
                 "collect_memory_writes": True, "max_memory_writes": 1,
                 "collect_memory_reads": True, "max_memory_reads": 1,
                 "collect_memory_events": True, "max_memory_events": 1,
+                "collect_register_events": True, "max_register_events": 1,
                 "max_events": 1,
             }},
         ]}, timeout=20)
@@ -256,6 +277,12 @@ def main():
         assert truncated_writes["memory_ordering"]["complete"] is False, truncated_writes
         assert truncated_writes["memory_ordering"]["events_dropped"] == \
             truncated_writes["memory_events_dropped"], truncated_writes
+        assert len(truncated_writes["register_events"]) == 1, truncated_writes
+        assert truncated_writes["register_events_truncated"] is True, truncated_writes
+        assert truncated_writes["register_events_dropped"] > 0, truncated_writes
+        assert truncated_writes["register_ordering"]["complete"] is False, truncated_writes
+        assert truncated_writes["register_ordering"]["events_dropped"] == \
+            truncated_writes["register_events_dropped"], truncated_writes
 
         conditional_batch = client.tool("veh_batch", {"steps": [
             {"tool": "veh_continue", "args": {"wait": True, "timeout": 10}},
@@ -312,6 +339,7 @@ def main():
                     "threadId": thread_id, "start": hex(start), "end": hex(start + 0x100),
                     "max_steps": 1000, "timeout_ms": 5000, "stack_bytes": 0,
                     "collect_memory_events": True, "max_memory_events": 256,
+                    "collect_register_events": True, "max_register_events": 256,
                     "collect_events": True, "max_events": 256,
                     "collect_code": True, "max_code_bytes": 4096, "max_code_versions": 256,
                 }},
@@ -448,6 +476,7 @@ def main():
             "collect_memory_writes": True, "max_memory_writes": 8,
             "collect_memory_reads": True, "max_memory_reads": 8,
             "collect_memory_events": True, "max_memory_events": 8,
+            "collect_register_events": True, "max_register_events": 8,
             "dependency_sources": [accumulator_name],
         }, timeout=15)
         assert stack_trace.get("stop_reason") == "left_range", stack_trace
@@ -466,6 +495,14 @@ def main():
         assert pop_event["value"] == expected_value, stack_trace
         assert push_event.get("dependencies") == [accumulator_name], stack_trace
         assert pop_event.get("dependencies") == [accumulator_name], stack_trace
+        push_register = next(event for event in stack_trace["register_events"]
+                             if event["sequence"] == 1)
+        pop_register = next(event for event in stack_trace["register_events"]
+                            if event["sequence"] == 2)
+        assert int(push_register["changes"][sp_name]["before"], 0) == int(saved[sp_name], 0), stack_trace
+        assert int(push_register["changes"][sp_name]["after"], 0) == expected_stack_address, stack_trace
+        assert int(pop_register["changes"][sp_name]["before"], 0) == expected_stack_address, stack_trace
+        assert int(pop_register["changes"][sp_name]["after"], 0) == int(saved[sp_name], 0), stack_trace
         aggregate_push = next(item for item in stack_trace["memory_writes"]
                               if int(item["instruction"], 0) == stack_start)
         assert aggregate_push["address"] == push_event["address"], stack_trace
@@ -505,6 +542,7 @@ def main():
             "end": hex(lea_start + len(code)), "max_steps": 16,
             "timeout_ms": 5000, "stack_bytes": 0,
             "collect_memory_reads": True, "max_memory_reads": 16,
+            "collect_register_events": True, "max_register_events": 16,
             "dependency_sources": [rcx_name, rdx_name],
         }, timeout=15)
         assert lea_trace.get("stop_reason") == "left_range", lea_trace
@@ -512,6 +550,17 @@ def main():
         assert set(lea_trace["final_dependencies"].get(destination_name, [])) == \
             {rcx_name, rdx_name}, lea_trace
         assert lea_trace["memory_reads"] == [], lea_trace
+        xor_event = next(event for event in lea_trace["register_events"]
+                         if int(event["instruction"], 0) == lea_start)
+        lea_event = next(event for event in lea_trace["register_events"]
+                         if int(event["instruction"], 0) == lea_start + 6)
+        xor_after = 0x11111111 ^ 0x12345678
+        assert xor_event["sequence"] == 1, lea_trace
+        assert int(xor_event["changes"][rcx_name]["before"], 0) == 0x11111111, lea_trace
+        assert int(xor_event["changes"][rcx_name]["after"], 0) == xor_after, lea_trace
+        assert lea_event["sequence"] == 2, lea_trace
+        assert int(lea_event["changes"][destination_name]["after"], 0) == \
+            ((xor_after + 0x22222222) & 0xFFFFFFFF), lea_trace
         assert client.tool("veh_free_memory", {"address": hex(lea_start)}).get("success")
 
         # A loop that rewrites its own XOR immediate produces two runtime byte
@@ -604,6 +653,7 @@ def main():
             "indirect_sites": len(indirect_trace["indirect_branches"]),
             "memory_writes": len(trace["memory_writes"]),
             "memory_events": len(trace["memory_events"]),
+            "register_events": len(trace["register_events"]),
             "executed_writes": sum(bool(w.get("executed_after_write")) for w in executable_trace["executable_writes"]),
             "lea_dependencies": lea_trace["final_dependencies"][destination_name],
             "code_versions": len(smc_trace["code_versions"]),

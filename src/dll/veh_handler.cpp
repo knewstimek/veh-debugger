@@ -436,28 +436,37 @@ uint64_t VehHandler::NormalizeBasicTraceBlockStart(uint64_t address, bool dynami
 	return address;
 }
 
+static void FillBasicTraceRegisterValues(const CONTEXT* ctx, uint64_t* regs, uint8_t& is32bit) {
+	memset(regs, 0, sizeof(uint64_t) * kTraceBasicBlockRegisterCount);
+	if (!ctx) return;
+#ifdef _WIN64
+	is32bit = 0;
+	uint64_t values[kTraceBasicBlockRegisterCount] = {
+		ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx, ctx->Rsi, ctx->Rdi, ctx->Rbp, ctx->Rsp,
+		ctx->R8, ctx->R9, ctx->R10, ctx->R11, ctx->R12, ctx->R13, ctx->R14, ctx->R15,
+		ctx->Rip, ctx->EFlags & ~0x100ULL
+	};
+#else
+	is32bit = 1;
+	uint64_t values[kTraceBasicBlockRegisterCount] = {
+		ctx->Eax, ctx->Ebx, ctx->Ecx, ctx->Edx, ctx->Esi, ctx->Edi, ctx->Ebp, ctx->Esp,
+		0, 0, 0, 0, 0, 0, 0, 0, ctx->Eip, ctx->EFlags & ~0x100UL
+	};
+#endif
+	memcpy(regs, values, sizeof(values));
+}
+
 void VehHandler::FillBasicTraceSnapshot(const CONTEXT* ctx, TraceBasicBlockSnapshot& s) {
 	memset(&s, 0, sizeof(s));
 	if (!ctx) return;
 #ifdef _WIN64
-	s.is32bit = 0;
 	s.instructionPointer = ctx->Rip;
 	s.stackPointer = ctx->Rsp;
-	uint64_t regs[kTraceBasicBlockRegisterCount] = {
-		ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx, ctx->Rsi, ctx->Rdi, ctx->Rbp, ctx->Rsp,
-		ctx->R8, ctx->R9, ctx->R10, ctx->R11, ctx->R12, ctx->R13, ctx->R14, ctx->R15,
-		ctx->Rip, ctx->EFlags
-	};
 #else
-	s.is32bit = 1;
 	s.instructionPointer = ctx->Eip;
 	s.stackPointer = ctx->Esp;
-	uint64_t regs[kTraceBasicBlockRegisterCount] = {
-		ctx->Eax, ctx->Ebx, ctx->Ecx, ctx->Edx, ctx->Esi, ctx->Edi, ctx->Ebp, ctx->Esp,
-		0, 0, 0, 0, 0, 0, 0, 0, ctx->Eip, ctx->EFlags
-	};
 #endif
-	memcpy(s.registers, regs, sizeof(regs));
+	FillBasicTraceRegisterValues(ctx, s.registers, s.is32bit);
 	s.stackSize = SafeCopyTraceStack(s.stackPointer, s.stack, traceBasicBlocks_.stackBytes);
 	return;
 }
@@ -845,6 +854,38 @@ void VehHandler::CompleteBasicTraceMemoryWrites() {
 	tb.pendingRegisterWriteMask = 0; tb.pendingDependencyMask = 0; tb.pendingWritesFlags = 0;
 }
 
+void VehHandler::PrepareBasicTraceRegisterEvent(uint64_t instruction, const CONTEXT* ctx) {
+	auto& tb = traceBasicBlocks_;
+	tb.pendingRegisterEventValid = false;
+	if (!tb.collectRegisterEvents || !ctx) return;
+	auto& event = tb.pendingRegisterEvent;
+	event = {};
+	event.instruction = instruction;
+	event.threadId = tb.threadId;
+	FillBasicTraceRegisterValues(ctx, event.before, event.is32bit);
+	tb.pendingRegisterEventValid = true;
+}
+
+void VehHandler::CompleteBasicTraceRegisterEvent(const CONTEXT* ctx) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.pendingRegisterEventValid || !ctx) return;
+	auto event = tb.pendingRegisterEvent;
+	tb.pendingRegisterEventValid = false;
+	event.sequence = tb.stepsExecuted + 1;
+	uint8_t afterIs32bit = event.is32bit;
+	FillBasicTraceRegisterValues(ctx, event.after, afterIs32bit);
+	const uint32_t registerCount = event.is32bit ? 8 : 16;
+	for (uint32_t i = 0; i < registerCount; ++i)
+		if (event.before[i] != event.after[i]) event.changedMask |= 1u << i;
+	if (event.before[17] != event.after[17]) event.changedMask |= 1u << 17;
+	if (tb.registerEventCount >= tb.registerEvents.size()) {
+		tb.registerEventsTruncated = true;
+		tb.registerEventsDropped++;
+		return;
+	}
+	tb.registerEvents[tb.registerEventCount++] = event;
+}
+
 bool VehHandler::RecordBasicTraceBlock(uint64_t start, const CONTEXT* ctx, uint32_t snapshot) {
 	auto& tb = traceBasicBlocks_;
 	if (tb.blockTable.empty()) return false;
@@ -925,6 +966,7 @@ void VehHandler::FinishBasicTrace(TraceBasicBlockStopReason reason, uint64_t fin
 	tb.pendingException = false;
 	tb.pendingWriteCount = 0;
 	tb.pendingReadCount = 0;
+	tb.pendingRegisterEventValid = false;
 	tb.active.store(false, std::memory_order_release);
 	tb.done.store(true, std::memory_order_release);
 }
@@ -936,6 +978,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		bool collectEvents, uint32_t maxEvents,
 		bool collectCode, uint32_t maxCodeBytes, uint32_t maxCodeVersions,
 		bool collectMemoryEvents, uint32_t maxMemoryEvents,
+		bool collectRegisterEvents, uint32_t maxRegisterEvents,
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition,
@@ -984,6 +1027,8 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.maxCodeVersions = maxCodeVersions;
 	tb.collectMemoryEvents = collectMemoryEvents;
 	tb.maxMemoryEvents = maxMemoryEvents;
+	tb.collectRegisterEvents = collectRegisterEvents;
+	tb.maxRegisterEvents = maxRegisterEvents;
 	tb.dependencySourceCount = dependencySourceCount;
 	memset(tb.dependencySources, 0, sizeof(tb.dependencySources));
 	if (dependencySourceCount) memcpy(tb.dependencySources, dependencySources,
@@ -1012,6 +1057,8 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	else tb.events.clear();
 	if (collectMemoryEvents) tb.memoryEvents.assign(maxMemoryEvents, {});
 	else tb.memoryEvents.clear();
+	if (collectRegisterEvents) tb.registerEvents.assign(maxRegisterEvents, {});
+	else tb.registerEvents.clear();
 	if (collectCode) {
 		tb.codeVersionTable.assign(nextPowerOfTwo(static_cast<size_t>(maxCodeVersions) * 2), {});
 		tb.codeVersions.assign(maxCodeVersions, {});
@@ -1031,6 +1078,10 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.memoryEventCount = 0;
 	tb.memoryEventsDropped = 0;
 	tb.memoryEventsTruncated = false;
+	tb.registerEventCount = 0;
+	tb.registerEventsDropped = 0;
+	tb.registerEventsTruncated = false;
+	tb.pendingRegisterEventValid = false;
 	tb.codeVersionCount = tb.codeByteCount = 0;
 	tb.codeTruncated = false;
 	memset(tb.registerDependencies, 0, sizeof(tb.registerDependencies));
@@ -1065,8 +1116,10 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	// directly, then resume it as a normal continue.
 	ctx.EFlags |= 0x100;
 	if (!SetStoppedContext(threadId, ctx)) return false;
-	if (tb.collectWindowActive)
+	if (tb.collectWindowActive) {
 		PrepareBasicTraceMemoryWrites(FindBasicTraceInstruction(ip), &ctx);
+		PrepareBasicTraceRegisterEvent(ip, &ctx);
+	}
 	tb.active.store(true, std::memory_order_release);
 	ResumeStoppedThread(threadId, false);
 	return true;
@@ -1085,6 +1138,7 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 	if (!tb.active.load(std::memory_order_acquire) || tid != tb.threadId)
 		return BasicTraceStepResult::NotActive;
 	CompleteBasicTraceMemoryWrites();
+	CompleteBasicTraceRegisterEvent(info->ContextRecord);
 
 	if (tb.cancelRequested.load(std::memory_order_acquire) || tb.stopPending) {
 		TraceBasicBlockStopReason reason = tb.pendingStopReason;
@@ -1116,6 +1170,7 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 				RecordBasicTraceEvent(TraceBasicBlockEventType::BlockEntry,
 					tb.stepsExecuted, 0, 0, addr, TraceBasicBlockEdgeKind::Fallthrough, 0, false, version);
 				PrepareBasicTraceMemoryWrites(current, info->ContextRecord);
+				PrepareBasicTraceRegisterEvent(addr, info->ContextRecord);
 			}
 		}
 		if (tb.stepsExecuted >= tb.maxSteps) {
@@ -1151,6 +1206,7 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 			RecordBasicTraceEvent(TraceBasicBlockEventType::BlockEntry,
 				tb.stepsExecuted, 0, 0, addr, TraceBasicBlockEdgeKind::Fallthrough, 0, false, version);
 			PrepareBasicTraceMemoryWrites(current, info->ContextRecord);
+			PrepareBasicTraceRegisterEvent(addr, info->ContextRecord);
 		}
 		if (tb.stepsExecuted >= tb.maxSteps) {
 			FinishBasicTrace(TraceBasicBlockStopReason::MaxSteps, addr, true);
@@ -1218,6 +1274,7 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 		return BasicTraceStepResult::Continue;
 	}
 	PrepareBasicTraceMemoryWrites(current, info->ContextRecord);
+	PrepareBasicTraceRegisterEvent(addr, info->ContextRecord);
 	info->ContextRecord->EFlags |= 0x100;
 	info->ContextRecord->Dr6 = 0;
 	return BasicTraceStepResult::Continue;
@@ -1238,6 +1295,7 @@ bool VehHandler::HandleBasicTraceException(PEXCEPTION_POINTERS info, uint32_t ti
 	tb.exceptionsFollowed++;
 	tb.pendingWriteCount = 0;
 	tb.pendingReadCount = 0;
+	tb.pendingRegisterEventValid = false;
 	tb.pendingRegisterWriteMask = 0;
 	tb.pendingException = true;
 	tb.pendingExceptionCollect = tb.startConditionMet && tb.collectWindowActive;
@@ -1298,6 +1356,7 @@ LONG VehHandler::HandleContinue(PEXCEPTION_POINTERS info) {
 					tb.truncated = true;
 				} else {
 					PrepareBasicTraceMemoryWrites(FindBasicTraceInstruction(destination), info->ContextRecord);
+					PrepareBasicTraceRegisterEvent(destination, info->ContextRecord);
 				}
 			}
 			if (tb.stopCondition.clauseCount && EvaluateBasicTraceCondition(tb.stopCondition, info->ContextRecord)) {
@@ -1341,8 +1400,10 @@ LONG VehHandler::HandleContinue(PEXCEPTION_POINTERS info) {
 		}
 	}
 	tb.finalAddress = destination;
-	if (!tb.stopPending)
+	if (!tb.stopPending) {
 		PrepareBasicTraceMemoryWrites(FindBasicTraceInstruction(destination), info->ContextRecord);
+		PrepareBasicTraceRegisterEvent(destination, info->ContextRecord);
+	}
 	// Even when a limit was reached, one final TF event is needed to park the
 	// target through the normal stopped-context path.
 	info->ContextRecord->EFlags |= 0x100;
