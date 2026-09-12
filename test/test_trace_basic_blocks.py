@@ -347,6 +347,38 @@ def main():
         orphaned_checkpoint = client.tool("veh_checkpoint_create", {"threadId": checkpoint_thread})
         assert orphaned_checkpoint.get("id"), orphaned_checkpoint
 
+        # On x64, LEA's source is a Zydis memory-form operand even though the
+        # instruction reads no memory. Its base/index origins must reach the
+        # largest enclosing destination register; writing EAX defines RAX via
+        # architectural zero-extension. Run this immediately before terminating
+        # the target so the synthetic register state cannot affect other cases.
+        saved = client.tool("veh_registers", {"threadId": checkpoint_thread})["registers"]
+        lea_code = client.tool("veh_allocate_memory", {"size": 4096, "protection": "rwx"})
+        assert lea_code.get("success"), lea_code
+        lea_start = int(lea_code["address"], 0)
+        resume_address = int(saved["rip"], 0)
+        code = (bytes.fromhex("81 F1 78 56 34 12 8D 04 0A 49 BB") +
+                resume_address.to_bytes(8, "little") + bytes.fromhex("41 FF E3"))
+        assert client.tool("veh_write_memory", {
+            "address": hex(lea_start), "data": code.hex(" "),
+        }).get("success")
+        for name, value in (("rcx", "0x11111111"), ("rdx", "0x22222222"),
+                            ("rip", hex(lea_start))):
+            assert client.tool("veh_set_register", {
+                "threadId": checkpoint_thread, "name": name, "value": value,
+            }).get("success")
+        lea_trace = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(lea_start),
+            "end": hex(lea_start + len(code)), "max_steps": 16,
+            "timeout_ms": 5000, "stack_bytes": 0,
+            "collect_memory_reads": True, "max_memory_reads": 16,
+            "dependency_sources": ["rcx", "rdx"],
+        }, timeout=15)
+        assert lea_trace.get("stop_reason") == "left_range", lea_trace
+        assert set(lea_trace["final_dependencies"].get("rax", [])) == {"rcx", "rdx"}, lea_trace
+        assert lea_trace["memory_reads"] == [], lea_trace
+        assert client.tool("veh_free_memory", {"address": hex(lea_start)}).get("success")
+
         terminated = client.tool("veh_terminate")
         assert terminated.get("success"), terminated
         launch = client.tool("veh_launch", {
@@ -382,6 +414,7 @@ def main():
             "indirect_sites": len(indirect_trace["indirect_branches"]),
             "memory_writes": len(trace["memory_writes"]),
             "executed_writes": sum(bool(w.get("executed_after_write")) for w in executable_trace["executable_writes"]),
+            "lea_dependencies": lea_trace["final_dependencies"]["rax"],
             "checkpoint_restored": True,
         }))
     finally:

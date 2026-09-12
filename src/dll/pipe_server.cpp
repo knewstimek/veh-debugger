@@ -157,6 +157,17 @@ static bool DecodeBasicTraceRange(uint64_t start, uint64_t end,
 					continue;
 				}
 				if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY) continue;
+				// LEA consumes the address expression, not memory at that address. Zydis
+				// represents the source as a memory-form operand, so carry its base/index
+				// register origins into the enclosing destination register explicitly and
+				// do not emit a synthetic memory-read observation.
+				if (decoded.mnemonic == ZYDIS_MNEMONIC_LEA) {
+					uint8_t base = BasicTraceRegisterIndex(machineMode, operand.mem.base);
+					uint8_t index = BasicTraceRegisterIndex(machineMode, operand.mem.index);
+					if (base < 16) meta.readRegisterMask |= 1u << base;
+					if (index < 16) meta.readRegisterMask |= 1u << index;
+					continue;
+				}
 				bool readable = (operand.actions & ZYDIS_OPERAND_ACTION_READ) != 0;
 				bool writable = (operand.actions & ZYDIS_OPERAND_ACTION_WRITE) != 0;
 				if (!readable && !writable) continue;
