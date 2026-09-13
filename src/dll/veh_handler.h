@@ -242,6 +242,14 @@ public:
 		bool occurrenceWindowStarted = false;
 		bool occurrenceWindowCompleted = false;
 		uint32_t filteredSteps = 0;
+		bool stopOnReturn = false;
+		bool functionReturned = false;
+		bool externalCallActive = false;
+		uint64_t entryStackPointer = 0;
+		uint64_t returnAddress = 0;
+		uint64_t externalReturnAddress = 0;
+		uint64_t externalSteps = 0;
+		uint32_t returnSnapshot = UINT32_MAX;
 		std::vector<Instruction> instructions;
 		std::vector<uint64_t> staticBlockStarts;
 		std::vector<BlockSlot> blockTable;
@@ -336,6 +344,7 @@ public:
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition, const TraceOccurrenceWindow& occurrenceWindow,
+		bool stopOnReturn,
 		std::vector<TraceBasicBlocksState::Instruction>&& instructions,
 		std::vector<uint64_t>&& staticBlockStarts);
 	void CancelTraceBasicBlocks(TraceBasicBlockStopReason reason);

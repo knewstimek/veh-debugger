@@ -21,6 +21,13 @@ __declspec(noinline) int TraceCoverageTarget(volatile int value) {
 	return result;
 }
 
+__declspec(noinline) DWORD TraceFunctionScopeTarget(volatile int value) {
+	// The imported API deliberately leaves the function's decoded range.  A
+	// function-scoped trace must filter that execution and resume at this call's
+	// return address before stopping at this function's own return.
+	return GetCurrentThreadId() ^ static_cast<DWORD>(value);
+}
+
 __declspec(noinline) int TraceIndirectTargetA(int value) { return value + 11; }
 __declspec(noinline) int TraceIndirectTargetB(int value) { return value ^ 0x35; }
 
@@ -90,6 +97,7 @@ int main(int argc, char* argv[]) {
 			g_counter += TraceExceptionCoverageTarget();
 		else
 			g_counter = TraceCoverageTarget(g_counter);
+		g_counter ^= static_cast<int>(TraceFunctionScopeTarget(g_counter));
 		g_counter = TraceIndirectCoverageTarget(g_counter);
 		TraceExecutableWriteTarget();
 		WorkFunction();

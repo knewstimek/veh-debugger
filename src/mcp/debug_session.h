@@ -303,6 +303,13 @@ public:
 		uint64_t occurrenceHits = 0;
 		bool occurrenceWindowStarted = false;
 		bool occurrenceWindowCompleted = false;
+		bool functionScopeSupported = false;
+		bool stopOnReturn = false;
+		bool functionReturned = false;
+		uint32_t returnSnapshot = UINT32_MAX;
+		uint64_t entryStackPointer = 0;
+		uint64_t returnAddress = 0;
+		uint64_t externalSteps = 0;
 		TraceBasicBlockStopReason stopReason = TraceBasicBlockStopReason::Completed;
 		bool truncated = false;
 		uint32_t exceptionsFollowed = 0;
@@ -362,7 +369,8 @@ public:
 		const std::vector<TraceDependencySource>& dependencySources = {},
 		const TraceCondition& startCondition = {}, const TraceCondition& stopCondition = {},
 		const TraceCondition& collectCondition = {},
-		const TraceOccurrenceWindow& occurrenceWindow = {});
+		const TraceOccurrenceWindow& occurrenceWindow = {},
+		bool stopOnReturn = false);
 
 	// --- Resolve (PDB) ---
 	uint64_t ResolveSourceLine(const std::string& file, uint32_t line);

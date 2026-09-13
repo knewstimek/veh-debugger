@@ -36,7 +36,8 @@ def stage(root, name, mcp_build, dll_build):
 
 
 def run_case(name, build, target, timeout, expect_file_unsupported=False,
-             expect_occurrence_unsupported=False):
+             expect_occurrence_unsupported=False,
+             expect_function_scope_unsupported=False):
     env = os.environ.copy()
     env["VEH_TEST_BUILD_DIR"] = build
     env["VEH_TEST_TARGET"] = os.path.abspath(target)
@@ -44,6 +45,8 @@ def run_case(name, build, target, timeout, expect_file_unsupported=False,
         env["VEH_TEST_EXPECT_FILE_UNSUPPORTED"] = "1"
     if expect_occurrence_unsupported:
         env["VEH_TEST_EXPECT_OCCURRENCE_UNSUPPORTED"] = "1"
+    if expect_function_scope_unsupported:
+        env["VEH_TEST_EXPECT_FUNCTION_SCOPE_UNSUPPORTED"] = "1"
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     process = subprocess.Popen([sys.executable, TEST], cwd=ROOT, env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -78,7 +81,7 @@ def main():
         results = [
             run_case("old-mcp-new-dll", old_mcp_new_dll, args.target, args.timeout),
             run_case("new-mcp-old-dll", new_mcp_old_dll, args.target, args.timeout,
-                     args.expect_old_no_file_mode, True),
+                     args.expect_old_no_file_mode, True, True),
         ]
     print(json.dumps({"results": results}, separators=(",", ":")))
     if any(result["status"] != "ok" for result in results):
