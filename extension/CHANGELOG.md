@@ -2,7 +2,11 @@
 
 ## Unreleased
 
+### Added
+- **Function-scoped basic-block traces** -- `veh_trace_basic_blocks.stop_on_return` records the entry stack pointer and return address, keeps tracing across calls outside the decoded range while excluding those external instructions from memory/register/code collection, and stops only when the original frame returns. Results include `stop_reason="function_return"`, the concrete return edge, external-step count, and a full destination register/stack snapshot, with direct, `veh_batch`, and breakpoint-action parity on x86 and x64.
+
 ### Fixed
+- **Memory-form NOPs no longer report false unsupported reads** -- multi-byte `NOP [reg]` encodings are recognized as non-accessing padding instead of attempting to read the decorative effective address. Protected RMW traces therefore retain their real memory events without an unrelated unsupported-read count.
 - **Trace startup tolerates inaccessible image gaps without deadlocking the control pipe** -- runtime range decoding now skips reserved, `PAGE_NOACCESS`, and guard regions and limits reads to the current readable region. Recoverable SEH probes on the internal IPC thread are passed back to their local handlers instead of being surfaced as debugger stops that the blocked IPC thread could never resume.
 - **Long-running trace requests no longer self-cancel at the heartbeat boundary** -- heartbeat liveness checks are deferred while a bounded synchronous control request owns the response channel, leaving the request-specific collector and client timeouts authoritative instead of aborting the pending read after 30 seconds.
 - **Large ordered trace control responses no longer fail opaquely** -- multi-megabyte trace payloads now receive a 15-second read/write transfer allowance instead of the generic 3-second control-message limit. Trace failures preserve transport stage, advertised/received/expected byte counts, system error, response header size, collector stop reason, elapsed time, completed steps, and final address; forced collector timeouts are reported as `collector_timeout` instead of `legacy_or_invalid_response`.

@@ -1177,6 +1177,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition, const TraceOccurrenceWindow& occurrenceWindow,
+		bool stopOnReturn,
 		std::vector<TraceBasicBlocksState::Instruction>&& instructions,
 		std::vector<uint64_t>&& staticBlockStarts) {
 	if (traceReg_.active.load(std::memory_order_acquire) ||
@@ -1194,12 +1195,31 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	}
 #ifdef _WIN64
 	uint64_t ip = ctx.Rip;
+	uint64_t entryStackPointer = ctx.Rsp;
 #else
 	uint64_t ip = ctx.Eip;
+	uint64_t entryStackPointer = ctx.Esp;
 #endif
 	if (ip < rangeStart || ip >= rangeEnd || instructions.empty()) {
 		if (codeStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(codeStreamPipe);
 		return false;
+	}
+	uint64_t returnAddress = 0;
+	if (stopOnReturn) {
+#ifdef _WIN64
+		if (!SafeCopyTraceValue(entryStackPointer, reinterpret_cast<uint8_t*>(&returnAddress),
+				static_cast<uint8_t>(sizeof(returnAddress))) || !returnAddress) {
+#else
+		uint32_t returnAddress32 = 0;
+		if (!SafeCopyTraceValue(entryStackPointer, reinterpret_cast<uint8_t*>(&returnAddress32),
+				static_cast<uint8_t>(sizeof(returnAddress32))) || !returnAddress32) {
+#endif
+			if (codeStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(codeStreamPipe);
+			return false;
+		}
+#ifndef _WIN64
+		returnAddress = returnAddress32;
+#endif
 	}
 
 	auto nextPowerOfTwo = [](size_t value) {
@@ -1340,6 +1360,14 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.pendingWriteCount = 0;
 	tb.pendingReadCount = 0;
 	tb.filteredSteps = 0;
+	tb.stopOnReturn = stopOnReturn;
+	tb.functionReturned = false;
+	tb.externalCallActive = false;
+	tb.entryStackPointer = entryStackPointer;
+	tb.returnAddress = returnAddress;
+	tb.externalReturnAddress = 0;
+	tb.externalSteps = 0;
+	tb.returnSnapshot = UINT32_MAX;
 	tb.stepsExecuted = 0;
 	tb.initialAddress = tb.currentBlock = tb.previousInstruction = tb.finalAddress = ip;
 	tb.stopReason = TraceBasicBlockStopReason::Completed;
@@ -1402,9 +1430,71 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 	}
 	bool inRange = addr >= tb.rangeStart && addr < tb.rangeEnd;
 	auto* current = inRange ? FindBasicTraceInstruction(addr) : nullptr;
+	auto* previousInstruction = FindBasicTraceInstruction(tb.previousInstruction);
+	if (tb.stopOnReturn && previousInstruction &&
+		previousInstruction->kind == TraceBasicBlockEdgeKind::Return &&
+		addr == tb.returnAddress) {
+#ifdef _WIN64
+		const uint64_t stackPointer = info->ContextRecord->Rsp;
+		const uint64_t returnStackPointer = tb.entryStackPointer + sizeof(uint64_t);
+#else
+		const uint64_t stackPointer = info->ContextRecord->Esp;
+		const uint64_t returnStackPointer = tb.entryStackPointer + sizeof(uint32_t);
+#endif
+		if (stackPointer >= returnStackPointer) {
+			++tb.stepsExecuted;
+			++previousInstruction->hitCount;
+			previousInstruction->lastHitStep = tb.stepsExecuted;
+			uint32_t snapshot = UINT32_MAX;
+			if (!RecordBasicTraceEdge(tb.currentBlock, tb.previousInstruction, addr,
+					TraceBasicBlockEdgeKind::Return, 0, previousInstruction->indirect != 0,
+					info->ContextRecord, &snapshot)) {
+				FinishBasicTrace(TraceBasicBlockStopReason::MaxEdges, addr, true);
+				return BasicTraceStepResult::Stop;
+			}
+			RecordBasicTraceEvent(TraceBasicBlockEventType::Edge, tb.stepsExecuted,
+				tb.currentBlock, tb.previousInstruction, addr, TraceBasicBlockEdgeKind::Return,
+				0, previousInstruction->indirect != 0, UINT32_MAX);
+			tb.functionReturned = true;
+			tb.returnSnapshot = snapshot;
+			FinishBasicTrace(TraceBasicBlockStopReason::FunctionReturn, addr);
+			return BasicTraceStepResult::Stop;
+		}
+	}
+
+	if (tb.externalCallActive) {
+		++tb.stepsExecuted;
+		++tb.filteredSteps;
+		++tb.externalSteps;
+		tb.finalAddress = addr;
+		if (inRange && addr == tb.externalReturnAddress) {
+			tb.externalCallActive = false;
+			tb.externalReturnAddress = 0;
+			tb.currentBlock = tb.previousInstruction = addr;
+			if (tb.collectWindowActive) {
+				uint32_t snapshot = CaptureBasicTraceSnapshot(info->ContextRecord);
+				if (!RecordBasicTraceBlock(addr, info->ContextRecord, snapshot)) {
+					FinishBasicTrace(TraceBasicBlockStopReason::MaxBlocks, addr, true);
+					return BasicTraceStepResult::Stop;
+				}
+				uint32_t version = CaptureBasicTraceCodeVersion(addr, tb.stepsExecuted);
+				RecordBasicTraceEvent(TraceBasicBlockEventType::BlockEntry, tb.stepsExecuted,
+					0, 0, addr, TraceBasicBlockEdgeKind::Fallthrough, 0, false, version);
+				PrepareBasicTraceMemoryWrites(current, info->ContextRecord);
+				PrepareBasicTraceRegisterEvent(addr, info->ContextRecord);
+			}
+		}
+		if (tb.stepsExecuted >= tb.maxSteps) {
+			FinishBasicTrace(TraceBasicBlockStopReason::MaxSteps, addr, true);
+			return BasicTraceStepResult::Stop;
+		}
+		info->ContextRecord->EFlags |= 0x100;
+		info->ContextRecord->Dr6 = 0;
+		return BasicTraceStepResult::Continue;
+	}
 	const bool wasCollecting = tb.collectWindowActive;
 	if (inRange && !AdvanceBasicTraceOccurrence(addr)) {
-		auto* previous = wasCollecting ? FindBasicTraceInstruction(tb.previousInstruction) : nullptr;
+		auto* previous = wasCollecting ? previousInstruction : nullptr;
 		++tb.stepsExecuted;
 		if (previous) {
 			++previous->hitCount;
@@ -1484,7 +1574,7 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 		return BasicTraceStepResult::Continue;
 	}
 
-	auto* previous = FindBasicTraceInstruction(tb.previousInstruction);
+	auto* previous = previousInstruction;
 	if (previous) previous->hitCount++;
 	tb.stepsExecuted++;
 	if (previous) previous->lastHitStep = tb.stepsExecuted;
@@ -1494,8 +1584,11 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 	bool boundary = !inRange || nonSequential || staticBoundary || (previous && previous->terminal);
 	if (boundary) {
 		TraceBasicBlockEdgeKind kind = TraceBasicBlockEdgeKind::Branch;
-		if (!inRange) kind = TraceBasicBlockEdgeKind::RangeExit;
-		else if (previous && previous->terminal) kind = previous->kind;
+		if (!inRange) {
+			kind = tb.stopOnReturn && previous &&
+				previous->kind == TraceBasicBlockEdgeKind::Call ?
+				TraceBasicBlockEdgeKind::Call : TraceBasicBlockEdgeKind::RangeExit;
+		} else if (previous && previous->terminal) kind = previous->kind;
 		else if (!nonSequential) kind = TraceBasicBlockEdgeKind::Fallthrough;
 
 		bool dynamicTarget = nonSequential && !(previous && previous->terminal);
@@ -1515,6 +1608,17 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 			tb.currentBlock, tb.previousInstruction, targetBlock, kind, 0,
 			previous && previous->indirect != 0, version);
 		if (!inRange) {
+			if (tb.stopOnReturn && previous && previous->kind == TraceBasicBlockEdgeKind::Call) {
+				tb.externalCallActive = true;
+				tb.externalReturnAddress = previous->next;
+				tb.pendingWriteCount = 0;
+				tb.pendingReadCount = 0;
+				tb.pendingRegisterEventValid = false;
+				tb.finalAddress = addr;
+				info->ContextRecord->EFlags |= 0x100;
+				info->ContextRecord->Dr6 = 0;
+				return BasicTraceStepResult::Continue;
+			}
 			FinishBasicTrace(TraceBasicBlockStopReason::LeftRange, addr);
 			return BasicTraceStepResult::Stop;
 		}
@@ -1556,6 +1660,19 @@ bool VehHandler::HandleBasicTraceException(PEXCEPTION_POINTERS info, uint32_t ti
 	auto& tb = traceBasicBlocks_;
 	if (!tb.active.load(std::memory_order_acquire) || tid != tb.threadId)
 		return false;
+	if (tb.externalCallActive && (addr < tb.rangeStart || addr >= tb.rangeEnd)) {
+		++tb.stepsExecuted;
+		++tb.filteredSteps;
+		++tb.externalSteps;
+		tb.finalAddress = addr;
+		if (tb.stepsExecuted >= tb.maxSteps) {
+			tb.stopPending = true;
+			tb.pendingStopReason = TraceBasicBlockStopReason::MaxSteps;
+			tb.truncated = true;
+		}
+		info->ContextRecord->EFlags |= 0x100;
+		return true;
+	}
 	if (addr < tb.rangeStart || addr >= tb.rangeEnd) return false;
 	if (!tb.followExceptions) {
 		FinishBasicTrace(TraceBasicBlockStopReason::Exception, addr);

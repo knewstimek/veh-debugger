@@ -3268,7 +3268,7 @@ json McpServer::GetToolsList() {
 			{"system_only", {{"type", "boolean"}, {"description", "Only resolve to system DLLs. Default: false"}}}
 		 }}, {"required", json::array({"addresses"})}}}},
 
-		{{"name", "veh_trace_basic_blocks"}, {"description", "Bounded semantic trace for one VEH-stopped thread. Returns versioned aggregate metadata and unique blocks/edges; optional ordered streams cover transitions, per-occurrence memory accesses, instruction register deltas, and runtime code versions in one sequence space. Startup failures report structured stopped/IP/range/decode diagnostics. Also reports hot/loop summaries, indirect targets, memory observations, and exception events."},
+		{{"name", "veh_trace_basic_blocks"}, {"description", "Bounded semantic trace for one VEH-stopped thread. Returns versioned aggregate metadata and unique blocks/edges; optional ordered streams cover transitions, per-occurrence memory accesses, instruction register deltas, and runtime code versions in one sequence space. Function-scoped mode records the entry return contract, filters external-call execution, and stops at the original return. Startup failures report structured stopped/IP/range/decode diagnostics."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID currently stopped by VEH; its RIP/EIP must be inside the range"}}},
 			{"start", {{"type", "string"}, {"description", "Inclusive range start (hex or module+RVA)"}}},
@@ -3278,6 +3278,7 @@ json McpServer::GetToolsList() {
 			{"max_steps", {{"type", "integer"}, {"description", "Maximum instruction/exception events (default 100000, max 5000000)"}}},
 			{"timeout_ms", {{"type", "integer"}, {"description", "Wall-clock limit (default 10000, max 60000)"}}},
 			{"stack_bytes", {{"type", "integer"}, {"description", "Bytes to capture from SP per snapshot (default 128, max 256; 0 disables stack bytes)"}}},
+			{"stop_on_return", {{"type", "boolean"}, {"description", "Record entry SP/return address, exclude external call execution from collection, and stop with function_return plus the return register snapshot (default false)"}}},
 			{"follow_exceptions", {{"type", "boolean"}, {"description", "Pass target exceptions to its handlers and record handled continuations as edges (default true)"}}},
 			{"collect_memory_writes", {{"type", "boolean"}, {"description", "Collect bounded memory-write before/after transitions (default false)"}}},
 			{"max_memory_writes", {{"type", "integer"}, {"description", "Maximum unique memory-write transitions (default 4096, max 16384)"}}}

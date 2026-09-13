@@ -187,6 +187,11 @@ static bool DecodeBasicTraceRange(uint64_t start, uint64_t end,
 					if (index < 16) meta.readRegisterMask |= 1u << index;
 					continue;
 				}
+				// Intel multi-byte NOP encodings carry a memory-form operand for
+				// instruction length, but they neither calculate an effective address
+				// nor access memory. Treating NOP [reg] as a read creates a false
+				// unsupported access when the decorative register value is unmapped.
+				if (decoded.mnemonic == ZYDIS_MNEMONIC_NOP) continue;
 				bool readable = (operand.actions & ZYDIS_OPERAND_ACTION_READ) != 0;
 				bool writable = (operand.actions & ZYDIS_OPERAND_ACTION_WRITE) != 0;
 				if (!readable && !writable) continue;
@@ -2177,17 +2182,20 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 		TraceBasicBlocksRequest req{};
 		memcpy(&req, payload, std::min<size_t>(payloadSize, sizeof(req)));
-		const bool explicitV7Wire = req.wireVersion >= kTraceBasicBlocksWireVersion &&
+		const bool explicitV8Wire = req.wireVersion >= kTraceBasicBlocksWireVersion &&
+			req.requestSize >= kTraceBasicBlocksRequestV8Size && req.requestSize <= payloadSize;
+		const bool explicitV7Wire = req.wireVersion == 7 &&
 			req.requestSize >= kTraceBasicBlocksRequestV7Size && req.requestSize <= payloadSize;
 		const bool explicitV6Wire = req.wireVersion == 6 &&
 			req.requestSize >= kTraceBasicBlocksRequestV6Size && req.requestSize <= payloadSize;
 		const bool explicitV5Wire = req.wireVersion == kTraceBasicBlocksMinimumExplicitWireVersion &&
 			req.requestSize >= kTraceBasicBlocksRequestV4Size && req.requestSize <= payloadSize;
-		const bool explicitKnownWire = explicitV7Wire || explicitV6Wire || explicitV5Wire;
-		const uint16_t responseHeaderSize = explicitV7Wire ? kTraceBasicBlocksResponseV6Size :
+		const bool explicitKnownWire = explicitV8Wire || explicitV7Wire || explicitV6Wire || explicitV5Wire;
+		const uint16_t responseHeaderSize = explicitV8Wire ? kTraceBasicBlocksResponseV7Size :
+			(explicitV7Wire ? kTraceBasicBlocksResponseV6Size :
 			(explicitKnownWire ? kTraceBasicBlocksResponseV5Size :
 			(payloadSize >= kTraceBasicBlocksRequestV4Size ?
-				kTraceBasicBlocksResponseV4Size : kTraceBasicBlocksResponseV3Size));
+				kTraceBasicBlocksResponseV4Size : kTraceBasicBlocksResponseV3Size)));
 		CONTEXT stoppedContext{};
 		const bool stopped = VehHandler::Instance().IsThreadStopped(req.threadId);
 		const bool hasStoppedContext = VehHandler::Instance().GetStoppedContext(req.threadId, stoppedContext);
@@ -2223,13 +2231,14 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			sendTraceFailure(IpcStatus::InvalidArgs, TraceBasicBlocksStartFailure::InvalidArguments, false, 0);
 			return;
 		}
-		if (!explicitV6Wire && !explicitV7Wire) {
+		if (!explicitV6Wire && !explicitV7Wire && !explicitV8Wire) {
 			req.codeOutputMode = static_cast<uint8_t>(TraceCodeOutputMode::Inline);
 			req.codeChunkBytes = 0;
 			req.codeStreamOwnerPid = 0;
 			req.codeStreamToken = 0;
 		}
-		if (!explicitV7Wire) req.occurrenceWindow = {};
+		if (!explicitV7Wire && !explicitV8Wire) req.occurrenceWindow = {};
+		if (!explicitV8Wire) req.stopOnReturn = 0;
 		if (req.threadId == 0 || req.rangeStart >= req.rangeEnd ||
 			req.rangeEnd - req.rangeStart > 4ULL * 1024 * 1024) {
 			sendTraceFailure(IpcStatus::InvalidArgs, TraceBasicBlocksStartFailure::InvalidArguments, false, 0);
@@ -2286,6 +2295,22 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				false, decodedInstructionCount);
 			break;
 		}
+		if (req.stopOnReturn) {
+#ifdef _WIN64
+			const uint64_t entryStackPointer = stoppedContext.Rsp;
+			uint64_t returnAddress = 0;
+#else
+			const uint64_t entryStackPointer = stoppedContext.Esp;
+			uint32_t returnAddress = 0;
+#endif
+			if (!hasStoppedContext || !entryStackPointer ||
+				!SafeReadMem(entryStackPointer, &returnAddress, sizeof(returnAddress)) || !returnAddress) {
+				sendTraceFailure(IpcStatus::InvalidArgs,
+					TraceBasicBlocksStartFailure::ReturnAddressUnavailable, true,
+					decodedInstructionCount);
+				break;
+			}
+		}
 
 		HANDLE codeStreamPipe = INVALID_HANDLE_VALUE;
 		if (fileCodeOutput) {
@@ -2317,6 +2342,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				req.collectRegisterEvents != 0, req.maxRegisterEvents,
 				req.dependencySources, req.dependencySourceCount,
 				req.startCondition, req.stopCondition, req.collectCondition, req.occurrenceWindow,
+				req.stopOnReturn != 0,
 				std::move(instructions), std::move(staticBlockStarts))) {
 			TraceBasicBlocksStartFailure reason = TraceBasicBlocksStartFailure::StartRejected;
 			if (!stopped || !hasStoppedContext) reason = TraceBasicBlocksStartFailure::ThreadNotStopped;
@@ -2581,6 +2607,14 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			header->occurrenceHits = tb.occurrenceHits;
 			header->occurrenceWindowStarted = tb.occurrenceWindowStarted ? 1 : 0;
 			header->occurrenceWindowCompleted = tb.occurrenceWindowCompleted ? 1 : 0;
+		}
+		if (responseHeaderSize >= kTraceBasicBlocksResponseV7Size) {
+			header->functionScopeEnabled = tb.stopOnReturn ? 1 : 0;
+			header->functionReturned = tb.functionReturned ? 1 : 0;
+			header->returnSnapshot = tb.returnSnapshot;
+			header->entryStackPointer = tb.entryStackPointer;
+			header->returnAddress = tb.returnAddress;
+			header->externalSteps = tb.externalSteps;
 		}
 		if (req.collectCode) header->eventSchemaVersion = 2;
 

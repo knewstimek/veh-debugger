@@ -273,6 +273,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	int maxSteps = TraceJsonInt(args, "max_steps", 100000);
 	int timeoutMs = TraceJsonInt(args, "timeout_ms", 10000);
 	int stackBytes = TraceJsonInt(args, "stack_bytes", 128);
+	bool stopOnReturn = TraceJsonBool(args, "stop_on_return", false);
 	bool collectMemoryWrites = TraceJsonBool(args, "collect_memory_writes", false);
 	int maxMemoryWrites = TraceJsonInt(args, "max_memory_writes", 4096);
 	bool collectMemoryReads = TraceJsonBool(args, "collect_memory_reads", false);
@@ -418,7 +419,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		static_cast<uint32_t>(codeChunkBytes), codeOutputPath,
 		collectMemoryEvents, static_cast<uint32_t>(maxMemoryEvents),
 		collectRegisterEvents, static_cast<uint32_t>(maxRegisterEvents),
-		dependencySources, startCondition, stopCondition, collectCondition, occurrenceWindow);
+		dependencySources, startCondition, stopCondition, collectCondition, occurrenceWindow,
+		stopOnReturn);
 	auto hex = [](uint64_t value) {
 		char buffer[24]; snprintf(buffer, sizeof(buffer), "0x%llX", value);
 		return std::string(buffer);
@@ -434,6 +436,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		case TraceBasicBlockStopReason::Cancelled: return "cancelled";
 		case TraceBasicBlockStopReason::Condition: return "condition";
 		case TraceBasicBlockStopReason::OccurrenceWindow: return "occurrence_window";
+		case TraceBasicBlockStopReason::FunctionReturn: return "function_return";
 		default: return "completed";
 		}
 	};
@@ -449,6 +452,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 			case TraceBasicBlocksStartFailure::CollectorBusy: return "collector_busy";
 			case TraceBasicBlocksStartFailure::StartRejected: return "start_rejected";
 			case TraceBasicBlocksStartFailure::CodeStreamUnavailable: return "code_stream_unavailable";
+			case TraceBasicBlocksStartFailure::ReturnAddressUnavailable: return "return_address_unavailable";
 			default: return "";
 			}
 		};
@@ -491,6 +495,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	}
 	if (occurrenceWindow.enabled && !result.occurrenceSupported)
 		return {{"error", "injected DLL does not support occurrence_window"}};
+	if (stopOnReturn && !result.functionScopeSupported)
+		return {{"error", "injected DLL does not support stop_on_return"}};
 	TraceRegionClassifier regions(session.GetTargetProcess());
 	auto edgeKind = [](TraceBasicBlockEdgeKind kind) {
 		switch (kind) {
@@ -561,6 +567,18 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		snapshots.push_back({{"id", index}, {"instruction_pointer", hex(snapshot.instructionPointer)},
 			{"stack_pointer", hex(snapshot.stackPointer)}, {"registers", std::move(registers)},
 			{"stack", stack.str()}});
+	}
+	json functionScope = {{"stop_on_return", stopOnReturn},
+		{"supported", result.functionScopeSupported}};
+	if (stopOnReturn && result.functionScopeSupported) {
+		functionScope["entry_stack_pointer"] = hex(result.entryStackPointer);
+		functionScope["return_address"] = hex(result.returnAddress);
+		functionScope["returned"] = result.functionReturned;
+		functionScope["external_steps"] = result.externalSteps;
+		if (result.returnSnapshot < result.snapshots.size()) {
+			functionScope["return_snapshot_id"] = result.returnSnapshot;
+			functionScope["return_snapshot"] = snapshots[result.returnSnapshot];
+		}
 	}
 
 	// A block's first snapshot is its entry state; an edge snapshot is the
@@ -837,6 +855,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 
 	json fullResult = {{"schema_version", 4}, {"mode", "aggregated"},
 		{"thread_id", result.threadId}, {"ordering", std::move(ordering)},
+		{"function_scope", std::move(functionScope)},
 		{"occurrence_window", std::move(occurrence)},
 		{"events", std::move(events)}, {"events_truncated", result.eventsTruncated},
 		{"memory_ordering", std::move(memoryOrdering)},
@@ -891,6 +910,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		{"thread_id", fullResult["thread_id"]}, {"stop_reason", fullResult["stop_reason"]},
 		{"steps_executed", fullResult["steps_executed"]},
 		{"final_address", fullResult["final_address"]}, {"counts", std::move(counts)},
+		{"function_scope", fullResult["function_scope"]},
 		{"truncation", std::move(truncation)}, {"occurrence_window", fullResult["occurrence_window"]},
 		{"output_file", {{"path", exported.path}, {"format", exported.format},
 			{"size", exported.size}, {"sha256", exported.sha256}, {"complete", complete}}}};

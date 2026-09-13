@@ -15,7 +15,8 @@ from mcp_test_client import McpClient as Client
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BUILD_DIR = os.environ.get("VEH_TEST_BUILD_DIR", os.path.join(ROOT, "build"))
 MCP_EXE = os.path.join(BUILD_DIR, "bin", "Release", "veh-mcp-server.exe")
-TARGET = os.path.join(BUILD_DIR, "bin", "Release", "test_target.exe")
+TARGET = os.environ.get("VEH_TEST_TARGET",
+                        os.path.join(BUILD_DIR, "bin", "Release", "test_target.exe"))
 
 
 def read_code_artifact(path):
@@ -87,7 +88,7 @@ def main():
             "collect_events", "max_events", "collect_code", "max_code_bytes", "max_code_versions",
             "code_output", "code_output_path", "code_chunk_bytes",
             "collect_memory_events", "max_memory_events",
-            "collect_register_events", "max_register_events",
+            "collect_register_events", "max_register_events", "stop_on_return",
         )), trace_tool
         launch = client.tool("veh_launch", {"program": TARGET, "stopOnEntry": True})
         assert launch.get("success"), launch
@@ -246,6 +247,105 @@ def main():
                              for change in edge.get("register_delta", {}).values()
                              if "after_region" in change]
         assert classified_deltas, trace
+
+        function_bp = client.tool("veh_set_function_breakpoint", {
+            "name": "TraceFunctionScopeTarget",
+        })
+        assert function_bp.get("success") and function_bp.get("address"), function_bp
+        function_start = int(function_bp["address"], 0)
+        function_stop = client.tool("veh_continue", {
+            "wait": True, "timeout": 10,
+        }, timeout=15)
+        assert function_stop.get("reason") == "breakpoint", function_stop
+        function_regs = client.tool("veh_registers", {
+            "threadId": function_stop["threadId"],
+        })["registers"]
+        function_sp_name = "esp" if "esp" in function_regs else "rsp"
+        function_pointer_size = 4 if function_sp_name == "esp" else 8
+        expected_entry_sp = int(function_regs[function_sp_name], 0)
+        entry_return_bytes = client.tool("veh_read_memory", {
+            "address": hex(expected_entry_sp), "size": function_pointer_size,
+        })["hex"]
+        expected_return_address = int.from_bytes(bytes.fromhex(entry_return_bytes), "little")
+        function_trace = client.tool("veh_trace_basic_blocks", {
+            "threadId": function_stop["threadId"],
+            "start": hex(function_start), "end": hex(function_start + 0x100),
+            "stop_on_return": True, "max_steps": 20000, "timeout_ms": 10000,
+            "stack_bytes": 32, "collect_events": True, "max_events": 256,
+            "collect_memory_events": True, "max_memory_events": 256,
+            "collect_register_events": True, "max_register_events": 256,
+            "collect_code": True, "max_code_bytes": 4096, "max_code_versions": 256,
+        }, timeout=20)
+        assert function_trace.get("stop_reason") == "function_return", function_trace
+        scope = function_trace["function_scope"]
+        assert scope["supported"] is True and scope["stop_on_return"] is True, function_trace
+        assert scope["returned"] is True and scope["external_steps"] > 0, function_trace
+        assert int(scope["entry_stack_pointer"], 0) == expected_entry_sp, function_trace
+        assert int(scope["return_address"], 0) == expected_return_address, function_trace
+        assert int(scope["return_address"], 0) == int(function_trace["final_address"], 0), function_trace
+        assert scope["return_snapshot"]["id"] == scope["return_snapshot_id"], function_trace
+        assert scope["return_snapshot"]["instruction_pointer"] == scope["return_address"], function_trace
+        assert any(edge["kind"] == "call" for edge in function_trace["edges"]), function_trace
+        return_edges = [edge for edge in function_trace["edges"] if edge["kind"] == "return"]
+        assert return_edges and return_edges[-1]["target"] == scope["return_address"], function_trace
+        assert all(function_start <= int(event["instruction"], 0) < function_start + 0x100
+                   for event in function_trace["memory_events"]), function_trace
+        assert all(function_start <= int(event["instruction"], 0) < function_start + 0x100
+                   for event in function_trace["register_events"]), function_trace
+        assert client.tool("veh_remove_breakpoint", {
+            "id": function_bp["id"],
+        }).get("success"), function_bp
+        assert client.tool("veh_remove_breakpoint", {"id": bp["id"]}).get("success"), bp
+
+        batch_function_bp = client.tool("veh_set_function_breakpoint", {
+            "name": "TraceFunctionScopeTarget",
+        })
+        assert batch_function_bp.get("success"), batch_function_bp
+        function_batch = client.tool("veh_batch", {"steps": [
+            {"tool": "veh_continue", "args": {"wait": True, "timeout": 10}},
+            {"tool": "veh_trace_basic_blocks", "args": {
+                "threadId": "$0.threadId", "start": hex(function_start),
+                "end": hex(function_start + 0x100), "stop_on_return": True,
+                "max_steps": 20000, "timeout_ms": 10000,
+            }},
+        ]}, timeout=25)
+        batch_function_trace = function_batch["results"][1]["result"]
+        assert batch_function_trace.get("stop_reason") == "function_return", function_batch
+        assert batch_function_trace["function_scope"]["returned"] is True, function_batch
+        assert client.tool("veh_remove_breakpoint", {
+            "id": batch_function_bp["id"],
+        }).get("success"), batch_function_bp
+
+        function_action_output = output_path("function-scope-action", "json")
+        function_action_bp = client.tool("veh_set_breakpoint", {
+            "address": hex(function_start), "action": [
+                {"tool": "veh_trace_basic_blocks", "args": {
+                    "threadId": thread_id, "start": hex(function_start),
+                    "end": hex(function_start + 0x100), "stop_on_return": True,
+                    "max_steps": 20000, "timeout_ms": 10000,
+                    "output_file": function_action_output,
+                }},
+                {"tool": "veh_set_breakpoint", "args": {"address": "$0.final_address"}},
+            ],
+        })
+        assert function_action_bp.get("success") and function_action_bp.get("hasAction"), function_action_bp
+        function_action_stop = client.tool("veh_continue", {
+            "wait": True, "timeout": 15,
+        }, timeout=20)
+        assert function_action_stop.get("reason") == "breakpoint", function_action_stop
+        assert function_action_stop.get("breakpointId") != function_action_bp["id"], function_action_stop
+        with open(function_action_output, encoding="utf-8") as action_file:
+            function_action_trace = json.load(action_file)
+        assert function_action_trace.get("stop_reason") == "function_return", function_action_trace
+        assert function_action_trace["function_scope"]["returned"] is True, function_action_trace
+        assert client.tool("veh_remove_breakpoint", {
+            "id": function_action_stop["breakpointId"],
+        }).get("success"), function_action_stop
+        assert client.tool("veh_remove_breakpoint", {
+            "id": function_action_bp["id"],
+        }).get("success"), function_action_bp
+        bp = client.tool("veh_set_breakpoint", {"address": hex(start)})
+        assert bp.get("success"), bp
 
         # Batch dispatch must use the same implementation and result shape as a
         # direct call. The continue result also verifies $N.threadId expansion.
@@ -656,6 +756,35 @@ def main():
         assert int(lea_event["changes"][destination_name]["after"], 0) == \
             ((xor_after + 0x22222222) & 0xFFFFFFFF), lea_trace
         assert client.tool("veh_free_memory", {"address": hex(lea_start)}).get("success")
+
+        # Multi-byte NOP has a decorative memory-form operand but performs no
+        # address calculation or memory read, even when the named register is
+        # null. It must not inflate unsupported-memory diagnostics.
+        nop_code = client.tool("veh_allocate_memory", {"size": 4096, "protection": "rwx"})
+        assert nop_code.get("success"), nop_code
+        nop_start = int(nop_code["address"], 0)
+        if is_32bit:
+            code = (bytes.fromhex("31 C0 0F 1F 00 BB") +
+                    resume_address.to_bytes(4, "little") + bytes.fromhex("FF E3"))
+        else:
+            code = (bytes.fromhex("31 C0 0F 1F 00 49 BB") +
+                    resume_address.to_bytes(8, "little") + bytes.fromhex("41 FF E3"))
+        assert client.tool("veh_write_memory", {
+            "address": hex(nop_start), "data": code.hex(" "),
+        }).get("success")
+        assert client.tool("veh_set_register", {
+            "threadId": checkpoint_thread, "name": ip_name, "value": hex(nop_start),
+        }).get("success")
+        nop_trace = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(nop_start),
+            "end": hex(nop_start + len(code)), "max_steps": 8,
+            "timeout_ms": 5000, "collect_memory_reads": True,
+            "max_memory_reads": 8, "collect_memory_events": True,
+            "max_memory_events": 8,
+        }, timeout=15)
+        assert nop_trace.get("unsupported_memory_reads") == 0, nop_trace
+        assert nop_trace["memory_reads"] == [] and nop_trace["memory_events"] == [], nop_trace
+        assert client.tool("veh_free_memory", {"address": hex(nop_start)}).get("success")
 
         # A loop that rewrites its own XOR immediate produces two runtime byte
         # versions of the same block. Ordered edge occurrences must identify
