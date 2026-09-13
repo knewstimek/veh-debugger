@@ -16,6 +16,8 @@ cmake --build build32 --config Release
 
 Run tests from the repository root. Test harnesses must use real timeouts,
 `try/finally` cleanup, and must terminate and wait for every process they start.
+DAP stdio tests should reuse `test/dap_test_client.py` so blocking pipe reads stay
+on a reader thread and the controlling test can enforce monotonic timeouts.
 
 ## Core integration coverage
 
