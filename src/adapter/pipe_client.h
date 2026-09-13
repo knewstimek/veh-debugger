@@ -76,6 +76,8 @@ private:
 	std::atomic<bool> connected_{false};
 	std::mutex sendMutex_;       // write 직렬화
 	std::mutex sendReceiveMutex_; // SendAndReceive 직렬화
+	std::mutex requestStateMutex_; // heartbeat timeout과 동기 요청 상태 직렬화
+	bool requestInFlight_ = false;
 
 	// 단일 리더 스레드
 	std::thread readerThread_;
