@@ -9,6 +9,7 @@
 - **Versioned ordered basic-block events** -- `veh_trace_basic_blocks` now identifies its aggregate response with `schema_version`, `mode`, and `thread_id`. Optional `collect_events` records a bounded event-schema-v1 stream containing the initial block entry and every observed block transition in execution order, each with its trace-step `sequence` and OS `thread_id`; `max_events`, `events_truncated`, and ordering completeness metadata make partial streams explicit. Direct calls, `veh_batch`, and breakpoint actions use the same implementation and result semantics.
 
 ### Changed
+- **Larger bounded runtime-code capture** -- `veh_trace_basic_blocks.max_code_bytes` now accepts an explicit budget up to 16 MiB (default unchanged at 256 KiB), allowing sub-10k-instruction x86 self-modifying VM traces to retain substantially more block versions before reporting truncation. The DLL sizes its temporary single-block scratch buffer to the bounded trace range instead of duplicating the full cumulative version budget.
 - **Tracked and repeatable release procedure** -- release policy now lives in `RELEASING.md`, with a validation/packaging helper that synchronizes x64/x86 artifacts without committing or publishing. Stale v1.0.4 test guidance, the packaged README's outdated MCP count and duplicate trace entry, obsolete DLL logging/test-count documentation, and generated-artifact ignore rules were refreshed; the completed dated trace proposal was reduced to its durable debugger/analyzer design boundary in `OVERVIEW.md`.
 
 ### Fixed

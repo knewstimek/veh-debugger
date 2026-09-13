@@ -3188,7 +3188,7 @@ json McpServer::GetToolsList() {
 			,{"collect_events", {{"type", "boolean"}, {"description", "Collect every observed block entry/transition in execution order with sequence and thread ID (default false)"}}}
 			,{"max_events", {{"type", "integer"}, {"description", "Maximum ordered events retained without stopping aggregate collection (default 8192, max 32768)"}}}
 			,{"collect_code", {{"type", "boolean"}, {"description", "Capture runtime bytes for unique executed block versions and map version IDs to ordered events; implies collect_events (default false)"}}}
-			,{"max_code_bytes", {{"type", "integer"}, {"description", "Total stored code-byte budget across unique versions (default 262144, max 4194304)"}}}
+			,{"max_code_bytes", {{"type", "integer"}, {"description", "Total stored code-byte budget across unique versions (default 262144, max 16777216)"}}}
 			,{"max_code_versions", {{"type", "integer"}, {"description", "Maximum unique block code versions retained (default 4096, max 16384)"}}}
 			,{"dependency_sources", {{"type", "array"}, {"maxItems", 32}, {"description", "Conservative dependency sources: register names or {address,size,label?} memory ranges"}}}
 			,{"start_condition", {{"type", "string"}, {"description", "Begin collection when a register/memory comparison becomes true; supports up to four && or || clauses"}}}

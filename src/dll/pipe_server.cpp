@@ -2206,7 +2206,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			(req.collectEvents && req.maxEvents > 32768) ||
 			(req.collectMemoryEvents && req.maxMemoryEvents > 65536) ||
 			(req.collectRegisterEvents && req.maxRegisterEvents > 65536) ||
-			(req.collectCode && (req.maxCodeBytes > 4U * 1024 * 1024 ||
+			(req.collectCode && (req.maxCodeBytes > kTraceBasicBlockMaxCodeBytes ||
 				req.maxCodeVersions > 16384 || req.maxCodeBytes == 0 || req.maxCodeVersions == 0)) ||
 			req.dependencySourceCount > kTraceDependencyMaxSources ||
 			req.timeoutMs < 100 || req.timeoutMs > 60000 ||

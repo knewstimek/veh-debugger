@@ -296,8 +296,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		return {{"error", "max_memory_reads must be 1-16384"}};
 	if (maxEvents < 1 || maxEvents > 32768)
 		return {{"error", "max_events must be 1-32768"}};
-	if (maxCodeBytes < 1 || maxCodeBytes > 4 * 1024 * 1024)
-		return {{"error", "max_code_bytes must be 1-4194304"}};
+	if (maxCodeBytes < 1 || static_cast<uint32_t>(maxCodeBytes) > kTraceBasicBlockMaxCodeBytes)
+		return {{"error", "max_code_bytes must be 1-16777216"}};
 	if (maxCodeVersions < 1 || maxCodeVersions > 16384)
 		return {{"error", "max_code_versions must be 1-16384"}};
 	if (maxMemoryEvents < 1 || maxMemoryEvents > 65536)
