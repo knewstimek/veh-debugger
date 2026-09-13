@@ -2161,8 +2161,18 @@ json McpServer::ToolTargetedCapture(const json& args) {
 			traceResult = {{"error", std::string("targeted trace failed: ") + e.what()}};
 		}
 		ToolCheckpointDelete({{"id", checkpointId}});
-		const bool targetMatched = !traceResult.contains("error") &&
+		const bool hasTraceError = traceResult.contains("error");
+		const bool targetMatched = !hasTraceError &&
 			traceResult.value("target_window", json::object()).value("matched", false);
+		const uint64_t stepsExecuted = !hasTraceError ?
+			traceResult.value("steps_executed", uint64_t{0}) : 0;
+		const std::string stopReason = !hasTraceError ?
+			traceResult.value("stop_reason", std::string{}) : std::string{};
+		// A match at the initial IP has sequence zero.  It is only a trigger
+		// observation, not a completed capture: the requested post window must run
+		// and terminate through the dedicated target-window stop path.
+		const bool captureSucceeded = !hasTraceError && targetMatched &&
+			stepsExecuted != 0 && stopReason == "target_window";
 		if (traceResult.contains("output_file")) report["artifact"] = traceResult["output_file"];
 		if (traceResult.contains("counts")) report["counts"] = traceResult["counts"];
 		if (traceResult.contains("truncation")) report["truncation"] = traceResult["truncation"];
@@ -2170,10 +2180,17 @@ json McpServer::ToolTargetedCapture(const json& args) {
 		if (traceResult.contains("target_window")) report["target_window"] = traceResult["target_window"];
 		if (traceResult.contains("steps_executed")) report["steps_executed"] = traceResult["steps_executed"];
 		if (traceResult.contains("stop_reason")) report["stop_reason"] = traceResult["stop_reason"];
-		if (traceResult.contains("error") || !targetMatched) {
+		if (report.contains("artifact") && report["artifact"].is_object())
+			report["artifact"]["complete"] = captureSucceeded;
+		report["capture_complete"] = captureSucceeded;
+		if (!captureSucceeded) {
 			report["status"] = "failed";
-			report["error"] = traceResult.contains("error") ? traceResult["error"] :
-				json("target occurrence was not reached");
+			if (hasTraceError) report["error"] = traceResult["error"];
+			else if (!targetMatched) report["error"] = "target occurrence was not reached";
+			else if (stepsExecuted == 0) report["error"] = "trace executed zero instructions";
+			else if (stopReason == "exception")
+				report["error"] = "trace stopped by exception before target window completed";
+			else report["error"] = "target window did not complete (stop_reason: " + stopReason + ")";
 			++failed; if (firstFailedInput < 0) firstFailedInput = static_cast<int64_t>(index);
 		} else {
 			report["status"] = "ok";
@@ -3657,7 +3674,7 @@ json McpServer::GetToolsList() {
 	targetedProperties["stop_on_error"] = {{"type", "boolean"},
 		{"description", "Stop after first failed input (default true)"}};
 	tools.push_back({{"name", "veh_targeted_capture"},
-		{"description", "Run an input matrix in one attached session and write one bounded occurrence-triggered trace artifact per input. Setup steps may restore checkpoints and apply each $input; the trace retains a pre/post instruction ring with ordered code/register/memory events and embeds a pre-trace TEB/FS/GS environment snapshot. Returns per-input path/hash/count/drop/truncation/match/failure metadata. Session lifecycle tools are deliberately excluded from setup steps."},
+		{"description", "Run an input matrix in one attached session and write one bounded occurrence-triggered trace artifact per input. Setup steps may restore checkpoints and apply each $input; the trace retains a pre/post instruction ring with ordered code/register/memory events and embeds a pre-trace TEB/FS/GS environment snapshot. Success requires at least one completed instruction and the requested target-window stop; exception, zero-step, and partial windows fail explicitly. Returns per-input path/hash/count/drop/truncation/match/failure metadata. Session lifecycle tools are deliberately excluded from setup steps."},
 		{"inputSchema", {{"type", "object"}, {"properties", std::move(targetedProperties)},
 			{"required", json::array({"inputs", "trace", "trigger", "window", "output_directory"})}}}});
 	return tools;

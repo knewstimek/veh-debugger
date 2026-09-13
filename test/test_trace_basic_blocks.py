@@ -1260,7 +1260,8 @@ def main():
         matrix_code = client.tool("veh_allocate_memory", {"size": 4096, "protection": "rwx"})
         assert matrix_code.get("success"), matrix_code
         matrix_start = int(matrix_code["address"], 0)
-        matrix_bytes = bytes.fromhex("31 C0 83 C0 01 83 F8 05 75 F8 EB FE")
+        matrix_bytes = (bytes.fromhex("31 C0 83 C0 01 83 F8 05 75 F8 EB FE") +
+                        bytes.fromhex("90") * 52 + bytes.fromhex("0F 0B EB FE"))
         assert client.tool("veh_write_memory", {
             "address": hex(matrix_start), "data": matrix_bytes.hex(" "),
         }).get("success")
@@ -1304,6 +1305,7 @@ def main():
         matrix_paths = []
         for item in matrix["inputs"]:
             assert item["status"] == "ok" and item["stop_reason"] == "target_window", item
+            assert item["capture_complete"] is True and item["artifact"]["complete"] is True, item
             assert item["target_window"]["matched"] is True, item
             assert item["drop_counts"] == {
                 "events": 0, "memory_events": 0, "register_events": 0,
@@ -1320,14 +1322,6 @@ def main():
                               if region["kind"] == "teb")
             assert teb_region["encoding"] == "hex" and len(teb_region["data"]) == 512, teb_region
         assert len(set(matrix_paths)) == 2, matrix_paths
-        for path in matrix_paths:
-            os.remove(path)
-        os.rmdir(matrix_dir)
-        artifact_dirs.remove(matrix_dir)
-        assert client.tool("veh_checkpoint_delete", {
-            "id": matrix_checkpoint["id"],
-        }).get("deleted") is True
-
         targeted_batch = client.tool("veh_batch", {"steps": [
             {"tool": "veh_set_register", "args": {
                 "threadId": matrix_thread, "name": matrix_accumulator, "value": "0",
@@ -1385,6 +1379,54 @@ def main():
         assert client.tool("veh_remove_breakpoint", {
             "id": targeted_action_bp["id"],
         }).get("success")
+
+        # A trigger match at the initial IP is not a successful capture when
+        # that instruction faults before the requested post window executes.
+        invalid_matrix = client.tool("veh_targeted_capture", {
+            "inputs": [
+                {"name": "valid", "ip": hex(matrix_start),
+                 "trigger": hex(matrix_start + 2)},
+                {"name": "exception", "ip": hex(matrix_start + 64),
+                 "trigger": hex(matrix_start + 64)},
+            ],
+            "steps": [
+                {"tool": "veh_checkpoint_restore", "args": {
+                    "id": matrix_checkpoint["id"],
+                }},
+                {"tool": "veh_set_register", "args": {
+                    "threadId": matrix_thread, "name": matrix_ip, "value": "$input.ip",
+                }},
+            ],
+            "trace": {
+                "threadId": matrix_thread, "start": hex(matrix_start),
+                "end": hex(matrix_start + len(matrix_bytes)), "max_steps": 1000,
+                "timeout_ms": 5000, "follow_exceptions": False,
+                "max_code_bytes": 4096, "max_code_versions": 64,
+            },
+            "trigger": {"address": "$input.trigger", "occurrence": 1},
+            "window": {"before_steps": 0, "after_steps": 4},
+            "environment": {"capture_teb": True, "teb_size": 256},
+            "output_directory": matrix_dir, "stop_on_error": False,
+        }, timeout=30)
+        assert invalid_matrix["succeeded"] == 1 and invalid_matrix["failed"] == 1, invalid_matrix
+        assert invalid_matrix["first_failed_input"] == 1, invalid_matrix
+        valid_item, exception_item = invalid_matrix["inputs"]
+        assert valid_item["status"] == "ok" and valid_item["capture_complete"] is True, valid_item
+        assert exception_item["status"] == "failed", exception_item
+        assert exception_item["steps_executed"] == 0, exception_item
+        assert exception_item["stop_reason"] == "exception", exception_item
+        assert exception_item["capture_complete"] is False, exception_item
+        assert exception_item["artifact"]["complete"] is False, exception_item
+        assert "zero instructions" in exception_item["error"], exception_item
+        for item in invalid_matrix["inputs"]:
+            matrix_paths.append(item["artifact"]["path"])
+        for path in matrix_paths:
+            os.remove(path)
+        os.rmdir(matrix_dir)
+        artifact_dirs.remove(matrix_dir)
+        assert client.tool("veh_checkpoint_delete", {
+            "id": matrix_checkpoint["id"],
+        }).get("deleted") is True
         print(json.dumps({
             "stop_reason": trace["stop_reason"],
             "blocks": len(trace["blocks"]),
