@@ -1408,12 +1408,21 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		bool collectMemoryReads, uint32_t maxMemoryReads,
 		bool collectEvents, uint32_t maxEvents,
 		bool collectCode, uint32_t maxCodeBytes, uint32_t maxCodeVersions,
+		TraceCodeOutputMode codeOutputMode, uint32_t codeChunkBytes,
+		const std::string& codeOutputPath,
 		bool collectMemoryEvents, uint32_t maxMemoryEvents,
 		bool collectRegisterEvents, uint32_t maxRegisterEvents,
 		const std::vector<TraceDependencySource>& dependencySources,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition) {
 	TraceBasicBlocksResult result;
+	TraceCodeArtifactReceiver codeArtifactReceiver;
+	const bool fileCodeOutput = collectCode && codeOutputMode == TraceCodeOutputMode::File;
+	if (fileCodeOutput && !codeArtifactReceiver.Start(codeOutputPath, codeChunkBytes,
+			maxCodeBytes, rangeStart, rangeEnd)) {
+		result.codeArtifact = codeArtifactReceiver.Finish(false);
+		return result;
+	}
 	TraceBasicBlocksRequest req{};
 	req.wireVersion = kTraceBasicBlocksWireVersion;
 	req.requestSize = sizeof(req);
@@ -1439,6 +1448,10 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	req.maxMemoryEvents = maxMemoryEvents;
 	req.collectRegisterEvents = collectRegisterEvents ? 1 : 0;
 	req.maxRegisterEvents = maxRegisterEvents;
+	req.codeOutputMode = static_cast<uint8_t>(codeOutputMode);
+	req.codeChunkBytes = fileCodeOutput ? codeChunkBytes : 0;
+	req.codeStreamOwnerPid = fileCodeOutput ? codeArtifactReceiver.OwnerPid() : 0;
+	req.codeStreamToken = fileCodeOutput ? codeArtifactReceiver.Token() : 0;
 	req.dependencySourceCount = static_cast<uint8_t>(std::min<size_t>(dependencySources.size(), kTraceDependencyMaxSources));
 	if (req.dependencySourceCount) memcpy(req.dependencySources, dependencySources.data(),
 		static_cast<size_t>(req.dependencySourceCount) * sizeof(req.dependencySources[0]));
@@ -1447,10 +1460,20 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	req.collectCondition = collectCondition;
 
 	std::vector<uint8_t> data;
-	if (!pipeClient_.SendAndReceive(IpcCommand::TraceBasicBlocks, &req, sizeof(req), data,
-			static_cast<int>(timeoutMs) + 15000)) return result;
+	const bool received = pipeClient_.SendAndReceive(IpcCommand::TraceBasicBlocks, &req, sizeof(req), data,
+		static_cast<int>(timeoutMs) + 15000);
+	const bool streamExpected = received && data.size() >= sizeof(IpcStatus) &&
+		*reinterpret_cast<const IpcStatus*>(data.data()) == IpcStatus::Ok;
+	if (fileCodeOutput) {
+		result.codeArtifact = codeArtifactReceiver.Finish(streamExpected);
+		if (!received && result.codeArtifact.error.empty())
+			result.codeArtifact.error = "trace control response failed";
+	}
+	if (!received) return result;
 	if (data.size() < sizeof(IpcStatus)) return result;
 	result.status = *reinterpret_cast<const IpcStatus*>(data.data());
+	if (fileCodeOutput && result.status == IpcStatus::InvalidArgs && result.codeArtifact.error.empty())
+		result.codeArtifact.error = "injected DLL does not support code_output=file";
 	if (data.size() < kTraceBasicBlocksResponseV3Size) return result;
 	auto* header = reinterpret_cast<const TraceBasicBlocksResponse*>(data.data());
 	size_t headerSize = header->headerSize;

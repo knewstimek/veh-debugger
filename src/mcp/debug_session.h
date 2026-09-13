@@ -11,6 +11,7 @@
 #include "adapter/injector.h"
 #include "adapter/disassembler.h"
 #include "common/ipc_protocol.h"
+#include "trace_code_artifact.h"
 
 namespace veh {
 
@@ -331,6 +332,7 @@ public:
 		std::vector<TraceBasicBlockRegisterEventEntry> registerEvents;
 		std::vector<TraceBasicBlockCodeVersionEntry> codeVersions;
 		std::vector<uint8_t> codeBytes;
+		TraceCodeArtifactResult codeArtifact;
 	};
 	TraceBasicBlocksResult TraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, uint64_t rangeEnd,
 		uint32_t maxBlocks = 4096, uint32_t maxEdges = 8192, uint32_t maxSteps = 100000,
@@ -340,6 +342,9 @@ public:
 		bool collectEvents = false, uint32_t maxEvents = 8192,
 		bool collectCode = false, uint32_t maxCodeBytes = 262144,
 		uint32_t maxCodeVersions = 4096,
+		TraceCodeOutputMode codeOutputMode = TraceCodeOutputMode::Inline,
+		uint32_t codeChunkBytes = kTraceCodeDefaultChunkBytes,
+		const std::string& codeOutputPath = {},
 		bool collectMemoryEvents = false, uint32_t maxMemoryEvents = 8192,
 		bool collectRegisterEvents = false, uint32_t maxRegisterEvents = 8192,
 		const std::vector<TraceDependencySource>& dependencySources = {},

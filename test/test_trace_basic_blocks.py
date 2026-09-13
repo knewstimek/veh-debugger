@@ -1,8 +1,11 @@
 """Integration smoke test for veh_trace_basic_blocks."""
 import json
+import hashlib
 import os
 import queue
+import struct
 import subprocess
+import tempfile
 import threading
 import time
 from collections import Counter
@@ -12,6 +15,40 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 BUILD_DIR = os.environ.get("VEH_TEST_BUILD_DIR", os.path.join(ROOT, "build"))
 MCP_EXE = os.path.join(BUILD_DIR, "bin", "Release", "veh-mcp-server.exe")
 TARGET = os.path.join(BUILD_DIR, "bin", "Release", "test_target.exe")
+
+
+def read_code_artifact(path):
+    data = open(path, "rb").read()
+    header_format = "<QIIIIQQQQII"
+    record_format = "<QQQQQII"
+    header_size = struct.calcsize(header_format)
+    fields = struct.unpack_from(header_format, data)
+    artifact = {
+        "magic": fields[0], "schema": fields[1], "header_size": fields[2],
+        "flags": fields[3], "chunk_bytes": fields[4], "range_start": fields[5],
+        "range_end": fields[6], "code_bytes": fields[7], "record_bytes": fields[8],
+        "versions": fields[9], "chunks": fields[10], "records": [],
+        "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+    }
+    assert artifact["magic"] == 0x0045444F43484556, artifact
+    assert artifact["schema"] == 1 and artifact["header_size"] == header_size, artifact
+    assert len(data) == header_size + artifact["record_bytes"], artifact
+    cursor = header_size
+    expected_data_offset = 0
+    for _ in range(artifact["versions"]):
+        record = struct.unpack_from(record_format, data, cursor)
+        cursor += struct.calcsize(record_format)
+        size = record[6]
+        code = data[cursor:cursor + size]
+        assert len(code) == size and record[4] == expected_data_offset, artifact
+        cursor += size
+        expected_data_offset += size
+        artifact["records"].append({"block": record[0], "end": record[1],
+                                    "hash": record[2], "first_sequence": record[3],
+                                    "data_offset": record[4], "id": record[5],
+                                    "size": size, "bytes": code})
+    assert cursor == len(data) and expected_data_offset == artifact["code_bytes"], artifact
+    return artifact
 
 
 class Client:
@@ -49,7 +86,8 @@ class Client:
             except queue.Empty as error:
                 raise TimeoutError(method) from error
             if message is None:
-                raise RuntimeError(f"MCP server exited while waiting for {method}")
+                stderr = self.proc.stderr.read().decode(errors="replace") if self.proc.poll() is not None else ""
+                raise RuntimeError(f"MCP server exited while waiting for {method}: {stderr[-4000:]}")
             if message.get("id") == self.seq:
                 return message
 
@@ -75,6 +113,12 @@ class Client:
 
 def main():
     client = Client()
+    artifact_paths = []
+    def artifact_path(label):
+        path = os.path.join(tempfile.gettempdir(),
+                            f"veh-trace-{os.getpid()}-{time.time_ns()}-{label}.vtc")
+        artifact_paths.append(path)
+        return path
     try:
         client.call("initialize", {
             "protocolVersion": "2024-11-05",
@@ -88,6 +132,7 @@ def main():
         trace_properties = trace_tool["inputSchema"]["properties"]
         assert all(name in trace_properties for name in (
             "collect_events", "max_events", "collect_code", "max_code_bytes", "max_code_versions",
+            "code_output", "code_output_path", "code_chunk_bytes",
             "collect_memory_events", "max_memory_events",
             "collect_register_events", "max_register_events",
         )), trace_tool
@@ -257,8 +302,10 @@ def main():
                 "collect_memory_events": True, "max_memory_events": 256,
                 "collect_register_events": True, "max_register_events": 256,
                 "collect_events": True, "max_events": 256,
-                "collect_code": True, "max_code_bytes": 16 * 1024 * 1024,
+                "collect_code": True, "max_code_bytes": 400 * 1024 * 1024,
                 "max_code_versions": 256,
+                "code_output": "file",
+                "code_chunk_bytes": 256 * 1024,
             }},
         ]}, timeout=20)
         assert batch.get("totalSteps") == 2, batch
@@ -271,7 +318,13 @@ def main():
         assert len(batch_trace["blocks"]) >= 2, batch_trace
         assert len(batch_trace["edges"]) >= 1, batch_trace
         assert batch_trace["ordering"]["available"] is True, batch_trace
-        assert batch_trace["code_capture"]["available"] is True and batch_trace["code_versions"], batch_trace
+        assert batch_trace["code_capture"]["available"] is True, batch_trace
+        assert batch_trace["code_capture"]["storage"] == "file" and not batch_trace["code_versions"], batch_trace
+        batch_artifact_path = batch_trace["code_capture"]["path"]
+        artifact_paths.append(batch_artifact_path)
+        batch_artifact = read_code_artifact(batch_artifact_path)
+        assert batch_artifact["versions"] == batch_trace["code_capture"]["versions_captured"], batch_trace
+        assert batch_artifact["sha256"] == batch_trace["code_capture"]["sha256"], batch_trace
         assert all(event["thread_id"] == batch_stop["threadId"]
                    for event in batch_trace["events"]), batch_trace
         assert all(event["thread_id"] == batch_stop["threadId"]
@@ -360,6 +413,7 @@ def main():
         # Breakpoint actions use BatchExecutor too. The trace action installs a
         # sentinel breakpoint at its returned final_address; hitting that new
         # breakpoint proves the trace completed and its result was referenceable.
+        action_artifact_path = artifact_path("action")
         action_bp = client.tool("veh_set_breakpoint", {
             "address": hex(start),
             "action": [
@@ -369,8 +423,10 @@ def main():
                     "collect_memory_events": True, "max_memory_events": 256,
                     "collect_register_events": True, "max_register_events": 256,
                     "collect_events": True, "max_events": 256,
-                    "collect_code": True, "max_code_bytes": 16 * 1024 * 1024,
+                    "collect_code": True, "max_code_bytes": 400 * 1024 * 1024,
                     "max_code_versions": 256,
+                    "code_output": "file", "code_output_path": action_artifact_path,
+                    "code_chunk_bytes": 256 * 1024,
                 }},
                 {"tool": "veh_set_breakpoint", "args": {"address": "$0.final_address"}},
             ],
@@ -379,6 +435,8 @@ def main():
         action_stop = client.tool("veh_continue", {"wait": True, "timeout": 10}, timeout=15)
         assert action_stop.get("reason") == "breakpoint", action_stop
         assert action_stop.get("breakpointId") != action_bp["id"], action_stop
+        action_artifact = read_code_artifact(action_artifact_path)
+        assert action_artifact["versions"] > 0 and action_artifact["flags"] & 1, action_artifact
         assert client.tool("veh_remove_breakpoint", {
             "id": action_stop["breakpointId"],
         }).get("success"), action_stop
@@ -612,7 +670,9 @@ def main():
             "end": hex(smc_start + len(smc_code)), "collect_code": True,
             "max_code_bytes": 16 * 1024 * 1024 + 1,
         })
-        assert oversized_code == {"error": "max_code_bytes must be 1-16777216"}, oversized_code
+        assert oversized_code == {
+            "error": "max_code_bytes must be 1-16777216 for code_output=inline",
+        }, oversized_code
         smc_trace = client.tool("veh_trace_basic_blocks", {
             "threadId": checkpoint_thread, "start": hex(smc_start),
             "end": hex(smc_start + len(smc_code)), "max_steps": 4,
@@ -635,6 +695,38 @@ def main():
                        for event in smc_trace["events"]]
         assert occurrences == [(0, 0), (2, 1), (4, 1)], smc_trace
 
+        # File mode streams portable version records over a private data pipe;
+        # the control response retains event/version IDs but no inline byte blob.
+        assert client.tool("veh_write_memory", {
+            "address": hex(smc_start), "data": smc_code.hex(" "),
+        }).get("success")
+        assert client.tool("veh_set_register", {
+            "threadId": checkpoint_thread, "name": ip_name, "value": hex(smc_start),
+        }).get("success")
+        direct_artifact_path = artifact_path("direct-smc")
+        file_trace = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(smc_start),
+            "end": hex(smc_start + len(smc_code)), "max_steps": 4,
+            "timeout_ms": 5000, "stack_bytes": 0,
+            "collect_code": True, "max_code_bytes": 400 * 1024 * 1024,
+            "max_code_versions": 8, "max_events": 16,
+            "code_output": "file", "code_output_path": direct_artifact_path,
+            "code_chunk_bytes": 8 * 1024 * 1024,
+        }, timeout=15)
+        assert file_trace.get("stop_reason") == "max_steps", file_trace
+        assert file_trace["code_versions"] == [] and file_trace["code_truncated"] is False, file_trace
+        direct_capture = file_trace["code_capture"]
+        assert direct_capture["storage"] == "file" and direct_capture["complete"] is True, file_trace
+        assert direct_capture["chunk_bytes"] == 8 * 1024 * 1024, file_trace
+        direct_artifact = read_code_artifact(direct_artifact_path)
+        assert direct_artifact["versions"] == 2 and direct_artifact["code_bytes"] == 18, direct_artifact
+        assert [record["bytes"] for record in direct_artifact["records"]] == [
+            bytes.fromhex(version["bytes"]) for version in versions
+        ], direct_artifact
+        assert direct_capture["sha256"] == direct_artifact["sha256"], file_trace
+        assert [(event["sequence"], event.get("code_version"))
+                for event in file_trace["events"]] == occurrences, file_trace
+
         assert client.tool("veh_write_memory", {
             "address": hex(smc_start), "data": smc_code.hex(" "),
         }).get("success")
@@ -650,10 +742,106 @@ def main():
         }, timeout=15)
         assert limited_code["code_truncated"] is True, limited_code
         assert limited_code["code_capture"]["complete"] is False, limited_code
+
+        assert client.tool("veh_write_memory", {
+            "address": hex(smc_start), "data": smc_code.hex(" "),
+        }).get("success")
+        assert client.tool("veh_set_register", {
+            "threadId": checkpoint_thread, "name": ip_name, "value": hex(smc_start),
+        }).get("success")
+        limited_artifact_path = artifact_path("limited")
+        limited_file = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(smc_start),
+            "end": hex(smc_start + len(smc_code)), "max_steps": 1,
+            "timeout_ms": 5000, "stack_bytes": 0,
+            "collect_code": True, "max_code_bytes": 1,
+            "max_code_versions": 1, "max_events": 4,
+            "code_output": "file", "code_output_path": limited_artifact_path,
+            "code_chunk_bytes": 256 * 1024,
+        }, timeout=15)
+        assert limited_file["code_truncated"] is True, limited_file
+        assert limited_file["code_capture"]["complete"] is False, limited_file
+        limited_artifact = read_code_artifact(limited_artifact_path)
+        assert limited_artifact["flags"] == 3 and limited_artifact["versions"] == 0, limited_artifact
+        assert limited_artifact["code_bytes"] == 0 and limited_artifact["chunks"] == 0, limited_artifact
+
+        bad_file_limit = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(smc_start),
+            "end": hex(smc_start + len(smc_code)), "collect_code": True,
+            "code_output": "file", "max_code_bytes": 400 * 1024 * 1024 + 1,
+        })
+        assert bad_file_limit == {
+            "error": "max_code_bytes must be 1-419430400 for code_output=file",
+        }, bad_file_limit
+        bad_chunk = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(smc_start),
+            "end": hex(smc_start + len(smc_code)), "collect_code": True,
+            "code_output": "file", "code_chunk_bytes": 256 * 1024 - 64 * 1024,
+        })
+        assert bad_chunk == {
+            "error": "code_chunk_bytes must be 262144-8388608 and a multiple of 65536",
+        }, bad_chunk
+        bad_large_chunk = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(smc_start),
+            "end": hex(smc_start + len(smc_code)), "collect_code": True,
+            "code_output": "file", "code_chunk_bytes": 8 * 1024 * 1024 + 64 * 1024,
+        })
+        assert bad_large_chunk == bad_chunk, bad_large_chunk
+        bad_unaligned_chunk = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(smc_start),
+            "end": hex(smc_start + len(smc_code)), "collect_code": True,
+            "code_output": "file", "code_chunk_bytes": 256 * 1024 + 1,
+        })
+        assert bad_unaligned_chunk == bad_chunk, bad_unaligned_chunk
+        existing_artifact_path = artifact_path("existing")
+        with open(existing_artifact_path, "wb") as existing_artifact:
+            existing_artifact.write(b"do-not-overwrite")
+        existing_output = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(smc_start),
+            "end": hex(smc_start + len(smc_code)), "collect_code": True,
+            "code_output": "file", "code_output_path": existing_artifact_path,
+        })
+        assert existing_output == {"error": "code output file already exists"}, existing_output
+        assert open(existing_artifact_path, "rb").read() == b"do-not-overwrite"
+
+        # One large static block crosses a 256 KiB transport boundary even
+        # though only its first instruction executes. This exercises framing,
+        # offsets, the final short chunk, and artifact reconstruction cheaply.
+        large_size = 1024 * 1024
+        large = client.tool("veh_allocate_memory", {"size": large_size, "protection": "rwx"})
+        assert large.get("success"), large
+        large_start = int(large["address"], 0)
+        long_nop = bytes.fromhex("66 66 66 66 66 66 2e 0f 1f 84 00 00 00 00 00")
+        large_body = (long_nop * ((large_size - 1) // len(long_nop)) +
+                      b"\x90" * ((large_size - 1) % len(long_nop)))
+        large_code = large_body + b"\xc3"
+        assert client.tool("veh_write_memory", {
+            "address": hex(large_start), "data": large_code.hex(" "),
+        }, timeout=20).get("success")
+        assert client.tool("veh_set_register", {
+            "threadId": checkpoint_thread, "name": ip_name, "value": hex(large_start),
+        }).get("success")
+        multi_artifact_path = artifact_path("multi-chunk")
+        multi_trace = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(large_start),
+            "end": hex(large_start + large_size), "max_steps": 1,
+            "timeout_ms": 5000, "stack_bytes": 0,
+            "collect_code": True, "max_code_bytes": 400 * 1024 * 1024,
+            "max_code_versions": 4, "max_events": 4,
+            "code_output": "file", "code_output_path": multi_artifact_path,
+            "code_chunk_bytes": 256 * 1024,
+        }, timeout=30)
+        assert multi_trace.get("stop_reason") == "max_steps", multi_trace
+        multi_artifact = read_code_artifact(multi_artifact_path)
+        assert multi_artifact["versions"] == 1 and multi_artifact["chunks"] == 5, multi_artifact
+        assert multi_artifact["code_bytes"] == large_size, multi_artifact
+        assert multi_artifact["records"][0]["bytes"] == large_code, multi_artifact
+        assert multi_trace["code_capture"]["chunk_count"] == 5, multi_trace
         assert client.tool("veh_set_register", {
             "threadId": checkpoint_thread, "name": ip_name, "value": saved[ip_name],
         }).get("success")
         assert client.tool("veh_free_memory", {"address": hex(smc_start)}).get("success")
+        assert client.tool("veh_free_memory", {"address": hex(large_start)}).get("success")
 
         terminated = client.tool("veh_terminate")
         assert terminated.get("success"), terminated
@@ -698,6 +886,11 @@ def main():
         }))
     finally:
         client.close()
+        for path in artifact_paths:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
 
 
 if __name__ == "__main__":

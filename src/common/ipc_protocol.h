@@ -18,6 +18,12 @@ inline std::wstring GetPipeName(uint32_t pid, const std::wstring& prefix) {
 	return L"\\\\.\\pipe\\" + prefix + L"-" + std::to_wstring(pid);
 }
 
+inline std::wstring GetTraceCodePipeName(uint32_t ownerPid, uint64_t token) {
+	wchar_t suffix[40]{};
+	swprintf_s(suffix, L"%u-%016llx", ownerPid, token);
+	return L"\\\\.\\pipe\\veh-trace-code-" + std::wstring(suffix);
+}
+
 // IPC message header
 #pragma pack(push, 1)
 struct IpcHeader {
@@ -552,6 +558,16 @@ struct TraceDependencySource {
 };
 static constexpr uint8_t kTraceDependencyMaxSources = 32;
 static constexpr uint32_t kTraceBasicBlockMaxCodeBytes = 16U * 1024 * 1024;
+static constexpr uint32_t kTraceBasicBlockMaxFileCodeBytes = 400U * 1024 * 1024;
+static constexpr uint32_t kTraceCodeDefaultChunkBytes = 4U * 1024 * 1024;
+static constexpr uint32_t kTraceCodeMinChunkBytes = 256U * 1024;
+static constexpr uint32_t kTraceCodeMaxChunkBytes = 8U * 1024 * 1024;
+static constexpr uint32_t kTraceCodeChunkAlignment = 64U * 1024;
+
+enum class TraceCodeOutputMode : uint8_t {
+	Inline = 0,
+	File = 1,
+};
 
 struct TraceBasicBlocksRequest {
 	uint32_t threadId;       // thread currently stopped in VEH
@@ -585,14 +601,97 @@ struct TraceBasicBlocksRequest {
 	uint8_t collectRegisterEvents; // ordered per-occurrence register delta stream
 	uint8_t reserved5[3];
 	uint32_t maxRegisterEvents;
+	uint8_t codeOutputMode;       // TraceCodeOutputMode; inline for legacy requests
+	uint8_t reserved6[3];
+	uint32_t codeChunkBytes;      // file mode transport chunk size
+	uint32_t codeStreamOwnerPid;  // process hosting the one-shot inbound data pipe
+	uint32_t reserved7;
+	uint64_t codeStreamToken;     // unguessable per-capture pipe suffix
 };
 
-static constexpr uint16_t kTraceBasicBlocksWireVersion = 5;
+static constexpr uint16_t kTraceBasicBlocksWireVersion = 6;
+static constexpr uint16_t kTraceBasicBlocksMinimumExplicitWireVersion = 5;
 static constexpr uint16_t kTraceBasicBlocksRequestV3Size =
 	static_cast<uint16_t>(offsetof(TraceBasicBlocksRequest, collectRegisterEvents));
 static constexpr uint16_t kTraceBasicBlocksRequestV4Size =
+	static_cast<uint16_t>(offsetof(TraceBasicBlocksRequest, codeOutputMode));
+static constexpr uint16_t kTraceBasicBlocksRequestV6Size =
 	static_cast<uint16_t>(sizeof(TraceBasicBlocksRequest));
 static_assert(kTraceBasicBlocksRequestV3Size < kTraceBasicBlocksRequestV4Size);
+static_assert(kTraceBasicBlocksRequestV4Size < kTraceBasicBlocksRequestV6Size);
+
+// Runtime-code file artifact and the private one-shot stream carrying its
+// record bytes.  These packed little-endian structures are intentionally
+// independent of pointer width so analyzers can read x86/x64 captures on any OS.
+static constexpr uint64_t kTraceCodeArtifactMagic = 0x0045444F43484556ULL; // "VEHCODE\0"
+static constexpr uint32_t kTraceCodeArtifactSchemaVersion = 1;
+static constexpr uint32_t kTraceCodeArtifactFlagComplete = 1u << 0;
+static constexpr uint32_t kTraceCodeArtifactFlagTruncated = 1u << 1;
+static constexpr uint32_t kTraceCodeStreamMagic = 0x43535456; // "VTSC"
+
+enum class TraceCodeStreamFrameType : uint16_t {
+	Data = 1,
+	Complete = 2,
+	Error = 3,
+};
+
+#pragma pack(push, 1)
+struct TraceCodeArtifactHeader {
+	uint64_t magic;
+	uint32_t schemaVersion;
+	uint32_t headerSize;
+	uint32_t flags;
+	uint32_t chunkBytes;
+	uint64_t rangeStart;
+	uint64_t rangeEnd;
+	uint64_t codeByteCount;
+	uint64_t recordByteCount;
+	uint32_t versionCount;
+	uint32_t chunkCount;
+};
+
+struct TraceCodeArtifactRecord {
+	uint64_t blockStart;
+	uint64_t blockEnd;
+	uint64_t hash;
+	uint64_t firstSequence;
+	uint64_t dataOffset;
+	uint32_t id;
+	uint32_t size;
+};
+
+struct TraceCodeStreamFrameHeader {
+	uint32_t magic;
+	uint16_t schemaVersion;
+	uint16_t type;
+	uint64_t token;
+	uint64_t chunkIndex;
+	uint64_t streamOffset;
+	uint32_t payloadSize;
+	uint32_t reserved;
+	uint64_t payloadHash;
+};
+
+struct TraceCodeStreamComplete {
+	uint64_t committedRecordBytes;
+	uint64_t codeByteCount;
+	uint32_t versionCount;
+	uint32_t chunkCount;
+	uint8_t truncated;
+	uint8_t reserved[7];
+};
+#pragma pack(pop)
+static_assert(sizeof(TraceCodeArtifactHeader) == 64);
+static_assert(sizeof(TraceCodeArtifactRecord) == 48);
+static_assert(sizeof(TraceCodeStreamFrameHeader) == 48);
+static_assert(sizeof(TraceCodeStreamComplete) == 32);
+
+inline uint64_t TraceCodePayloadHash(const void* data, size_t size) {
+	const auto* bytes = static_cast<const uint8_t*>(data);
+	uint64_t hash = 1469598103934665603ULL;
+	for (size_t i = 0; i < size; ++i) { hash ^= bytes[i]; hash *= 1099511628211ULL; }
+	return hash;
+}
 
 struct TraceBasicBlockEntry {
 	uint64_t start;
@@ -806,6 +905,7 @@ enum class TraceBasicBlocksStartFailure : uint8_t {
 	InstructionPointerOutsideRange = 4,
 	CollectorBusy = 5,
 	StartRejected = 6,
+	CodeStreamUnavailable = 7,
 };
 
 static constexpr uint16_t kTraceBasicBlocksResponseV3Size =

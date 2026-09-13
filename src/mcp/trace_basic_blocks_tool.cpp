@@ -278,8 +278,20 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	bool collectEvents = TraceJsonBool(args, "collect_events", false);
 	int maxEvents = TraceJsonInt(args, "max_events", 8192);
 	bool collectCode = TraceJsonBool(args, "collect_code", false);
+	std::string codeOutput = args.value("code_output", "inline");
+	std::transform(codeOutput.begin(), codeOutput.end(), codeOutput.begin(),
+		[](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+	if (codeOutput != "inline" && codeOutput != "file")
+		return {{"error", "code_output must be inline or file"}};
+	const bool fileCodeOutput = codeOutput == "file";
+	if (fileCodeOutput && !collectCode)
+		return {{"error", "code_output=file requires collect_code=true"}};
+	std::string codeOutputPath = args.value("code_output_path", "");
+	if (!fileCodeOutput && !codeOutputPath.empty())
+		return {{"error", "code_output_path requires code_output=file"}};
 	int maxCodeBytes = TraceJsonInt(args, "max_code_bytes", 262144);
 	int maxCodeVersions = TraceJsonInt(args, "max_code_versions", 4096);
+	int codeChunkBytes = TraceJsonInt(args, "code_chunk_bytes", kTraceCodeDefaultChunkBytes);
 	bool collectMemoryEvents = TraceJsonBool(args, "collect_memory_events", false);
 	int maxMemoryEvents = TraceJsonInt(args, "max_memory_events", 8192);
 	bool collectRegisterEvents = TraceJsonBool(args, "collect_register_events", false);
@@ -296,10 +308,20 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		return {{"error", "max_memory_reads must be 1-16384"}};
 	if (maxEvents < 1 || maxEvents > 32768)
 		return {{"error", "max_events must be 1-32768"}};
-	if (maxCodeBytes < 1 || static_cast<uint32_t>(maxCodeBytes) > kTraceBasicBlockMaxCodeBytes)
-		return {{"error", "max_code_bytes must be 1-16777216"}};
+	const uint32_t maxAllowedCodeBytes = fileCodeOutput ?
+		kTraceBasicBlockMaxFileCodeBytes : kTraceBasicBlockMaxCodeBytes;
+	if (maxCodeBytes < 1 || static_cast<uint32_t>(maxCodeBytes) > maxAllowedCodeBytes)
+		return {{"error", fileCodeOutput ?
+			"max_code_bytes must be 1-419430400 for code_output=file" :
+			"max_code_bytes must be 1-16777216 for code_output=inline"}};
 	if (maxCodeVersions < 1 || maxCodeVersions > 16384)
 		return {{"error", "max_code_versions must be 1-16384"}};
+	if (fileCodeOutput && (codeChunkBytes < static_cast<int>(kTraceCodeMinChunkBytes) ||
+		codeChunkBytes > static_cast<int>(kTraceCodeMaxChunkBytes) ||
+		codeChunkBytes % static_cast<int>(kTraceCodeChunkAlignment) != 0))
+		return {{"error", "code_chunk_bytes must be 262144-8388608 and a multiple of 65536"}};
+	if (!fileCodeOutput && args.contains("code_chunk_bytes"))
+		return {{"error", "code_chunk_bytes requires code_output=file"}};
 	if (maxMemoryEvents < 1 || maxMemoryEvents > 65536)
 		return {{"error", "max_memory_events must be 1-65536"}};
 	if (maxRegisterEvents < 1 || maxRegisterEvents > 65536)
@@ -346,6 +368,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		collectMemoryReads, static_cast<uint32_t>(maxMemoryReads),
 		collectEvents, static_cast<uint32_t>(maxEvents),
 		collectCode, static_cast<uint32_t>(maxCodeBytes), static_cast<uint32_t>(maxCodeVersions),
+		fileCodeOutput ? TraceCodeOutputMode::File : TraceCodeOutputMode::Inline,
+		static_cast<uint32_t>(codeChunkBytes), codeOutputPath,
 		collectMemoryEvents, static_cast<uint32_t>(maxMemoryEvents),
 		collectRegisterEvents, static_cast<uint32_t>(maxRegisterEvents),
 		dependencySources, startCondition, stopCondition, collectCondition);
@@ -354,6 +378,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		return std::string(buffer);
 	};
 	if (!result.ok) {
+		if (fileCodeOutput && !result.codeArtifact.error.empty())
+			return {{"error", result.codeArtifact.error}};
 		auto failureName = [](TraceBasicBlocksStartFailure reason) {
 			switch (reason) {
 			case TraceBasicBlocksStartFailure::InvalidArguments: return "invalid_arguments";
@@ -715,10 +741,26 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 			{"first_sequence", version.firstSequence},
 			{"bytes", bytes(result.codeBytes.data() + version.dataOffset, version.size)}});
 	}
-	json codeCapture = {{"available", result.codeCollectionEnabled},
-		{"schema_version", result.codeSchemaVersion},
-		{"complete", result.codeCollectionEnabled && !result.codeTruncated && !result.eventsTruncated},
-		{"bytes_captured", result.codeBytes.size()}, {"versions_captured", result.codeVersions.size()}};
+	json codeCapture;
+	bool codeTruncated = result.codeTruncated;
+	if (fileCodeOutput) {
+		const auto& artifact = result.codeArtifact;
+		codeTruncated = codeTruncated || artifact.captureTruncated || !artifact.success;
+		codeCapture = {{"available", result.codeCollectionEnabled && artifact.success},
+			{"schema_version", result.codeSchemaVersion}, {"storage", "file"},
+			{"artifact_schema_version", artifact.schemaVersion},
+			{"complete", artifact.success && artifact.captureComplete && !result.eventsTruncated},
+			{"path", artifact.path}, {"size", artifact.fileSize}, {"sha256", artifact.sha256},
+			{"bytes_captured", artifact.codeBytes}, {"versions_captured", artifact.versions},
+			{"record_bytes", artifact.recordBytes}, {"chunk_bytes", artifact.chunkBytes},
+			{"chunk_count", artifact.chunks}};
+		if (!artifact.error.empty()) codeCapture["error"] = artifact.error;
+	} else {
+		codeCapture = {{"available", result.codeCollectionEnabled},
+			{"schema_version", result.codeSchemaVersion},
+			{"complete", result.codeCollectionEnabled && !result.codeTruncated && !result.eventsTruncated},
+			{"bytes_captured", result.codeBytes.size()}, {"versions_captured", result.codeVersions.size()}};
+	}
 
 	return {{"schema_version", 4}, {"mode", "aggregated"},
 		{"thread_id", result.threadId}, {"ordering", std::move(ordering)},
@@ -732,7 +774,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		{"register_events_truncated", result.registerEventsTruncated},
 		{"register_events_dropped", result.registerEventsDropped},
 		{"code_capture", std::move(codeCapture)}, {"code_versions", std::move(codeVersions)},
-		{"code_truncated", result.codeTruncated},
+		{"code_truncated", codeTruncated},
 		{"stop_reason", stopReason(result.stopReason)}, {"truncated", result.truncated},
 		{"steps_executed", result.stepsExecuted}, {"elapsed_ms", result.elapsedMs},
 		{"filtered_steps", result.filteredSteps}, {"start_condition_met", result.startConditionMet},
