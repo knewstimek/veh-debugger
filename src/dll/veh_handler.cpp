@@ -561,8 +561,51 @@ bool VehHandler::AdvanceBasicTraceOccurrence(uint64_t address) {
 	return true;
 }
 
+void VehHandler::EvictBasicTraceTargetEvents(uint64_t sequence) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.targetWindow.enabled || tb.targetMatched) return;
+	const uint64_t cutoff = sequence > tb.targetWindow.beforeSteps ?
+		sequence - tb.targetWindow.beforeSteps : 0;
+	auto evict = [cutoff](auto& values, uint32_t& head, uint32_t& count) {
+		while (count && values[head].sequence < cutoff) {
+			head = (head + 1) % static_cast<uint32_t>(values.size());
+			--count;
+		}
+	};
+	if (!tb.events.empty()) evict(tb.events, tb.eventHead, tb.eventCount);
+	if (!tb.memoryEvents.empty()) evict(tb.memoryEvents, tb.memoryEventHead, tb.memoryEventCount);
+	if (!tb.registerEvents.empty()) evict(tb.registerEvents, tb.registerEventHead, tb.registerEventCount);
+}
+
+void VehHandler::AdvanceBasicTraceTarget(uint64_t address, uint64_t sequence) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.targetWindow.enabled || tb.targetMatched || address != tb.targetWindow.address) return;
+	++tb.targetOccurrenceHits;
+	if (tb.targetOccurrenceHits != tb.targetWindow.occurrence) return;
+	EvictBasicTraceTargetEvents(sequence);
+	tb.targetMatched = true;
+	tb.targetTriggerSequence = sequence;
+	tb.targetCaptureStartSequence = sequence > tb.targetWindow.beforeSteps ?
+		sequence - tb.targetWindow.beforeSteps : 0;
+	tb.targetCaptureEndSequence = sequence;
+	CompactBasicTraceTargetCode();
+	// Aggregate tables are not rings and would otherwise serialize the entire
+	// trigger-search prefix. Keep the ordered pre-window above, then scope all
+	// aggregate metadata to the trigger and post-trigger portion.
+	std::fill(tb.blockTable.begin(), tb.blockTable.end(), TraceBasicBlocksState::BlockSlot{});
+	std::fill(tb.edgeTable.begin(), tb.edgeTable.end(), TraceBasicBlocksState::EdgeSlot{});
+	std::fill(tb.memoryWriteTable.begin(), tb.memoryWriteTable.end(), TraceBasicBlocksState::MemoryWriteSlot{});
+	std::fill(tb.memoryReadTable.begin(), tb.memoryReadTable.end(), TraceBasicBlocksState::MemoryReadSlot{});
+	tb.blockCount = tb.edgeCount = tb.snapshotCount = tb.exceptionsFollowed = 0;
+	tb.memoryWriteCount = tb.memoryReadCount = 0;
+	tb.unsupportedMemoryWrites = tb.unsupportedMemoryReads = 0;
+	tb.memoryWritesTruncated = tb.memoryReadsTruncated = false;
+	tb.dependencyIncomplete = false;
+}
+
 bool VehHandler::BasicTraceCollectionGate(const CONTEXT* ctx) const {
 	const auto& tb = traceBasicBlocks_;
+	if (tb.targetWindow.enabled) return tb.startConditionMet;
 	return tb.startConditionMet && tb.occurrenceWindowActive &&
 		(tb.collectCondition.clauseCount == 0 ||
 		 EvaluateBasicTraceCondition(tb.collectCondition, ctx));
@@ -723,12 +766,16 @@ void VehHandler::RecordBasicTraceMemoryEvent(
 		const TraceBasicBlocksState::PendingRead& pending, uint64_t sequence) {
 	auto& tb = traceBasicBlocks_;
 	if (!tb.collectMemoryEvents) return;
+	EvictBasicTraceTargetEvents(sequence);
 	if (tb.memoryEventCount >= tb.memoryEvents.size()) {
 		tb.memoryEventsTruncated = true;
 		tb.memoryEventsDropped++;
 		return;
 	}
-	auto& event = tb.memoryEvents[tb.memoryEventCount++];
+	uint32_t index = (tb.memoryEventHead + tb.memoryEventCount) %
+		static_cast<uint32_t>(tb.memoryEvents.size());
+	++tb.memoryEventCount;
+	auto& event = tb.memoryEvents[index];
 	event = {};
 	event.sequence = sequence;
 	event.instruction = pending.instruction;
@@ -746,12 +793,16 @@ void VehHandler::RecordBasicTraceMemoryEvent(
 		const TraceBasicBlocksState::PendingWrite& pending, const uint8_t* after, uint64_t sequence) {
 	auto& tb = traceBasicBlocks_;
 	if (!tb.collectMemoryEvents) return;
+	EvictBasicTraceTargetEvents(sequence);
 	if (tb.memoryEventCount >= tb.memoryEvents.size()) {
 		tb.memoryEventsTruncated = true;
 		tb.memoryEventsDropped++;
 		return;
 	}
-	auto& event = tb.memoryEvents[tb.memoryEventCount++];
+	uint32_t index = (tb.memoryEventHead + tb.memoryEventCount) %
+		static_cast<uint32_t>(tb.memoryEvents.size());
+	++tb.memoryEventCount;
+	auto& event = tb.memoryEvents[index];
 	event = {};
 	event.sequence = sequence;
 	event.instruction = pending.instruction;
@@ -771,11 +822,15 @@ void VehHandler::RecordBasicTraceEvent(TraceBasicBlockEventType type, uint64_t s
 		TraceBasicBlockEdgeKind edgeKind, uint32_t exceptionCode, bool indirect, uint32_t codeVersion) {
 	auto& tb = traceBasicBlocks_;
 	if (!tb.collectEvents) return;
+	EvictBasicTraceTargetEvents(sequence);
 	if (tb.eventCount >= tb.events.size()) {
 		tb.eventsTruncated = true;
+		++tb.eventsDropped;
 		return;
 	}
-	auto& event = tb.events[tb.eventCount++];
+	uint32_t index = (tb.eventHead + tb.eventCount) % static_cast<uint32_t>(tb.events.size());
+	++tb.eventCount;
+	auto& event = tb.events[index];
 	event.sequence = sequence;
 	event.source = source;
 	event.sourceInstruction = sourceInstruction;
@@ -786,6 +841,64 @@ void VehHandler::RecordBasicTraceEvent(TraceBasicBlockEventType type, uint64_t s
 	event.type = type;
 	event.edgeKind = edgeKind;
 	event.indirect = indirect ? 1 : 0;
+}
+
+bool VehHandler::CompactBasicTraceTargetCode() {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.targetWindow.enabled || tb.codeFileOutput || !tb.collectCode) return false;
+	if (tb.targetCodeVersionRemap.size() < tb.codeVersionCount ||
+		tb.targetCodeVersionsScratch.size() < tb.maxCodeVersions ||
+		tb.targetCodeBytesScratch.size() < tb.maxCodeBytes) return false;
+	std::fill(tb.targetCodeVersionRemap.begin(), tb.targetCodeVersionRemap.end(), UINT32_MAX);
+	for (uint32_t i = 0; i < tb.eventCount; ++i) {
+		const auto& event = tb.events[(tb.eventHead + i) % tb.events.size()];
+		if (event.codeVersion < tb.codeVersionCount)
+			tb.targetCodeVersionRemap[event.codeVersion] = UINT32_MAX - 1;
+	}
+	uint32_t newCount = 0;
+	uint32_t newBytes = 0;
+	for (uint32_t oldId = 0; oldId < tb.codeVersionCount; ++oldId) {
+		if (tb.targetCodeVersionRemap[oldId] != UINT32_MAX - 1) continue;
+		const auto& oldEntry = tb.codeVersions[oldId];
+		if (newCount >= tb.maxCodeVersions || oldEntry.dataOffset + oldEntry.size > tb.codeByteCount ||
+			newBytes + oldEntry.size > tb.maxCodeBytes) return false;
+		auto entry = oldEntry;
+		entry.id = newCount;
+		entry.dataOffset = newBytes;
+		memcpy(tb.targetCodeBytesScratch.data() + newBytes,
+			tb.codeBytes.data() + oldEntry.dataOffset, oldEntry.size);
+		tb.targetCodeVersionsScratch[newCount] = entry;
+		tb.targetCodeVersionRemap[oldId] = newCount++;
+		newBytes += oldEntry.size;
+	}
+	for (uint32_t i = 0; i < tb.eventCount; ++i) {
+		auto& event = tb.events[(tb.eventHead + i) % tb.events.size()];
+		if (event.codeVersion < tb.targetCodeVersionRemap.size())
+			event.codeVersion = tb.targetCodeVersionRemap[event.codeVersion];
+	}
+	tb.codeBytes.swap(tb.targetCodeBytesScratch);
+	tb.codeVersions.swap(tb.targetCodeVersionsScratch);
+	tb.codeVersionCount = newCount;
+	tb.codeByteCount = newBytes;
+	std::fill(tb.codeVersionTable.begin(), tb.codeVersionTable.end(), TraceBasicBlocksState::CodeVersionSlot{});
+	for (uint32_t id = 0; id < newCount; ++id) {
+		const auto& entry = tb.codeVersions[id];
+		uint64_t secondaryHash = 1099511628211ULL;
+		const uint8_t* bytes = tb.codeBytes.data() + entry.dataOffset;
+		for (uint32_t i = 0; i < entry.size; ++i) {
+			secondaryHash ^= static_cast<uint64_t>(bytes[i]) + i;
+			secondaryHash *= 14029467366897019727ULL;
+		}
+		size_t mask = tb.codeVersionTable.size() - 1;
+		size_t index = static_cast<size_t>(BasicTraceHash(entry.blockStart) ^
+			BasicTraceHash(entry.hash) ^ entry.size) & mask;
+		while (tb.codeVersionTable[index].occupied) index = (index + 1) & mask;
+		auto& slot = tb.codeVersionTable[index];
+		slot.occupied = 1;
+		slot.entry = entry;
+		slot.secondaryHash = secondaryHash;
+	}
+	return true;
 }
 
 uint32_t VehHandler::CaptureBasicTraceCodeVersion(uint64_t blockStart, uint64_t sequence) {
@@ -822,6 +935,12 @@ uint32_t VehHandler::CaptureBasicTraceCodeVersion(uint64_t blockStart, uint64_t 
 		if (!slot.occupied) {
 			if (tb.codeVersionCount >= tb.maxCodeVersions ||
 				tb.codeByteCount + size > tb.maxCodeBytes) {
+				const uint32_t oldCount = tb.codeVersionCount;
+				const uint32_t oldBytes = tb.codeByteCount;
+				if (tb.targetWindow.enabled && !tb.targetMatched &&
+					CompactBasicTraceTargetCode() &&
+					(tb.codeVersionCount < oldCount || tb.codeByteCount < oldBytes))
+					return CaptureBasicTraceCodeVersion(blockStart, sequence);
 				tb.codeTruncated = true; return UINT32_MAX;
 			}
 			TraceBasicBlockCodeVersionEntry entry{};
@@ -1065,6 +1184,7 @@ void VehHandler::CompleteBasicTraceRegisterEvent(const CONTEXT* ctx) {
 	auto event = tb.pendingRegisterEvent;
 	tb.pendingRegisterEventValid = false;
 	event.sequence = tb.stepsExecuted + 1;
+	EvictBasicTraceTargetEvents(event.sequence);
 	uint8_t afterIs32bit = event.is32bit;
 	FillBasicTraceRegisterValues(ctx, event.after, afterIs32bit);
 	const uint32_t registerCount = event.is32bit ? 8 : 16;
@@ -1076,7 +1196,10 @@ void VehHandler::CompleteBasicTraceRegisterEvent(const CONTEXT* ctx) {
 		tb.registerEventsDropped++;
 		return;
 	}
-	tb.registerEvents[tb.registerEventCount++] = event;
+	uint32_t index = (tb.registerEventHead + tb.registerEventCount) %
+		static_cast<uint32_t>(tb.registerEvents.size());
+	++tb.registerEventCount;
+	tb.registerEvents[index] = event;
 }
 
 bool VehHandler::RecordBasicTraceBlock(uint64_t start, const CONTEXT* ctx, uint32_t snapshot) {
@@ -1177,7 +1300,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition, const TraceOccurrenceWindow& occurrenceWindow,
-		bool stopOnReturn,
+		bool stopOnReturn, const TraceTargetWindow& targetWindow,
 		std::vector<TraceBasicBlocksState::Instruction>&& instructions,
 		std::vector<uint64_t>&& staticBlockStarts) {
 	if (traceReg_.active.load(std::memory_order_acquire) ||
@@ -1265,6 +1388,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.stopCondition = stopCondition;
 	tb.collectCondition = collectCondition;
 	tb.occurrenceWindow = occurrenceWindow;
+	tb.targetWindow = targetWindow;
 	tb.instructions = std::move(instructions);
 	tb.staticBlockStarts = std::move(staticBlockStarts);
 	tb.blockTable.assign(nextPowerOfTwo(static_cast<size_t>(maxBlocks) * 2), {});
@@ -1329,9 +1453,20 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 			}
 		} else {
 			tb.codeBytes.assign(maxCodeBytes, 0);
+			if (targetWindow.enabled) {
+				tb.targetCodeBytesScratch.assign(maxCodeBytes, 0);
+				tb.targetCodeVersionsScratch.assign(maxCodeVersions, {});
+				tb.targetCodeVersionRemap.assign(maxCodeVersions, UINT32_MAX);
+			} else {
+				tb.targetCodeBytesScratch.clear();
+				tb.targetCodeVersionsScratch.clear();
+				tb.targetCodeVersionRemap.clear();
+			}
 		}
 	} else {
 		tb.codeVersionTable.clear(); tb.codeVersions.clear(); tb.codeBytes.clear(); tb.codeScratch.clear();
+		tb.targetCodeBytesScratch.clear(); tb.targetCodeVersionsScratch.clear();
+		tb.targetCodeVersionRemap.clear();
 		tb.codeFileOutput = false;
 	}
 	tb.blockCount = tb.edgeCount = tb.snapshotCount = tb.exceptionsFollowed = 0;
@@ -1341,11 +1476,15 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.memoryReadsTruncated = false;
 	tb.dependencyIncomplete = false;
 	tb.eventsTruncated = false;
+	tb.eventsDropped = 0;
 	tb.eventCount = 0;
+	tb.eventHead = 0;
 	tb.memoryEventCount = 0;
+	tb.memoryEventHead = 0;
 	tb.memoryEventsDropped = 0;
 	tb.memoryEventsTruncated = false;
 	tb.registerEventCount = 0;
+	tb.registerEventHead = 0;
 	tb.registerEventsDropped = 0;
 	tb.registerEventsTruncated = false;
 	tb.pendingRegisterEventValid = false;
@@ -1380,7 +1519,13 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.occurrenceWindowActive = !occurrenceWindow.enabled;
 	tb.occurrenceWindowStarted = !occurrenceWindow.enabled;
 	tb.occurrenceWindowCompleted = false;
+	tb.targetOccurrenceHits = 0;
+	tb.targetTriggerSequence = 0;
+	tb.targetCaptureStartSequence = 0;
+	tb.targetCaptureEndSequence = 0;
+	tb.targetMatched = false;
 	AdvanceBasicTraceOccurrence(ip);
+	AdvanceBasicTraceTarget(ip, 0);
 	tb.startConditionMet = startCondition.clauseCount == 0 || EvaluateBasicTraceCondition(startCondition, &ctx);
 	tb.collectWindowActive = BasicTraceCollectionGate(&ctx);
 	if (tb.collectWindowActive) {
@@ -1430,6 +1575,7 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 	}
 	bool inRange = addr >= tb.rangeStart && addr < tb.rangeEnd;
 	auto* current = inRange ? FindBasicTraceInstruction(addr) : nullptr;
+	if (inRange) AdvanceBasicTraceTarget(addr, tb.stepsExecuted + 1);
 	auto* previousInstruction = FindBasicTraceInstruction(tb.previousInstruction);
 	if (tb.stopOnReturn && previousInstruction &&
 		previousInstruction->kind == TraceBasicBlockEdgeKind::Return &&
@@ -1631,6 +1777,13 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 
 	tb.previousInstruction = addr;
 	tb.finalAddress = addr;
+	if (tb.targetMatched) {
+		tb.targetCaptureEndSequence = tb.stepsExecuted;
+		if (tb.stepsExecuted >= tb.targetTriggerSequence + tb.targetWindow.afterSteps) {
+			FinishBasicTrace(TraceBasicBlockStopReason::TargetWindow, addr);
+			return BasicTraceStepResult::Stop;
+		}
+	}
 	if (tb.stopCondition.clauseCount && EvaluateBasicTraceCondition(tb.stopCondition, info->ContextRecord)) {
 		FinishBasicTrace(TraceBasicBlockStopReason::Condition, addr);
 		return BasicTraceStepResult::Stop;

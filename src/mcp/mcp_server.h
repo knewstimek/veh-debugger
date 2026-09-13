@@ -40,7 +40,7 @@ private:
 		void OnResourcesList(const json& id, const json& params);
 		void OnResourceTemplatesList(const json& id, const json& params);
 
-	// Tool implementations (44 tools total)
+	// Tool implementations
 	json ToolAttach(const json& args);
 	json ToolLaunch(const json& args);
 	json ToolDetach(const json& args);
@@ -81,6 +81,7 @@ private:
 	json ToolResolveImports(const json& args);
 	json ToolTraceCalls(const json& args);
 	json ToolTraceBasicBlocks(const json& args);
+	json ToolTargetedCapture(const json& args);
 	json ToolCheckpointCreate(const json& args);
 	json ToolCheckpointRestore(const json& args);
 	json ToolCheckpointDiff(const json& args);

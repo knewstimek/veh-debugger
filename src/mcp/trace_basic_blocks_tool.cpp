@@ -247,7 +247,7 @@ static bool ParseTraceCondition(const json& args, const char* key, TraceConditio
 }
 
 json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
-		const TraceAddressResolver& resolveAddress) {
+	const TraceAddressResolver& resolveAddress, const json& artifactMetadata) {
 	uint32_t threadId = TraceJsonUint32(args, "threadId");
 	if (!threadId) return {{"error", "threadId is required"}};
 
@@ -376,6 +376,20 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		!ParseTraceCondition(args, "stop_condition", stopCondition, conditionError) ||
 		!ParseTraceCondition(args, "collect_condition", collectCondition, conditionError))
 		return {{"error", conditionError}};
+	auto parseBound = [](const json& value, uint32_t& output) {
+		try {
+			uint64_t parsed = 0;
+			if (value.is_number_unsigned()) parsed = value.get<uint64_t>();
+			else if (value.is_number_integer()) {
+				int64_t signedValue = value.get<int64_t>();
+				if (signedValue < 0) return false;
+				parsed = static_cast<uint64_t>(signedValue);
+			} else return false;
+			if (parsed > UINT32_MAX) return false;
+			output = static_cast<uint32_t>(parsed);
+			return true;
+		} catch (...) { return false; }
+	};
 	TraceOccurrenceWindow occurrenceWindow{};
 	if (args.contains("occurrence_window")) {
 		const auto& window = args["occurrence_window"];
@@ -383,20 +397,6 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 			return {{"error", "occurrence_window requires address and from"}};
 		if (!parseAddressValue(window["address"], occurrenceWindow.address))
 			return {{"error", "occurrence_window.address could not be resolved"}};
-		auto parseBound = [](const json& value, uint32_t& output) {
-			try {
-				uint64_t parsed = 0;
-				if (value.is_number_unsigned()) parsed = value.get<uint64_t>();
-				else if (value.is_number_integer()) {
-					int64_t signedValue = value.get<int64_t>();
-					if (signedValue < 0) return false;
-					parsed = static_cast<uint64_t>(signedValue);
-				} else return false;
-				if (parsed > UINT32_MAX) return false;
-				output = static_cast<uint32_t>(parsed);
-				return true;
-			} catch (...) { return false; }
-		};
 		if (!parseBound(window["from"], occurrenceWindow.from) ||
 			(window.contains("to") && !parseBound(window["to"], occurrenceWindow.to)))
 			return {{"error", "occurrence_window from/to must be unsigned 32-bit integers"}};
@@ -405,6 +405,29 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		if (!occurrenceWindow.from || (occurrenceWindow.to && occurrenceWindow.to < occurrenceWindow.from))
 			return {{"error", "occurrence_window requires from >= 1 and to == 0 or to >= from"}};
 		occurrenceWindow.enabled = 1;
+	}
+	TraceTargetWindow targetWindow{};
+	if (args.contains("target_window")) {
+		const auto& window = args["target_window"];
+		if (!window.is_object() || !window.contains("address") ||
+			!window.contains("occurrence") || !window.contains("before_steps") ||
+			!window.contains("after_steps"))
+			return {{"error", "target_window requires address, occurrence, before_steps, and after_steps"}};
+		if (!parseAddressValue(window["address"], targetWindow.address))
+			return {{"error", "target_window.address could not be resolved"}};
+		if (!parseBound(window["occurrence"], targetWindow.occurrence) ||
+			!parseBound(window["before_steps"], targetWindow.beforeSteps) ||
+			!parseBound(window["after_steps"], targetWindow.afterSteps))
+			return {{"error", "target_window bounds must be unsigned 32-bit integers"}};
+		if (!targetWindow.occurrence || !targetWindow.afterSteps ||
+			targetWindow.beforeSteps > 100000 || targetWindow.afterSteps > 100000)
+			return {{"error", "target_window requires occurrence >= 1, after_steps 1-100000, and before_steps 0-100000"}};
+		if (targetWindow.address < start || targetWindow.address >= end)
+			return {{"error", "target_window.address must be inside the trace range"}};
+		if (occurrenceWindow.enabled || stopOnReturn || fileCodeOutput ||
+			startCondition.clauseCount || stopCondition.clauseCount || collectCondition.clauseCount)
+			return {{"error", "target_window cannot be combined with occurrence_window, stop_on_return, conditions, or code_output=file"}};
+		targetWindow.enabled = 1;
 	}
 
 	auto result = session.TraceBasicBlocks(threadId, start, end,
@@ -420,7 +443,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		collectMemoryEvents, static_cast<uint32_t>(maxMemoryEvents),
 		collectRegisterEvents, static_cast<uint32_t>(maxRegisterEvents),
 		dependencySources, startCondition, stopCondition, collectCondition, occurrenceWindow,
-		stopOnReturn);
+		stopOnReturn, targetWindow);
 	auto hex = [](uint64_t value) {
 		char buffer[24]; snprintf(buffer, sizeof(buffer), "0x%llX", value);
 		return std::string(buffer);
@@ -437,6 +460,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		case TraceBasicBlockStopReason::Condition: return "condition";
 		case TraceBasicBlockStopReason::OccurrenceWindow: return "occurrence_window";
 		case TraceBasicBlockStopReason::FunctionReturn: return "function_return";
+		case TraceBasicBlockStopReason::TargetWindow: return "target_window";
 		default: return "completed";
 		}
 	};
@@ -497,6 +521,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		return {{"error", "injected DLL does not support occurrence_window"}};
 	if (stopOnReturn && !result.functionScopeSupported)
 		return {{"error", "injected DLL does not support stop_on_return"}};
+	if (targetWindow.enabled && !result.targetWindowSupported)
+		return {{"error", "injected DLL does not support target_window"}};
 	TraceRegionClassifier regions(session.GetTargetProcess());
 	auto edgeKind = [](TraceBasicBlockEdgeKind kind) {
 		switch (kind) {
@@ -771,7 +797,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	json ordering = {{"available", result.eventCollectionEnabled},
 		{"granularity", "basic_block_transitions"},
 		{"event_schema_version", result.eventSchemaVersion},
-		{"complete", result.eventCollectionEnabled && !result.eventsTruncated}};
+		{"complete", result.eventCollectionEnabled && !result.eventsTruncated},
+		{"events_captured", result.events.size()}, {"events_dropped", result.eventsDropped}};
 	json memoryEvents = json::array();
 	for (const auto& event : result.memoryEvents) {
 		json value = {{"sequence", event.sequence}, {"thread_id", event.threadId},
@@ -852,12 +879,24 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 			{"completed", result.occurrenceWindowCompleted},
 			{"semantics", "collect from entry N until immediately before entry M+1"}};
 	}
+	json targeted = {{"enabled", targetWindow.enabled != 0}};
+	if (targetWindow.enabled) {
+		targeted = {{"enabled", true}, {"address", hex(targetWindow.address)},
+			{"occurrence", targetWindow.occurrence}, {"before_steps", targetWindow.beforeSteps},
+			{"after_steps", targetWindow.afterSteps}, {"matched", result.targetMatched},
+			{"matched_occurrence_count", result.targetOccurrenceHits},
+			{"trigger_sequence", result.targetTriggerSequence},
+			{"capture_start_sequence", result.targetCaptureStartSequence},
+			{"capture_end_sequence", result.targetCaptureEndSequence}};
+	}
 
 	json fullResult = {{"schema_version", 4}, {"mode", "aggregated"},
 		{"thread_id", result.threadId}, {"ordering", std::move(ordering)},
 		{"function_scope", std::move(functionScope)},
+		{"target_window", std::move(targeted)},
 		{"occurrence_window", std::move(occurrence)},
 		{"events", std::move(events)}, {"events_truncated", result.eventsTruncated},
+		{"events_dropped", result.eventsDropped},
 		{"memory_ordering", std::move(memoryOrdering)},
 		{"memory_events", std::move(memoryEvents)},
 		{"memory_events_truncated", result.memoryEventsTruncated},
@@ -887,6 +926,12 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		{"final_dependencies", std::move(finalDependencies)},
 		{"exceptions", std::move(exceptions)},
 		{"register_order", std::move(registerOrder)}, {"snapshots", std::move(snapshots)}};
+	if (targetWindow.enabled) {
+		fullResult["mode"] = "targeted";
+		fullResult["aggregate_scope"] = "trigger_and_post_trigger";
+		fullResult["ordered_scope"] = "bounded_pre_and_post_trigger";
+	}
+	if (!artifactMetadata.empty()) fullResult["capture_environment"] = artifactMetadata;
 	if (outputFile.empty()) return fullResult;
 
 	auto exported = WriteTraceOutputFile(outputFile, outputFormat, fullResult);
@@ -911,6 +956,10 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		{"steps_executed", fullResult["steps_executed"]},
 		{"final_address", fullResult["final_address"]}, {"counts", std::move(counts)},
 		{"function_scope", fullResult["function_scope"]},
+		{"target_window", fullResult["target_window"]},
+		{"drop_counts", {{"events", fullResult["events_dropped"]},
+			{"memory_events", fullResult["memory_events_dropped"]},
+			{"register_events", fullResult["register_events_dropped"]}}},
 		{"truncation", std::move(truncation)}, {"occurrence_window", fullResult["occurrence_window"]},
 		{"output_file", {{"path", exported.path}, {"format", exported.format},
 			{"size", exported.size}, {"sha256", exported.sha256}, {"complete", complete}}}};

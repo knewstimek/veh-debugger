@@ -1415,7 +1415,7 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		const std::vector<TraceDependencySource>& dependencySources,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition, const TraceOccurrenceWindow& occurrenceWindow,
-		bool stopOnReturn) {
+		bool stopOnReturn, const TraceTargetWindow& targetWindow) {
 	TraceBasicBlocksResult result;
 	TraceCodeArtifactReceiver codeArtifactReceiver;
 	const bool fileCodeOutput = collectCode && codeOutputMode == TraceCodeOutputMode::File;
@@ -1461,6 +1461,7 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	req.collectCondition = collectCondition;
 	req.occurrenceWindow = occurrenceWindow;
 	req.stopOnReturn = stopOnReturn ? 1 : 0;
+	req.targetWindow = targetWindow;
 
 	std::vector<uint8_t> data;
 	PipeExchangeDiagnostics exchangeDiagnostics;
@@ -1574,6 +1575,16 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		result.entryStackPointer = header->entryStackPointer;
 		result.returnAddress = header->returnAddress;
 		result.externalSteps = header->externalSteps;
+	}
+	if (headerSize >= kTraceBasicBlocksResponseV8Size) {
+		result.targetWindowSupported = true;
+		result.targetWindow = header->targetWindow;
+		result.targetOccurrenceHits = header->targetOccurrenceHits;
+		result.targetTriggerSequence = header->targetTriggerSequence;
+		result.targetCaptureStartSequence = header->targetCaptureStartSequence;
+		result.targetCaptureEndSequence = header->targetCaptureEndSequence;
+		result.eventsDropped = header->eventsDropped;
+		result.targetMatched = header->targetMatched != 0;
 	}
 	if (header->status != IpcStatus::Ok) {
 		result.controlFailure = header->stopReason == TraceBasicBlockStopReason::Timeout ?
