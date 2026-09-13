@@ -1,4 +1,5 @@
 #include "trace_basic_blocks_tool.h"
+#include "trace_output_file.h"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -250,15 +251,16 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	uint32_t threadId = TraceJsonUint32(args, "threadId");
 	if (!threadId) return {{"error", "threadId is required"}};
 
-	auto parseAddress = [&](const char* name, uint64_t& value) -> bool {
-		if (!args.contains(name)) return false;
-		const auto& item = args[name];
+	auto parseAddressValue = [&](const json& item, uint64_t& value) -> bool {
 		if (item.is_string()) return resolveAddress(item.get<std::string>(), value);
 		if (item.is_number_unsigned() || item.is_number_integer()) {
 			value = item.get<uint64_t>();
 			return true;
 		}
 		return false;
+	};
+	auto parseAddress = [&](const char* name, uint64_t& value) -> bool {
+		return args.contains(name) && parseAddressValue(args[name], value);
 	};
 	uint64_t start = 0, end = 0;
 	if (!parseAddress("start", start) || !parseAddress("end", end) || start >= end)
@@ -289,6 +291,20 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	std::string codeOutputPath = args.value("code_output_path", "");
 	if (!fileCodeOutput && !codeOutputPath.empty())
 		return {{"error", "code_output_path requires code_output=file"}};
+	if (args.contains("output_file") && !args["output_file"].is_string())
+		return {{"error", "output_file must be a string"}};
+	if (args.contains("output_format") && !args["output_format"].is_string())
+		return {{"error", "output_format must be a string"}};
+	std::string outputFile = args.value("output_file", "");
+	std::string outputFormat = args.value("output_format", "json");
+	std::transform(outputFormat.begin(), outputFormat.end(), outputFormat.begin(),
+		[](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+	if (outputFile.empty() && args.contains("output_format"))
+		return {{"error", "output_format requires output_file"}};
+	if (!outputFile.empty()) {
+		std::string outputError = ValidateTraceOutputFile(outputFile, outputFormat);
+		if (!outputError.empty()) return {{"error", outputError}};
+	}
 	int maxCodeBytes = TraceJsonInt(args, "max_code_bytes", 262144);
 	int maxCodeVersions = TraceJsonInt(args, "max_code_versions", 4096);
 	int codeChunkBytes = TraceJsonInt(args, "code_chunk_bytes", kTraceCodeDefaultChunkBytes);
@@ -359,6 +375,36 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		!ParseTraceCondition(args, "stop_condition", stopCondition, conditionError) ||
 		!ParseTraceCondition(args, "collect_condition", collectCondition, conditionError))
 		return {{"error", conditionError}};
+	TraceOccurrenceWindow occurrenceWindow{};
+	if (args.contains("occurrence_window")) {
+		const auto& window = args["occurrence_window"];
+		if (!window.is_object() || !window.contains("address") || !window.contains("from"))
+			return {{"error", "occurrence_window requires address and from"}};
+		if (!parseAddressValue(window["address"], occurrenceWindow.address))
+			return {{"error", "occurrence_window.address could not be resolved"}};
+		auto parseBound = [](const json& value, uint32_t& output) {
+			try {
+				uint64_t parsed = 0;
+				if (value.is_number_unsigned()) parsed = value.get<uint64_t>();
+				else if (value.is_number_integer()) {
+					int64_t signedValue = value.get<int64_t>();
+					if (signedValue < 0) return false;
+					parsed = static_cast<uint64_t>(signedValue);
+				} else return false;
+				if (parsed > UINT32_MAX) return false;
+				output = static_cast<uint32_t>(parsed);
+				return true;
+			} catch (...) { return false; }
+		};
+		if (!parseBound(window["from"], occurrenceWindow.from) ||
+			(window.contains("to") && !parseBound(window["to"], occurrenceWindow.to)))
+			return {{"error", "occurrence_window from/to must be unsigned 32-bit integers"}};
+		if (!occurrenceWindow.address || occurrenceWindow.address < start || occurrenceWindow.address >= end)
+			return {{"error", "occurrence_window.address must be inside the trace range"}};
+		if (!occurrenceWindow.from || (occurrenceWindow.to && occurrenceWindow.to < occurrenceWindow.from))
+			return {{"error", "occurrence_window requires from >= 1 and to == 0 or to >= from"}};
+		occurrenceWindow.enabled = 1;
+	}
 
 	auto result = session.TraceBasicBlocks(threadId, start, end,
 		static_cast<uint32_t>(maxBlocks), static_cast<uint32_t>(maxEdges),
@@ -372,7 +418,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		static_cast<uint32_t>(codeChunkBytes), codeOutputPath,
 		collectMemoryEvents, static_cast<uint32_t>(maxMemoryEvents),
 		collectRegisterEvents, static_cast<uint32_t>(maxRegisterEvents),
-		dependencySources, startCondition, stopCondition, collectCondition);
+		dependencySources, startCondition, stopCondition, collectCondition, occurrenceWindow);
 	auto hex = [](uint64_t value) {
 		char buffer[24]; snprintf(buffer, sizeof(buffer), "0x%llX", value);
 		return std::string(buffer);
@@ -414,6 +460,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		return {{"error", std::string("TraceBasicBlocks failed: ") + reason},
 			{"failure", std::move(failure)}};
 	}
+	if (occurrenceWindow.enabled && !result.occurrenceSupported)
+		return {{"error", "injected DLL does not support occurrence_window"}};
 	TraceRegionClassifier regions(session.GetTargetProcess());
 	auto stopReason = [](TraceBasicBlockStopReason reason) {
 		switch (reason) {
@@ -425,6 +473,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		case TraceBasicBlockStopReason::Exception: return "exception";
 		case TraceBasicBlockStopReason::Cancelled: return "cancelled";
 		case TraceBasicBlockStopReason::Condition: return "condition";
+		case TraceBasicBlockStopReason::OccurrenceWindow: return "occurrence_window";
 		default: return "completed";
 		}
 	};
@@ -762,8 +811,18 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 			{"bytes_captured", result.codeBytes.size()}, {"versions_captured", result.codeVersions.size()}};
 	}
 
-	return {{"schema_version", 4}, {"mode", "aggregated"},
+	json occurrence = {{"enabled", occurrenceWindow.enabled != 0}};
+	if (occurrenceWindow.enabled) {
+		occurrence = {{"enabled", true}, {"address", hex(occurrenceWindow.address)},
+			{"from", occurrenceWindow.from}, {"to", occurrenceWindow.to},
+			{"hits", result.occurrenceHits}, {"started", result.occurrenceWindowStarted},
+			{"completed", result.occurrenceWindowCompleted},
+			{"semantics", "collect from entry N until immediately before entry M+1"}};
+	}
+
+	json fullResult = {{"schema_version", 4}, {"mode", "aggregated"},
 		{"thread_id", result.threadId}, {"ordering", std::move(ordering)},
+		{"occurrence_window", std::move(occurrence)},
 		{"events", std::move(events)}, {"events_truncated", result.eventsTruncated},
 		{"memory_ordering", std::move(memoryOrdering)},
 		{"memory_events", std::move(memoryEvents)},
@@ -794,6 +853,34 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		{"final_dependencies", std::move(finalDependencies)},
 		{"exceptions", std::move(exceptions)},
 		{"register_order", std::move(registerOrder)}, {"snapshots", std::move(snapshots)}};
+	if (outputFile.empty()) return fullResult;
+
+	auto exported = WriteTraceOutputFile(outputFile, outputFormat, fullResult);
+	if (!exported.success)
+		return {{"error", exported.error}, {"output_file", {{"path", outputFile},
+			{"format", outputFormat}, {"complete", false}}}};
+	json counts = json::object();
+	for (const char* name : {"blocks", "edges", "events", "memory_events", "register_events",
+			"code_versions", "memory_writes", "memory_reads", "exceptions", "snapshots"})
+		counts[name] = fullResult[name].size();
+	json truncation = {{"trace", fullResult["truncated"]},
+		{"events", fullResult["events_truncated"]},
+		{"memory_events", fullResult["memory_events_truncated"]},
+		{"register_events", fullResult["register_events_truncated"]},
+		{"code", fullResult["code_truncated"]},
+		{"memory_writes", fullResult["memory_writes_truncated"]},
+		{"memory_reads", fullResult["memory_reads_truncated"]}};
+	bool complete = true;
+	for (const auto& value : truncation.items()) if (value.value().get<bool>()) complete = false;
+	json compact = {{"schema_version", 4}, {"mode", "file"},
+		{"thread_id", fullResult["thread_id"]}, {"stop_reason", fullResult["stop_reason"]},
+		{"steps_executed", fullResult["steps_executed"]},
+		{"final_address", fullResult["final_address"]}, {"counts", std::move(counts)},
+		{"truncation", std::move(truncation)}, {"occurrence_window", fullResult["occurrence_window"]},
+		{"output_file", {{"path", exported.path}, {"format", exported.format},
+			{"size", exported.size}, {"sha256", exported.sha256}, {"complete", complete}}}};
+	if (fileCodeOutput) compact["code_artifact"] = fullResult["code_capture"];
+	return compact;
 }
 
 } // namespace veh

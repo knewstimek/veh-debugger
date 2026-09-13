@@ -2,13 +2,14 @@
 import json
 import hashlib
 import os
-import queue
 import struct
 import subprocess
+import sys
 import tempfile
-import threading
 import time
 from collections import Counter
+
+from mcp_test_client import McpClient as Client
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -51,66 +52,6 @@ def read_code_artifact(path):
     return artifact
 
 
-class Client:
-    def __init__(self):
-        self.proc = subprocess.Popen(
-            [MCP_EXE], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        self.seq = 0
-        self.responses = queue.Queue()
-        self.reader = threading.Thread(target=self._read_responses, daemon=True)
-        self.reader.start()
-
-    def _read_responses(self):
-        try:
-            for line in self.proc.stdout:
-                self.responses.put(json.loads(line))
-        finally:
-            self.responses.put(None)
-
-    def call(self, method, params=None, timeout=20):
-        self.seq += 1
-        request = {"jsonrpc": "2.0", "id": self.seq, "method": method}
-        if params is not None:
-            request["params"] = params
-        self.proc.stdin.write((json.dumps(request) + "\n").encode())
-        self.proc.stdin.flush()
-        deadline = time.time() + timeout
-        while True:
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                raise TimeoutError(method)
-            try:
-                message = self.responses.get(timeout=remaining)
-            except queue.Empty as error:
-                raise TimeoutError(method) from error
-            if message is None:
-                stderr = self.proc.stderr.read().decode(errors="replace") if self.proc.poll() is not None else ""
-                raise RuntimeError(f"MCP server exited while waiting for {method}: {stderr[-4000:]}")
-            if message.get("id") == self.seq:
-                return message
-
-    def tool(self, name, arguments=None, timeout=20):
-        response = self.call("tools/call", {"name": name, "arguments": arguments or {}}, timeout)
-        content = response["result"]["content"][0]["text"]
-        return json.loads(content)
-
-    def close(self):
-        try:
-            self.tool("veh_terminate", timeout=5)
-        except Exception:
-            pass
-        finally:
-            if self.proc.poll() is None:
-                self.proc.terminate()
-                try:
-                    self.proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.proc.kill()
-                    self.proc.wait(timeout=5)
-
-
 def main():
     client = Client()
     artifact_paths = []
@@ -119,6 +60,18 @@ def main():
                             f"veh-trace-{os.getpid()}-{time.time_ns()}-{label}.vtc")
         artifact_paths.append(path)
         return path
+    def output_path(label, extension="json"):
+        path = os.path.join(tempfile.gettempdir(),
+                            f"veh-trace-{os.getpid()}-{time.time_ns()}-{label}.{extension}")
+        artifact_paths.append(path)
+        return path
+    def validate_output(path, expected_sha256):
+        completed = subprocess.run([
+            sys.executable, os.path.join(ROOT, "tools", "validate_trace_output.py"),
+            path, "--sha256", expected_sha256,
+        ], cwd=ROOT, capture_output=True, text=True, timeout=15)
+        assert completed.returncode == 0, completed.stderr
+        return json.loads(completed.stdout)
     try:
         client.call("initialize", {
             "protocolVersion": "2024-11-05",
@@ -414,6 +367,7 @@ def main():
         # sentinel breakpoint at its returned final_address; hitting that new
         # breakpoint proves the trace completed and its result was referenceable.
         action_artifact_path = artifact_path("action")
+        action_output_path = output_path("action", "jsonl")
         action_bp = client.tool("veh_set_breakpoint", {
             "address": hex(start),
             "action": [
@@ -427,6 +381,7 @@ def main():
                     "max_code_versions": 256,
                     "code_output": "file", "code_output_path": action_artifact_path,
                     "code_chunk_bytes": 256 * 1024,
+                    "output_file": action_output_path, "output_format": "jsonl",
                 }},
                 {"tool": "veh_set_breakpoint", "args": {"address": "$0.final_address"}},
             ],
@@ -437,6 +392,11 @@ def main():
         assert action_stop.get("breakpointId") != action_bp["id"], action_stop
         action_artifact = read_code_artifact(action_artifact_path)
         assert action_artifact["versions"] > 0 and action_artifact["flags"] & 1, action_artifact
+        action_lines = [json.loads(line) for line in open(action_output_path, encoding="utf-8")]
+        assert action_lines[0]["record"] == "manifest", action_lines[0]
+        action_hash = hashlib.sha256(open(action_output_path, "rb").read()).hexdigest()
+        validated_action = validate_output(action_output_path, action_hash)
+        assert validated_action["counts"]["code_versions"] == 0, validated_action
         assert client.tool("veh_remove_breakpoint", {
             "id": action_stop["breakpointId"],
         }).get("success"), action_stop
@@ -489,6 +449,7 @@ def main():
             {"tool": "veh_checkpoint_create", "args": {
                 "threadId": checkpoint_thread,
                 "regions": [{"address": scratch_address, "size": 16}],
+                "capture_teb": True, "teb_size": 256,
             }},
             {"tool": "veh_set_register", "args": {
                 "threadId": checkpoint_thread, "name": reg_name, "value": "0x2222",
@@ -499,6 +460,12 @@ def main():
             {"tool": "veh_checkpoint_delete", "args": {"id": "$0.id"}},
         ]}, timeout=20)
         assert checkpoint_batch.get("totalSteps") == 6, checkpoint_batch
+        checkpoint_created = checkpoint_batch["results"][0]["result"]
+        assert checkpoint_created["teb_captured"] is True, checkpoint_created
+        assert int(checkpoint_created["thread_environment"]["teb"], 0) != 0, checkpoint_created
+        segment_name = "fs" if "esp" in regs else "gs"
+        assert int(checkpoint_created["thread_environment"][segment_name]["base"], 0) != 0, checkpoint_created
+        assert checkpoint_created["memory_bytes"] == 272, checkpoint_created
         checkpoint_diff = checkpoint_batch["results"][3]["result"]
         assert reg_name in checkpoint_diff["register_delta"], checkpoint_diff
         assert checkpoint_diff["memory_changes"], checkpoint_diff
@@ -508,6 +475,42 @@ def main():
         assert restored_memory["hex"].replace(" ", "").lower() == "aa" * 16, restored_memory
         restored_regs = client.tool("veh_registers", {"threadId": checkpoint_thread})["registers"]
         assert int(restored_regs[reg_name], 0) == 0x1111, restored_regs
+
+        input_batch = client.tool("veh_batch", {
+            "stop_on_error": True,
+            "inputs": [
+                {"name": "valid", "register": reg_name, "value": "0x3333"},
+                {"name": "invalid", "register": "not_a_register", "value": "0x4444"},
+                {"name": "not_run", "register": reg_name, "value": "0x5555"},
+            ],
+            "steps": [{"tool": "veh_set_register", "args": {
+                "threadId": checkpoint_thread, "name": "$input.register", "value": "$input.value",
+            }}],
+        })
+        assert input_batch["succeeded"] == 1 and input_batch["failed"] == 1, input_batch
+        assert input_batch["first_failed_input"] == 1 and len(input_batch["inputs"]) == 2, input_batch
+        assert input_batch["inputs"][1]["first_failed_step"] == 0, input_batch
+        bad_input_variable = client.tool("veh_batch", {
+            "steps": [{"tool": "veh_registers", "args": {"threadId": checkpoint_thread}}],
+            "inputs": [1], "input_variable": 7,
+        })
+        assert bad_input_variable == {"error": "input_variable must be a string"}, bad_input_variable
+        nested_stop = client.tool("veh_batch", {
+            "stop_on_error": True,
+            "steps": [{"for_each": [
+                {"register": reg_name, "value": "0x3333"},
+                {"register": "not_a_register", "value": "0x4444"},
+                {"register": reg_name, "value": "0x5555"},
+            ], "as": "$case", "do": [{"tool": "veh_set_register", "args": {
+                "threadId": checkpoint_thread, "name": "$case.register", "value": "$case.value",
+            }}]}],
+        })
+        nested_result = nested_stop["results"][0]["result"]
+        assert nested_stop["failed"] == 1 and nested_result["count"] == 2, nested_stop
+        assert len(nested_result["results"]) == 2, nested_stop
+        assert client.tool("veh_set_register", {
+            "threadId": checkpoint_thread, "name": reg_name, "value": "0x1111",
+        }).get("success")
 
         stale_mapping = client.tool("veh_checkpoint_create", {
             "threadId": checkpoint_thread,
@@ -695,6 +698,78 @@ def main():
                        for event in smc_trace["events"]]
         assert occurrences == [(0, 0), (2, 1), (4, 1)], smc_trace
 
+        # Dispatcher occurrence windows are entry-to-entry and AND-compose with
+        # the existing start/collect conditions. The fourth visit closes [2,3]
+        # before its instruction executes, so only two loop cycles are exported.
+        assert client.tool("veh_write_memory", {
+            "address": hex(smc_start), "data": smc_code.hex(" "),
+        }).get("success")
+        assert client.tool("veh_set_register", {
+            "threadId": checkpoint_thread, "name": ip_name, "value": hex(smc_start),
+        }).get("success")
+        occurrence_output_path = output_path("occurrence", "json")
+        occurrence_trace = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(smc_start),
+            "end": hex(smc_start + len(smc_code)), "max_steps": 20,
+            "timeout_ms": 5000, "stack_bytes": 0,
+            "collect_events": True, "max_events": 32,
+            "collect_memory_events": True, "max_memory_events": 32,
+            "collect_register_events": True, "max_register_events": 32,
+            "collect_code": True, "max_code_bytes": 1024, "max_code_versions": 8,
+            "occurrence_window": {"address": hex(smc_start), "from": 2, "to": 3},
+            "output_file": occurrence_output_path, "output_format": "json",
+        }, timeout=15)
+        assert occurrence_trace["mode"] == "file", occurrence_trace
+        assert occurrence_trace["stop_reason"] == "occurrence_window", occurrence_trace
+        assert occurrence_trace["occurrence_window"]["hits"] == 4, occurrence_trace
+        assert occurrence_trace["occurrence_window"]["started"] is True, occurrence_trace
+        assert occurrence_trace["occurrence_window"]["completed"] is True, occurrence_trace
+        occurrence_document = json.load(open(occurrence_output_path, encoding="utf-8"))
+        assert occurrence_document["stop_reason"] == "occurrence_window", occurrence_document
+        assert occurrence_trace["counts"]["register_events"] == len(occurrence_document["register_events"]), occurrence_trace
+        assert occurrence_trace["output_file"]["sha256"] == hashlib.sha256(
+            open(occurrence_output_path, "rb").read()).hexdigest(), occurrence_trace
+        validated_occurrence = validate_output(
+            occurrence_output_path, occurrence_trace["output_file"]["sha256"])
+        assert validated_occurrence["counts"]["register_events"] == \
+            occurrence_trace["counts"]["register_events"], validated_occurrence
+
+        bad_occurrence = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(smc_start),
+            "end": hex(smc_start + len(smc_code)),
+            "occurrence_window": {"address": hex(smc_start), "from": 3, "to": 2},
+        })
+        assert "from >= 1" in bad_occurrence.get("error", ""), bad_occurrence
+        negative_occurrence = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(smc_start),
+            "end": hex(smc_start + len(smc_code)),
+            "occurrence_window": {"address": hex(smc_start), "from": -1},
+        })
+        assert "unsigned 32-bit" in negative_occurrence.get("error", ""), negative_occurrence
+        bad_output_type = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(smc_start),
+            "end": hex(smc_start + len(smc_code)), "output_file": 7,
+        })
+        assert bad_output_type == {"error": "output_file must be a string"}, bad_output_type
+
+        assert client.tool("veh_write_memory", {
+            "address": hex(smc_start), "data": smc_code.hex(" "),
+        }).get("success")
+        assert client.tool("veh_set_register", {
+            "threadId": checkpoint_thread, "name": ip_name, "value": hex(smc_start),
+        }).get("success")
+        batch_output_path = output_path("batch", "json")
+        exported_batch = client.tool("veh_batch", {"stop_on_error": True, "steps": [
+            {"tool": "veh_trace_basic_blocks", "args": {
+                "threadId": checkpoint_thread, "start": hex(smc_start),
+                "end": hex(smc_start + len(smc_code)), "max_steps": 2,
+                "timeout_ms": 5000, "output_file": batch_output_path,
+            }},
+        ]}, timeout=15)
+        assert exported_batch["succeeded"] == 1 and exported_batch["failed"] == 0, exported_batch
+        assert exported_batch["results"][0]["status"] == "ok", exported_batch
+        assert exported_batch["artifacts"][0]["path"] == os.path.abspath(batch_output_path), exported_batch
+
         # File mode streams portable version records over a private data pipe;
         # the control response retains event/version IDs but no inline byte blob.
         assert client.tool("veh_write_memory", {
@@ -803,6 +878,15 @@ def main():
         })
         assert existing_output == {"error": "code output file already exists"}, existing_output
         assert open(existing_artifact_path, "rb").read() == b"do-not-overwrite"
+        existing_trace_path = output_path("existing-trace", "json")
+        with open(existing_trace_path, "wb") as existing_trace:
+            existing_trace.write(b"do-not-overwrite")
+        existing_trace_output = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(smc_start),
+            "end": hex(smc_start + len(smc_code)), "output_file": existing_trace_path,
+        })
+        assert existing_trace_output == {"error": "output_file already exists"}, existing_trace_output
+        assert open(existing_trace_path, "rb").read() == b"do-not-overwrite"
 
         # One large static block crosses a 256 KiB transport boundary even
         # though only its first instruction executes. This exercises framing,

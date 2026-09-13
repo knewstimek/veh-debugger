@@ -291,6 +291,11 @@ public:
 		uint64_t normalizedIp = 0;
 		uint64_t normalizedRangeStart = 0;
 		uint64_t normalizedRangeEnd = 0;
+		bool occurrenceSupported = false;
+		TraceOccurrenceWindow occurrenceWindow{};
+		uint64_t occurrenceHits = 0;
+		bool occurrenceWindowStarted = false;
+		bool occurrenceWindowCompleted = false;
 		TraceBasicBlockStopReason stopReason = TraceBasicBlockStopReason::Completed;
 		bool truncated = false;
 		uint32_t exceptionsFollowed = 0;
@@ -349,7 +354,8 @@ public:
 		bool collectRegisterEvents = false, uint32_t maxRegisterEvents = 8192,
 		const std::vector<TraceDependencySource>& dependencySources = {},
 		const TraceCondition& startCondition = {}, const TraceCondition& stopCondition = {},
-		const TraceCondition& collectCondition = {});
+		const TraceCondition& collectCondition = {},
+		const TraceOccurrenceWindow& occurrenceWindow = {});
 
 	// --- Resolve (PDB) ---
 	uint64_t ResolveSourceLine(const std::string& file, uint32_t line);

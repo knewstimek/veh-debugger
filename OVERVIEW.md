@@ -44,6 +44,7 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 | `src/mcp/debug_session.cpp/h` | DebugSession class - pure C++ IPC wrapper, no JSON dependency. Used by MCP (and future veh_batch) |
 | `src/mcp/mcp_server.cpp/h` | MCP JSON-RPC server, 44 debugger tools (delegates to DebugSession) |
 | `src/mcp/installer.cpp/h` | Auto-install to Claude/Cursor/Windsurf/Codex configs |
+| `docs/DEVELOPMENT_TOOLS.md` | Reusable MCP scenario, trace validator, parity, and IPC-compatibility tool catalog |
 
 ## IPC Protocol
 

@@ -84,6 +84,42 @@ uint64_t BatchExecutor::ResolveAddress(const std::string& s) {
 	return ParseHexOrDec(s);
 }
 
+static bool BatchResultFailed(const json& value) {
+	if (value.is_object()) {
+		if (value.contains("error")) return true;
+		if (value.contains("success") && value["success"].is_boolean() && !value["success"].get<bool>())
+			return true;
+		for (const char* child : {"result", "results"})
+			if (value.contains(child) && BatchResultFailed(value[child])) return true;
+	} else if (value.is_array()) {
+		for (const auto& item : value) if (BatchResultFailed(item)) return true;
+	}
+	return false;
+}
+
+static void CollectBatchTraceMetadata(const json& value, json& summaries, json& artifacts) {
+	if (value.is_object()) {
+		if (value.contains("stop_reason") && value.contains("steps_executed")) {
+			json summary = {{"stop_reason", value["stop_reason"]}, {"steps_executed", value["steps_executed"]}};
+			for (const char* key : {"thread_id", "counts", "occurrence_window", "truncation"})
+				if (value.contains(key)) summary[key] = value[key];
+			summaries.push_back(std::move(summary));
+		}
+		if (value.contains("output_file") && value["output_file"].is_object() &&
+			value["output_file"].contains("path")) artifacts.push_back(value["output_file"]);
+		if (value.contains("code_artifact") && value["code_artifact"].is_object() &&
+			value["code_artifact"].contains("path")) artifacts.push_back(value["code_artifact"]);
+		for (const auto& [key, child] : value.items())
+			if (key != "output_file" && key != "code_artifact") CollectBatchTraceMetadata(child, summaries, artifacts);
+	} else if (value.is_array()) {
+		for (const auto& child : value) CollectBatchTraceMetadata(child, summaries, artifacts);
+	}
+}
+
+void BatchExecutor::SetVariable(const std::string& name, const json& value) {
+	namedVars_[name.empty() || name[0] == '$' ? name : "$" + name] = value;
+}
+
 json BatchExecutor::Execute(const json& steps) {
 	if (!steps.is_array()) {
 		return {{"error", "steps must be an array"}};
@@ -94,26 +130,41 @@ json BatchExecutor::Execute(const json& steps) {
 
 	// Don't clear results_/namedVars_ -- sub-executors inherit parent context
 	json allResults = json::array();
+	uint32_t succeeded = 0, failed = 0;
+	int64_t firstFailedStep = -1;
 
 	for (size_t i = 0; i < steps.size(); i++) {
 		try {
 			json result = ExecuteStep(steps[i]);
 			results_.push_back(result);
-			allResults.push_back({{"step", i}, {"result", result}});
+			bool stepFailed = BatchResultFailed(result);
+			allResults.push_back({{"step", i}, {"status", stepFailed ? "failed" : "ok"}, {"result", result}});
+			if (stepFailed) { ++failed; if (firstFailedStep < 0) firstFailedStep = static_cast<int64_t>(i); }
+			else ++succeeded;
 
 			// Check for fatal error
 			if (result.contains("error") && result.contains("fatal") && result["fatal"].get<bool>()) {
 				allResults.push_back({{"step", i}, {"aborted", true}, {"reason", result["error"]}});
 				break;
 			}
+			if (stepFailed && stopOnError_) break;
 		} catch (const std::exception& e) {
 			json err = {{"error", std::string("Step ") + std::to_string(i) + ": " + e.what()}};
 			results_.push_back(err);
-			allResults.push_back({{"step", i}, {"result", err}});
+			allResults.push_back({{"step", i}, {"status", "failed"}, {"result", err}});
+			++failed; if (firstFailedStep < 0) firstFailedStep = static_cast<int64_t>(i);
+			if (stopOnError_) break;
 		}
 	}
 
-	return {{"results", allResults}, {"totalSteps", results_.size()}};
+	json traceSummaries = json::array(), artifacts = json::array();
+	CollectBatchTraceMetadata(allResults, traceSummaries, artifacts);
+	json report = {{"results", allResults}, {"totalSteps", results_.size()},
+		{"succeeded", succeeded}, {"failed", failed},
+		{"first_failed_step", firstFailedStep < 0 ? json(nullptr) : json(firstFailedStep)},
+		{"stopped_on_error", stopOnError_ && failed != 0},
+		{"trace_summary", std::move(traceSummaries)}, {"artifacts", std::move(artifacts)}};
+	return report;
 }
 
 json BatchExecutor::ExecuteStep(const json& step) {
@@ -146,6 +197,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 		if (result && step.contains("then") && step["then"].is_array()) {
 			BatchExecutor sub(session_, actionSink_, genericToolSink_);
 			sub.depth_ = depth_ + 1;
+			sub.stopOnError_ = stopOnError_;
 			sub.results_ = results_;
 			sub.namedVars_ = namedVars_;
 			size_t parentSize = results_.size();
@@ -157,6 +209,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 		} else if (!result && step.contains("else") && step["else"].is_array()) {
 			BatchExecutor sub(session_, actionSink_, genericToolSink_);
 			sub.depth_ = depth_ + 1;
+			sub.stopOnError_ = stopOnError_;
 			sub.results_ = results_;
 			sub.namedVars_ = namedVars_;
 			size_t parentSize = results_.size();
@@ -179,6 +232,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 		for (int i = 0; i < maxIter; i++) {
 			BatchExecutor sub(session_, actionSink_, genericToolSink_);
 			sub.depth_ = depth_ + 1;
+			sub.stopOnError_ = stopOnError_;
 			sub.results_ = results_;
 			sub.namedVars_ = namedVars_;
 			json r = sub.Execute(step["loop"]);
@@ -187,6 +241,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 			namedVars_ = sub.namedVars_;
 			loopResults.push_back(r);
 			iterations++;
+			if (stopOnError_ && BatchResultFailed(r)) break;
 
 			if (!untilCond.empty()) {
 				std::string resolved = ResolveString(untilCond);
@@ -227,14 +282,16 @@ json BatchExecutor::ExecuteStep(const json& step) {
 			namedVars_[varName] = items[i];
 			BatchExecutor sub(session_, actionSink_, genericToolSink_);
 			sub.depth_ = depth_ + 1;
+			sub.stopOnError_ = stopOnError_;
 			sub.results_ = results_;
 			sub.namedVars_ = namedVars_;
 			json r = sub.Execute(step["do"]);
 			results_ = sub.results_;
 			namedVars_ = sub.namedVars_;
 			foreachResults.push_back(r);
+			if (stopOnError_ && BatchResultFailed(r)) break;
 		}
-		return {{"type", "for_each"}, {"count", items.size()}, {"results", foreachResults}};
+		return {{"type", "for_each"}, {"count", foreachResults.size()}, {"results", foreachResults}};
 	}
 
 	// Tool call

@@ -31,6 +31,11 @@ py -3 test/test_trace_basic_blocks.py
 py -3 test/test_trace_code_stream_failure.py
 ```
 
+Reusable scenario, exported-trace validation, direct/batch/action parity, and
+mixed-version IPC commands are documented in
+[`docs/DEVELOPMENT_TOOLS.md`](../docs/DEVELOPMENT_TOOLS.md). Prefer those
+bounded runners to one-off process harnesses.
+
 For architecture-sensitive MCP behavior, rerun the applicable test against the
 x86 build:
 

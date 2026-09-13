@@ -1,4 +1,6 @@
 - Publish a release only when the user explicitly authorizes it and chooses the version. Follow `RELEASING.md` exactly.
+- Before committing or packaging release-facing artifacts, remove or generalize personal machine paths, credentials, private target names, and any details that reveal which real program or protected sample was being debugged; use synthetic fixtures and neutral examples instead.
+- Use `docs/DEVELOPMENT_TOOLS.md` as the catalog for reusable MCP scenario, trace-validation, parity, and IPC-compatibility tooling; extend those tools instead of adding one-off harnesses when practical.
 
 - After a successful VEH Debugger build, use the `agent-tool` `copy` tool to deploy `veh-mcp-server.exe`, `veh-debug-adapter.exe`, and the required `vcruntime_net*.dll` beside `agent-tool.exe`, verifying exact paths and copied hashes first.
 - When this repository has a changelog or release-notes file, record completed user-facing changes under an `Unreleased` section as part of the same task so the next release notes are ready.

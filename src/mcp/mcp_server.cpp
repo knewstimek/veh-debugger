@@ -1718,17 +1718,56 @@ json McpServer::ToolBatch(const json& args) {
 	if (!steps.is_array() || steps.empty()) {
 		return {{"error", "steps (array) is required, or provide file path"}};
 	}
+	if (args.contains("stop_on_error") && !args["stop_on_error"].is_boolean())
+		return {{"error", "stop_on_error must be a boolean"}};
+	const bool stopOnError = args.value("stop_on_error", false);
 
-	BatchExecutor executor(session_, [this](uint32_t id, const json& action) {
-		StoreBreakpointAction(id, action);
-	}, [this](const std::string& name, const json& toolArgs) {
-		if (name == "veh_checkpoint_create") return ToolCheckpointCreate(toolArgs);
-		if (name == "veh_checkpoint_restore") return ToolCheckpointRestore(toolArgs);
-		if (name == "veh_checkpoint_diff") return ToolCheckpointDiff(toolArgs);
-		if (name == "veh_checkpoint_delete") return ToolCheckpointDelete(toolArgs);
-		return json{{"error", "Unsupported batch tool: " + name}};
-	});
-	return executor.Execute(steps);
+	auto run = [&](const json* input, const std::string& inputVariable) {
+		BatchExecutor executor(session_, [this](uint32_t id, const json& action) {
+			StoreBreakpointAction(id, action);
+		}, [this](const std::string& name, const json& toolArgs) {
+			if (name == "veh_checkpoint_create") return ToolCheckpointCreate(toolArgs);
+			if (name == "veh_checkpoint_restore") return ToolCheckpointRestore(toolArgs);
+			if (name == "veh_checkpoint_diff") return ToolCheckpointDiff(toolArgs);
+			if (name == "veh_checkpoint_delete") return ToolCheckpointDelete(toolArgs);
+			return json{{"error", "Unsupported batch tool: " + name}};
+		});
+		executor.SetStopOnError(stopOnError);
+		if (input) executor.SetVariable(inputVariable, *input);
+		return executor.Execute(steps);
+	};
+	if (!args.contains("inputs")) return run(nullptr, "");
+	if (!args["inputs"].is_array() || args["inputs"].empty() || args["inputs"].size() > 256)
+		return {{"error", "inputs must be an array with 1-256 items"}};
+	if (args.contains("input_variable") && !args["input_variable"].is_string())
+		return {{"error", "input_variable must be a string"}};
+	std::string inputVariable = args.value("input_variable", "$input");
+	if (inputVariable.empty()) inputVariable = "$input";
+	if (inputVariable[0] != '$') inputVariable.insert(inputVariable.begin(), '$');
+	json inputReports = json::array();
+	uint32_t succeeded = 0, failed = 0;
+	int64_t firstFailedInput = -1;
+	for (size_t index = 0; index < args["inputs"].size(); ++index) {
+		const auto& input = args["inputs"][index];
+		json execution = run(&input, inputVariable);
+		bool inputFailed = execution.value("failed", 0) != 0;
+		json report = {{"index", index}, {"status", inputFailed ? "failed" : "ok"},
+			{"steps", execution.value("results", json::array())},
+			{"succeeded", execution.value("succeeded", 0)}, {"failed", execution.value("failed", 0)},
+			{"first_failed_step", execution.value("first_failed_step", json(nullptr))},
+			{"trace_summary", execution.value("trace_summary", json::array())},
+			{"artifacts", execution.value("artifacts", json::array())}};
+		if (input.is_object() && input.contains("name")) report["name"] = input["name"];
+		inputReports.push_back(std::move(report));
+		if (inputFailed) {
+			++failed; if (firstFailedInput < 0) firstFailedInput = static_cast<int64_t>(index);
+			if (stopOnError) break;
+		} else ++succeeded;
+	}
+	return {{"mode", "inputs"}, {"input_variable", inputVariable},
+		{"inputs", std::move(inputReports)}, {"succeeded", succeeded}, {"failed", failed},
+		{"first_failed_input", firstFailedInput < 0 ? json(nullptr) : json(firstFailedInput)},
+		{"stopped_on_error", stopOnError && failed != 0}};
 }
 
 json McpServer::ToolTraceRegister(const json& args) {
@@ -2008,17 +2047,66 @@ json McpServer::ToolCheckpointCreate(const json& args) {
 		return {{"error", "checkpoint requires a VEH-stopped thread"}};
 	auto registers = session_.GetRegisters(threadId);
 	if (!registers) return {{"error", "failed to capture thread context"}};
+	auto queryEnvironment = [&](CheckpointThreadEnvironment& environment) -> bool {
+		HANDLE thread = OpenThread(THREAD_QUERY_INFORMATION, FALSE, threadId);
+		if (!thread) return false;
+		using NtQueryInformationThreadFn = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+		auto query = reinterpret_cast<NtQueryInformationThreadFn>(
+			GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
+		struct ThreadBasicInformationLocal {
+			LONG exitStatus; PVOID tebBase; HANDLE processId; HANDLE threadId;
+			ULONG_PTR affinityMask; LONG priority; LONG basePriority;
+		};
+		ThreadBasicInformationLocal basic{};
+		bool ok = query && query(thread, 0, &basic, sizeof(basic), nullptr) >= 0;
+		if (ok) environment.nativeTeb = reinterpret_cast<uint64_t>(basic.tebBase);
+		BOOL wow64 = FALSE;
+		IsWow64Process(session_.GetTargetProcess(), &wow64);
+		environment.wow64 = wow64 != FALSE;
+		ULONG_PTR wow64Teb = 0;
+		if (query && environment.wow64 && query(thread, 17, &wow64Teb, sizeof(wow64Teb), nullptr) >= 0)
+			environment.teb = wow64Teb;
+		if (!environment.teb) environment.teb = environment.nativeTeb;
+		auto selectorBase = [&](uint64_t selector) -> uint64_t {
+			LDT_ENTRY entry{};
+			if (!selector || !GetThreadSelectorEntry(thread, static_cast<DWORD>(selector), &entry)) return 0;
+			return static_cast<uint64_t>(entry.BaseLow) |
+				(static_cast<uint64_t>(entry.HighWord.Bytes.BaseMid) << 16) |
+				(static_cast<uint64_t>(entry.HighWord.Bytes.BaseHi) << 24);
+		};
+		environment.fsBase = selectorBase(registers->fs);
+		environment.gsBase = selectorBase(registers->gs);
+		if (registers->is32bit && !environment.fsBase) environment.fsBase = environment.teb;
+		if (!registers->is32bit && !environment.gsBase) environment.gsBase = environment.nativeTeb;
+		CloseHandle(thread);
+		return ok && environment.teb != 0;
+	};
 	if (args.contains("regions") && !args["regions"].is_array())
 		return {{"error", "regions must be an array"}};
-	const json regionsArg = args.value("regions", json::array());
+	json regionsArg = args.value("regions", json::array());
+	CheckpointThreadEnvironment environment{};
+	if (!queryEnvironment(environment))
+		return {{"error", "failed to query thread TEB/segment environment"}};
+	if (args.contains("capture_teb") && !args["capture_teb"].is_boolean())
+		return {{"error", "capture_teb must be a boolean"}};
+	bool captureTeb = args.value("capture_teb", false);
+	const size_t explicitRegionCount = regionsArg.size();
+	if (captureTeb) {
+		uint32_t tebSize = JsonUint32(args, "teb_size", 4096);
+		if (tebSize < 256 || tebSize > 1024 * 1024)
+			return {{"error", "teb_size must be 256-1048576"}};
+		regionsArg.push_back({{"address", environment.teb}, {"size", tebSize}, {"kind", "teb"}});
+	}
 	if (regionsArg.size() > 16) return {{"error", "at most 16 memory regions are allowed"}};
 
 	Checkpoint checkpoint;
 	checkpoint.sessionGeneration = session_.GetSessionGeneration();
 	checkpoint.threadId = threadId;
 	checkpoint.registers = *registers;
+	checkpoint.environment = environment;
 	size_t totalBytes = 0;
-	for (const auto& requested : regionsArg) {
+	for (size_t requestedIndex = 0; requestedIndex < regionsArg.size(); ++requestedIndex) {
+		const auto& requested = regionsArg[requestedIndex];
 		if (!requested.is_object() || !requested.contains("address") || !requested.contains("size"))
 			return {{"error", "each region requires address and size"}};
 		uint64_t address = 0;
@@ -2060,6 +2148,8 @@ json McpServer::ToolCheckpointCreate(const json& args) {
 		region.regionSize = mbi.RegionSize;
 		region.type = mbi.Type;
 		region.protection = mbi.Protect;
+		region.kind = requestedIndex >= explicitRegionCount ? "teb" : "memory";
+		region.restorable = region.kind != "teb";
 		region.bytes = std::move(bytes);
 		checkpoint.regions.push_back(std::move(region));
 		totalBytes += size;
@@ -2077,11 +2167,21 @@ json McpServer::ToolCheckpointCreate(const json& args) {
 	json regions = json::array();
 	for (const auto& region : checkpoint.regions)
 		regions.push_back({{"address",CheckpointHex(region.address)}, {"size",region.bytes.size()},
-			{"allocation_base",CheckpointHex(region.allocationBase)}});
+			{"allocation_base",CheckpointHex(region.allocationBase)}, {"kind", region.kind},
+			{"restorable", region.restorable}});
+	auto architecture = registers->is32bit ? (environment.wow64 ? "wow64" : "x86") : "x64";
+	json threadEnvironment = {{"architecture", architecture}, {"wow64", environment.wow64},
+		{"teb", CheckpointHex(environment.teb)},
+		{"fs", {{"selector", CheckpointHex(registers->fs)}, {"base", CheckpointHex(environment.fsBase)}}},
+		{"gs", {{"selector", CheckpointHex(registers->gs)}, {"base", CheckpointHex(environment.gsBase)}}}};
+	if (environment.nativeTeb && environment.nativeTeb != environment.teb)
+		threadEnvironment["native_teb"] = CheckpointHex(environment.nativeTeb);
 	return {{"id",checkpoint.id}, {"threadId",threadId}, {"memory_bytes",totalBytes},
 		{"regions",std::move(regions)},
+		{"thread_environment", std::move(threadEnvironment)}, {"teb_captured", captureTeb},
 		{"context_scope",registers->is32bit ? "x86-gpr-flags" : "x64-gpr-flags-xmm"},
-		{"limitations",json::array({"selected memory only","no heap metadata, handles, kernel state, or other threads"})}};
+		{"limitations",json::array({"selected memory only","TEB bytes and segment bases are observed but not restored",
+			"no heap metadata, handles, kernel state, or other threads"})}};
 }
 
 json McpServer::ToolCheckpointRestore(const json& args) {
@@ -2103,6 +2203,7 @@ json McpServer::ToolCheckpointRestore(const json& args) {
 	std::vector<std::vector<uint8_t>> rollback;
 	rollback.reserve(checkpoint.regions.size());
 	for (const auto& region : checkpoint.regions) {
+		if (!region.restorable) { rollback.emplace_back(); continue; }
 		MEMORY_BASIC_INFORMATION mbi{};
 		if (!VirtualQueryEx(session_.GetTargetProcess(), reinterpret_cast<LPCVOID>(uintptr_t(region.address)),
 				&mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
@@ -2119,16 +2220,17 @@ json McpServer::ToolCheckpointRestore(const json& args) {
 	size_t written = 0;
 	for (; written < checkpoint.regions.size(); ++written) {
 		const auto& region = checkpoint.regions[written];
+		if (!region.restorable) continue;
 		if (!session_.WriteMemory(region.address, region.bytes.data(), static_cast<uint32_t>(region.bytes.size()))) {
 			for (size_t i = 0; i <= written && i < rollback.size(); ++i)
-				session_.WriteMemory(checkpoint.regions[i].address, rollback[i].data(),
+				if (checkpoint.regions[i].restorable) session_.WriteMemory(checkpoint.regions[i].address, rollback[i].data(),
 					static_cast<uint32_t>(rollback[i].size()));
 			return {{"error", "memory restore failed; rollback attempted"}, {"failed_region",written}};
 		}
 	}
 	if (!session_.SetRegisters(checkpoint.threadId, checkpoint.registers)) {
 		for (size_t i = 0; i < rollback.size(); ++i)
-			session_.WriteMemory(checkpoint.regions[i].address, rollback[i].data(),
+			if (checkpoint.regions[i].restorable) session_.WriteMemory(checkpoint.regions[i].address, rollback[i].data(),
 				static_cast<uint32_t>(rollback[i].size()));
 		return {{"error", "context restore failed; memory rollback attempted"}};
 	}
@@ -3197,14 +3299,23 @@ json McpServer::GetToolsList() {
 			,{"start_condition", {{"type", "string"}, {"description", "Begin collection when a register/memory comparison becomes true; supports up to four && or || clauses"}}}
 			,{"stop_condition", {{"type", "string"}, {"description", "Stop trace when a register/memory comparison becomes true"}}}
 			,{"collect_condition", {{"type", "string"}, {"description", "Collect only while a register/memory comparison is true"}}}
+			,{"occurrence_window", {{"type", "object"}, {"properties", {
+				{"address", {{"type", "string"}, {"description", "Dispatcher/instruction address inside the trace range"}}},
+				{"from", {{"type", "integer"}, {"minimum", 1}, {"description", "First visit whose following cycle is collected"}}},
+				{"to", {{"type", "integer"}, {"minimum", 0}, {"description", "Last collected visit; 0 keeps the upper bound open"}}}
+			}}, {"required", json::array({"address", "from"})}, {"description", "AND-composed with start_condition and collect_condition; collection runs entry-to-entry and a bounded window stops before visit to+1"}}}
+			,{"output_file", {{"type", "string"}, {"description", "Write the complete trace result to a new MCP-host file and return compact path/hash/count metadata"}}}
+			,{"output_format", {{"type", "string"}, {"enum", {"json", "jsonl"}}, {"description", "output_file encoding (default json); JSONL uses a manifest plus section-item records"}}}
 		 }}, {"required", json::array({"threadId", "start", "end"})}}}},
 
-		{{"name", "veh_checkpoint_create"}, {"description", "Capture one VEH-stopped thread's GPR/flags (plus x64 XMM) and explicitly selected memory ranges. Checkpoints are session-local and bounded; they do not capture other threads, handles, allocations, files, sockets, or kernel state."},
+		{{"name", "veh_checkpoint_create"}, {"description", "Capture one VEH-stopped thread's GPR/flags (plus x64 XMM), TEB and FS/GS selector/base metadata, and explicitly selected memory ranges. Checkpoints are session-local and bounded; they do not capture other threads, handles, allocations, files, sockets, or kernel state."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "VEH-stopped thread to capture"}}},
 			{"regions", {{"type", "array"}, {"maxItems", 16}, {"items", {{"type", "object"}, {"properties", {
 				{"address", {{"type", "string"}}}, {"size", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4194304}}}
-			}} , {"required", json::array({"address", "size"})}}}, {"description", "Non-overlapping committed ranges; max 16 MiB total"}}}
+			}} , {"required", json::array({"address", "size"})}}}, {"description", "Non-overlapping committed ranges; max 16 MiB total"}}},
+			{"capture_teb", {{"type", "boolean"}, {"description", "Also capture bytes at the effective x86/WOW64/x64 TEB address (default false)"}}},
+			{"teb_size", {{"type", "integer"}, {"minimum", 256}, {"maximum", 1048576}, {"description", "Bytes captured when capture_teb=true (default 4096)"}}}
 		 }}, {"required", json::array({"threadId"})}}}},
 
 		{{"name", "veh_checkpoint_restore"}, {"description", "Restore selected memory and the captured thread context. Refuses changed mappings, rolls memory back on failure, and requires the original thread to be VEH-stopped."},
@@ -3259,7 +3370,7 @@ json McpServer::GetToolsList() {
 			"Execute multiple debugger commands in a single call, reducing round-trips. "
 			"Supports sequential execution, variable references ($N for step N result, $N.key for nested access; "
 			"$last / $prev for the most recent result and the one before it), "
-			"and control flow (if/loop/for_each). Uses existing tool names and args format.\n"
+			"and control flow (if/loop/for_each). Optional inputs repeats the same steps sequentially in one session with $input bound per run. Reports per-step/input status, first failure, trace summaries, and artifact paths.\n"
 			"Note: veh_registers returns 32-bit names (eax/esp/eip) on 32-bit targets, 64-bit (rax/rsp/rip) otherwise; "
 			"pass args.fields (e.g. [\"esp\",\"eip\"]) to shrink per-step output in loops.\n"
 			"\nExamples:\n"
@@ -3271,7 +3382,10 @@ json McpServer::GetToolsList() {
 		},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"steps", {{"type", "array"}, {"items", {{"oneOf", json::array({json{{"type", "object"}}, json{{"type", "string"}}})}}}, {"description", "Array of step objects, or JSON-encoded object strings for compatibility. Each decoded step is {tool, args}, {if, then, else}, {loop, until, max}, or {for_each, as, do}."}}},
-			{"file", {{"type", "string"}, {"description", "Load steps from a JSON file instead of inline. File can be a JSON array of steps or {\"steps\": [...]}. Example: veh_batch({file: \"patch_sequence.json\"})"}}}
+			{"file", {{"type", "string"}, {"description", "Load steps from a JSON file instead of inline. File can be a JSON array of steps or {\"steps\": [...]}. Example: veh_batch({file: \"patch_sequence.json\"})"}}},
+			{"inputs", {{"type", "array"}, {"maxItems", 256}, {"description", "Repeat the steps once per input object/value in the same debug session"}}},
+			{"input_variable", {{"type", "string"}, {"description", "Variable bound to each input (default $input)"}}},
+			{"stop_on_error", {{"type", "boolean"}, {"description", "Stop the current batch and any remaining input runs after the first failed step (default false)"}}}
 		 }}}}},
 
 		{{"name", "veh_trace_register"}, {"description", "Trace a register: single-steps internally (inside DLL, zero IPC overhead per step) until the register meets a condition. Returns the instruction that caused the change. Thread must be stopped at a breakpoint (not via veh_pause). Much faster than manual step+check loops."},

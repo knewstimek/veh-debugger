@@ -545,6 +545,29 @@ bool VehHandler::EvaluateBasicTraceCondition(const TraceCondition& condition, co
 	return aggregate;
 }
 
+bool VehHandler::AdvanceBasicTraceOccurrence(uint64_t address) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.occurrenceWindow.enabled || address != tb.occurrenceWindow.address) return true;
+	++tb.occurrenceHits;
+	if (tb.occurrenceHits == tb.occurrenceWindow.from) {
+		tb.occurrenceWindowActive = true;
+		tb.occurrenceWindowStarted = true;
+	}
+	if (tb.occurrenceWindow.to && tb.occurrenceHits > tb.occurrenceWindow.to) {
+		tb.occurrenceWindowActive = false;
+		tb.occurrenceWindowCompleted = true;
+		return false;
+	}
+	return true;
+}
+
+bool VehHandler::BasicTraceCollectionGate(const CONTEXT* ctx) const {
+	const auto& tb = traceBasicBlocks_;
+	return tb.startConditionMet && tb.occurrenceWindowActive &&
+		(tb.collectCondition.clauseCount == 0 ||
+		 EvaluateBasicTraceCondition(tb.collectCondition, ctx));
+}
+
 void VehHandler::PrepareBasicTraceMemoryWrites(
 		const TraceBasicBlocksState::Instruction* instruction, const CONTEXT* ctx) {
 	auto& tb = traceBasicBlocks_;
@@ -1153,7 +1176,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		bool collectRegisterEvents, uint32_t maxRegisterEvents,
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
-		const TraceCondition& collectCondition,
+		const TraceCondition& collectCondition, const TraceOccurrenceWindow& occurrenceWindow,
 		std::vector<TraceBasicBlocksState::Instruction>&& instructions,
 		std::vector<uint64_t>&& staticBlockStarts) {
 	if (traceReg_.active.load(std::memory_order_acquire) ||
@@ -1221,6 +1244,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.startCondition = startCondition;
 	tb.stopCondition = stopCondition;
 	tb.collectCondition = collectCondition;
+	tb.occurrenceWindow = occurrenceWindow;
 	tb.instructions = std::move(instructions);
 	tb.staticBlockStarts = std::move(staticBlockStarts);
 	tb.blockTable.assign(nextPowerOfTwo(static_cast<size_t>(maxBlocks) * 2), {});
@@ -1324,9 +1348,13 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.pendingException = false;
 	tb.pendingExceptionFaultAddress = 0;
 
+	tb.occurrenceHits = 0;
+	tb.occurrenceWindowActive = !occurrenceWindow.enabled;
+	tb.occurrenceWindowStarted = !occurrenceWindow.enabled;
+	tb.occurrenceWindowCompleted = false;
+	AdvanceBasicTraceOccurrence(ip);
 	tb.startConditionMet = startCondition.clauseCount == 0 || EvaluateBasicTraceCondition(startCondition, &ctx);
-	tb.collectWindowActive = tb.startConditionMet &&
-		(collectCondition.clauseCount == 0 || EvaluateBasicTraceCondition(collectCondition, &ctx));
+	tb.collectWindowActive = BasicTraceCollectionGate(&ctx);
 	if (tb.collectWindowActive) {
 		uint32_t initialSnapshot = CaptureBasicTraceSnapshot(&ctx);
 		if (!RecordBasicTraceBlock(ip, &ctx, initialSnapshot)) {
@@ -1374,6 +1402,20 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 	}
 	bool inRange = addr >= tb.rangeStart && addr < tb.rangeEnd;
 	auto* current = inRange ? FindBasicTraceInstruction(addr) : nullptr;
+	const bool wasCollecting = tb.collectWindowActive;
+	if (inRange && !AdvanceBasicTraceOccurrence(addr)) {
+		auto* previous = wasCollecting ? FindBasicTraceInstruction(tb.previousInstruction) : nullptr;
+		++tb.stepsExecuted;
+		if (previous) {
+			++previous->hitCount;
+			previous->lastHitStep = tb.stepsExecuted;
+		} else if (!wasCollecting) {
+			++tb.filteredSteps;
+		}
+		tb.finalAddress = addr;
+		FinishBasicTrace(TraceBasicBlockStopReason::OccurrenceWindow, addr);
+		return BasicTraceStepResult::Stop;
+	}
 
 	if (!tb.startConditionMet) {
 		tb.stepsExecuted++;
@@ -1385,8 +1427,7 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 		}
 		if (EvaluateBasicTraceCondition(tb.startCondition, info->ContextRecord)) {
 			tb.startConditionMet = true;
-			tb.collectWindowActive = tb.collectCondition.clauseCount == 0 ||
-				EvaluateBasicTraceCondition(tb.collectCondition, info->ContextRecord);
+			tb.collectWindowActive = BasicTraceCollectionGate(info->ContextRecord);
 			tb.currentBlock = tb.previousInstruction = addr;
 			if (tb.collectWindowActive) {
 				if (!RecordBasicTraceBlock(addr, info->ContextRecord)) {
@@ -1421,8 +1462,7 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 			FinishBasicTrace(TraceBasicBlockStopReason::Condition, addr);
 			return BasicTraceStepResult::Stop;
 		}
-		if (tb.collectCondition.clauseCount == 0 ||
-				EvaluateBasicTraceCondition(tb.collectCondition, info->ContextRecord)) {
+		if (BasicTraceCollectionGate(info->ContextRecord)) {
 			tb.collectWindowActive = true;
 			tb.currentBlock = tb.previousInstruction = addr;
 			if (!RecordBasicTraceBlock(addr, info->ContextRecord)) {
@@ -1491,7 +1531,7 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 		FinishBasicTrace(TraceBasicBlockStopReason::MaxSteps, addr, true);
 		return BasicTraceStepResult::Stop;
 	}
-	if (tb.collectCondition.clauseCount && !EvaluateBasicTraceCondition(tb.collectCondition, info->ContextRecord)) {
+	if (!BasicTraceCollectionGate(info->ContextRecord)) {
 		tb.collectWindowActive = false;
 		tb.pendingWriteCount = 0;
 		tb.pendingReadCount = 0;
@@ -1562,18 +1602,22 @@ LONG VehHandler::HandleContinue(PEXCEPTION_POINTERS info) {
 	auto& tb = traceBasicBlocks_;
 	if (!tb.active.load(std::memory_order_acquire) || tid != tb.threadId || !tb.pendingException)
 		return EXCEPTION_CONTINUE_SEARCH;
+	const bool destinationInRange = destination >= tb.rangeStart && destination < tb.rangeEnd;
+	if (destinationInRange && !AdvanceBasicTraceOccurrence(destination)) {
+		tb.stopPending = true;
+		tb.pendingStopReason = TraceBasicBlockStopReason::OccurrenceWindow;
+	}
 
 	if (!tb.pendingExceptionCollect) {
 		tb.pendingException = false;
 		tb.finalAddress = destination;
-		if (destination < tb.rangeStart || destination >= tb.rangeEnd) {
+		if (!destinationInRange) {
 			tb.stopPending = true;
 			tb.pendingStopReason = TraceBasicBlockStopReason::LeftRange;
 		} else {
 			if (!tb.startConditionMet && EvaluateBasicTraceCondition(tb.startCondition, info->ContextRecord))
 				tb.startConditionMet = true;
-			bool collect = tb.startConditionMet && (tb.collectCondition.clauseCount == 0 ||
-				EvaluateBasicTraceCondition(tb.collectCondition, info->ContextRecord));
+			bool collect = !tb.stopPending && BasicTraceCollectionGate(info->ContextRecord);
 			tb.collectWindowActive = collect;
 			tb.currentBlock = tb.previousInstruction = destination;
 			if (collect) {
@@ -1612,7 +1656,7 @@ LONG VehHandler::HandleContinue(PEXCEPTION_POINTERS info) {
 	}
 	tb.pendingException = false;
 
-	if (destination < tb.rangeStart || destination >= tb.rangeEnd) {
+	if (!destinationInRange) {
 		tb.stopPending = true;
 		tb.pendingStopReason = TraceBasicBlockStopReason::LeftRange;
 	} else if (!tb.stopPending) {

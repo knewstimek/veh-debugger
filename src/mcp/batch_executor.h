@@ -42,6 +42,8 @@ public:
 
 	// Execute a batch of steps. Returns array of step results.
 	json Execute(const json& steps);
+	void SetVariable(const std::string& name, const json& value);
+	void SetStopOnError(bool value) { stopOnError_ = value; }
 
 private:
 	// Execute a single step (tool call or control flow)
@@ -70,6 +72,7 @@ private:
 	std::vector<json> results_;  // step results indexed by step number
 	std::unordered_map<std::string, json> namedVars_;  // named variables ($addr, etc.)
 	int depth_ = 0;  // nesting depth (max 20)
+	bool stopOnError_ = false;
 };
 
 } // namespace veh

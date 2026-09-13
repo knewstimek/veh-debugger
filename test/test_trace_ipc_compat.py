@@ -2,7 +2,7 @@
 import json
 import os
 
-from test_trace_basic_blocks import Client
+from mcp_test_client import McpClient
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -13,7 +13,7 @@ TARGET = os.environ.get(
 
 
 def main():
-    client = Client()
+    client = McpClient()
     try:
         client.call("initialize", {
             "protocolVersion": "2024-11-05",
@@ -43,15 +43,30 @@ def main():
         assert trace.get("schema_version") in {3, 4}, trace
         assert trace.get("blocks") and trace.get("edges"), trace
         assert trace.get("events") and trace.get("memory_events"), trace
+        def stop_at_start():
+            next_stop = client.tool("veh_continue", {"wait": True, "timeout": 10}, timeout=15)
+            assert next_stop.get("reason") == "breakpoint", next_stop
+            assert int(next_stop.get("address", "0"), 0) == start, next_stop
+            return next_stop
         if os.environ.get("VEH_TEST_EXPECT_FILE_UNSUPPORTED") == "1":
+            extension_stop = stop_at_start()
             file_trace = client.tool("veh_trace_basic_blocks", {
-                "threadId": stop["threadId"], "start": hex(start), "end": hex(start + 0x100),
+                "threadId": extension_stop["threadId"], "start": hex(start), "end": hex(start + 0x100),
                 "collect_code": True, "code_output": "file",
                 "max_code_bytes": 400 * 1024 * 1024,
             }, timeout=15)
             assert file_trace == {
                 "error": "injected DLL does not support code_output=file",
             }, file_trace
+        if os.environ.get("VEH_TEST_EXPECT_OCCURRENCE_UNSUPPORTED") == "1":
+            extension_stop = stop_at_start()
+            occurrence_trace = client.tool("veh_trace_basic_blocks", {
+                "threadId": extension_stop["threadId"], "start": hex(start), "end": hex(start + 0x100),
+                "occurrence_window": {"address": hex(start), "from": 1, "to": 1},
+            }, timeout=15)
+            assert occurrence_trace == {
+                "error": "injected DLL does not support occurrence_window",
+            }, occurrence_trace
         print(json.dumps({
             "mcp": os.environ.get("VEH_TEST_BUILD_DIR", os.path.join(ROOT, "build")),
             "target": TARGET,

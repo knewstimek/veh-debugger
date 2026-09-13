@@ -131,13 +131,23 @@ private:
 		uint64_t regionSize = 0;
 		uint32_t type = 0;
 		uint32_t protection = 0;
+		bool restorable = true;
+		std::string kind = "memory";
 		std::vector<uint8_t> bytes;
+	};
+	struct CheckpointThreadEnvironment {
+		uint64_t teb = 0;
+		uint64_t nativeTeb = 0;
+		uint64_t fsBase = 0;
+		uint64_t gsBase = 0;
+		bool wow64 = false;
 	};
 	struct Checkpoint {
 		uint64_t id = 0;
 		uint64_t sessionGeneration = 0;
 		uint32_t threadId = 0;
 		RegisterSet registers{};
+		CheckpointThreadEnvironment environment{};
 		std::vector<CheckpointRegion> regions;
 		size_t byteSize = 0;
 	};
