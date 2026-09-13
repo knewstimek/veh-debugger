@@ -414,7 +414,9 @@ bool PipeServer::AsyncReadExact(void* buf, DWORD size, DWORD timeoutMs) {
 		                   size - totalRead, &bytesRead, &ov);
 
 		if (!ok && GetLastError() != ERROR_IO_PENDING) {
+			DWORD error = GetLastError();
 			CloseHandle(ov.hEvent);
+			SetLastError(error);
 			return false;
 		}
 
@@ -430,13 +432,18 @@ bool PipeServer::AsyncReadExact(void* buf, DWORD size, DWORD timeoutMs) {
 		DWORD wait = WaitForMultipleObjects(nEvents, events, FALSE, timeoutMs);
 
 		if (wait == WAIT_OBJECT_0) {
-			GetOverlappedResult(pipe_, &ov, &bytesRead, FALSE);
+			BOOL completed = GetOverlappedResult(pipe_, &ov, &bytesRead, FALSE);
+			DWORD error = completed ? ERROR_SUCCESS : GetLastError();
 			CloseHandle(ov.hEvent);
-			if (bytesRead == 0) return false;
+			if (!completed || bytesRead == 0) {
+				SetLastError(completed ? ERROR_BROKEN_PIPE : error);
+				return false;
+			}
 			totalRead += bytesRead;
 		} else {
 			CancelIoEx(pipe_, &ov);
 			CloseHandle(ov.hEvent);
+			SetLastError(wait == WAIT_TIMEOUT ? WAIT_TIMEOUT : ERROR_OPERATION_ABORTED);
 			return false;  // 타임아웃 or stop
 		}
 	}
@@ -637,6 +644,13 @@ void PipeServer::ServerThread() {
 			IpcHeader hdr;
 			if (!AsyncReadExact(&hdr, sizeof(hdr), READ_TIMEOUT_MS)) {
 				if (!running_ || !connected_) break;
+				DWORD readError = GetLastError();
+				if (readError != WAIT_TIMEOUT && readError != ERROR_OPERATION_ABORTED &&
+					readError != ERROR_IO_PENDING) {
+					LOG_WARN("Control pipe disconnected: %lu", readError);
+					connected_ = false;
+					break;
+				}
 
 				// 하트비트 타임아웃 체크
 				uint64_t elapsed = GetTickCount64() - lastCommandTime_;
@@ -2144,9 +2158,12 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 		TraceBasicBlocksRequest req{};
 		memcpy(&req, payload, std::min<size_t>(payloadSize, sizeof(req)));
-		const bool explicitCurrentWire = req.wireVersion >= kTraceBasicBlocksWireVersion &&
+		const bool explicitV6Wire = req.wireVersion >= kTraceBasicBlocksWireVersion &&
+			req.requestSize >= kTraceBasicBlocksRequestV6Size && req.requestSize <= payloadSize;
+		const bool explicitV5Wire = req.wireVersion == kTraceBasicBlocksMinimumExplicitWireVersion &&
 			req.requestSize >= kTraceBasicBlocksRequestV4Size && req.requestSize <= payloadSize;
-		const uint16_t responseHeaderSize = explicitCurrentWire ? kTraceBasicBlocksResponseV5Size :
+		const bool explicitKnownWire = explicitV6Wire || explicitV5Wire;
+		const uint16_t responseHeaderSize = explicitKnownWire ? kTraceBasicBlocksResponseV5Size :
 			(payloadSize >= kTraceBasicBlocksRequestV4Size ?
 				kTraceBasicBlocksResponseV4Size : kTraceBasicBlocksResponseV3Size);
 		CONTEXT stoppedContext{};
@@ -2177,10 +2194,16 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			}
 			SendResponse(command, response.data(), static_cast<uint32_t>(response.size()));
 		};
-		if ((req.requestSize != 0 && !explicitCurrentWire) ||
-			(req.wireVersion != 0 && req.wireVersion < kTraceBasicBlocksWireVersion)) {
+		if ((req.requestSize != 0 && !explicitKnownWire) ||
+			(req.wireVersion != 0 && req.wireVersion < kTraceBasicBlocksMinimumExplicitWireVersion)) {
 			sendTraceFailure(IpcStatus::InvalidArgs, TraceBasicBlocksStartFailure::InvalidArguments, false, 0);
 			return;
+		}
+		if (!explicitV6Wire) {
+			req.codeOutputMode = static_cast<uint8_t>(TraceCodeOutputMode::Inline);
+			req.codeChunkBytes = 0;
+			req.codeStreamOwnerPid = 0;
+			req.codeStreamToken = 0;
 		}
 		if (req.threadId == 0 || req.rangeStart >= req.rangeEnd ||
 			req.rangeEnd - req.rangeStart > 4ULL * 1024 * 1024) {
@@ -2200,14 +2223,21 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		if (req.collectCode && req.maxCodeBytes == 0) req.maxCodeBytes = 262144;
 		if (req.collectCode && req.maxCodeVersions == 0) req.maxCodeVersions = 4096;
 		if (req.collectCode || req.collectMemoryEvents || req.collectRegisterEvents) req.collectEvents = 1;
+		const bool fileCodeOutput = req.codeOutputMode == static_cast<uint8_t>(TraceCodeOutputMode::File);
+		const uint32_t maxCodeBytes = fileCodeOutput ?
+			kTraceBasicBlockMaxFileCodeBytes : kTraceBasicBlockMaxCodeBytes;
 		if (req.maxBlocks > 16384 || req.maxEdges > 32768 || req.maxSteps > 5000000 ||
 			(req.collectMemoryWrites && req.maxMemoryWrites > 16384) ||
 			(req.collectMemoryReads && req.maxMemoryReads > 16384) ||
 			(req.collectEvents && req.maxEvents > 32768) ||
 			(req.collectMemoryEvents && req.maxMemoryEvents > 65536) ||
 			(req.collectRegisterEvents && req.maxRegisterEvents > 65536) ||
-			(req.collectCode && (req.maxCodeBytes > kTraceBasicBlockMaxCodeBytes ||
+			(req.collectCode && (req.maxCodeBytes > maxCodeBytes ||
 				req.maxCodeVersions > 16384 || req.maxCodeBytes == 0 || req.maxCodeVersions == 0)) ||
+			(req.codeOutputMode > static_cast<uint8_t>(TraceCodeOutputMode::File)) ||
+			(fileCodeOutput && (!req.collectCode || !req.codeStreamOwnerPid || !req.codeStreamToken ||
+				req.codeChunkBytes < kTraceCodeMinChunkBytes || req.codeChunkBytes > kTraceCodeMaxChunkBytes ||
+				req.codeChunkBytes % kTraceCodeChunkAlignment != 0)) ||
 			req.dependencySourceCount > kTraceDependencyMaxSources ||
 			req.timeoutMs < 100 || req.timeoutMs > 60000 ||
 			req.stackBytes > kTraceBasicBlockMaxStackBytes) {
@@ -2227,6 +2257,23 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			break;
 		}
 
+		HANDLE codeStreamPipe = INVALID_HANDLE_VALUE;
+		if (fileCodeOutput) {
+			std::wstring codePipeName = GetTraceCodePipeName(req.codeStreamOwnerPid, req.codeStreamToken);
+			if (!WaitNamedPipeW(codePipeName.c_str(), 3000)) {
+				sendTraceFailure(IpcStatus::Error, TraceBasicBlocksStartFailure::CodeStreamUnavailable,
+					true, decodedInstructionCount);
+				break;
+			}
+			codeStreamPipe = CreateFileW(codePipeName.c_str(), GENERIC_WRITE, 0, nullptr,
+				OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+			if (codeStreamPipe == INVALID_HANDLE_VALUE) {
+				sendTraceFailure(IpcStatus::Error, TraceBasicBlocksStartFailure::CodeStreamUnavailable,
+					true, decodedInstructionCount);
+				break;
+			}
+		}
+
 		auto startTick = GetTickCount64();
 		if (!VehHandler::Instance().StartTraceBasicBlocks(req.threadId, req.rangeStart, req.rangeEnd,
 				req.maxBlocks, req.maxEdges, req.maxSteps, req.stackBytes,
@@ -2234,6 +2281,8 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				req.collectMemoryReads != 0, req.maxMemoryReads,
 				req.collectEvents != 0, req.maxEvents,
 				req.collectCode != 0, req.maxCodeBytes, req.maxCodeVersions,
+				static_cast<TraceCodeOutputMode>(req.codeOutputMode), req.codeChunkBytes,
+				req.codeStreamToken, codeStreamPipe,
 				req.collectMemoryEvents != 0, req.maxMemoryEvents,
 				req.collectRegisterEvents != 0, req.maxRegisterEvents,
 				req.dependencySources, req.dependencySourceCount,
@@ -2259,6 +2308,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 		if (!tb.done.load(std::memory_order_acquire)) {
 			tb.active.store(false, std::memory_order_release);
+			VehHandler::Instance().FinalizeTraceBasicBlocksCodeStream();
 			std::vector<uint8_t> response(responseHeaderSize);
 			auto* header = reinterpret_cast<TraceBasicBlocksResponse*>(response.data());
 			memset(header, 0, responseHeaderSize);
@@ -2274,6 +2324,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		uint64_t parkTick = GetTickCount64();
 		while (!VehHandler::Instance().IsThreadStopped(req.threadId) && GetTickCount64() - parkTick < 2000)
 			Sleep(1);
+		VehHandler::Instance().FinalizeTraceBasicBlocksCodeStream();
 
 		struct ResultBlock {
 			TraceBasicBlockEntry entry{};
@@ -2433,8 +2484,10 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		responseSize += static_cast<size_t>(tb.eventCount) * sizeof(TraceBasicBlockEventEntry);
 		responseSize += static_cast<size_t>(tb.memoryEventCount) * sizeof(TraceBasicBlockMemoryEventEntry);
 		responseSize += static_cast<size_t>(responseRegisterEventCount) * sizeof(TraceBasicBlockRegisterEventEntry);
-		responseSize += static_cast<size_t>(tb.codeVersionCount) * sizeof(TraceBasicBlockCodeVersionEntry);
-		responseSize += tb.codeByteCount;
+		const uint32_t inlineCodeVersionCount = fileCodeOutput ? 0 : tb.codeVersionCount;
+		const uint32_t inlineCodeByteCount = fileCodeOutput ? 0 : tb.codeByteCount;
+		responseSize += static_cast<size_t>(inlineCodeVersionCount) * sizeof(TraceBasicBlockCodeVersionEntry);
+		responseSize += inlineCodeByteCount;
 		std::vector<uint8_t> response(responseSize);
 		auto* header = reinterpret_cast<TraceBasicBlocksResponse*>(response.data());
 		memset(header, 0, responseHeaderSize);
@@ -2467,8 +2520,8 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		header->eventCollectionEnabled = req.collectEvents ? 1 : 0;
 		header->eventsTruncated = tb.eventsTruncated ? 1 : 0;
 		header->eventSchemaVersion = 1;
-		header->codeVersionCount = tb.codeVersionCount;
-		header->codeByteCount = tb.codeByteCount;
+		header->codeVersionCount = inlineCodeVersionCount;
+		header->codeByteCount = inlineCodeByteCount;
 		header->codeCollectionEnabled = req.collectCode ? 1 : 0;
 		header->codeTruncated = tb.codeTruncated ? 1 : 0;
 		header->codeSchemaVersion = 1;
@@ -2533,12 +2586,12 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				static_cast<size_t>(responseRegisterEventCount) * sizeof(tb.registerEvents[0]));
 			out += static_cast<size_t>(responseRegisterEventCount) * sizeof(tb.registerEvents[0]);
 		}
-		if (tb.codeVersionCount) {
-			memcpy(out, tb.codeVersions.data(), static_cast<size_t>(tb.codeVersionCount) * sizeof(tb.codeVersions[0]));
-			out += static_cast<size_t>(tb.codeVersionCount) * sizeof(tb.codeVersions[0]);
+		if (inlineCodeVersionCount) {
+			memcpy(out, tb.codeVersions.data(), static_cast<size_t>(inlineCodeVersionCount) * sizeof(tb.codeVersions[0]));
+			out += static_cast<size_t>(inlineCodeVersionCount) * sizeof(tb.codeVersions[0]);
 		}
-		if (tb.codeByteCount) {
-			memcpy(out, tb.codeBytes.data(), tb.codeByteCount);
+		if (inlineCodeByteCount) {
+			memcpy(out, tb.codeBytes.data(), inlineCodeByteCount);
 		}
 		SendResponse(command, response.data(), static_cast<uint32_t>(response.size()));
 		break;

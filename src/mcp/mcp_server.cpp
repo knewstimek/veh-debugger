@@ -3188,8 +3188,11 @@ json McpServer::GetToolsList() {
 			,{"collect_events", {{"type", "boolean"}, {"description", "Collect every observed block entry/transition in execution order with sequence and thread ID (default false)"}}}
 			,{"max_events", {{"type", "integer"}, {"description", "Maximum ordered events retained without stopping aggregate collection (default 8192, max 32768)"}}}
 			,{"collect_code", {{"type", "boolean"}, {"description", "Capture runtime bytes for unique executed block versions and map version IDs to ordered events; implies collect_events (default false)"}}}
-			,{"max_code_bytes", {{"type", "integer"}, {"description", "Total stored code-byte budget across unique versions (default 262144, max 16777216)"}}}
+			,{"max_code_bytes", {{"type", "integer"}, {"description", "Total runtime code-byte budget across unique versions (default 262144; max 16777216 inline or 419430400 file)"}}}
 			,{"max_code_versions", {{"type", "integer"}, {"description", "Maximum unique block code versions retained (default 4096, max 16384)"}}}
+			,{"code_output", {{"type", "string"}, {"enum", {"inline", "file"}}, {"description", "Return bytes inline (default) or stream a portable artifact to a file"}}}
+			,{"code_output_path", {{"type", "string"}, {"description", "Optional new artifact path on the MCP host for code_output=file; an existing file is never overwritten"}}}
+			,{"code_chunk_bytes", {{"type", "integer"}, {"description", "File-stream chunk size, 262144-8388608 in 65536-byte multiples (default 4194304)"}}}
 			,{"dependency_sources", {{"type", "array"}, {"maxItems", 32}, {"description", "Conservative dependency sources: register names or {address,size,label?} memory ranges"}}}
 			,{"start_condition", {{"type", "string"}, {"description", "Begin collection when a register/memory comparison becomes true; supports up to four && or || clauses"}}}
 			,{"stop_condition", {{"type", "string"}, {"description", "Stop trace when a register/memory comparison becomes true"}}}

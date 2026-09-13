@@ -189,6 +189,19 @@ the corresponding event-schema-v2 record. Budget exhaustion marks code capture
 incomplete without stopping aggregate collection, so runtime bytes remain usable
 evidence for self-modifying code without pretending the post-trace image is equal.
 
+The default inline mode preserves the original response layout and caps cumulative
+version bytes at 16 MiB. Optional file mode raises the bounded budget to 400 MiB
+without placing the byte blob in the control response. The VEH thread appends packed
+artifact records to a preallocated SPSC ring; a dedicated writer sends 256 KiB–8 MiB
+frames over a tokenized one-shot data pipe while MCP writes a delete-on-close partial
+file. Successful completion publishes a hard link (or a copy on filesystems without
+hard links), verifies SHA-256, and returns only artifact metadata. A killed MCP drops
+the partial link automatically. Slow/broken consumers never cause unbounded growth:
+ring exhaustion or transfer failure marks code capture incomplete while aggregate
+trace collection continues. Artifact schema 1 uses a fixed 64-byte little-endian
+header, 48-byte version records, and 64-bit byte/record offsets so analysis is not
+tied to Windows or target pointer width.
+
 ### Analysis boundary
 
 The injected debugger is a bounded runtime-observation engine: it records measured

@@ -786,7 +786,12 @@ uint32_t VehHandler::CaptureBasicTraceCodeVersion(uint64_t blockStart, uint64_t 
 		tb.codeTruncated = true; return UINT32_MAX;
 	}
 	uint64_t hash = 1469598103934665603ULL;
-	for (uint32_t i = 0; i < size; ++i) { hash ^= tb.codeScratch[i]; hash *= 1099511628211ULL; }
+	uint64_t secondaryHash = 1099511628211ULL;
+	for (uint32_t i = 0; i < size; ++i) {
+		hash ^= tb.codeScratch[i]; hash *= 1099511628211ULL;
+		secondaryHash ^= static_cast<uint64_t>(tb.codeScratch[i]) + i;
+		secondaryHash *= 14029467366897019727ULL;
+	}
 	size_t mask = tb.codeVersionTable.size() - 1;
 	size_t index = static_cast<size_t>(BasicTraceHash(blockStart) ^ BasicTraceHash(hash) ^ size) & mask;
 	for (size_t probe = 0; probe < tb.codeVersionTable.size(); ++probe) {
@@ -796,24 +801,189 @@ uint32_t VehHandler::CaptureBasicTraceCodeVersion(uint64_t blockStart, uint64_t 
 				tb.codeByteCount + size > tb.maxCodeBytes) {
 				tb.codeTruncated = true; return UINT32_MAX;
 			}
+			TraceBasicBlockCodeVersionEntry entry{};
+			entry.blockStart = blockStart; entry.blockEnd = blockEnd;
+			entry.hash = hash; entry.firstSequence = sequence;
+			entry.id = tb.codeVersionCount; entry.dataOffset = tb.codeByteCount;
+			entry.size = size;
+			if (tb.codeFileOutput) {
+				if (!tb.codeStreamAccepting) { tb.codeTruncated = true; return UINT32_MAX; }
+				TraceCodeArtifactRecord record{};
+				record.blockStart = blockStart; record.blockEnd = blockEnd;
+				record.hash = hash; record.firstSequence = sequence;
+				record.dataOffset = tb.codeByteCount; record.id = entry.id; record.size = size;
+				if (!AppendBasicTraceCodeStream(&record, sizeof(record)) ||
+					!AppendBasicTraceCodeStream(tb.codeScratch.data(), size)) {
+					tb.codeStreamAccepting = false; tb.codeTruncated = true; return UINT32_MAX;
+				}
+				tb.codeStreamCommittedBytes = tb.codeStreamProducedBytes;
+			} else {
+				memcpy(tb.codeBytes.data() + tb.codeByteCount, tb.codeScratch.data(), size);
+			}
 			slot.occupied = 1;
-			slot.entry.blockStart = blockStart; slot.entry.blockEnd = blockEnd;
-			slot.entry.hash = hash; slot.entry.firstSequence = sequence;
-			slot.entry.id = tb.codeVersionCount; slot.entry.dataOffset = tb.codeByteCount;
-			slot.entry.size = size;
-			memcpy(tb.codeBytes.data() + tb.codeByteCount, tb.codeScratch.data(), size);
+			slot.entry = entry;
+			slot.secondaryHash = secondaryHash;
 			tb.codeByteCount += size;
-			tb.codeVersions[tb.codeVersionCount] = slot.entry;
+			tb.codeVersions[tb.codeVersionCount] = entry;
 			return tb.codeVersionCount++;
 		}
 		const auto& entry = slot.entry;
 		if (entry.blockStart == blockStart && entry.size == size && entry.hash == hash &&
-			memcmp(tb.codeBytes.data() + entry.dataOffset, tb.codeScratch.data(), size) == 0)
+			slot.secondaryHash == secondaryHash &&
+			(tb.codeFileOutput ||
+			 memcmp(tb.codeBytes.data() + entry.dataOffset, tb.codeScratch.data(), size) == 0))
 			return entry.id;
 		index = (index + 1) & mask;
 	}
 	tb.codeTruncated = true;
 	return UINT32_MAX;
+}
+
+bool VehHandler::PublishBasicTraceCodeStreamBuffer() {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.codeFileOutput || !tb.codeStreamBufferCount) return false;
+	auto& buffer = tb.codeStreamBuffers[tb.codeStreamProducerIndex];
+	if (buffer.state.load(std::memory_order_acquire) != 1 || buffer.size == 0) return true;
+	buffer.index = tb.codeStreamNextChunk++;
+	buffer.state.store(2, std::memory_order_release);
+	SyscallResolver::Instance().SetEvent(tb.codeStreamReadyEvent);
+	return true;
+}
+
+bool VehHandler::AppendBasicTraceCodeStream(const void* data, size_t size) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.codeFileOutput || !tb.codeStreamAccepting || !data) return false;
+	const auto* input = static_cast<const uint8_t*>(data);
+	while (size) {
+		auto& buffer = tb.codeStreamBuffers[tb.codeStreamProducerIndex];
+		if (buffer.state.load(std::memory_order_acquire) != 1) return false;
+		size_t available = tb.codeChunkBytes - buffer.size;
+		size_t copied = std::min(size, available);
+		memcpy(buffer.bytes.data() + buffer.size, input, copied);
+		buffer.size += static_cast<uint32_t>(copied);
+		tb.codeStreamProducedBytes += copied;
+		input += copied;
+		size -= copied;
+		if (buffer.size == tb.codeChunkBytes) {
+			PublishBasicTraceCodeStreamBuffer();
+			uint32_t next = (tb.codeStreamProducerIndex + 1) % tb.codeStreamBufferCount;
+			auto& nextBuffer = tb.codeStreamBuffers[next];
+			uint8_t expected = 0;
+			if (!nextBuffer.state.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
+				tb.codeStreamAccepting = false;
+				return size == 0;
+			}
+			nextBuffer.size = 0;
+			tb.codeStreamProducerIndex = next;
+		}
+	}
+	return true;
+}
+
+static bool WriteTraceCodeStreamExact(HANDLE pipe, const void* data, DWORD size) {
+	const auto* cursor = static_cast<const uint8_t*>(data);
+	DWORD total = 0;
+	while (total < size) {
+		OVERLAPPED ov{};
+		ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+		if (!ov.hEvent) return false;
+		DWORD written = 0;
+		BOOL ok = WriteFile(pipe, cursor + total, size - total, &written, &ov);
+		if (!ok && GetLastError() == ERROR_IO_PENDING) {
+			DWORD wait = WaitForSingleObject(ov.hEvent, 10000);
+			if (wait == WAIT_OBJECT_0) ok = GetOverlappedResult(pipe, &ov, &written, FALSE);
+			else { CancelIoEx(pipe, &ov); ok = FALSE; }
+		}
+		CloseHandle(ov.hEvent);
+		if (!ok || !written) return false;
+		total += written;
+	}
+	return true;
+}
+
+void VehHandler::RunBasicTraceCodeStreamWriter() {
+	auto& tb = traceBasicBlocks_;
+	uint32_t consumer = 0;
+	uint32_t chunksWritten = 0;
+	while (true) {
+		bool handled = false;
+		if (tb.codeStreamBufferCount) {
+			auto& buffer = tb.codeStreamBuffers[consumer];
+			uint8_t expected = 2;
+			if (buffer.state.compare_exchange_strong(expected, 3, std::memory_order_acq_rel)) {
+				handled = true;
+				if (!tb.codeStreamTransferFailed.load(std::memory_order_acquire)) {
+					TraceCodeStreamFrameHeader frame{};
+					frame.magic = kTraceCodeStreamMagic;
+					frame.schemaVersion = kTraceCodeArtifactSchemaVersion;
+					frame.type = static_cast<uint16_t>(TraceCodeStreamFrameType::Data);
+					frame.token = tb.codeStreamToken;
+					frame.chunkIndex = buffer.index;
+					frame.streamOffset = static_cast<uint64_t>(buffer.index) * tb.codeChunkBytes;
+					frame.payloadSize = buffer.size;
+					frame.payloadHash = TraceCodePayloadHash(buffer.bytes.data(), buffer.size);
+					if (!WriteTraceCodeStreamExact(tb.codeStreamPipe, &frame, sizeof(frame)) ||
+						!WriteTraceCodeStreamExact(tb.codeStreamPipe, buffer.bytes.data(), buffer.size))
+						tb.codeStreamTransferFailed.store(true, std::memory_order_release);
+					else
+						++chunksWritten;
+				}
+				buffer.size = 0;
+				buffer.state.store(0, std::memory_order_release);
+				consumer = (consumer + 1) % tb.codeStreamBufferCount;
+			}
+		}
+		if (tb.codeStreamProducerDone.load(std::memory_order_acquire)) {
+			bool ready = false;
+			for (uint32_t i = 0; i < tb.codeStreamBufferCount; ++i)
+				if (tb.codeStreamBuffers[i].state.load(std::memory_order_acquire) == 2) { ready = true; break; }
+			if (!ready) break;
+		}
+		if (!handled) WaitForSingleObject(tb.codeStreamReadyEvent, 100);
+	}
+	if (!tb.codeStreamTransferFailed.load(std::memory_order_acquire)) {
+		TraceCodeStreamComplete complete{};
+		complete.committedRecordBytes = tb.codeStreamCommittedBytes;
+		complete.codeByteCount = tb.codeByteCount;
+		complete.versionCount = tb.codeVersionCount;
+		complete.chunkCount = chunksWritten;
+		complete.truncated = tb.codeTruncated ? 1 : 0;
+		TraceCodeStreamFrameHeader frame{};
+		frame.magic = kTraceCodeStreamMagic;
+		frame.schemaVersion = kTraceCodeArtifactSchemaVersion;
+		frame.type = static_cast<uint16_t>(TraceCodeStreamFrameType::Complete);
+		frame.token = tb.codeStreamToken;
+		frame.chunkIndex = chunksWritten;
+		frame.streamOffset = tb.codeStreamCommittedBytes;
+		frame.payloadSize = sizeof(complete);
+		frame.payloadHash = TraceCodePayloadHash(&complete, sizeof(complete));
+		if (!WriteTraceCodeStreamExact(tb.codeStreamPipe, &frame, sizeof(frame)) ||
+			!WriteTraceCodeStreamExact(tb.codeStreamPipe, &complete, sizeof(complete)))
+			tb.codeStreamTransferFailed.store(true, std::memory_order_release);
+	}
+}
+
+void VehHandler::StopBasicTraceCodeStream(bool abort) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.codeFileOutput) return;
+	if (abort) tb.codeTruncated = true;
+	PublishBasicTraceCodeStreamBuffer();
+	tb.codeStreamProducerDone.store(true, std::memory_order_release);
+	SyscallResolver::Instance().SetEvent(tb.codeStreamReadyEvent);
+	if (tb.codeStreamThread.joinable()) tb.codeStreamThread.join();
+	if (tb.codeStreamTransferFailed.load(std::memory_order_acquire)) tb.codeTruncated = true;
+	if (tb.codeStreamPipe != INVALID_HANDLE_VALUE) {
+		CloseHandle(tb.codeStreamPipe);
+		tb.codeStreamPipe = INVALID_HANDLE_VALUE;
+	}
+	if (tb.codeStreamReadyEvent) {
+		SyscallResolver::Instance().Close(tb.codeStreamReadyEvent);
+		tb.codeStreamReadyEvent = nullptr;
+	}
+}
+
+void VehHandler::FinalizeTraceBasicBlocksCodeStream() {
+	StopBasicTraceCodeStream(false);
 }
 
 void VehHandler::CompleteBasicTraceMemoryWrites() {
@@ -977,6 +1147,8 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		bool collectMemoryReads, uint32_t maxMemoryReads,
 		bool collectEvents, uint32_t maxEvents,
 		bool collectCode, uint32_t maxCodeBytes, uint32_t maxCodeVersions,
+		TraceCodeOutputMode codeOutputMode, uint32_t codeChunkBytes,
+		uint64_t codeStreamToken, HANDLE codeStreamPipe,
 		bool collectMemoryEvents, uint32_t maxMemoryEvents,
 		bool collectRegisterEvents, uint32_t maxRegisterEvents,
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
@@ -987,16 +1159,25 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	if (traceReg_.active.load(std::memory_order_acquire) ||
 		importResolve_.active.load(std::memory_order_acquire) ||
 		traceCalls_.active.load(std::memory_order_acquire) ||
-		traceBasicBlocks_.active.load(std::memory_order_acquire)) return false;
+		traceBasicBlocks_.active.load(std::memory_order_acquire)) {
+		if (codeStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(codeStreamPipe);
+		return false;
+	}
 
 	CONTEXT ctx{};
-	if (!GetStoppedContext(threadId, ctx)) return false;
+	if (!GetStoppedContext(threadId, ctx)) {
+		if (codeStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(codeStreamPipe);
+		return false;
+	}
 #ifdef _WIN64
 	uint64_t ip = ctx.Rip;
 #else
 	uint64_t ip = ctx.Eip;
 #endif
-	if (ip < rangeStart || ip >= rangeEnd || instructions.empty()) return false;
+	if (ip < rangeStart || ip >= rangeEnd || instructions.empty()) {
+		if (codeStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(codeStreamPipe);
+		return false;
+	}
 
 	auto nextPowerOfTwo = [](size_t value) {
 		size_t result = 1;
@@ -1025,6 +1206,10 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.collectCode = collectCode;
 	tb.maxCodeBytes = maxCodeBytes;
 	tb.maxCodeVersions = maxCodeVersions;
+	tb.codeFileOutput = collectCode && codeOutputMode == TraceCodeOutputMode::File;
+	tb.codeChunkBytes = tb.codeFileOutput ? codeChunkBytes : 0;
+	tb.codeStreamToken = tb.codeFileOutput ? codeStreamToken : 0;
+	tb.codeStreamPipe = tb.codeFileOutput ? codeStreamPipe : INVALID_HANDLE_VALUE;
 	tb.collectMemoryEvents = collectMemoryEvents;
 	tb.maxMemoryEvents = maxMemoryEvents;
 	tb.collectRegisterEvents = collectRegisterEvents;
@@ -1062,14 +1247,48 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	if (collectCode) {
 		tb.codeVersionTable.assign(nextPowerOfTwo(static_cast<size_t>(maxCodeVersions) * 2), {});
 		tb.codeVersions.assign(maxCodeVersions, {});
-		tb.codeBytes.assign(maxCodeBytes, 0);
 		// A single captured block cannot exceed the decoded trace range.  Keep the
 		// larger cumulative version budget from needlessly doubling allocation.
 		const size_t maxBlockBytes = static_cast<size_t>(std::min<uint64_t>(
 			maxCodeBytes, rangeEnd - rangeStart));
 		tb.codeScratch.assign(maxBlockBytes, 0);
+		if (tb.codeFileOutput) {
+			tb.codeBytes.clear();
+			tb.codeStreamBufferCount = static_cast<uint32_t>(std::max<size_t>(3,
+				(maxBlockBytes + sizeof(TraceCodeArtifactRecord) + codeChunkBytes - 1) /
+				codeChunkBytes + 2));
+			tb.codeStreamBufferCount = std::min(tb.codeStreamBufferCount,
+				TraceBasicBlocksState::kMaxCodeStreamBuffers);
+			for (uint32_t i = 0; i < TraceBasicBlocksState::kMaxCodeStreamBuffers; ++i) {
+				auto& buffer = tb.codeStreamBuffers[i];
+				buffer.bytes.clear(); buffer.size = 0; buffer.index = 0;
+				buffer.state.store(0, std::memory_order_relaxed);
+				if (i < tb.codeStreamBufferCount) buffer.bytes.assign(codeChunkBytes, 0);
+			}
+			tb.codeStreamProducerIndex = 0;
+			tb.codeStreamNextChunk = 0;
+			tb.codeStreamProducedBytes = 0;
+			tb.codeStreamCommittedBytes = 0;
+			tb.codeStreamAccepting = true;
+			tb.codeStreamProducerDone.store(false, std::memory_order_relaxed);
+			tb.codeStreamTransferFailed.store(false, std::memory_order_relaxed);
+			if (!NT_SUCCESS(SyscallResolver::Instance().CreateEvent(&tb.codeStreamReadyEvent))) {
+				CloseHandle(tb.codeStreamPipe); tb.codeStreamPipe = INVALID_HANDLE_VALUE;
+				return false;
+			}
+			tb.codeStreamBuffers[0].state.store(1, std::memory_order_relaxed);
+			try { tb.codeStreamThread = std::thread(&VehHandler::RunBasicTraceCodeStreamWriter, this); }
+			catch (...) {
+				SyscallResolver::Instance().Close(tb.codeStreamReadyEvent); tb.codeStreamReadyEvent = nullptr;
+				CloseHandle(tb.codeStreamPipe); tb.codeStreamPipe = INVALID_HANDLE_VALUE;
+				return false;
+			}
+		} else {
+			tb.codeBytes.assign(maxCodeBytes, 0);
+		}
 	} else {
 		tb.codeVersionTable.clear(); tb.codeVersions.clear(); tb.codeBytes.clear(); tb.codeScratch.clear();
+		tb.codeFileOutput = false;
 	}
 	tb.blockCount = tb.edgeCount = tb.snapshotCount = tb.exceptionsFollowed = 0;
 	tb.memoryWriteCount = tb.unsupportedMemoryWrites = 0;
@@ -1110,7 +1329,9 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		(collectCondition.clauseCount == 0 || EvaluateBasicTraceCondition(collectCondition, &ctx));
 	if (tb.collectWindowActive) {
 		uint32_t initialSnapshot = CaptureBasicTraceSnapshot(&ctx);
-		if (!RecordBasicTraceBlock(ip, &ctx, initialSnapshot)) return false;
+		if (!RecordBasicTraceBlock(ip, &ctx, initialSnapshot)) {
+			StopBasicTraceCodeStream(true); return false;
+		}
 		uint32_t version = CaptureBasicTraceCodeVersion(ip, 0);
 		RecordBasicTraceEvent(TraceBasicBlockEventType::BlockEntry, 0, 0, 0, ip,
 			TraceBasicBlockEdgeKind::Fallthrough, 0, false, version);
@@ -1119,7 +1340,9 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	// Avoid leaving a generic step flag behind: write TF into the stopped context
 	// directly, then resume it as a normal continue.
 	ctx.EFlags |= 0x100;
-	if (!SetStoppedContext(threadId, ctx)) return false;
+	if (!SetStoppedContext(threadId, ctx)) {
+		StopBasicTraceCodeStream(true); return false;
+	}
 	if (tb.collectWindowActive) {
 		PrepareBasicTraceMemoryWrites(FindBasicTraceInstruction(ip), &ctx);
 		PrepareBasicTraceRegisterEvent(ip, &ctx);

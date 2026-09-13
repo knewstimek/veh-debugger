@@ -43,6 +43,15 @@ def main():
         assert trace.get("schema_version") in {3, 4}, trace
         assert trace.get("blocks") and trace.get("edges"), trace
         assert trace.get("events") and trace.get("memory_events"), trace
+        if os.environ.get("VEH_TEST_EXPECT_FILE_UNSUPPORTED") == "1":
+            file_trace = client.tool("veh_trace_basic_blocks", {
+                "threadId": stop["threadId"], "start": hex(start), "end": hex(start + 0x100),
+                "collect_code": True, "code_output": "file",
+                "max_code_bytes": 400 * 1024 * 1024,
+            }, timeout=15)
+            assert file_trace == {
+                "error": "injected DLL does not support code_output=file",
+            }, file_trace
         print(json.dumps({
             "mcp": os.environ.get("VEH_TEST_BUILD_DIR", os.path.join(ROOT, "build")),
             "target": TARGET,

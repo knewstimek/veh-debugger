@@ -3,8 +3,10 @@
 #include <cstdint>
 #include <functional>
 #include <atomic>
+#include <array>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -190,7 +192,17 @@ public:
 		};
 		struct CodeVersionSlot {
 			TraceBasicBlockCodeVersionEntry entry{};
+			uint64_t secondaryHash = 0;
 			uint8_t occupied = 0;
+		};
+		// A 4 MiB decoded range needs 17 minimum-sized chunks when a record
+		// header crosses the boundary, plus two slots so the writer can advance.
+		static constexpr uint32_t kMaxCodeStreamBuffers = 19;
+		struct CodeStreamBuffer {
+			std::vector<uint8_t> bytes;
+			std::atomic<uint8_t> state{0}; // 0 free, 1 filling, 2 ready, 3 writing
+			uint32_t size = 0;
+			uint64_t index = 0;
 		};
 
 		std::atomic<bool> active{false};
@@ -240,6 +252,21 @@ public:
 		std::vector<TraceBasicBlockCodeVersionEntry> codeVersions;
 		std::vector<uint8_t> codeBytes;
 		std::vector<uint8_t> codeScratch;
+		bool codeFileOutput = false;
+		uint32_t codeChunkBytes = 0;
+		uint64_t codeStreamToken = 0;
+		HANDLE codeStreamPipe = INVALID_HANDLE_VALUE;
+		HANDLE codeStreamReadyEvent = nullptr;
+		std::thread codeStreamThread;
+		std::array<CodeStreamBuffer, kMaxCodeStreamBuffers> codeStreamBuffers;
+		uint32_t codeStreamBufferCount = 0;
+		uint32_t codeStreamProducerIndex = 0;
+		uint64_t codeStreamNextChunk = 0;
+		uint64_t codeStreamProducedBytes = 0;
+		uint64_t codeStreamCommittedBytes = 0;
+		bool codeStreamAccepting = false;
+		std::atomic<bool> codeStreamProducerDone{false};
+		std::atomic<bool> codeStreamTransferFailed{false};
 		uint32_t blockCount = 0;
 		uint32_t edgeCount = 0;
 		uint32_t snapshotCount = 0;
@@ -297,6 +324,8 @@ public:
 		bool collectMemoryReads, uint32_t maxMemoryReads,
 		bool collectEvents, uint32_t maxEvents,
 		bool collectCode, uint32_t maxCodeBytes, uint32_t maxCodeVersions,
+		TraceCodeOutputMode codeOutputMode, uint32_t codeChunkBytes,
+		uint64_t codeStreamToken, HANDLE codeStreamPipe,
 		bool collectMemoryEvents, uint32_t maxMemoryEvents,
 		bool collectRegisterEvents, uint32_t maxRegisterEvents,
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
@@ -305,6 +334,7 @@ public:
 		std::vector<TraceBasicBlocksState::Instruction>&& instructions,
 		std::vector<uint64_t>&& staticBlockStarts);
 	void CancelTraceBasicBlocks(TraceBasicBlockStopReason reason);
+	void FinalizeTraceBasicBlocksCodeStream();
 
 	// TraceRegister: single-step loop inside VEH, no IPC per step
 	struct TraceRegState {
@@ -439,6 +469,10 @@ private:
 		TraceBasicBlockEdgeKind edgeKind = TraceBasicBlockEdgeKind::Fallthrough,
 		uint32_t exceptionCode = 0, bool indirect = false, uint32_t codeVersion = UINT32_MAX);
 	uint32_t CaptureBasicTraceCodeVersion(uint64_t blockStart, uint64_t sequence);
+	bool AppendBasicTraceCodeStream(const void* data, size_t size);
+	bool PublishBasicTraceCodeStreamBuffer();
+	void RunBasicTraceCodeStreamWriter();
+	void StopBasicTraceCodeStream(bool abort);
 	bool EvaluateBasicTraceCondition(const TraceCondition& condition, const CONTEXT* ctx) const;
 
 	// 공통 패턴: 컨텍스트 저장 -> 이벤트 생성 -> 콜백 -> 대기 -> 컨텍스트 복원
