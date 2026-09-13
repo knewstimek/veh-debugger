@@ -1414,7 +1414,7 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		bool collectRegisterEvents, uint32_t maxRegisterEvents,
 		const std::vector<TraceDependencySource>& dependencySources,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
-		const TraceCondition& collectCondition) {
+		const TraceCondition& collectCondition, const TraceOccurrenceWindow& occurrenceWindow) {
 	TraceBasicBlocksResult result;
 	TraceCodeArtifactReceiver codeArtifactReceiver;
 	const bool fileCodeOutput = collectCode && codeOutputMode == TraceCodeOutputMode::File;
@@ -1458,6 +1458,7 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	req.startCondition = startCondition;
 	req.stopCondition = stopCondition;
 	req.collectCondition = collectCondition;
+	req.occurrenceWindow = occurrenceWindow;
 
 	std::vector<uint8_t> data;
 	const bool received = pipeClient_.SendAndReceive(IpcCommand::TraceBasicBlocks, &req, sizeof(req), data,
@@ -1512,6 +1513,13 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		result.normalizedIp = header->normalizedIp;
 		result.normalizedRangeStart = header->normalizedRangeStart;
 		result.normalizedRangeEnd = header->normalizedRangeEnd;
+	}
+	if (headerSize >= kTraceBasicBlocksResponseV6Size) {
+		result.occurrenceSupported = true;
+		result.occurrenceWindow = header->occurrenceWindow;
+		result.occurrenceHits = header->occurrenceHits;
+		result.occurrenceWindowStarted = header->occurrenceWindowStarted != 0;
+		result.occurrenceWindowCompleted = header->occurrenceWindowCompleted != 0;
 	}
 	if (header->status != IpcStatus::Ok) return result;
 

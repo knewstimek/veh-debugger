@@ -104,6 +104,8 @@ trace IPC는 request/header size를 협상하고 legacy schema-v3/v4 및 직전 
 
 큰 VM trace는 `code_output="file"`을 사용하면 된다. DLL의 VEH 경로는 사전 할당된 ring buffer에만 기록하고 별도 writer가 256 KiB~8 MiB의 `code_chunk_bytes`(기본 4 MiB)로 MCP의 one-shot data pipe에 전송한다. MCP는 portable little-endian `.vtc` artifact를 기록하고 경로, 크기, SHA-256, 실제 byte/version/chunk 수만 반환한다. 총 `max_code_bytes`는 최대 400 MiB이며 기존 파일은 덮어쓰지 않는다. `code_output_path`를 생략하면 MCP host의 임시 디렉터리에 고유 파일을 만든다. 예산 또는 backpressure 한도 초과는 집계를 중단하지 않고 `code_truncated=true`, `code_capture.complete=false`로 표시한다. artifact는 64비트 offset을 사용하므로 Windows에서 수집한 x86/x64 결과를 다른 OS의 Analyzer도 읽을 수 있다.
 
+전체 trace JSON 응답이 커지는 경우에는 별도의 `output_file`과 `output_format="json"|"jsonl"`을 지정할 수 있다. 서버가 전체 결과를 새 파일에 기록하고 MCP 응답에는 경로, SHA-256, 크기, 배열별 count, truncation/error만 반환한다. 기존 파일은 덮어쓰지 않으며 direct, `veh_batch`, breakpoint action 모두 같은 의미를 사용한다. `occurrence_window={address,from,to}`는 지정 명령의 N번째 방문 직전부터 M번째 다음 방문 직전까지 entry-to-entry로 수집한다. 이 gate는 `start_condition` 및 `collect_condition`과 AND 결합하며, `to=0`은 상한을 열어 둔다.
+
 `collect_memory_reads=true`는 주소·크기·값을 `max_memory_reads` 한도에서 deduplicate한다. `dependency_sources`에는 최대 32개의 레지스터 이름 또는 `{address,size,label?}` 메모리 범위를 지정할 수 있고, 결과의 edge/read/write/final register에는 conservative origin bitset을 label 배열로 반환한다. 이는 full symbolic taint가 아니라 GPR·flags와 동일 주소/크기의 memory flow만 추적하는 실험 기능이다. REP, 16바이트 초과, FS/GS 및 지원하지 않는 vector flow는 unsupported count로 드러내며, 조건부 수집 공백이 있으면 `dependency_incomplete=true`로 완전성을 보장하지 않음을 알린다.
 
 `start_condition`, `stop_condition`, `collect_condition`은 `r12 == 0x1234`, `[r13-8] != 0`, `rip < 0x140000000 || rip >= 0x150000000` 형태를 지원한다. 비교 연산은 `== != < <= > >=`, 메모리 폭은 `byte/word/dword/qword [reg±offset]`으로 지정할 수 있고 기본값은 포인터 폭이다. 한 조건에서 최대 4개 절을 같은 `&&` 또는 `||`로 연결할 수 있으며 두 논리 연산자의 혼합은 거부한다. 결과의 주소에는 가능한 경우 `image`, `mapped`, `private`, `stack` 및 protection/guard 분류가 붙고, `loop_folds`는 반복 진입 block 후보만 제공하며 dispatcher 의미 판정은 하지 않는다. `exceptions`에는 code, fault RIP/address, continuation, fault/continuation snapshot이 포함된다. 실제로 실행된 SEH handler 주소는 안정적으로 관측되지 않으므로 추측해 반환하지 않는다.
@@ -343,11 +345,11 @@ enabled = true
 | `veh_trace_register` | `threadId, register, mode?, value?, max_steps?` | 레지스터 변화 추적 (DLL 내부 스텝 루프, IPC 오버헤드 0) |
 | `veh_trace_memory` | `address, size?, timeout_ms?` | 메모리 쓰기 추적 (임시 HW BP로 빠르게 감지) |
 | `veh_resolve_imports` | `threadId, addresses, max_steps?, follow_exceptions?, system_only?, target_modules?` | 난독화 import 일괄 해석 (thunk -> DLL 스텝 추적, 최대 2000개) |
-| `veh_batch` | `steps` | 다중 명령 일괄 실행 (`$N`/`$last`/`$prev` 결과 참조, if/loop/for_each 제어 흐름) |
+| `veh_batch` | `steps, inputs?, input_variable?, stop_on_error?` | 다중 명령 일괄 실행 및 동일 세션의 입력별 순차 실행. 결과 참조, 제어 흐름, 입력별 status/count/첫 실패/trace artifact 요약을 반환한다. |
 | `veh_trace_callers` | `address, duration_sec?` | 함수 호출자 프로파일링 (자동 resume -> N초간 caller 수집 -> 자동 pause). 유니크 caller별 히트 카운트 반환. x64: RtlVirtualUnwind (정확). x86: [ESP] (함수 진입점에서만 정확) |
 | `veh_trace_calls` | `addresses, duration_sec?, resolve?, system_only?` | call/jmp 명령이 런타임에 어디로 가는지 모니터링. 콜 사이트에 BP 설치 후 N초간 실행, 실제 타겟 주소 + API 이름 수집. `resolve=true`: thunk/trampoline을 자연스러운 call 컨텍스트에서 따라가 최종 API까지 추적 (예외 기반 난독화 대응). `system_only=true`: 시스템 DLL 타겟만 반환. 패킹된 바이너리의 IAT 복원용. |
 | `veh_trace_basic_blocks` | `threadId, start, end, ..., collect_events?, collect_memory_events?, collect_register_events?, collect_code?, ...` | DLL 내부 bounded trace. versioned aggregate metadata와 선택적 ordered block/code/memory/register occurrence stream 및 block/edge, delta, memory, dependency, region, exception을 반환한다. |
-| `veh_checkpoint_create` | `threadId, regions?` | VEH 정지 스레드의 GPR/flags(x64는 XMM 포함)와 선택 메모리 범위를 세션 로컬 checkpoint로 저장한다. |
+| `veh_checkpoint_create` | `threadId, regions?, capture_teb?, teb_size?` | GPR/flags(x64는 XMM 포함), TEB 및 FS/GS 환경과 선택 메모리를 저장한다. 선택한 TEB bytes는 비교용이며 OS 관리 상태로서 복원하지 않는다. |
 | `veh_checkpoint_restore` | `id` | 동일 스레드가 VEH 정지된 상태에서 context와 선택 메모리를 복원한다. 변경된 매핑은 거부하고 실패 시 메모리 rollback을 시도한다. |
 | `veh_checkpoint_diff` | `id, other_id?` | checkpoint와 현재 상태 또는 다른 checkpoint의 register 및 변경 메모리 구간을 비교한다. |
 | `veh_checkpoint_delete` | `id` | checkpoint를 삭제하고 서버 메모리 예산을 반환한다. |

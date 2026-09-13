@@ -2158,14 +2158,17 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 		TraceBasicBlocksRequest req{};
 		memcpy(&req, payload, std::min<size_t>(payloadSize, sizeof(req)));
-		const bool explicitV6Wire = req.wireVersion >= kTraceBasicBlocksWireVersion &&
+		const bool explicitV7Wire = req.wireVersion >= kTraceBasicBlocksWireVersion &&
+			req.requestSize >= kTraceBasicBlocksRequestV7Size && req.requestSize <= payloadSize;
+		const bool explicitV6Wire = req.wireVersion == 6 &&
 			req.requestSize >= kTraceBasicBlocksRequestV6Size && req.requestSize <= payloadSize;
 		const bool explicitV5Wire = req.wireVersion == kTraceBasicBlocksMinimumExplicitWireVersion &&
 			req.requestSize >= kTraceBasicBlocksRequestV4Size && req.requestSize <= payloadSize;
-		const bool explicitKnownWire = explicitV6Wire || explicitV5Wire;
-		const uint16_t responseHeaderSize = explicitKnownWire ? kTraceBasicBlocksResponseV5Size :
+		const bool explicitKnownWire = explicitV7Wire || explicitV6Wire || explicitV5Wire;
+		const uint16_t responseHeaderSize = explicitV7Wire ? kTraceBasicBlocksResponseV6Size :
+			(explicitKnownWire ? kTraceBasicBlocksResponseV5Size :
 			(payloadSize >= kTraceBasicBlocksRequestV4Size ?
-				kTraceBasicBlocksResponseV4Size : kTraceBasicBlocksResponseV3Size);
+				kTraceBasicBlocksResponseV4Size : kTraceBasicBlocksResponseV3Size));
 		CONTEXT stoppedContext{};
 		const bool stopped = VehHandler::Instance().IsThreadStopped(req.threadId);
 		const bool hasStoppedContext = VehHandler::Instance().GetStoppedContext(req.threadId, stoppedContext);
@@ -2192,6 +2195,8 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				header->normalizedRangeStart = req.rangeStart;
 				header->normalizedRangeEnd = req.rangeEnd;
 			}
+			if (responseHeaderSize >= kTraceBasicBlocksResponseV6Size)
+				header->occurrenceWindow = req.occurrenceWindow;
 			SendResponse(command, response.data(), static_cast<uint32_t>(response.size()));
 		};
 		if ((req.requestSize != 0 && !explicitKnownWire) ||
@@ -2199,12 +2204,13 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			sendTraceFailure(IpcStatus::InvalidArgs, TraceBasicBlocksStartFailure::InvalidArguments, false, 0);
 			return;
 		}
-		if (!explicitV6Wire) {
+		if (!explicitV6Wire && !explicitV7Wire) {
 			req.codeOutputMode = static_cast<uint8_t>(TraceCodeOutputMode::Inline);
 			req.codeChunkBytes = 0;
 			req.codeStreamOwnerPid = 0;
 			req.codeStreamToken = 0;
 		}
+		if (!explicitV7Wire) req.occurrenceWindow = {};
 		if (req.threadId == 0 || req.rangeStart >= req.rangeEnd ||
 			req.rangeEnd - req.rangeStart > 4ULL * 1024 * 1024) {
 			sendTraceFailure(IpcStatus::InvalidArgs, TraceBasicBlocksStartFailure::InvalidArguments, false, 0);
@@ -2238,6 +2244,11 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			(fileCodeOutput && (!req.collectCode || !req.codeStreamOwnerPid || !req.codeStreamToken ||
 				req.codeChunkBytes < kTraceCodeMinChunkBytes || req.codeChunkBytes > kTraceCodeMaxChunkBytes ||
 				req.codeChunkBytes % kTraceCodeChunkAlignment != 0)) ||
+			(req.occurrenceWindow.enabled && (!req.occurrenceWindow.address ||
+				req.occurrenceWindow.from == 0 ||
+				(req.occurrenceWindow.to && req.occurrenceWindow.to < req.occurrenceWindow.from) ||
+				req.occurrenceWindow.address < req.rangeStart ||
+				req.occurrenceWindow.address >= req.rangeEnd)) ||
 			req.dependencySourceCount > kTraceDependencyMaxSources ||
 			req.timeoutMs < 100 || req.timeoutMs > 60000 ||
 			req.stackBytes > kTraceBasicBlockMaxStackBytes) {
@@ -2286,7 +2297,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				req.collectMemoryEvents != 0, req.maxMemoryEvents,
 				req.collectRegisterEvents != 0, req.maxRegisterEvents,
 				req.dependencySources, req.dependencySourceCount,
-				req.startCondition, req.stopCondition, req.collectCondition,
+				req.startCondition, req.stopCondition, req.collectCondition, req.occurrenceWindow,
 				std::move(instructions), std::move(staticBlockStarts))) {
 			TraceBasicBlocksStartFailure reason = TraceBasicBlocksStartFailure::StartRejected;
 			if (!stopped || !hasStoppedContext) reason = TraceBasicBlocksStartFailure::ThreadNotStopped;
@@ -2545,6 +2556,12 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			header->normalizedIp = normalizedIp;
 			header->normalizedRangeStart = req.rangeStart;
 			header->normalizedRangeEnd = req.rangeEnd;
+		}
+		if (responseHeaderSize >= kTraceBasicBlocksResponseV6Size) {
+			header->occurrenceWindow = req.occurrenceWindow;
+			header->occurrenceHits = tb.occurrenceHits;
+			header->occurrenceWindowStarted = tb.occurrenceWindowStarted ? 1 : 0;
+			header->occurrenceWindowCompleted = tb.occurrenceWindowCompleted ? 1 : 0;
 		}
 		if (req.collectCode) header->eventSchemaVersion = 2;
 

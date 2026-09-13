@@ -236,6 +236,11 @@ public:
 		TraceCondition collectCondition{};
 		bool startConditionMet = true;
 		bool collectWindowActive = true;
+		TraceOccurrenceWindow occurrenceWindow{};
+		uint64_t occurrenceHits = 0;
+		bool occurrenceWindowActive = true;
+		bool occurrenceWindowStarted = false;
+		bool occurrenceWindowCompleted = false;
 		uint32_t filteredSteps = 0;
 		std::vector<Instruction> instructions;
 		std::vector<uint64_t> staticBlockStarts;
@@ -330,7 +335,7 @@ public:
 		bool collectRegisterEvents, uint32_t maxRegisterEvents,
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
-		const TraceCondition& collectCondition,
+		const TraceCondition& collectCondition, const TraceOccurrenceWindow& occurrenceWindow,
 		std::vector<TraceBasicBlocksState::Instruction>&& instructions,
 		std::vector<uint64_t>&& staticBlockStarts);
 	void CancelTraceBasicBlocks(TraceBasicBlockStopReason reason);
@@ -473,6 +478,8 @@ private:
 	bool PublishBasicTraceCodeStreamBuffer();
 	void RunBasicTraceCodeStreamWriter();
 	void StopBasicTraceCodeStream(bool abort);
+	bool AdvanceBasicTraceOccurrence(uint64_t address);
+	bool BasicTraceCollectionGate(const CONTEXT* ctx) const;
 	bool EvaluateBasicTraceCondition(const TraceCondition& condition, const CONTEXT* ctx) const;
 
 	// 공통 패턴: 컨텍스트 저장 -> 이벤트 생성 -> 콜백 -> 대기 -> 컨텍스트 복원
