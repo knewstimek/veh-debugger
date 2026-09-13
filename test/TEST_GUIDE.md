@@ -32,6 +32,7 @@ py -3 test/test_mcp_launch.py
 py -3 test/test_mcp_deep.py
 py -3 test/test_mcp_new_features.py
 py -3 test/test_trace_basic_blocks.py
+py -3 test/test_trace_inaccessible_range.py
 py -3 test/test_trace_code_stream_failure.py
 ```
 
