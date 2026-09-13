@@ -1,6 +1,7 @@
 """Integration smoke test for veh_trace_basic_blocks."""
 import json
 import hashlib
+import ctypes
 import os
 import struct
 import subprocess
@@ -17,6 +18,32 @@ BUILD_DIR = os.environ.get("VEH_TEST_BUILD_DIR", os.path.join(ROOT, "build"))
 MCP_EXE = os.path.join(BUILD_DIR, "bin", "Release", "veh-mcp-server.exe")
 TARGET = os.environ.get("VEH_TEST_TARGET",
                         os.path.join(BUILD_DIR, "bin", "Release", "test_target.exe"))
+
+
+class MemoryBasicInformation(ctypes.Structure):
+    _fields_ = [
+        ("BaseAddress", ctypes.c_void_p),
+        ("AllocationBase", ctypes.c_void_p),
+        ("AllocationProtect", ctypes.c_ulong),
+        ("PartitionId", ctypes.c_ushort),
+        ("RegionSize", ctypes.c_size_t),
+        ("State", ctypes.c_ulong),
+        ("Protect", ctypes.c_ulong),
+        ("Type", ctypes.c_ulong),
+    ]
+
+
+def committed_region(pid, address):
+    process = ctypes.windll.kernel32.OpenProcess(0x0400, False, pid)
+    assert process, ctypes.get_last_error()
+    try:
+        mbi = MemoryBasicInformation()
+        size = ctypes.windll.kernel32.VirtualQueryEx(
+            process, ctypes.c_void_p(address), ctypes.byref(mbi), ctypes.sizeof(mbi))
+        assert size == ctypes.sizeof(mbi) and mbi.State == 0x1000, (size, mbi.State)
+        return mbi.BaseAddress, mbi.RegionSize
+    finally:
+        ctypes.windll.kernel32.CloseHandle(process)
 
 
 def read_code_artifact(path):
@@ -1237,16 +1264,30 @@ def main():
         assert client.tool("veh_write_memory", {
             "address": hex(matrix_start), "data": matrix_bytes.hex(" "),
         }).get("success")
+        assert client.tool("veh_set_register", {
+            "threadId": matrix_thread, "name": matrix_ip, "value": hex(matrix_start),
+        }).get("success")
+        matrix_sp = int(matrix_regs["esp" if matrix_ip == "eip" else "rsp"], 0)
+        stack_base, stack_size = committed_region(launch["pid"], matrix_sp)
+        matrix_checkpoint = client.tool("veh_checkpoint_create", {
+            "threadId": matrix_thread,
+            "regions": [{"address": hex(stack_base), "size": stack_size}],
+        })
+        assert matrix_checkpoint.get("id"), matrix_checkpoint
+        stack_region = matrix_checkpoint["regions"][0]
+        assert stack_region["kind"] == "stack", matrix_checkpoint
+        assert int(stack_region["restore_start"], 0) == matrix_sp, matrix_checkpoint
+        assert stack_region["live_prefix_skipped"] == matrix_sp - stack_base, matrix_checkpoint
         matrix_dir = tempfile.mkdtemp(prefix=f"veh-targeted-{os.getpid()}-")
         artifact_dirs.append(matrix_dir)
         matrix = client.tool("veh_targeted_capture", {
             "inputs": [{"name": "first"}, {"name": "second"}],
             "steps": [
-                {"tool": "veh_set_register", "args": {
-                    "threadId": matrix_thread, "name": matrix_accumulator, "value": "0",
+                {"tool": "veh_checkpoint_restore", "args": {
+                    "id": matrix_checkpoint["id"],
                 }},
                 {"tool": "veh_set_register", "args": {
-                    "threadId": matrix_thread, "name": matrix_ip, "value": hex(matrix_start),
+                    "threadId": matrix_thread, "name": matrix_accumulator, "value": "0",
                 }},
             ],
             "trace": {
@@ -1283,6 +1324,9 @@ def main():
             os.remove(path)
         os.rmdir(matrix_dir)
         artifact_dirs.remove(matrix_dir)
+        assert client.tool("veh_checkpoint_delete", {
+            "id": matrix_checkpoint["id"],
+        }).get("deleted") is True
 
         targeted_batch = client.tool("veh_batch", {"steps": [
             {"tool": "veh_set_register", "args": {

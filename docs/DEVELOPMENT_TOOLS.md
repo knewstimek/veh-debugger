@@ -60,7 +60,7 @@ For handler-focused work, `target_window={address,occurrence,before_steps,after_
 
 ## Checkpoint thread environment
 
-`veh_checkpoint_create` always records architecture (`x86`, `wow64`, or `x64`), effective TEB address, FS/GS selectors, and effective segment bases when available. `capture_teb: true` adds 256-1,048,576 bytes (`teb_size`, default 4096) from the effective TEB to checkpoint diff data. TEB bytes and segment bases are OS-managed observations and are deliberately not restored; explicitly requested ordinary memory regions and the supported register context retain the existing restore behavior.
+`veh_checkpoint_create` always records architecture (`x86`, `wow64`, or `x64`), effective TEB address, FS/GS selectors, and effective segment bases when available. `capture_teb: true` adds 256-1,048,576 bytes (`teb_size`, default 4096) from the effective TEB to checkpoint diff data. TEB bytes and segment bases are OS-managed observations and are deliberately not restored. An explicit region in the stopped thread's stack allocation is labeled `stack`; restore copies from the captured SP upward and reports `live_stack_bytes_skipped`, preserving the live VEH exception/wait frames below SP while restoring the logical application stack.
 
 ## Batch input reports
 

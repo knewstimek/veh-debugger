@@ -132,6 +132,7 @@ private:
 		uint64_t regionSize = 0;
 		uint32_t type = 0;
 		uint32_t protection = 0;
+		size_t restoreOffset = 0;
 		bool restorable = true;
 		std::string kind = "memory";
 		std::vector<uint8_t> bytes;
