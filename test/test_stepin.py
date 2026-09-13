@@ -1,204 +1,52 @@
-"""DAP StepIn Test - F11 동작 확인"""
-import subprocess, json, sys, time, os, queue, threading
+"""DAP stepIn integration test with bounded I/O and cleanup."""
+import os
 
-ADAPTER = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-debug-adapter.exe")
-TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
-SOURCE = os.path.join(os.path.dirname(__file__), "..", "test_target", "main.cpp")
-LOG = os.path.join(os.path.dirname(__file__), "stepin-test-adapter.log")
-
-proc = subprocess.Popen(
-    [ADAPTER, f"--log={LOG}", "--log-level=debug"],
-    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-    bufsize=0
-)
-
-seq = [0]
-messages = queue.Queue()
+from dap_test_client import DapClient
 
 
-def _read_messages():
-    """Parse DAP frames on a dedicated blocking reader thread."""
-    while True:
-        line = proc.stdout.readline()
-        if not line:
-            return
-        if not line.lower().startswith(b"content-length:"):
-            continue
-        try:
-            length = int(line.split(b":", 1)[1].strip())
-        except ValueError:
-            continue
-        while True:
-            header = proc.stdout.readline()
-            if not header or header in (b"\r\n", b"\n"):
-                break
-        if not header:
-            return
-        body = proc.stdout.read(length)
-        if len(body) != length:
-            return
-        try:
-            messages.put(json.loads(body))
-        except json.JSONDecodeError:
-            continue
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+ADAPTER = os.path.join(ROOT, "build", "bin", "Release", "veh-debug-adapter.exe")
+TARGET = os.path.join(ROOT, "build", "bin", "Release", "test_target.exe")
+SOURCE = os.path.join(ROOT, "test_target", "main.cpp")
 
 
-threading.Thread(target=_read_messages, daemon=True).start()
-
-def send(cmd, args=None):
-    seq[0] += 1
-    msg = {"seq": seq[0], "type": "request", "command": cmd}
-    if args: msg["arguments"] = args
-    body = json.dumps(msg).encode()
-    header = f"Content-Length: {len(body)}\r\n\r\n".encode()
-    proc.stdin.write(header + body)
-    proc.stdin.flush()
-
-def recv(timeout=5):
+def main():
+    with open(SOURCE, encoding="utf-8") as source:
+        call_line = next(index for index, line in enumerate(source, 1)
+                         if line.strip() == "WorkFunction();")
+    client = DapClient(ADAPTER)
     try:
-        return messages.get(timeout=timeout)
-    except queue.Empty:
-        return None
+        client.initialize()
+        launch_seq = client.send("launch", {"program": TARGET, "stopOnEntry": True})
+        launch = client.wait_for(lambda item: item.get("request_seq") == launch_seq, 15)
+        assert launch.get("success"), launch
+        client.event("initialized", 10)
+        breakpoint = client.request("setBreakpoints", {
+            "source": {"path": SOURCE}, "breakpoints": [{"line": call_line}],
+        })
+        assert breakpoint.get("success") and breakpoint["body"]["breakpoints"][0]["verified"], breakpoint
+        client.request("configurationDone")
+        entry = client.event("stopped", 10)
+        client.request("continue", {"threadId": entry["body"]["threadId"]})
+        hit = client.event("stopped", 15, lambda item: item["body"].get("reason") == "breakpoint")
+        thread_id = hit["body"]["threadId"]
+        frames = []
+        for _ in range(6):
+            response = client.request("stepIn", {"threadId": thread_id})
+            assert response.get("success"), response
+            stopped = client.event("stopped", 15)
+            thread_id = stopped["body"]["threadId"]
+            stack = client.request("stackTrace", {
+                "threadId": thread_id, "startFrame": 0, "levels": 3,
+            })
+            frames = stack["body"]["stackFrames"]
+            if frames and "WorkFunction" in frames[0].get("name", ""):
+                break
+        assert frames and "WorkFunction" in frames[0].get("name", ""), frames
+        print(f"PASS: DAP stepIn entered {frames[0]['name']}")
+    finally:
+        client.close()
 
-def recv_until(predicate, timeout=15):
-    msgs = []
-    start = time.time()
-    while time.time() - start < timeout:
-        msg = recv(timeout=2)
-        if msg is None: continue
-        msgs.append(msg)
-        if predicate(msg):
-            return msg, msgs
-    return None, msgs
 
-print("=== DAP StepIn Test (Launch mode) ===")
-
-# 1. Initialize
-send("initialize", {"adapterID": "veh", "clientID": "test"})
-resp, _ = recv_until(lambda m: m.get("command") == "initialize" and m.get("type") == "response")
-print(f"1. initialize: success={resp['success']}")
-
-# 2. Launch with stopOnEntry
-send("launch", {"program": TARGET, "stopOnEntry": True})
-launch_resp = None
-initialized = False
-for _ in range(15):
-    msg = recv(timeout=3)
-    if msg is None: continue
-    if msg.get("type") == "response" and msg.get("command") == "launch":
-        launch_resp = msg
-    if msg.get("type") == "event" and msg.get("event") == "initialized":
-        initialized = True
-    if launch_resp and initialized:
-        break
-
-if not launch_resp or not launch_resp.get("success"):
-    print(f"FAIL: launch failed: {launch_resp}")
-    proc.kill()
-    sys.exit(1)
-print(f"2. launch: success=True")
-
-# 3. Set breakpoint at the WorkFunction call site. Resolve the source line
-# dynamically so additions to test_target do not silently invalidate the test.
-with open(SOURCE, "r", encoding="utf-8") as source_file:
-    work_call_line = next(
-        index for index, line in enumerate(source_file, 1)
-        if line.strip() == "WorkFunction();"
-    )
-send("setBreakpoints", {
-    "source": {"path": SOURCE},
-    "breakpoints": [{"line": work_call_line}]
-})
-bp_resp, _ = recv_until(lambda m: m.get("command") == "setBreakpoints")
-if bp_resp:
-    bps = bp_resp.get("body", {}).get("breakpoints", [])
-    for bp in bps:
-        print(f"3. BP line {work_call_line}: verified={bp.get('verified')} id={bp.get('id')}")
-
-# 4. ConfigurationDone
-send("configurationDone")
-recv_until(lambda m: m.get("command") == "configurationDone")
-print(f"4. configurationDone")
-
-# Wait for stopped (entry)
-stopped, _ = recv_until(lambda m: m.get("type") == "event" and m.get("event") == "stopped", timeout=5)
-if stopped:
-    print(f"   stopped: reason={stopped['body'].get('reason')}")
-else:
-    print("FAIL: no entry stop")
-    proc.kill()
-    sys.exit(1)
-
-# 5. Continue to BP
-send("continue", {"threadId": stopped["body"]["threadId"]})
-recv_until(lambda m: m.get("command") == "continue")
-bp_hit, _ = recv_until(
-    lambda m: m.get("type") == "event" and m.get("event") == "stopped"
-        and m.get("body",{}).get("reason") == "breakpoint", timeout=10)
-if not bp_hit:
-    print("FAIL: no breakpoint hit")
-    proc.kill()
-    sys.exit(1)
-
-tid = bp_hit["body"]["threadId"]
-print(f"5. BP hit at line {work_call_line}! threadId={tid}")
-
-# 6. Stack before
-send("stackTrace", {"threadId": tid, "startFrame": 0, "levels": 3})
-st, _ = recv_until(lambda m: m.get("command") == "stackTrace")
-if st and st["body"]["stackFrames"]:
-    f = st["body"]["stackFrames"][0]
-    print(f"6. Before: RIP={f.get('instructionPointerReference','?')} line={f.get('line','?')} func={f.get('name','?')}")
-
-# 7. F11 (stepIn) - should step into WorkFunction
-print(f"\n7. === F11 (stepIn) threadId={tid} ===")
-send("stepIn", {"threadId": tid})
-recv_until(lambda m: m.get("command") == "stepIn")
-
-step_stopped, msgs = recv_until(
-    lambda m: m.get("type") == "event" and m.get("event") == "stopped", timeout=10)
-if step_stopped:
-    reason = step_stopped["body"].get("reason")
-    step_tid = step_stopped["body"].get("threadId")
-    print(f"   stopped: reason={reason} threadId={step_tid}")
-
-    send("stackTrace", {"threadId": step_tid, "startFrame": 0, "levels": 3})
-    st2, _ = recv_until(lambda m: m.get("command") == "stackTrace")
-    if st2 and st2["body"]["stackFrames"]:
-        f2 = st2["body"]["stackFrames"][0]
-        func_name = f2.get('name', '?')
-        line = f2.get('line', '?')
-        print(f"   After stepIn: RIP={f2.get('instructionPointerReference','?')} line={line} func={func_name}")
-        if "WorkFunction" in func_name:
-            print(f"   >>> SUCCESS: Stepped INTO WorkFunction")
-        else:
-            print(f"   >>> Stepped to: {func_name}")
-else:
-    print("   FAIL: no stopped event after F11!")
-
-# 8. Do a few more F11 steps inside WorkFunction
-for i in range(5):
-    print(f"\n{i+8}. === F11 #{i+2} ===")
-    send("stepIn", {"threadId": tid})
-    recv_until(lambda m: m.get("command") == "stepIn")
-    sn, _ = recv_until(lambda m: m.get("type") == "event" and m.get("event") == "stopped", timeout=10)
-    if sn:
-        send("stackTrace", {"threadId": sn["body"].get("threadId", tid), "startFrame": 0, "levels": 1})
-        stn, _ = recv_until(lambda m: m.get("command") == "stackTrace")
-        if stn and stn["body"]["stackFrames"]:
-            fn = stn["body"]["stackFrames"][0]
-            print(f"   RIP={fn.get('instructionPointerReference','?')} line={fn.get('line','?')} func={fn.get('name','?')} reason={sn['body'].get('reason','?')}")
-    else:
-        print(f"   FAIL: no stopped after stepIn #{i+2}")
-        break
-
-# Cleanup
-print("\nCleaning up...")
-send("disconnect", {"terminateDebuggee": True})
-recv_until(lambda m: m.get("command") == "disconnect", timeout=5)
-try:
-    proc.wait(timeout=5)
-except subprocess.TimeoutExpired:
-    proc.kill()
-    proc.wait(timeout=3)
-print("\n=== StepIn Test Complete ===")
+if __name__ == "__main__":
+    main()

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.1.16 - 2026-09-14
+
 ### Added
 - **File-backed full trace export and reusable validation tools** -- `veh_trace_basic_blocks` can write complete JSON or streaming-friendly JSONL results to a new MCP-host file and return compact path/SHA-256/size/count/truncation metadata with direct, `veh_batch`, and breakpoint-action parity. Reusable bounded MCP scenario, trace validator, parity, and mixed-IPC runners are cataloged in `docs/DEVELOPMENT_TOOLS.md`.
 - **Occurrence-scoped trace collection** -- an optional one-based dispatcher/instruction visit window collects entry-to-entry cycles in the shared ordered event space, composes explicitly with trace conditions, and reports observed visits plus started/completed state.
@@ -18,6 +20,7 @@
 - **Tracked and repeatable release procedure** -- release policy now lives in `RELEASING.md`, with a validation/packaging helper that synchronizes x64/x86 artifacts without committing or publishing. Stale v1.0.4 test guidance, the packaged README's outdated MCP count and duplicate trace entry, obsolete DLL logging/test-count documentation, and generated-artifact ignore rules were refreshed; the completed dated trace proposal was reduced to its durable debugger/analyzer design boundary in `OVERVIEW.md`.
 
 ### Fixed
+- **Release packages exclude local logs** -- VSIX packaging now ignores `*.log`, preventing local Marketplace/build diagnostics from being included in published extension archives.
 - **Immediate recovery after a broken control pipe** -- the injected server now distinguishes real pipe disconnection from an idle read timeout, allowing a new MCP process to reconnect immediately after the previous MCP exits during a trace instead of waiting for the 30-second heartbeat cleanup.
 - **Mixed-version trace IPC startup and opaque rejection errors** -- `veh_trace_basic_blocks` now negotiates request/header sizes, accepts schema-v3/v4 wire layouts, and emits the response header layout expected by the caller, so a running older MCP server can trace a target injected with the newer DLL and vice versa. Current startup failures include a structured status and reason plus the stopped-state decision, normalized IP/range, decode success, and decoded-instruction count instead of collapsing every rejection into a RIP message.
 - **Pre-decrement stack writes in memory traces** -- x86/x64 `push`-family instructions now capture the actual post-decrement stack destination and its before/after values instead of reading the unchanged old-SP address. Ordered push writes and the matching pop reads therefore agree on address and value.

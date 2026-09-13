@@ -1,50 +1,24 @@
 """Test veh_batch tool - sequential execution, variable refs, control flow."""
-import subprocess, json, time, sys, os
+import time, sys, os
+
+from mcp_test_client import McpClient as SharedMcpClient
 
 MCP_EXE = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe")
 TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
 
 class McpClient:
     def __init__(self):
-        self.proc = subprocess.Popen([MCP_EXE], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.seq = 0
-        self.send("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
-                                  "clientInfo": {"name": "batch-test", "version": "1.0"}})
-        assert self.recv() is not None
-
-    def send(self, method, params=None):
-        self.seq += 1
-        msg = {"jsonrpc": "2.0", "id": self.seq, "method": method}
-        if params: msg["params"] = params
-        self.proc.stdin.write((json.dumps(msg) + "\n").encode()); self.proc.stdin.flush()
-
-    def recv(self, timeout=15):
-        start = time.time()
-        while time.time() - start < timeout:
-            line = self.proc.stdout.readline()
-            if line:
-                line = line.decode().strip()
-                if line:
-                    try: return json.loads(line)
-                    except: continue
-        return None
+        self.client = SharedMcpClient(MCP_EXE)
+        self.client.initialize("batch-test")
 
     def call_tool(self, name, args=None):
-        self.send("tools/call", {"name": name, "arguments": args or {}})
-        return self.recv()
+        return self.client.tool(name, args or {})
 
     def parse(self, resp):
-        if not resp: return {"error": "timeout"}
-        content = resp.get("result", {}).get("content", [{}])
-        text = content[0].get("text", "") if content else ""
-        try: return json.loads(text) if text else {}
-        except: return {"raw": text}
+        return resp
 
     def close(self):
-        try: self.proc.stdin.close()
-        except: pass
-        try: self.proc.terminate(); self.proc.wait(timeout=3)
-        except: self.proc.kill()
+        self.client.close()
 
 
 passed = 0
@@ -62,8 +36,7 @@ def test(name, fn):
         import traceback; traceback.print_exc()
 
 
-def run_all():
-    client = McpClient()
+def run_with_client(client):
     r = client.parse(client.call_tool("veh_launch", {"program": TARGET, "stopOnEntry": True}))
     assert r.get("success"), f"Launch: {r}"
     pid = r["pid"]
@@ -184,9 +157,14 @@ def run_all():
 
     test("Error handling", test_error_handling)
 
-    # Cleanup
-    client.call_tool("veh_detach")
-    client.close()
+
+
+def run_all():
+    client = McpClient()
+    try:
+        run_with_client(client)
+    finally:
+        client.close()
 
 
 if __name__ == "__main__":

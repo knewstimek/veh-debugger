@@ -18,7 +18,10 @@ Windows debugger based on **VEH (Vectored Exception Handler)** instead of the Wi
 - **4 injection methods** — CreateRemoteThread, NtCreateThreadEx, Thread Hijack, QueueUserAPC
 - **TCP remote mode** — Debug across VMs or network
 - **MCP tool server** — 44 tools for AI agent integration (Claude, Cursor, Codex, etc.)
-- **Bounded semantic tracing** — Aggregate blocks/edges, register deltas, hot/loop summaries, indirect targets, memory observations, dependencies, conditions, handled exceptions, and optional versioned ordered block-transition events without per-instruction MCP traffic
+- **Bounded semantic tracing** — Aggregate blocks/edges plus optional ordered block, memory-access, register-delta, and runtime-code events in one sequence space without per-instruction MCP traffic
+- **Large trace artifacts** — Stream up to 400 MiB of runtime code to portable `.vtc` files or export complete trace results as JSON/JSONL with compact path, hash, count, and truncation metadata
+- **Occurrence-scoped capture** — Collect selected dispatcher/instruction visits and combine them explicitly with start, stop, and collection conditions
+- **Repeatable analysis sessions** — Capture bounded thread checkpoints including TEB and FS/GS metadata, and run input matrices through `veh_batch` with per-input failure and artifact summaries
 
 ## Quick Start
 
@@ -75,6 +78,12 @@ This is equivalent to Cheat Engine's "Find out what writes to this address" / "F
 ## MCP Tool Server (AI Integration)
 
 The bundled `veh-mcp-server.exe` exposes 44 debugging tools via the Model Context Protocol, allowing AI agents to directly control the debugger.
+
+`veh_trace_basic_blocks` supports x86/x64 ordered memory and register provenance,
+self-modifying code versions, dispatcher occurrence windows, and file-backed
+JSON/JSONL or `.vtc` artifacts. Direct calls, `veh_batch`, and breakpoint actions
+share the same trace semantics. File formats use portable integer layouts, while
+the debugger and capture transport remain Windows-hosted.
 
 ```bash
 # Auto-install to all supported agents

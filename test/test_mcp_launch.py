@@ -18,11 +18,16 @@ import time
 import sys
 import os
 import tempfile
+import queue
+import threading
+from collections import deque
 
 MCP_EXE = os.environ.get("VEH_MCP_EXE", os.path.join(
     os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe"))
 TARGET = os.environ.get("VEH_TEST_TARGET", os.path.join(
     os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe"))
+
+ACTIVE_CLIENTS = set()
 
 class McpClient:
     def __init__(self):
@@ -33,6 +38,27 @@ class McpClient:
             stderr=subprocess.PIPE,
         )
         self.seq = 0
+        self.messages = queue.Queue()
+        self.stderr = deque(maxlen=200)
+        self.reader = threading.Thread(target=self._read_stdout, daemon=True)
+        self.stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
+        self.reader.start()
+        self.stderr_reader.start()
+        ACTIVE_CLIENTS.add(self)
+
+    def _read_stdout(self):
+        try:
+            for line in self.proc.stdout:
+                try:
+                    self.messages.put(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        finally:
+            self.messages.put(None)
+
+    def _read_stderr(self):
+        for line in self.proc.stderr:
+            self.stderr.append(line.decode(errors="replace").rstrip())
 
     def send(self, method, params=None):
         self.seq += 1
@@ -46,18 +72,11 @@ class McpClient:
 
     def recv(self, timeout=10):
         """Read one JSON-RPC response line."""
-        import select
-        start = time.time()
-        while time.time() - start < timeout:
-            line = self.proc.stdout.readline()
-            if line:
-                line = line.decode().strip()
-                if line:
-                    try:
-                        return json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-        return None
+        try:
+            message = self.messages.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        return message
 
     def call_tool(self, name, args=None):
         request_id = self.send("tools/call", {"name": name, "arguments": args or {}})
@@ -68,14 +87,21 @@ class McpClient:
 
     def close(self):
         try:
-            self.proc.stdin.close()
-        except:
-            pass
-        try:
-            self.proc.terminate()
-            self.proc.wait(timeout=3)
-        except:
-            self.proc.kill()
+            if self.proc.poll() is None:
+                try:
+                    self.call_tool("veh_terminate")
+                except Exception:
+                    pass
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.proc.kill()
+                    self.proc.wait(timeout=5)
+        finally:
+            ACTIVE_CLIENTS.discard(self)
+            self.reader.join(timeout=1)
+            self.stderr_reader.join(timeout=1)
 
 
 def check_process_alive(pid):
@@ -160,8 +186,8 @@ def test_stop_on_entry_false():
     print(f"  Process alive after 2s: {alive}")
 
     # Detach
-    resp = client.call_tool("veh_detach")
-    print(f"  Detach: {resp}")
+    resp = client.call_tool("veh_terminate")
+    print(f"  Terminate: {resp}")
 
     terminate_process(pid)
 
@@ -217,8 +243,8 @@ def test_stop_on_entry_true():
     time.sleep(2)
 
     # Detach
-    resp = client.call_tool("veh_detach")
-    print(f"  Detach: {resp}")
+    resp = client.call_tool("veh_terminate")
+    print(f"  Terminate: {resp}")
 
     terminate_process(pid)
 
@@ -606,6 +632,9 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"  FAILED: {e}\n")
             failed += 1
+        finally:
+            for active in list(ACTIVE_CLIENTS):
+                active.close()
 
     print(f"\nResults: {passed} passed, {failed} failed")
     sys.exit(1 if failed > 0 else 0)

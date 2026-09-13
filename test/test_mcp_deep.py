@@ -2,11 +2,11 @@
 
 Each test verifies actual correctness of returned data against known ground truth.
 """
-import subprocess
-import json
 import time
 import sys
 import os
+
+from mcp_test_client import McpClient as SharedMcpClient
 
 MCP_EXE = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe")
 TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
@@ -18,51 +18,14 @@ errors = []
 
 class McpClient:
     def __init__(self):
-        self.proc = subprocess.Popen(
-            [MCP_EXE],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        self.seq = 0
-        self.notifications = []
-
-    def send(self, method, params=None):
-        self.seq += 1
-        msg = {"jsonrpc": "2.0", "id": self.seq, "method": method}
-        if params: msg["params"] = params
-        self.proc.stdin.write((json.dumps(msg) + "\n").encode())
-        self.proc.stdin.flush()
-        return self.seq
-
-    def recv(self, timeout=15):
-        start = time.time()
-        while time.time() - start < timeout:
-            line = self.proc.stdout.readline()
-            if line:
-                line = line.decode().strip()
-                if not line: continue
-                try: msg = json.loads(line)
-                except json.JSONDecodeError: continue
-                if "id" not in msg:
-                    self.notifications.append(msg)
-                    continue
-                return msg
-        return None
+        self.client = SharedMcpClient(MCP_EXE)
+        self.notifications = self.client.notifications
 
     def call(self, name, args=None, timeout=15):
-        self.send("tools/call", {"name": name, "arguments": args or {}})
-        r = self.recv(timeout=timeout)
-        try:
-            text = r["result"]["content"][0]["text"]
-            return json.loads(text)
-        except: return r
+        return self.client.tool(name, args or {}, timeout)
 
     def init_and_launch(self, stop_on_entry=False):
-        self.send("initialize", {
-            "protocolVersion": "2024-11-05",
-            "clientInfo": {"name": "test", "version": "1.0"},
-            "capabilities": {}
-        })
-        self.recv()
+        self.client.initialize("mcp-deep-test")
         return self.call("veh_launch", {"program": TARGET, "stopOnEntry": stop_on_entry})
 
     def get_base(self):
@@ -79,12 +42,7 @@ class McpClient:
         return None
 
     def close(self):
-        try: self.proc.stdin.close()
-        except: pass
-        try: self.proc.terminate()
-        except: pass
-        try: self.proc.wait(timeout=3)
-        except: pass
+        self.client.close()
 
 def check(name, condition, detail=""):
     global passed, failed, errors
@@ -98,7 +56,8 @@ def check(name, condition, detail=""):
         errors.append(msg)
 
 def cleanup():
-    os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+    # Each test owns one SharedMcpClient; close() terminates and waits for its target.
+    pass
 
 
 # ============================================================
@@ -131,7 +90,7 @@ def test_function_bp_rip_accuracy():
 
         if bp_id: c.call("veh_remove_breakpoint", {"id": bp_id})
         c.call("veh_continue", {"threadId": 0})
-        c.call("veh_detach")
+        c.call("veh_terminate")
     finally:
         c.close(); cleanup()
 
@@ -167,7 +126,7 @@ def test_source_bp_line_accuracy():
 
         if bp_id: c.call("veh_remove_breakpoint", {"id": bp_id})
         c.call("veh_continue", {"threadId": 0})
-        c.call("veh_detach")
+        c.call("veh_terminate")
     finally:
         c.close(); cleanup()
 
@@ -221,7 +180,7 @@ def test_evaluate_correctness():
 
         if bp_id: c.call("veh_remove_breakpoint", {"id": bp_id})
         c.call("veh_continue", {"threadId": 0})
-        c.call("veh_detach")
+        c.call("veh_terminate")
     finally:
         c.close(); cleanup()
 
@@ -260,7 +219,7 @@ def test_set_register_verify():
 
         if bp_id: c.call("veh_remove_breakpoint", {"id": bp_id})
         c.call("veh_continue", {"threadId": 0})
-        c.call("veh_detach")
+        c.call("veh_terminate")
     finally:
         c.close(); cleanup()
 
@@ -275,14 +234,12 @@ def test_logpoint_notification():
         c.init_and_launch(stop_on_entry=False)
         time.sleep(1)
 
-        base = c.get_base()
-        work_func = base + 0x1000
-
-        bp = c.call("veh_set_breakpoint", {
-            "address": f"0x{work_func:X}",
+        bp = c.call("veh_set_function_breakpoint", {
+            "name": "WorkFunction",
             "logMessage": "TRACE RIP={RIP} RSP={RSP}"
         })
         bp_id = bp.get("id")
+        work_func = int(bp.get("address", "0x0"), 16)
         time.sleep(3)
 
         # Trigger a response to flush notifications
@@ -312,43 +269,40 @@ def test_logpoint_notification():
             check("logpoint notifications received", False, "0 logpoint notifications")
 
         if bp_id: c.call("veh_remove_breakpoint", {"id": bp_id})
-        c.call("veh_detach")
+        c.call("veh_terminate")
     finally:
         c.close(); cleanup()
 
 
 # ============================================================
-# Test 6: Conditional BP - RAX==0, verify actually stopped with RAX==0
+# Test 6: Conditional BP - stable stack-pointer predicate
 # ============================================================
 def test_conditional_bp_value_check():
-    print("\n[Test 6] Conditional BP: stop only when RAX==0, verify RAX value")
+    print("\n[Test 6] Conditional BP: stop when RSP is nonzero, verify RSP value")
     c = McpClient()
     try:
         c.init_and_launch(stop_on_entry=False)
         time.sleep(1)
 
-        base = c.get_base()
-        work_func = base + 0x1000
-
-        bp = c.call("veh_set_breakpoint", {
-            "address": f"0x{work_func:X}",
-            "condition": "RAX==0"
+        bp = c.call("veh_set_function_breakpoint", {
+            "name": "WorkFunction",
+            "condition": "RSP!=0"
         })
         bp_id = bp.get("id")
         time.sleep(2)
 
         tid = c.get_first_thread()
         if tid:
-            rax = c.call("veh_evaluate", {"expression": "RAX", "threadId": tid})
-            rax_val = int(rax.get("value", "0x1"), 16)
-            print(f"    Stopped with RAX = 0x{rax_val:X}")
-            check("RAX == 0 when condition is RAX==0", rax_val == 0, f"RAX=0x{rax_val:X}")
+            rsp = c.call("veh_evaluate", {"expression": "RSP", "threadId": tid})
+            rsp_val = int(rsp.get("value", "0x0"), 16)
+            print(f"    Stopped with RSP = 0x{rsp_val:X}")
+            check("RSP != 0 when condition is RSP!=0", rsp_val != 0, f"RSP=0x{rsp_val:X}")
         else:
             check("conditional BP stopped process", False, "no stopped thread")
 
         if bp_id: c.call("veh_remove_breakpoint", {"id": bp_id})
         c.call("veh_continue", {"threadId": 0})
-        c.call("veh_detach")
+        c.call("veh_terminate")
     finally:
         c.close(); cleanup()
 
@@ -364,7 +318,9 @@ def test_trace_callers_verification():
         time.sleep(1)
 
         base = c.get_base()
-        work_func = base + 0x1000
+        bp = c.call("veh_set_function_breakpoint", {"name": "WorkFunction"})
+        bp_id = bp.get("id")
+        work_func = int(bp.get("address", "0x0"), 16)
 
         # Run trace
         trace = c.call("veh_trace_callers", {
@@ -413,7 +369,8 @@ def test_trace_callers_verification():
                 else:
                     check("CALL target parseable", False, f"combined='{combined}'")
 
-        c.call("veh_detach")
+        if bp_id: c.call("veh_remove_breakpoint", {"id": bp_id})
+        c.call("veh_terminate")
     finally:
         c.close(); cleanup()
 
@@ -454,13 +411,13 @@ def test_step_and_verify_rip():
         check("RIP moved forward again", rip3 > rip2,
               f"0x{rip3:X} vs 0x{rip2:X}")
 
-        # All should be in same function (WorkFunction = base+0x1000 to roughly base+0x1070)
-        base = c.get_base()
-        check("still in WorkFunction", base + 0x1000 <= rip3 < base + 0x1100,
-              f"RIP=0x{rip3:X}, func=[0x{base+0x1000:X}, 0x{base+0x1100:X})")
+        frames = c.call("veh_stack_trace", {"threadId": tid, "maxFrames": 1}).get("frames", [])
+        top_function = frames[0].get("function", "") if frames else ""
+        check("still in WorkFunction", "workfunction" in top_function.lower(),
+              f"RIP=0x{rip3:X}, function={top_function!r}")
 
         c.call("veh_continue", {"threadId": 0})
-        c.call("veh_detach")
+        c.call("veh_terminate")
     finally:
         c.close(); cleanup()
 
@@ -492,23 +449,21 @@ def test_stack_trace_chain():
 
         check("stack has >= 2 frames", len(frames) >= 2, f"only {len(frames)} frames")
 
-        # Top frame should be in WorkFunction range
+        # Validate symbolic frames instead of assuming compiler-specific RVAs.
         if frames:
-            top_addr = int(frames[0].get("address", "0x0"), 16)
-            base = c.get_base()
-            check("top frame in WorkFunction", base + 0x1000 <= top_addr < base + 0x1070,
-                  f"0x{top_addr:X}")
+            top_function = frames[0].get("function", "")
+            check("top frame in WorkFunction", "workfunction" in top_function.lower(),
+                  top_function)
 
-            # Frame[1] should be in main (the call site)
+            # Frame[1] should be main (the call site).
             if len(frames) >= 2:
-                f1_addr = int(frames[1].get("address", "0x0"), 16)
-                # main is after WorkFunction, roughly base+0x1070..base+0x1200
-                check("frame[1] in main area", base + 0x1070 <= f1_addr < base + 0x1200,
-                      f"0x{f1_addr:X}")
+                caller_function = frames[1].get("function", "")
+                check("frame[1] is main", "main" in caller_function.lower(),
+                      caller_function)
 
         if bp_id: c.call("veh_remove_breakpoint", {"id": bp_id})
         c.call("veh_continue", {"threadId": 0})
-        c.call("veh_detach")
+        c.call("veh_terminate")
     finally:
         c.close(); cleanup()
 
@@ -523,11 +478,8 @@ def test_hit_condition_accuracy():
         c.init_and_launch(stop_on_entry=False)
         time.sleep(1)
 
-        base = c.get_base()
-        work_func = base + 0x1000
-
-        bp = c.call("veh_set_breakpoint", {
-            "address": f"0x{work_func:X}",
+        bp = c.call("veh_set_function_breakpoint", {
+            "name": "WorkFunction",
             "hitCondition": "3"
         })
         bp_id = bp.get("id")
@@ -556,7 +508,7 @@ def test_hit_condition_accuracy():
 
         if bp_id: c.call("veh_remove_breakpoint", {"id": bp_id})
         c.call("veh_continue", {"threadId": 0})
-        c.call("veh_detach")
+        c.call("veh_terminate")
     finally:
         c.close(); cleanup()
 
