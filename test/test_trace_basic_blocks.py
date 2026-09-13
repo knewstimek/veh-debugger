@@ -698,6 +698,66 @@ def main():
                        for event in smc_trace["events"]]
         assert occurrences == [(0, 0), (2, 1), (4, 1)], smc_trace
 
+        # A self-modified direct branch can enter the middle of a statically
+        # decoded block. The aggregate CFG retains that synthetic block start,
+        # but code completeness must cover the concrete executed destination
+        # rather than spending its budget on the unexecuted prefix.
+        mid_entry = client.tool("veh_allocate_memory", {"size": 4096, "protection": "rwx"})
+        assert mid_entry.get("success"), mid_entry
+        mid_start = int(mid_entry["address"], 0)
+        mid_target_offset = 270
+        static_target_offset = 280
+        new_relative = mid_target_offset - 15
+        old_relative = static_target_offset - 15
+        if is_32bit:
+            patch_branch = (bytes.fromhex("c7 05") +
+                            (mid_start + 11).to_bytes(4, "little") +
+                            new_relative.to_bytes(4, "little"))
+        else:
+            patch_branch = (bytes.fromhex("c7 05 01 00 00 00") +
+                            new_relative.to_bytes(4, "little"))
+        mid_code = (patch_branch + bytes.fromhex("e9") +
+                    old_relative.to_bytes(4, "little") +
+                    b"\x90" * (static_target_offset - 15) + bytes.fromhex("eb fe"))
+        assert len(mid_code) == static_target_offset + 2, len(mid_code)
+
+        def run_mid_entry_trace(**extra):
+            assert client.tool("veh_write_memory", {
+                "address": hex(mid_start), "data": mid_code.hex(" "),
+            }).get("success")
+            assert client.tool("veh_set_register", {
+                "threadId": checkpoint_thread, "name": ip_name, "value": hex(mid_start),
+            }).get("success")
+            args = {
+                "threadId": checkpoint_thread, "start": hex(mid_start),
+                "end": hex(mid_start + len(mid_code)), "max_steps": 14,
+                "timeout_ms": 5000, "stack_bytes": 0, "collect_code": True,
+                "max_code_bytes": 32, "max_code_versions": 8, "max_events": 32,
+            }
+            args.update(extra)
+            return client.tool("veh_trace_basic_blocks", args, timeout=15)
+
+        mid_trace = run_mid_entry_trace()
+        assert mid_trace["code_truncated"] is False, mid_trace
+        assert mid_trace["code_capture"]["complete"] is True, mid_trace
+        assert any(block["hits"] == 0 for block in mid_trace["blocks"]), mid_trace
+        mid_edge = next(event for event in mid_trace["events"]
+                        if int(event.get("source_instruction", "0"), 0) == mid_start + 10)
+        mid_version = next(version for version in mid_trace["code_versions"]
+                           if version["id"] == mid_edge["code_version"])
+        assert int(mid_edge["target"], 0) == mid_start + 15, mid_trace
+        assert int(mid_version["block"], 0) == mid_start + mid_target_offset, mid_trace
+
+        mid_artifact_path = artifact_path("mid-entry")
+        mid_file_trace = run_mid_entry_trace(
+            code_output="file", code_output_path=mid_artifact_path,
+            code_chunk_bytes=256 * 1024)
+        assert mid_file_trace["code_truncated"] is False, mid_file_trace
+        assert mid_file_trace["code_capture"]["complete"] is True, mid_file_trace
+        mid_artifact = read_code_artifact(mid_artifact_path)
+        assert any(record["block"] == mid_start + mid_target_offset
+                   for record in mid_artifact["records"]), mid_artifact
+
         # Dispatcher occurrence windows are entry-to-entry and AND-compose with
         # the existing start/collect conditions. The fourth visit closes [2,3]
         # before its instruction executes, so only two loop cycles are exported.
@@ -925,6 +985,7 @@ def main():
             "threadId": checkpoint_thread, "name": ip_name, "value": saved[ip_name],
         }).get("success")
         assert client.tool("veh_free_memory", {"address": hex(smc_start)}).get("success")
+        assert client.tool("veh_free_memory", {"address": hex(mid_start)}).get("success")
         assert client.tool("veh_free_memory", {"address": hex(large_start)}).get("success")
 
         terminated = client.tool("veh_terminate")

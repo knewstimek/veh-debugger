@@ -1506,7 +1506,11 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 			FinishBasicTrace(TraceBasicBlockStopReason::MaxEdges, addr, true);
 			return BasicTraceStepResult::Stop;
 		}
-		uint32_t version = inRange ? CaptureBasicTraceCodeVersion(targetBlock, tb.stepsExecuted) : UINT32_MAX;
+		// The aggregate CFG target may be normalized to a static block start that
+		// was never executed (for example after self-modifying a direct branch).
+		// Capture from the concrete destination so completeness describes executed
+		// instruction bytes and the ordered edge points at their containing version.
+		uint32_t version = inRange ? CaptureBasicTraceCodeVersion(addr, tb.stepsExecuted) : UINT32_MAX;
 		RecordBasicTraceEvent(TraceBasicBlockEventType::Edge, tb.stepsExecuted,
 			tb.currentBlock, tb.previousInstruction, targetBlock, kind, 0,
 			previous && previous->indirect != 0, version);

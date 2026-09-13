@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- **Runtime-code completeness ignores unexecuted synthetic prefixes** -- ordered edge code versions are now captured from the concrete executed destination instead of a CFG-normalized aggregate block start. Self-modifying branches that enter the middle of a statically decoded block retain their zero-hit placeholder for CFG reporting without spending code budget on its unexecuted prefix or falsely marking otherwise complete inline/file captures as truncated.
+
 ## 1.1.16 - 2026-09-14
 
 ### Added
