@@ -551,6 +551,7 @@ struct TraceDependencySource {
 	uint8_t reserved[6];
 };
 static constexpr uint8_t kTraceDependencyMaxSources = 32;
+static constexpr uint32_t kTraceBasicBlockMaxCodeBytes = 16U * 1024 * 1024;
 
 struct TraceBasicBlocksRequest {
 	uint32_t threadId;       // thread currently stopped in VEH

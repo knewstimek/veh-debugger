@@ -1063,7 +1063,11 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		tb.codeVersionTable.assign(nextPowerOfTwo(static_cast<size_t>(maxCodeVersions) * 2), {});
 		tb.codeVersions.assign(maxCodeVersions, {});
 		tb.codeBytes.assign(maxCodeBytes, 0);
-		tb.codeScratch.assign(maxCodeBytes, 0);
+		// A single captured block cannot exceed the decoded trace range.  Keep the
+		// larger cumulative version budget from needlessly doubling allocation.
+		const size_t maxBlockBytes = static_cast<size_t>(std::min<uint64_t>(
+			maxCodeBytes, rangeEnd - rangeStart));
+		tb.codeScratch.assign(maxBlockBytes, 0);
 	} else {
 		tb.codeVersionTable.clear(); tb.codeVersions.clear(); tb.codeBytes.clear(); tb.codeScratch.clear();
 	}

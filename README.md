@@ -100,7 +100,7 @@ trace IPC는 request/header size를 협상하고 직전 schema-v3/v4 wire layout
 
 `collect_register_events=true`도 ordered block event를 함께 활성화하고 수집 구간에서 정상 완료된 모든 instruction occurrence를 `register_events`에 보존한다. 각 항목은 동일한 sequence, OS thread ID, instruction address와 변경된 GPR/SP/EFLAGS의 before/after를 포함하며, 변화가 없는 명령도 빈 `changes` event로 실행 occurrence를 남긴다. faulting instruction은 완료된 delta로 추측하지 않고 exception stream이 담당한다. 독립된 `max_register_events`를 넘으면 `register_events_truncated`, 정확한 `register_events_dropped`, `register_ordering.complete=false`로 손실 범위를 명시한다.
 
-`collect_code=true`는 ordered event 수집도 활성화하고 실행 시점 block bytes를 unique `(block, version)`으로 보존한다. event-schema-v2의 `code_version`이 `code_versions` 항목과 연결되므로 self-modifying code도 어느 sequence에서 어느 bytes가 실행됐는지 구분할 수 있다. `max_code_bytes`와 `max_code_versions`는 독립된 총량 제한이며 초과 시 집계는 계속하고 `code_truncated=true`, `code_capture.complete=false`를 반환한다.
+`collect_code=true`는 ordered event 수집도 활성화하고 실행 시점 block bytes를 unique `(block, version)`으로 보존한다. event-schema-v2의 `code_version`이 `code_versions` 항목과 연결되므로 self-modifying code도 어느 sequence에서 어느 bytes가 실행됐는지 구분할 수 있다. `max_code_bytes`(최대 16 MiB)와 `max_code_versions`는 독립된 총량 제한이며 초과 시 집계는 계속하고 `code_truncated=true`, `code_capture.complete=false`를 반환한다. 기본 byte budget은 기존과 같은 256 KiB이므로 큰 VM trace에만 명시적으로 확대하면 된다.
 
 `collect_memory_reads=true`는 주소·크기·값을 `max_memory_reads` 한도에서 deduplicate한다. `dependency_sources`에는 최대 32개의 레지스터 이름 또는 `{address,size,label?}` 메모리 범위를 지정할 수 있고, 결과의 edge/read/write/final register에는 conservative origin bitset을 label 배열로 반환한다. 이는 full symbolic taint가 아니라 GPR·flags와 동일 주소/크기의 memory flow만 추적하는 실험 기능이다. REP, 16바이트 초과, FS/GS 및 지원하지 않는 vector flow는 unsupported count로 드러내며, 조건부 수집 공백이 있으면 `dependency_incomplete=true`로 완전성을 보장하지 않음을 알린다.
 

@@ -257,7 +257,8 @@ def main():
                 "collect_memory_events": True, "max_memory_events": 256,
                 "collect_register_events": True, "max_register_events": 256,
                 "collect_events": True, "max_events": 256,
-                "collect_code": True, "max_code_bytes": 4096, "max_code_versions": 256,
+                "collect_code": True, "max_code_bytes": 16 * 1024 * 1024,
+                "max_code_versions": 256,
             }},
         ]}, timeout=20)
         assert batch.get("totalSteps") == 2, batch
@@ -368,7 +369,8 @@ def main():
                     "collect_memory_events": True, "max_memory_events": 256,
                     "collect_register_events": True, "max_register_events": 256,
                     "collect_events": True, "max_events": 256,
-                    "collect_code": True, "max_code_bytes": 4096, "max_code_versions": 256,
+                    "collect_code": True, "max_code_bytes": 16 * 1024 * 1024,
+                    "max_code_versions": 256,
                 }},
                 {"tool": "veh_set_breakpoint", "args": {"address": "$0.final_address"}},
             ],
@@ -605,11 +607,19 @@ def main():
         assert client.tool("veh_set_register", {
             "threadId": checkpoint_thread, "name": ip_name, "value": hex(smc_start),
         }).get("success")
+        oversized_code = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(smc_start),
+            "end": hex(smc_start + len(smc_code)), "collect_code": True,
+            "max_code_bytes": 16 * 1024 * 1024 + 1,
+        })
+        assert oversized_code == {"error": "max_code_bytes must be 1-16777216"}, oversized_code
         smc_trace = client.tool("veh_trace_basic_blocks", {
             "threadId": checkpoint_thread, "start": hex(smc_start),
             "end": hex(smc_start + len(smc_code)), "max_steps": 4,
             "timeout_ms": 5000, "stack_bytes": 0,
-            "collect_code": True, "max_code_bytes": 64,
+            # Exercise the enlarged opt-in budget without producing a large
+            # response; only actually captured bytes are returned over IPC.
+            "collect_code": True, "max_code_bytes": 16 * 1024 * 1024,
             "max_code_versions": 8, "max_events": 16,
         }, timeout=15)
         assert smc_trace.get("stop_reason") == "max_steps", smc_trace
