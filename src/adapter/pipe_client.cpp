@@ -183,26 +183,43 @@ bool PipeClient::SendCommand(IpcCommand cmd, const void* payload, uint32_t paylo
 
 bool PipeClient::SendAndReceive(IpcCommand cmd,
 	const void* payload, uint32_t payloadSize,
-	std::vector<uint8_t>& response, int timeoutMs)
+	std::vector<uint8_t>& response, int timeoutMs,
+	PipeExchangeDiagnostics* diagnostics)
 {
+	auto report = [&](PipeExchangeFailure failure, DWORD systemError = ERROR_SUCCESS,
+			uint32_t advertisedPayloadSize = 0) {
+		if (!diagnostics) return;
+		diagnostics->failure = failure;
+		diagnostics->systemError = systemError;
+		diagnostics->advertisedPayloadSize = advertisedPayloadSize;
+	};
+	report(PipeExchangeFailure::None);
 	std::lock_guard<std::mutex> sendLock(sendReceiveMutex_);
 	if (!running_) {
 		// 리더 스레드 없으면 직접 읽기 (초기 연결 시)
-		if (!SendCommand(cmd, payload, payloadSize))
+		if (!SendCommand(cmd, payload, payloadSize)) {
+			report(PipeExchangeFailure::SendFailed, GetLastError());
 			return false;
+		}
 
 		IpcHeader respHdr;
-		if (!AsyncReadExact(&respHdr, sizeof(respHdr), timeoutMs))
+		if (!AsyncReadExact(&respHdr, sizeof(respHdr), timeoutMs)) {
+			report(PipeExchangeFailure::HeaderReadFailed, GetLastError());
 			return false;
+		}
 
 		if (respHdr.payloadSize > 64 * 1024 * 1024) {
 			LOG_ERROR("Response payload too large: %u", respHdr.payloadSize);
+			report(PipeExchangeFailure::PayloadTooLarge, ERROR_INSUFFICIENT_BUFFER, respHdr.payloadSize);
 			return false;
 		}
+		report(PipeExchangeFailure::None, ERROR_SUCCESS, respHdr.payloadSize);
 		response.resize(respHdr.payloadSize);
 		if (respHdr.payloadSize > 0) {
-			if (!AsyncReadExact(response.data(), respHdr.payloadSize, timeoutMs))
+			if (!AsyncReadExact(response.data(), respHdr.payloadSize, timeoutMs)) {
+				report(PipeExchangeFailure::PayloadReadFailed, GetLastError(), respHdr.payloadSize);
 				return false;
+			}
 		}
 		lastRecvTime_ = GetTickCount64();
 		return true;
@@ -214,11 +231,16 @@ bool PipeClient::SendAndReceive(IpcCommand cmd,
 		responseReady_ = false;
 		waitingForResponse_ = true;
 		expectedCommand_ = static_cast<uint32_t>(cmd);
+		responseAborted_ = false;
+		responseFailure_ = PipeExchangeFailure::None;
+		responseSystemError_ = ERROR_SUCCESS;
+		responseAdvertisedPayloadSize_ = 0;
 	}
 
 	if (!SendCommand(cmd, payload, payloadSize)) {
 		std::lock_guard<std::mutex> lock(responseMutex_);
 		waitingForResponse_ = false;
+		report(PipeExchangeFailure::SendFailed, GetLastError());
 		return false;
 	}
 
@@ -230,16 +252,21 @@ bool PipeClient::SendAndReceive(IpcCommand cmd,
 
 	if (!ok) {
 		LOG_ERROR("SendAndReceive timeout for cmd 0x%04X (%dms)", static_cast<uint32_t>(cmd), timeoutMs);
+		report(PipeExchangeFailure::WaitTimeout, WAIT_TIMEOUT, responseAdvertisedPayloadSize_);
 		return false;
 	}
 
 	if (responseAborted_) {
 		responseAborted_ = false;
 		LOG_WARN("SendAndReceive aborted for cmd 0x%04X (reader thread exited)", static_cast<uint32_t>(cmd));
+		report(responseFailure_ == PipeExchangeFailure::None ?
+			PipeExchangeFailure::ReaderAborted : responseFailure_, responseSystemError_,
+			responseAdvertisedPayloadSize_);
 		return false;
 	}
 
 	response = std::move(responseData_);
+	report(PipeExchangeFailure::None, ERROR_SUCCESS, static_cast<uint32_t>(response.size()));
 	return true;
 }
 
@@ -312,13 +339,25 @@ void PipeClient::ReaderThread() {
 
 		if (hdr.payloadSize > 64 * 1024 * 1024) {
 			LOG_ERROR("Payload too large: %u", hdr.payloadSize);
+			{
+				std::lock_guard<std::mutex> lock(responseMutex_);
+				responseFailure_ = PipeExchangeFailure::PayloadTooLarge;
+				responseSystemError_ = ERROR_INSUFFICIENT_BUFFER;
+				responseAdvertisedPayloadSize_ = hdr.payloadSize;
+			}
 			connected_ = false;
 			break;
 		}
 		std::vector<uint8_t> payload(hdr.payloadSize);
 		if (hdr.payloadSize > 0) {
-			if (!AsyncReadExact(payload.data(), hdr.payloadSize, 3000)) {
+			if (!AsyncReadExact(payload.data(), hdr.payloadSize, 15000)) {
 				LOG_ERROR("Pipe payload read failed");
+				{
+					std::lock_guard<std::mutex> lock(responseMutex_);
+					responseFailure_ = PipeExchangeFailure::PayloadReadFailed;
+					responseSystemError_ = GetLastError();
+					responseAdvertisedPayloadSize_ = hdr.payloadSize;
+				}
 				connected_ = false;
 				break;
 			}
@@ -356,6 +395,10 @@ void PipeClient::ReaderThread() {
 	{
 		std::lock_guard<std::mutex> lock(responseMutex_);
 		if (waitingForResponse_) {
+			if (responseFailure_ == PipeExchangeFailure::None) {
+				responseFailure_ = PipeExchangeFailure::ReaderAborted;
+				responseSystemError_ = GetLastError();
+			}
 			responseAborted_ = true;
 			responseReady_ = true;
 			responseCv_.notify_one();

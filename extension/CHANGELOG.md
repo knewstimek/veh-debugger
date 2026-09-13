@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Fixed
+- **Large ordered trace control responses no longer fail opaquely** -- multi-megabyte trace payloads now receive a 15-second read/write transfer allowance instead of the generic 3-second control-message limit. Trace failures preserve transport stage, advertised/received/expected byte counts, system error, response header size, collector stop reason, elapsed time, completed steps, and final address; forced collector timeouts are reported as `collector_timeout` instead of `legacy_or_invalid_response`.
 - **Runtime-code completeness ignores unexecuted synthetic prefixes** -- ordered edge code versions are now captured from the concrete executed destination instead of a CFG-normalized aggregate block start. Self-modifying branches that enter the middle of a statically decoded block retain their zero-hit placeholder for CFG reporting without spending code budget on its unexecuted prefix or falsely marking otherwise complete inline/file captures as truncated.
 
 ## 1.1.16 - 2026-09-14

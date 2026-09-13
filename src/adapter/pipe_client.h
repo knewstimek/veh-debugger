@@ -14,6 +14,23 @@ namespace veh {
 // 이벤트 ID 경계: 0x1000 이상이면 이벤트, 미만이면 명령 응답
 constexpr uint32_t IPC_EVENT_THRESHOLD = 0x1000;
 
+enum class PipeExchangeFailure : uint8_t {
+	None = 0,
+	NotRunning,
+	SendFailed,
+	HeaderReadFailed,
+	PayloadTooLarge,
+	PayloadReadFailed,
+	WaitTimeout,
+	ReaderAborted,
+};
+
+struct PipeExchangeDiagnostics {
+	PipeExchangeFailure failure = PipeExchangeFailure::None;
+	uint32_t advertisedPayloadSize = 0;
+	DWORD systemError = ERROR_SUCCESS;
+};
+
 class PipeClient {
 public:
 	~PipeClient() { Disconnect(); }
@@ -29,7 +46,8 @@ public:
 	// Send command and receive response (blocks until response or timeout)
 	bool SendAndReceive(IpcCommand cmd,
 		const void* payload, uint32_t payloadSize,
-		std::vector<uint8_t>& response, int timeoutMs = 3000);
+		std::vector<uint8_t>& response, int timeoutMs = 3000,
+		PipeExchangeDiagnostics* diagnostics = nullptr);
 
 	// Connect 직후, StartEventListener 전에 호출. DLL이 클라 연결 후 보내는 Ready
 	// 이벤트를 동기로 수신해 VEH 핸들러 설치 완료를 보장한다(attach race 방지).
@@ -90,6 +108,9 @@ private:
 	bool waitingForResponse_ = false;
 	uint32_t expectedCommand_ = 0;
 	bool responseAborted_ = false;  // reader thread exit signal
+	PipeExchangeFailure responseFailure_ = PipeExchangeFailure::None;
+	DWORD responseSystemError_ = ERROR_SUCCESS;
+	uint32_t responseAdvertisedPayloadSize_ = 0;
 };
 
 } // namespace veh

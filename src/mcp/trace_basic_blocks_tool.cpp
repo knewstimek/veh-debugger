@@ -423,6 +423,20 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		char buffer[24]; snprintf(buffer, sizeof(buffer), "0x%llX", value);
 		return std::string(buffer);
 	};
+	auto stopReason = [](TraceBasicBlockStopReason reason) {
+		switch (reason) {
+		case TraceBasicBlockStopReason::LeftRange: return "left_range";
+		case TraceBasicBlockStopReason::MaxSteps: return "max_steps";
+		case TraceBasicBlockStopReason::MaxBlocks: return "max_blocks";
+		case TraceBasicBlockStopReason::MaxEdges: return "max_edges";
+		case TraceBasicBlockStopReason::Timeout: return "timeout";
+		case TraceBasicBlockStopReason::Exception: return "exception";
+		case TraceBasicBlockStopReason::Cancelled: return "cancelled";
+		case TraceBasicBlockStopReason::Condition: return "condition";
+		case TraceBasicBlockStopReason::OccurrenceWindow: return "occurrence_window";
+		default: return "completed";
+		}
+	};
 	if (!result.ok) {
 		if (fileCodeOutput && !result.codeArtifact.error.empty())
 			return {{"error", result.codeArtifact.error}};
@@ -434,10 +448,13 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 			case TraceBasicBlocksStartFailure::InstructionPointerOutsideRange: return "instruction_pointer_outside_range";
 			case TraceBasicBlocksStartFailure::CollectorBusy: return "collector_busy";
 			case TraceBasicBlocksStartFailure::StartRejected: return "start_rejected";
-			default: return "legacy_or_invalid_response";
+			case TraceBasicBlocksStartFailure::CodeStreamUnavailable: return "code_stream_unavailable";
+			default: return "";
 			}
 		};
-		const char* reason = failureName(result.startFailure);
+		std::string reason = failureName(result.startFailure);
+		if (reason.empty()) reason = !result.controlFailure.empty() ?
+			result.controlFailure : "control_error";
 		auto statusName = [](IpcStatus status) {
 			switch (status) {
 			case IpcStatus::Ok: return "ok";
@@ -447,7 +464,19 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 			}
 		};
 		json failure = {{"reason", reason}, {"status", statusName(result.status)},
-			{"status_code", static_cast<uint32_t>(result.status)}};
+			{"status_code", static_cast<uint32_t>(result.status)},
+			{"control_response_received", result.controlResponseReceived},
+			{"control_response_bytes", result.controlResponseBytes},
+			{"advertised_payload_bytes", result.advertisedPayloadBytes}};
+		if (result.controlSystemError) failure["system_error"] = result.controlSystemError;
+		if (result.responseHeaderSize) failure["response_header_bytes"] = result.responseHeaderSize;
+		if (result.expectedResponseBytes) failure["expected_response_bytes"] = result.expectedResponseBytes;
+		if (result.responseHeaderSize >= kTraceBasicBlocksResponseV3Size) {
+			failure["stop_reason"] = stopReason(result.stopReason);
+			failure["elapsed_ms"] = result.elapsedMs;
+			failure["steps_executed"] = result.stepsExecuted;
+			failure["final_address"] = hex(result.finalAddress);
+		}
 		if (result.startFailure != TraceBasicBlocksStartFailure::None) {
 			failure["stopped"] = result.stopped;
 			failure["ip_in_range"] = result.ipInRange;
@@ -463,20 +492,6 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	if (occurrenceWindow.enabled && !result.occurrenceSupported)
 		return {{"error", "injected DLL does not support occurrence_window"}};
 	TraceRegionClassifier regions(session.GetTargetProcess());
-	auto stopReason = [](TraceBasicBlockStopReason reason) {
-		switch (reason) {
-		case TraceBasicBlockStopReason::LeftRange: return "left_range";
-		case TraceBasicBlockStopReason::MaxSteps: return "max_steps";
-		case TraceBasicBlockStopReason::MaxBlocks: return "max_blocks";
-		case TraceBasicBlockStopReason::MaxEdges: return "max_edges";
-		case TraceBasicBlockStopReason::Timeout: return "timeout";
-		case TraceBasicBlockStopReason::Exception: return "exception";
-		case TraceBasicBlockStopReason::Cancelled: return "cancelled";
-		case TraceBasicBlockStopReason::Condition: return "condition";
-		case TraceBasicBlockStopReason::OccurrenceWindow: return "occurrence_window";
-		default: return "completed";
-		}
-	};
 	auto edgeKind = [](TraceBasicBlockEdgeKind kind) {
 		switch (kind) {
 		case TraceBasicBlockEdgeKind::Branch: return "branch";

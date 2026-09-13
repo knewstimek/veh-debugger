@@ -1461,8 +1461,26 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	req.occurrenceWindow = occurrenceWindow;
 
 	std::vector<uint8_t> data;
+	PipeExchangeDiagnostics exchangeDiagnostics;
 	const bool received = pipeClient_.SendAndReceive(IpcCommand::TraceBasicBlocks, &req, sizeof(req), data,
-		static_cast<int>(timeoutMs) + 15000);
+		static_cast<int>(timeoutMs) + 15000, &exchangeDiagnostics);
+	result.controlResponseReceived = received;
+	result.controlResponseBytes = static_cast<uint32_t>(std::min<size_t>(data.size(), UINT32_MAX));
+	result.advertisedPayloadBytes = exchangeDiagnostics.advertisedPayloadSize;
+	result.controlSystemError = exchangeDiagnostics.systemError;
+	auto exchangeFailureName = [](PipeExchangeFailure failure) {
+		switch (failure) {
+		case PipeExchangeFailure::NotRunning: return "control_reader_not_running";
+		case PipeExchangeFailure::SendFailed: return "control_send_failed";
+		case PipeExchangeFailure::HeaderReadFailed: return "control_header_read_failed";
+		case PipeExchangeFailure::PayloadTooLarge: return "control_payload_too_large";
+		case PipeExchangeFailure::PayloadReadFailed: return "control_payload_read_failed";
+		case PipeExchangeFailure::WaitTimeout: return "control_response_timeout";
+		case PipeExchangeFailure::ReaderAborted: return "control_reader_aborted";
+		default: return "";
+		}
+	};
+	if (!received) result.controlFailure = exchangeFailureName(exchangeDiagnostics.failure);
 	const bool streamExpected = received && data.size() >= sizeof(IpcStatus) &&
 		*reinterpret_cast<const IpcStatus*>(data.data()) == IpcStatus::Ok;
 	if (fileCodeOutput) {
@@ -1471,13 +1489,20 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 			result.codeArtifact.error = "trace control response failed";
 	}
 	if (!received) return result;
-	if (data.size() < sizeof(IpcStatus)) return result;
+	if (data.size() < sizeof(IpcStatus)) {
+		result.controlFailure = "response_too_small_for_status";
+		return result;
+	}
 	result.status = *reinterpret_cast<const IpcStatus*>(data.data());
 	if (fileCodeOutput && result.status == IpcStatus::InvalidArgs && result.codeArtifact.error.empty())
 		result.codeArtifact.error = "injected DLL does not support code_output=file";
-	if (data.size() < kTraceBasicBlocksResponseV3Size) return result;
+	if (data.size() < kTraceBasicBlocksResponseV3Size) {
+		result.controlFailure = "response_too_small_for_trace_header";
+		return result;
+	}
 	auto* header = reinterpret_cast<const TraceBasicBlocksResponse*>(data.data());
 	size_t headerSize = header->headerSize;
+	result.responseHeaderSize = header->headerSize;
 	auto requiredSize = [&](size_t candidate) {
 		uint32_t registerEventCount = candidate >= kTraceBasicBlocksResponseV4Size ?
 			header->registerEventCount : 0;
@@ -1500,10 +1525,28 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 			headerSize = kTraceBasicBlocksResponseV4Size;
 		else if (requiredSize(kTraceBasicBlocksResponseV3Size) == data.size())
 			headerSize = kTraceBasicBlocksResponseV3Size;
-		else return result;
+		else {
+			result.controlFailure = "legacy_response_size_mismatch";
+			result.expectedResponseBytes = requiredSize(kTraceBasicBlocksResponseV4Size);
+			return result;
+		}
 	}
-	if (headerSize < kTraceBasicBlocksResponseV3Size || headerSize > data.size() ||
-		requiredSize(headerSize) != data.size()) return result;
+	result.responseHeaderSize = static_cast<uint16_t>(headerSize);
+	if (headerSize < kTraceBasicBlocksResponseV3Size || headerSize > data.size()) {
+		result.controlFailure = "invalid_response_header_size";
+		return result;
+	}
+	result.expectedResponseBytes = requiredSize(headerSize);
+	if (result.expectedResponseBytes != data.size()) {
+		result.controlFailure = "response_size_mismatch";
+		return result;
+	}
+	result.stopReason = header->stopReason;
+	result.truncated = header->truncated != 0;
+	result.elapsedMs = header->elapsedMs;
+	result.stepsExecuted = header->stepsExecuted;
+	result.finalAddress = header->finalAddress;
+	result.threadId = header->threadId;
 	if (headerSize >= kTraceBasicBlocksResponseV5Size) {
 		result.startFailure = static_cast<TraceBasicBlocksStartFailure>(header->startFailureReason);
 		result.stopped = header->stopped != 0;
@@ -1521,15 +1564,14 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		result.occurrenceWindowStarted = header->occurrenceWindowStarted != 0;
 		result.occurrenceWindowCompleted = header->occurrenceWindowCompleted != 0;
 	}
-	if (header->status != IpcStatus::Ok) return result;
+	if (header->status != IpcStatus::Ok) {
+		result.controlFailure = header->stopReason == TraceBasicBlockStopReason::Timeout ?
+			"collector_timeout" : "control_status_error";
+		return result;
+	}
 
 	result.ok = true;
-	result.stopReason = header->stopReason;
-	result.truncated = header->truncated != 0;
 	result.exceptionsFollowed = header->exceptionsFollowed;
-	result.elapsedMs = header->elapsedMs;
-	result.stepsExecuted = header->stepsExecuted;
-	result.finalAddress = header->finalAddress;
 	result.unsupportedMemoryWrites = header->unsupportedMemoryWrites;
 	result.memoryWritesTruncated = header->memoryWritesTruncated != 0;
 	result.filteredSteps = header->filteredSteps;
@@ -1537,7 +1579,6 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	result.unsupportedMemoryReads = header->unsupportedMemoryReads;
 	result.memoryReadsTruncated = header->memoryReadsTruncated != 0;
 	result.dependencyIncomplete = header->dependencyIncomplete != 0;
-	result.threadId = header->threadId;
 	result.eventCollectionEnabled = header->eventCollectionEnabled != 0;
 	result.eventsTruncated = header->eventsTruncated != 0;
 	result.eventSchemaVersion = header->eventSchemaVersion;
