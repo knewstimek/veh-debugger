@@ -106,6 +106,8 @@ trace IPC는 request/header size를 협상하고 legacy schema-v3/v4 및 직전 
 
 전체 trace JSON 응답이 커지는 경우에는 별도의 `output_file`과 `output_format="json"|"jsonl"`을 지정할 수 있다. 서버가 전체 결과를 새 파일에 기록하고 MCP 응답에는 경로, SHA-256, 크기, 배열별 count, truncation/error만 반환한다. 기존 파일은 덮어쓰지 않으며 direct, `veh_batch`, breakpoint action 모두 같은 의미를 사용한다. `occurrence_window={address,from,to}`는 지정 명령의 N번째 방문 직전부터 M번째 다음 방문 직전까지 entry-to-entry로 수집한다. 이 gate는 `start_condition` 및 `collect_condition`과 AND 결합하며, `to=0`은 상한을 열어 둔다.
 
+handler occurrence만 필요하면 `target_window={address,occurrence,before_steps,after_steps}`로 trigger 전 ordered ring과 trigger 후 bounded 구간만 남길 수 있다. `veh_targeted_capture`는 이를 입력 matrix로 확장해 각 `$input`의 batch setup을 실행하고 TEB/FS·GS 및 선택 memory snapshot을 trace JSON에 포함한 뒤, 입력별 고유 파일 경로·SHA-256·크기·event count·정확한 drop·truncation·matched occurrence를 반환한다. 이 고수준 orchestrator는 이미 attach된 한 세션에서 직접 호출하며 `veh_batch`/breakpoint action 안에 중첩하지 않는다. 저수준 `target_window`는 direct/batch/action에서 동일하게 지원된다.
+
 함수 단위 근거가 필요하면 `stop_on_return=true`를 사용한다. trace는 진입 시점의 stack pointer와 return address를 고정하고, decoded range 밖의 외부 호출을 single-step으로 통과하되 그 구간의 memory/register/code event는 수집하지 않는다. 원래 frame의 반환을 확인하면 `stop_reason="function_return"`, return edge, 반환 시점의 전체 snapshot을 돌려준다. 외부 구간도 `max_steps`와 `timeout_ms`에는 포함된다.
 
 `collect_memory_reads=true`는 주소·크기·값을 `max_memory_reads` 한도에서 deduplicate한다. `dependency_sources`에는 최대 32개의 레지스터 이름 또는 `{address,size,label?}` 메모리 범위를 지정할 수 있고, 결과의 edge/read/write/final register에는 conservative origin bitset을 label 배열로 반환한다. 이는 full symbolic taint가 아니라 GPR·flags와 동일 주소/크기의 memory flow만 추적하는 실험 기능이다. REP, 16바이트 초과, FS/GS 및 지원하지 않는 vector flow는 unsupported count로 드러내며, 조건부 수집 공백이 있으면 `dependency_incomplete=true`로 완전성을 보장하지 않음을 알린다.
@@ -118,7 +120,7 @@ trace IPC는 request/header size를 협상하고 legacy schema-v3/v4 및 직전 
 
 - **VEH 기반**: Windows Debug API 대신 VEH를 사용하여 안티디버그 우회에 유리
 - **DAP 전체 지원**: VSCode, MCP debug 도구 등 모든 DAP 호환 클라이언트에서 사용 가능
-- **MCP 도구 서버**: AI 에이전트(Claude, Codex 등)가 직접 디버거를 제어하는 44개 도구 제공
+- **MCP 도구 서버**: AI 에이전트(Claude, Codex 등)가 직접 디버거를 제어하는 45개 도구 제공
 - **TCP 모드**: `--tcp --port=PORT`로 원격 디버깅/MCP 연동 지원
 - **원격 접속**: `--remote` / `--bind=0.0.0.0`으로 VM/네트워크 너머 디버깅
 - **32/64비트 지원**: x86/x64 프로세스 모두 디버깅 (32비트 타겟은 별도 32비트 DLL 빌드 + WoW64 인젝션)
@@ -351,6 +353,7 @@ enabled = true
 | `veh_trace_callers` | `address, duration_sec?` | 함수 호출자 프로파일링 (자동 resume -> N초간 caller 수집 -> 자동 pause). 유니크 caller별 히트 카운트 반환. x64: RtlVirtualUnwind (정확). x86: [ESP] (함수 진입점에서만 정확) |
 | `veh_trace_calls` | `addresses, duration_sec?, resolve?, system_only?` | call/jmp 명령이 런타임에 어디로 가는지 모니터링. 콜 사이트에 BP 설치 후 N초간 실행, 실제 타겟 주소 + API 이름 수집. `resolve=true`: thunk/trampoline을 자연스러운 call 컨텍스트에서 따라가 최종 API까지 추적 (예외 기반 난독화 대응). `system_only=true`: 시스템 DLL 타겟만 반환. 패킹된 바이너리의 IAT 복원용. |
 | `veh_trace_basic_blocks` | `threadId, start, end, ..., stop_on_return?, collect_events?, collect_memory_events?, collect_register_events?, collect_code?, ...` | DLL 내부 bounded trace. 선택적 function-return scope, ordered block/code/memory/register occurrence stream 및 block/edge, delta, memory, dependency, region, exception을 반환한다. |
+| `veh_targeted_capture` | `inputs, steps?, trace, trigger, window, environment?, output_directory, stop_on_error?` | 입력별 setup 후 occurrence 전후 ordered trace와 환경 snapshot을 서버 파일에 저장하고 hash/count/drop/truncation/match 요약을 반환한다. |
 | `veh_checkpoint_create` | `threadId, regions?, capture_teb?, teb_size?` | GPR/flags(x64는 XMM 포함), TEB 및 FS/GS 환경과 선택 메모리를 저장한다. 선택한 TEB bytes는 비교용이며 OS 관리 상태로서 복원하지 않는다. |
 | `veh_checkpoint_restore` | `id` | 동일 스레드가 VEH 정지된 상태에서 context와 선택 메모리를 복원한다. 변경된 매핑은 거부하고 실패 시 메모리 rollback을 시도한다. |
 | `veh_checkpoint_diff` | `id, other_id?` | checkpoint와 현재 상태 또는 다른 checkpoint의 register 및 변경 메모리 구간을 비교한다. |

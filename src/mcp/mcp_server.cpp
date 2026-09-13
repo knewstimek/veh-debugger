@@ -303,6 +303,7 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 		else if (name == "veh_resolve_imports")       result = ToolResolveImports(args);
 		else if (name == "veh_trace_calls")           result = ToolTraceCalls(args);
 		else if (name == "veh_trace_basic_blocks")    result = ToolTraceBasicBlocks(args);
+		else if (name == "veh_targeted_capture")      result = ToolTargetedCapture(args);
 		else if (name == "veh_checkpoint_create")     result = ToolCheckpointCreate(args);
 		else if (name == "veh_checkpoint_restore")    result = ToolCheckpointRestore(args);
 		else if (name == "veh_checkpoint_diff")       result = ToolCheckpointDiff(args);
@@ -2008,6 +2009,186 @@ json McpServer::ToolTraceBasicBlocks(const json& args) {
 		[this](const std::string& text, uint64_t& value) { return ParseAddress(text, value); });
 }
 
+json McpServer::ToolTargetedCapture(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+	if (!args.contains("inputs") || !args["inputs"].is_array() || args["inputs"].empty() ||
+		args["inputs"].size() > 256)
+		return {{"error", "inputs must be an array with 1-256 items"}};
+	if (!args.contains("trace") || !args["trace"].is_object())
+		return {{"error", "trace object is required"}};
+	if (!args.contains("trigger") || !args["trigger"].is_object())
+		return {{"error", "trigger object is required"}};
+	if (!args.contains("window") || !args["window"].is_object())
+		return {{"error", "window object is required"}};
+	json setupSteps = args.value("steps", json::array());
+	if (!setupSteps.is_array() || setupSteps.size() > 500)
+		return {{"error", "steps must be an array with at most 500 items"}};
+	if (!args.contains("output_directory") || !args["output_directory"].is_string() ||
+		args["output_directory"].get<std::string>().empty())
+		return {{"error", "output_directory is required"}};
+	if (args.contains("stop_on_error") && !args["stop_on_error"].is_boolean())
+		return {{"error", "stop_on_error must be a boolean"}};
+	if (args.contains("environment") && !args["environment"].is_object())
+		return {{"error", "environment must be an object"}};
+
+	auto bounded = [](const json& object, const char* key, uint32_t minimum,
+		uint32_t maximum, uint32_t defaultValue, uint32_t& output) {
+		if (!object.contains(key)) { output = defaultValue; return true; }
+		const auto& value = object[key];
+		uint64_t parsed = 0;
+		if (value.is_number_unsigned()) parsed = value.get<uint64_t>();
+		else if (value.is_number_integer() && value.get<int64_t>() >= 0)
+			parsed = static_cast<uint64_t>(value.get<int64_t>());
+		else return false;
+		if (parsed < minimum || parsed > maximum) return false;
+		output = static_cast<uint32_t>(parsed);
+		return true;
+	};
+	uint32_t occurrence = 0, beforeSteps = 0, afterSteps = 0;
+	if (!bounded(args["trigger"], "occurrence", 1, UINT32_MAX, 1, occurrence) ||
+		!bounded(args["window"], "before_steps", 0, 100000, 0, beforeSteps) ||
+		!bounded(args["window"], "after_steps", 1, 100000, 1, afterSteps))
+		return {{"error", "trigger.occurrence must be >= 1 and window before/after_steps must be 0-100000/1-100000"}};
+	if (!args["trigger"].contains("address"))
+		return {{"error", "trigger.address is required"}};
+
+	std::filesystem::path directory(args["output_directory"].get<std::string>());
+	std::error_code pathError;
+	std::filesystem::create_directories(directory, pathError);
+	if (pathError || !std::filesystem::is_directory(directory, pathError))
+		return {{"error", "cannot create or access output_directory"}};
+	directory = std::filesystem::absolute(directory, pathError);
+	if (pathError) return {{"error", "cannot resolve output_directory"}};
+
+	std::string inputVariable = args.value("input_variable", "$input");
+	if (inputVariable.empty()) inputVariable = "$input";
+	if (inputVariable[0] != '$') inputVariable.insert(inputVariable.begin(), '$');
+	const bool stopOnError = args.value("stop_on_error", true);
+	const json environmentArgs = args.value("environment", json::object());
+	static std::atomic<uint64_t> captureSerial{0};
+	const uint64_t runToken = GetTickCount64() ^ (static_cast<uint64_t>(GetCurrentProcessId()) << 32) ^
+		captureSerial.fetch_add(1, std::memory_order_relaxed);
+	json reports = json::array();
+	uint32_t succeeded = 0, failed = 0;
+	int64_t firstFailedInput = -1;
+
+	for (size_t index = 0; index < args["inputs"].size(); ++index) {
+		const auto& input = args["inputs"][index];
+		BatchExecutor executor(session_, [this](uint32_t id, const json& action) {
+			StoreBreakpointAction(id, action);
+		}, [this](const std::string& name, const json& toolArgs) {
+			if (name == "veh_checkpoint_create") return ToolCheckpointCreate(toolArgs);
+			if (name == "veh_checkpoint_restore") return ToolCheckpointRestore(toolArgs);
+			if (name == "veh_checkpoint_diff") return ToolCheckpointDiff(toolArgs);
+			if (name == "veh_checkpoint_delete") return ToolCheckpointDelete(toolArgs);
+			return json{{"error", "Unsupported targeted setup tool: " + name}};
+		});
+		executor.SetStopOnError(true);
+		executor.SetVariable(inputVariable, input);
+		json setup = setupSteps.empty() ? json{{"results", json::array()}, {"failed", 0}, {"succeeded", 0}}
+			: executor.Execute(setupSteps);
+		json setupSummary = {{"succeeded", setup.value("succeeded", 0)},
+			{"failed", setup.value("failed", 0)},
+			{"first_failed_step", setup.value("first_failed_step", json(nullptr))}};
+		json report = {{"index", index}, {"setup", std::move(setupSummary)}};
+		if (input.is_object() && input.contains("name")) report["name"] = input["name"];
+		if (setup.value("failed", 0u) != 0) {
+			report["status"] = "failed";
+			report["error"] = "input setup failed";
+			reports.push_back(std::move(report));
+			++failed; if (firstFailedInput < 0) firstFailedInput = static_cast<int64_t>(index);
+			if (stopOnError) break;
+			continue;
+		}
+
+		json traceArgs = executor.ResolveArguments(args["trace"]);
+		json trigger = executor.ResolveArguments(args["trigger"]);
+		traceArgs["target_window"] = {{"address", trigger["address"]}, {"occurrence", occurrence},
+			{"before_steps", beforeSteps}, {"after_steps", afterSteps}};
+		traceArgs["collect_events"] = true;
+		if (!traceArgs.contains("collect_memory_events")) traceArgs["collect_memory_events"] = true;
+		if (!traceArgs.contains("collect_register_events")) traceArgs["collect_register_events"] = true;
+		if (!traceArgs.contains("collect_code")) traceArgs["collect_code"] = true;
+		traceArgs["code_output"] = "inline";
+		const uint64_t windowEvents = static_cast<uint64_t>(beforeSteps) + afterSteps + 16;
+		if (!traceArgs.contains("max_events")) traceArgs["max_events"] = std::min<uint64_t>(windowEvents, 32768);
+		if (!traceArgs.contains("max_register_events")) traceArgs["max_register_events"] = std::min<uint64_t>(windowEvents, 65536);
+		if (!traceArgs.contains("max_memory_events")) traceArgs["max_memory_events"] =
+			std::min<uint64_t>(windowEvents * 4, 65536);
+		if (!traceArgs.contains("max_code_bytes")) traceArgs["max_code_bytes"] = 16 * 1024 * 1024;
+		std::filesystem::path artifact = directory /
+			("targeted-" + std::to_string(runToken) + "-" + std::to_string(index) + ".json");
+		traceArgs["output_file"] = artifact.string();
+		traceArgs["output_format"] = "json";
+
+		json checkpointArgs = environmentArgs;
+		checkpointArgs["threadId"] = traceArgs.value("threadId", json(0));
+		if (!checkpointArgs.contains("capture_teb")) checkpointArgs["capture_teb"] = true;
+		json environment = ToolCheckpointCreate(checkpointArgs);
+		if (environment.contains("error")) {
+			report["status"] = "failed";
+			report["error"] = environment["error"];
+			reports.push_back(std::move(report));
+			++failed; if (firstFailedInput < 0) firstFailedInput = static_cast<int64_t>(index);
+			if (stopOnError) break;
+			continue;
+		}
+		const json checkpointId = environment["id"];
+		{
+			std::lock_guard<std::mutex> lock(checkpointMutex_);
+			auto saved = checkpoints_.find(checkpointId.get<uint64_t>());
+			if (saved != checkpoints_.end()) {
+				for (size_t regionIndex = 0; regionIndex < saved->second.regions.size(); ++regionIndex) {
+					const auto& bytes = saved->second.regions[regionIndex].bytes;
+					static constexpr char digits[] = "0123456789abcdef";
+					std::string encoded(bytes.size() * 2, '0');
+					for (size_t byteIndex = 0; byteIndex < bytes.size(); ++byteIndex) {
+						encoded[byteIndex * 2] = digits[bytes[byteIndex] >> 4];
+						encoded[byteIndex * 2 + 1] = digits[bytes[byteIndex] & 0x0f];
+					}
+					environment["regions"][regionIndex]["encoding"] = "hex";
+					environment["regions"][regionIndex]["data"] = std::move(encoded);
+				}
+			}
+		}
+		environment.erase("id");
+		environment["scope"] = "immediately_before_targeted_trace";
+		json traceResult;
+		try {
+			traceResult = ExecuteTraceBasicBlocksTool(session_, traceArgs,
+				[this](const std::string& text, uint64_t& value) { return ParseAddress(text, value); }, environment);
+		} catch (const std::exception& e) {
+			traceResult = {{"error", std::string("targeted trace failed: ") + e.what()}};
+		}
+		ToolCheckpointDelete({{"id", checkpointId}});
+		const bool targetMatched = !traceResult.contains("error") &&
+			traceResult.value("target_window", json::object()).value("matched", false);
+		if (traceResult.contains("output_file")) report["artifact"] = traceResult["output_file"];
+		if (traceResult.contains("counts")) report["counts"] = traceResult["counts"];
+		if (traceResult.contains("truncation")) report["truncation"] = traceResult["truncation"];
+		if (traceResult.contains("drop_counts")) report["drop_counts"] = traceResult["drop_counts"];
+		if (traceResult.contains("target_window")) report["target_window"] = traceResult["target_window"];
+		if (traceResult.contains("steps_executed")) report["steps_executed"] = traceResult["steps_executed"];
+		if (traceResult.contains("stop_reason")) report["stop_reason"] = traceResult["stop_reason"];
+		if (traceResult.contains("error") || !targetMatched) {
+			report["status"] = "failed";
+			report["error"] = traceResult.contains("error") ? traceResult["error"] :
+				json("target occurrence was not reached");
+			++failed; if (firstFailedInput < 0) firstFailedInput = static_cast<int64_t>(index);
+		} else {
+			report["status"] = "ok";
+			++succeeded;
+		}
+		reports.push_back(std::move(report));
+		if (stopOnError && failed != 0) break;
+	}
+	return {{"mode", "targeted_inputs"}, {"input_variable", inputVariable},
+		{"inputs", std::move(reports)}, {"succeeded", succeeded}, {"failed", failed},
+		{"first_failed_input", firstFailedInput < 0 ? json(nullptr) : json(firstFailedInput)},
+		{"stopped_on_error", stopOnError && failed != 0},
+		{"artifact_directory", directory.string()}};
+}
+
 static std::string CheckpointHex(uint64_t value) {
 	char buffer[24]; snprintf(buffer, sizeof(buffer), "0x%llX", value);
 	return buffer;
@@ -3083,7 +3264,7 @@ bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
 // --- Tool List Definition ---
 
 json McpServer::GetToolsList() {
-	return json::array({
+	json tools = json::array({
 		{{"name", "veh_attach"}, {"description", "Attach to a running process by PID. Injects VEH debugger DLL. Auto-detaches if already attached. Target process must be running (not CREATE_SUSPENDED)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"pid", {{"type", "integer"}, {"description", "Process ID to attach to"}}},
@@ -3305,6 +3486,12 @@ json McpServer::GetToolsList() {
 				{"from", {{"type", "integer"}, {"minimum", 1}, {"description", "First visit whose following cycle is collected"}}},
 				{"to", {{"type", "integer"}, {"minimum", 0}, {"description", "Last collected visit; 0 keeps the upper bound open"}}}
 			}}, {"required", json::array({"address", "from"})}, {"description", "AND-composed with start_condition and collect_condition; collection runs entry-to-entry and a bounded window stops before visit to+1"}}}
+			,{"target_window", {{"type", "object"}, {"properties", {
+				{"address", {{"type", "string"}, {"description", "Trigger address inside the trace range"}}},
+				{"occurrence", {{"type", "integer"}, {"minimum", 1}, {"description", "One-based trigger occurrence"}}},
+				{"before_steps", {{"type", "integer"}, {"minimum", 0}, {"maximum", 100000}, {"description", "Completed instruction steps retained before the trigger"}}},
+				{"after_steps", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100000}, {"description", "Completed instruction steps retained after the trigger"}}}
+			}}, {"required", json::array({"address", "occurrence", "before_steps", "after_steps"})}, {"description", "Bounded pre-trigger ring plus post-trigger capture; incompatible with occurrence_window, conditions, stop_on_return, and code_output=file"}}}
 			,{"output_file", {{"type", "string"}, {"description", "Write the complete trace result to a new MCP-host file and return compact path/hash/count metadata"}}}
 			,{"output_format", {{"type", "string"}, {"enum", {"json", "jsonl"}}, {"description", "output_file encoding (default json); JSONL uses a manifest plus section-item records"}}}
 		 }}, {"required", json::array({"threadId", "start", "end"})}}}},
@@ -3415,6 +3602,30 @@ json McpServer::GetToolsList() {
 			{"target_modules", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Only resolve to these specific modules (e.g. [\"kernel32\", \"ntdll\"]). Overrides system_only."}}}
 		 }}, {"required", json::array({"threadId", "addresses"})}}}}
 	});
+	json targetedProperties = json::object();
+	targetedProperties["inputs"] = {{"type", "array"}, {"minItems", 1}, {"maxItems", 256},
+		{"description", "Sequential input matrix"}};
+	targetedProperties["input_variable"] = {{"type", "string"},
+		{"description", "Bound input variable (default $input)"}};
+	targetedProperties["steps"] = {{"type", "array"}, {"maxItems", 500},
+		{"description", "Per-input veh_batch setup steps"}};
+	targetedProperties["trace"] = {{"type", "object"},
+		{"description", "veh_trace_basic_blocks arguments including threadId/start/end"}};
+	targetedProperties["trigger"] = {{"type", "object"},
+		{"description", "{address, occurrence?}; address may use a batch reference"}};
+	targetedProperties["window"] = {{"type", "object"},
+		{"description", "{before_steps?, after_steps?}; bounds are 0/1 through 100000"}};
+	targetedProperties["environment"] = {{"type", "object"},
+		{"description", "Optional {capture_teb, teb_size, regions}; capture_teb defaults true"}};
+	targetedProperties["output_directory"] = {{"type", "string"},
+		{"description", "MCP-host artifact directory"}};
+	targetedProperties["stop_on_error"] = {{"type", "boolean"},
+		{"description", "Stop after first failed input (default true)"}};
+	tools.push_back({{"name", "veh_targeted_capture"},
+		{"description", "Run an input matrix in one attached session and write one bounded occurrence-triggered trace artifact per input. Setup steps may restore checkpoints and apply each $input; the trace retains a pre/post instruction ring with ordered code/register/memory events and embeds a pre-trace TEB/FS/GS environment snapshot. Returns per-input path/hash/count/drop/truncation/match/failure metadata. Session lifecycle tools are deliberately excluded from setup steps."},
+		{"inputSchema", {{"type", "object"}, {"properties", std::move(targetedProperties)},
+			{"required", json::array({"inputs", "trace", "trigger", "window", "output_directory"})}}}});
+	return tools;
 }
 
 std::string McpServer::NotAttachedMessage() {

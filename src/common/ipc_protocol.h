@@ -499,6 +499,7 @@ enum class TraceBasicBlockStopReason : uint8_t {
 	Condition       = 8,
 	OccurrenceWindow = 9,
 	FunctionReturn   = 10,
+	TargetWindow     = 11,
 };
 
 enum class TraceBasicBlockEdgeKind : uint8_t {
@@ -582,6 +583,18 @@ struct TraceOccurrenceWindow {
 	uint8_t reserved[7];
 };
 
+// Instruction window centered on one concrete occurrence. Before the trigger,
+// ordered event arrays operate as bounded rings; after the trigger they retain
+// events linearly until `afterSteps` completed instructions have been observed.
+struct TraceTargetWindow {
+	uint64_t address;
+	uint32_t occurrence;
+	uint32_t beforeSteps;
+	uint32_t afterSteps;
+	uint8_t enabled;
+	uint8_t reserved[7];
+};
+
 struct TraceBasicBlocksRequest {
 	uint32_t threadId;       // thread currently stopped in VEH
 	uint64_t rangeStart;     // inclusive
@@ -623,9 +636,10 @@ struct TraceBasicBlocksRequest {
 	TraceOccurrenceWindow occurrenceWindow;
 	uint8_t stopOnReturn;
 	uint8_t reserved8[7];
+	TraceTargetWindow targetWindow;
 };
 
-static constexpr uint16_t kTraceBasicBlocksWireVersion = 8;
+static constexpr uint16_t kTraceBasicBlocksWireVersion = 9;
 static constexpr uint16_t kTraceBasicBlocksMinimumExplicitWireVersion = 5;
 static constexpr uint16_t kTraceBasicBlocksRequestV3Size =
 	static_cast<uint16_t>(offsetof(TraceBasicBlocksRequest, collectRegisterEvents));
@@ -636,11 +650,14 @@ static constexpr uint16_t kTraceBasicBlocksRequestV6Size =
 static constexpr uint16_t kTraceBasicBlocksRequestV7Size =
 	static_cast<uint16_t>(offsetof(TraceBasicBlocksRequest, stopOnReturn));
 static constexpr uint16_t kTraceBasicBlocksRequestV8Size =
+	static_cast<uint16_t>(offsetof(TraceBasicBlocksRequest, targetWindow));
+static constexpr uint16_t kTraceBasicBlocksRequestV9Size =
 	static_cast<uint16_t>(sizeof(TraceBasicBlocksRequest));
 static_assert(kTraceBasicBlocksRequestV3Size < kTraceBasicBlocksRequestV4Size);
 static_assert(kTraceBasicBlocksRequestV4Size < kTraceBasicBlocksRequestV6Size);
 static_assert(kTraceBasicBlocksRequestV6Size < kTraceBasicBlocksRequestV7Size);
 static_assert(kTraceBasicBlocksRequestV7Size < kTraceBasicBlocksRequestV8Size);
+static_assert(kTraceBasicBlocksRequestV8Size < kTraceBasicBlocksRequestV9Size);
 
 // Runtime-code file artifact and the private one-shot stream carrying its
 // record bytes.  These packed little-endian structures are intentionally
@@ -920,6 +937,14 @@ struct TraceBasicBlocksResponse {
 	uint64_t  entryStackPointer;
 	uint64_t  returnAddress;
 	uint64_t  externalSteps;
+	TraceTargetWindow targetWindow;
+	uint64_t  targetOccurrenceHits;
+	uint64_t  targetTriggerSequence;
+	uint64_t  targetCaptureStartSequence;
+	uint64_t  targetCaptureEndSequence;
+	uint64_t  eventsDropped;
+	uint8_t   targetMatched;
+	uint8_t   reservedTarget[7];
 	// followed by TraceBasicBlockEntry[blockCount],
 	// TraceBasicBlockEdgeEntry[edgeCount], TraceBasicBlockSnapshot[snapshotCount],
 	// TraceBasicBlockMemoryWriteEntry[memoryWriteCount],
@@ -952,11 +977,14 @@ static constexpr uint16_t kTraceBasicBlocksResponseV5Size =
 static constexpr uint16_t kTraceBasicBlocksResponseV6Size =
 	static_cast<uint16_t>(offsetof(TraceBasicBlocksResponse, functionScopeEnabled));
 static constexpr uint16_t kTraceBasicBlocksResponseV7Size =
+	static_cast<uint16_t>(offsetof(TraceBasicBlocksResponse, targetWindow));
+static constexpr uint16_t kTraceBasicBlocksResponseV8Size =
 	static_cast<uint16_t>(sizeof(TraceBasicBlocksResponse));
 static_assert(kTraceBasicBlocksResponseV3Size < kTraceBasicBlocksResponseV4Size);
 static_assert(kTraceBasicBlocksResponseV4Size < kTraceBasicBlocksResponseV5Size);
 static_assert(kTraceBasicBlocksResponseV5Size < kTraceBasicBlocksResponseV6Size);
 static_assert(kTraceBasicBlocksResponseV6Size < kTraceBasicBlocksResponseV7Size);
+static_assert(kTraceBasicBlocksResponseV7Size < kTraceBasicBlocksResponseV8Size);
 
 // --- Memory management ---
 struct AllocateMemoryRequest {

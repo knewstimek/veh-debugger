@@ -183,6 +183,15 @@ left to the exception stream because they have no normal post-instruction state.
 Exhausting `max_register_events` increments an exact dropped count while aggregate
 collection continues and marks the ordered register stream incomplete.
 
+Wire v9 adds an opt-in `target_window` containing an address, one-based occurrence,
+and bounded pre/post instruction counts. Before the match, ordered block, memory,
+and register arrays operate as circular buffers and evict records older than the
+pre-window without counting those intentional evictions as drops. At the match,
+inline code versions are compacted to those referenced by retained events and
+aggregate tables are reset; the response therefore distinguishes bounded pre/post
+ordered evidence from trigger/post-trigger aggregate summaries. Capacity loss in
+the basic ordered stream has its own exact dropped count.
+
 Optional `collect_code` implies ordered events and preallocates separate byte and
 version budgets. At each observed block transition the DLL snapshots the decoded
 block region, deduplicates `(block, bytes)` versions, and places the version id on

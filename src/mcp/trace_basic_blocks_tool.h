@@ -13,6 +13,7 @@ using TraceAddressResolver = std::function<bool(const std::string&, uint64_t&)>;
 // validation and JSON shaping here guarantees that both entry points stay in
 // lockstep as the trace result evolves.
 nlohmann::json ExecuteTraceBasicBlocksTool(DebugSession& session,
-	const nlohmann::json& args, const TraceAddressResolver& resolveAddress);
+	const nlohmann::json& args, const TraceAddressResolver& resolveAddress,
+	const nlohmann::json& artifactMetadata = nlohmann::json::object());
 
 } // namespace veh

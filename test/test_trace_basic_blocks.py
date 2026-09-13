@@ -56,6 +56,7 @@ def read_code_artifact(path):
 def main():
     client = Client()
     artifact_paths = []
+    artifact_dirs = []
     def artifact_path(label):
         path = os.path.join(tempfile.gettempdir(),
                             f"veh-trace-{os.getpid()}-{time.time_ns()}-{label}.vtc")
@@ -83,12 +84,13 @@ def main():
         trace_tool = next((tool for tool in listed
                            if tool.get("name") == "veh_trace_basic_blocks"), None)
         assert trace_tool, listed
+        assert any(tool.get("name") == "veh_targeted_capture" for tool in listed), listed
         trace_properties = trace_tool["inputSchema"]["properties"]
         assert all(name in trace_properties for name in (
             "collect_events", "max_events", "collect_code", "max_code_bytes", "max_code_versions",
             "code_output", "code_output_path", "code_chunk_bytes",
             "collect_memory_events", "max_memory_events",
-            "collect_register_events", "max_register_events", "stop_on_return",
+            "collect_register_events", "max_register_events", "stop_on_return", "target_window",
         )), trace_tool
         launch = client.tool("veh_launch", {"program": TARGET, "stopOnEntry": True})
         assert launch.get("success"), launch
@@ -167,6 +169,7 @@ def main():
         assert trace["ordering"] == {
             "available": True, "granularity": "basic_block_transitions",
             "event_schema_version": 2, "complete": True,
+            "events_captured": len(trace["events"]), "events_dropped": 0,
         }, trace
         assert trace["events"] and trace["events"][0]["type"] == "block_entry", trace
         assert all(event["thread_id"] == thread_id for event in trace["events"]), trace
@@ -247,6 +250,43 @@ def main():
                              for change in edge.get("register_delta", {}).values()
                              if "after_region" in change]
         assert classified_deltas, trace
+
+        trigger_block = max((block for block in trace["blocks"] if block["hits"] >= 3),
+                            key=lambda block: block["hits"])
+        trigger_address = int(trigger_block["start"], 0)
+        targeted_stop = client.tool("veh_continue", {
+            "wait": True, "timeout": 10,
+        }, timeout=15)
+        assert targeted_stop.get("reason") == "breakpoint", targeted_stop
+        targeted_path = output_path("target-window", "json")
+        targeted = client.tool("veh_trace_basic_blocks", {
+            "threadId": targeted_stop["threadId"], "start": hex(start),
+            "end": hex(start + 0x100), "max_steps": 1000, "timeout_ms": 5000,
+            "target_window": {"address": hex(trigger_address), "occurrence": 3,
+                              "before_steps": 3, "after_steps": 4},
+            "collect_events": True, "max_events": 32,
+            "collect_memory_events": True, "max_memory_events": 64,
+            "collect_register_events": True, "max_register_events": 32,
+            "collect_code": True, "max_code_bytes": 4096, "max_code_versions": 64,
+            "output_file": targeted_path,
+        }, timeout=15)
+        assert targeted.get("stop_reason") == "target_window", targeted
+        target_meta = targeted["target_window"]
+        assert target_meta["matched"] is True, targeted
+        assert target_meta["matched_occurrence_count"] == 3, targeted
+        assert target_meta["capture_start_sequence"] == target_meta["trigger_sequence"] - 3, targeted
+        assert target_meta["capture_end_sequence"] == target_meta["trigger_sequence"] + 4, targeted
+        with open(targeted_path, encoding="utf-8") as targeted_file:
+            targeted_full = json.load(targeted_file)
+        assert targeted_full["target_window"] == target_meta, targeted_full
+        register_sequences = [event["sequence"] for event in targeted_full["register_events"]]
+        assert register_sequences == list(range(target_meta["capture_start_sequence"],
+                                                target_meta["capture_end_sequence"] + 1)), targeted_full
+        assert all(target_meta["capture_start_sequence"] <= event["sequence"] <=
+                   target_meta["capture_end_sequence"]
+                   for event in targeted_full["events"] + targeted_full["memory_events"]), targeted_full
+        assert all(event.get("code_version", 0) < len(targeted_full["code_versions"])
+                   for event in targeted_full["events"] if "code_version" in event), targeted_full
 
         function_bp = client.tool("veh_set_function_breakpoint", {
             "name": "TraceFunctionScopeTarget",
@@ -408,7 +448,10 @@ def main():
         assert truncated_writes["memory_reads_truncated"] is True, truncated_writes
         assert len(truncated_writes["events"]) == 1, truncated_writes
         assert truncated_writes["events_truncated"] is True, truncated_writes
+        assert truncated_writes["events_dropped"] > 0, truncated_writes
         assert truncated_writes["ordering"]["complete"] is False, truncated_writes
+        assert truncated_writes["ordering"]["events_dropped"] == \
+            truncated_writes["events_dropped"], truncated_writes
         assert len(truncated_writes["memory_events"]) == 1, truncated_writes
         assert truncated_writes["memory_events_truncated"] is True, truncated_writes
         assert truncated_writes["memory_events_dropped"] > 0, truncated_writes
@@ -1180,6 +1223,124 @@ def main():
         assert exception_event["type"] == "illegal_instruction", exception_event
         assert "fault_snapshot" in exception_event and "continuation_snapshot" in exception_event, exception_event
         assert int(exception_event["continuation"], 0) > int(exception_event["fault_rip"], 0), exception_event
+
+        # Run the high-level matrix last so repeated synthetic inputs cannot
+        # perturb the state expected by the other integration cases.
+        matrix_thread = stop["threadId"]
+        matrix_regs = client.tool("veh_registers", {"threadId": matrix_thread})["registers"]
+        matrix_ip = "eip" if "eip" in matrix_regs else "rip"
+        matrix_accumulator = "eax" if matrix_ip == "eip" else "rax"
+        matrix_code = client.tool("veh_allocate_memory", {"size": 4096, "protection": "rwx"})
+        assert matrix_code.get("success"), matrix_code
+        matrix_start = int(matrix_code["address"], 0)
+        matrix_bytes = bytes.fromhex("31 C0 83 C0 01 83 F8 05 75 F8 EB FE")
+        assert client.tool("veh_write_memory", {
+            "address": hex(matrix_start), "data": matrix_bytes.hex(" "),
+        }).get("success")
+        matrix_dir = tempfile.mkdtemp(prefix=f"veh-targeted-{os.getpid()}-")
+        artifact_dirs.append(matrix_dir)
+        matrix = client.tool("veh_targeted_capture", {
+            "inputs": [{"name": "first"}, {"name": "second"}],
+            "steps": [
+                {"tool": "veh_set_register", "args": {
+                    "threadId": matrix_thread, "name": matrix_accumulator, "value": "0",
+                }},
+                {"tool": "veh_set_register", "args": {
+                    "threadId": matrix_thread, "name": matrix_ip, "value": hex(matrix_start),
+                }},
+            ],
+            "trace": {
+                "threadId": matrix_thread, "start": hex(matrix_start),
+                "end": hex(matrix_start + len(matrix_bytes)), "max_steps": 1000,
+                "timeout_ms": 5000, "max_code_bytes": 4096, "max_code_versions": 64,
+            },
+            "trigger": {"address": hex(matrix_start + 2), "occurrence": 3},
+            "window": {"before_steps": 3, "after_steps": 4},
+            "environment": {"capture_teb": True, "teb_size": 256},
+            "output_directory": matrix_dir,
+        }, timeout=30)
+        assert matrix.get("succeeded") == 2 and matrix.get("failed") == 0, matrix
+        matrix_paths = []
+        for item in matrix["inputs"]:
+            assert item["status"] == "ok" and item["stop_reason"] == "target_window", item
+            assert item["target_window"]["matched"] is True, item
+            assert item["drop_counts"] == {
+                "events": 0, "memory_events": 0, "register_events": 0,
+            }, item
+            artifact = item["artifact"]
+            matrix_paths.append(artifact["path"])
+            data = open(artifact["path"], "rb").read()
+            assert hashlib.sha256(data).hexdigest() == artifact["sha256"], item
+            matrix_full = json.loads(data)
+            assert matrix_full["mode"] == "targeted", matrix_full
+            assert matrix_full["aggregate_scope"] == "trigger_and_post_trigger", matrix_full
+            captured_environment = matrix_full["capture_environment"]
+            teb_region = next(region for region in captured_environment["regions"]
+                              if region["kind"] == "teb")
+            assert teb_region["encoding"] == "hex" and len(teb_region["data"]) == 512, teb_region
+        assert len(set(matrix_paths)) == 2, matrix_paths
+        for path in matrix_paths:
+            os.remove(path)
+        os.rmdir(matrix_dir)
+        artifact_dirs.remove(matrix_dir)
+
+        targeted_batch = client.tool("veh_batch", {"steps": [
+            {"tool": "veh_set_register", "args": {
+                "threadId": matrix_thread, "name": matrix_accumulator, "value": "0",
+            }},
+            {"tool": "veh_set_register", "args": {
+                "threadId": matrix_thread, "name": matrix_ip, "value": hex(matrix_start),
+            }},
+            {"tool": "veh_trace_basic_blocks", "args": {
+                "threadId": matrix_thread, "start": hex(matrix_start),
+                "end": hex(matrix_start + len(matrix_bytes)), "max_steps": 1000,
+                "timeout_ms": 5000,
+                "target_window": {"address": hex(matrix_start + 2), "occurrence": 3,
+                                  "before_steps": 2, "after_steps": 2},
+                "collect_events": True, "max_events": 16,
+                "collect_register_events": True, "max_register_events": 16,
+            }},
+        ]}, timeout=20)
+        targeted_batch_trace = targeted_batch["results"][2]["result"]
+        assert targeted_batch_trace["stop_reason"] == "target_window", targeted_batch
+        assert targeted_batch_trace["target_window"]["matched"] is True, targeted_batch
+
+        targeted_action_output = output_path("target-window-action", "json")
+        targeted_action_bp = client.tool("veh_set_breakpoint", {
+            "address": hex(matrix_start),
+            "action": [
+                {"tool": "veh_trace_basic_blocks", "args": {
+                    "threadId": matrix_thread, "start": hex(matrix_start),
+                    "end": hex(matrix_start + len(matrix_bytes)), "max_steps": 1000,
+                    "timeout_ms": 5000,
+                    "target_window": {"address": hex(matrix_start + 2), "occurrence": 3,
+                                      "before_steps": 2, "after_steps": 2},
+                    "collect_events": True, "max_events": 16,
+                    "output_file": targeted_action_output,
+                }},
+                {"tool": "veh_set_breakpoint", "args": {"address": "$0.final_address"}},
+            ],
+        })
+        assert targeted_action_bp.get("success") and targeted_action_bp.get("hasAction"), targeted_action_bp
+        for name, value in ((matrix_accumulator, "0"), (matrix_ip, hex(matrix_start))):
+            assert client.tool("veh_set_register", {
+                "threadId": matrix_thread, "name": name, "value": value,
+            }).get("success")
+        targeted_action_stop = client.tool("veh_continue", {
+            "wait": True, "timeout": 10,
+        }, timeout=15)
+        assert targeted_action_stop.get("reason") == "breakpoint", targeted_action_stop
+        with open(targeted_action_output, encoding="utf-8") as action_file:
+            targeted_action_trace = json.load(action_file)
+        assert targeted_action_trace["stop_reason"] == "target_window", targeted_action_trace
+        assert targeted_action_trace["target_window"]["matched"] is True, targeted_action_trace
+        if targeted_action_stop.get("breakpointId") != targeted_action_bp["id"]:
+            assert client.tool("veh_remove_breakpoint", {
+                "id": targeted_action_stop["breakpointId"],
+            }).get("success")
+        assert client.tool("veh_remove_breakpoint", {
+            "id": targeted_action_bp["id"],
+        }).get("success")
         print(json.dumps({
             "stop_reason": trace["stop_reason"],
             "blocks": len(trace["blocks"]),
@@ -1198,12 +1359,21 @@ def main():
             "stress_register_events": len(stress_trace["register_events"]),
             "stress_memory_events": len(stress_trace["memory_events"]),
             "checkpoint_restored": True,
+            "targeted_inputs": matrix["succeeded"],
+            "targeted_parity": True,
         }))
     finally:
         client.close()
         for path in artifact_paths:
             try:
                 os.remove(path)
+            except FileNotFoundError:
+                pass
+        for directory in artifact_dirs:
+            try:
+                for name in os.listdir(directory):
+                    os.remove(os.path.join(directory, name))
+                os.rmdir(directory)
             except FileNotFoundError:
                 pass
 

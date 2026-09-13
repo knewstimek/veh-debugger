@@ -15,7 +15,7 @@ Being in-process has a second effect. A Windows Debug API debugger attaches only
 The same debugging engine, exposed over two protocols.
 
 - **DAP**: directly in the VSCode debug panel. Source BPs, stepping, disassembly, register editing.
-- **MCP**: Claude, Cursor, Codex, etc. call 44 tools directly. No GUI in the loop -- the agent composes and automates debugging operations as functions, *programming* the debugger rather than *driving* it.
+- **MCP**: Claude, Cursor, Codex, etc. call 45 tools directly. No GUI in the loop -- the agent composes and automates debugging operations as functions, *programming* the debugger rather than *driving* it.
 
 ## Scenarios
 
@@ -106,6 +106,8 @@ Large VM traces can select `code_output="file"`. The VEH path writes only to a p
 
 When the complete trace JSON would make the MCP response large, set a separate `output_file` and `output_format="json"|"jsonl"`. The server writes the full result to a new file and returns only its path, SHA-256, size, per-array counts, truncation state, and errors. Existing files are never overwritten, and direct, `veh_batch`, and breakpoint-action calls share the same semantics. `occurrence_window={address,from,to}` collects entry-to-entry cycles from immediately before visit N through immediately before the visit after M. This gate is AND-composed with `start_condition` and `collect_condition`; `to=0` leaves the upper bound open.
 
+For one handler occurrence, `target_window={address,occurrence,before_steps,after_steps}` retains a bounded ordered pre-trigger ring and post-trigger interval. `veh_targeted_capture` applies per-input batch setup in one attached session, embeds a TEB/FS/GS plus selected-memory environment snapshot, and writes one unique JSON artifact per input. Its compact report includes path, SHA-256, size, event counts, exact drops, truncation, and occurrence-match state. This matrix orchestrator is called directly rather than nested in `veh_batch` or a breakpoint action; the underlying target window supports direct/batch/action parity.
+
 For function-scoped evidence, set `stop_on_return=true`. The trace fixes the entry stack pointer and return address, single-steps through calls outside the decoded range while excluding external memory/register/code events, and returns `stop_reason="function_return"`, the concrete return edge, and a full return snapshot when the original frame returns. External execution still consumes `max_steps` and `timeout_ms`.
 
 `start_condition`, `stop_condition`, and `collect_condition` accept forms such as `r12 == 0x1234`, `[r13-8] != 0`, or `rip < 0x140000000 || rip >= 0x150000000`. Comparisons are `== != < <= > >=`; memory width can be written as `byte/word/dword/qword [reg±offset]` and defaults to pointer width. Up to four clauses may use one logical operator (`&&` or `||`); mixing both is rejected. Addresses are classified, when available, as `image`, `mapped`, `private`, or `stack` with protection/guard metadata. `loop_folds` reports measured re-entry candidates without claiming dispatcher semantics. Exception events include code, fault RIP/address, continuation, and fault/continuation snapshots. The actual SEH handler address is not guessed because this trace does not reliably observe it.
@@ -116,7 +118,7 @@ For function-scoped evidence, set `stop_on_return=true`. The trace fixes the ent
 
 - **VEH-based**: Uses VEH instead of Windows Debug API - bypasses PEB/NtQuery-based anti-debug checks (Themida, VMProtect, etc.)
 - **Full DAP support**: Works with VSCode, MCP debug tools, and any DAP-compatible client
-- **MCP tool server**: 44 tools for AI agents (Claude, Cursor, Codex, etc.) to directly control the debugger
+- **MCP tool server**: 45 tools for AI agents (Claude, Cursor, Codex, etc.) to directly control the debugger
 - **TCP mode**: Remote debugging via `--tcp --port=PORT`
 - **Remote access**: `--remote` / `--bind=0.0.0.0` for VM/network debugging
 - **32/64-bit**: Debug both x86 and x64 processes (separate 32-bit DLL build; WoW64 injection for 32-bit targets)
@@ -149,7 +151,7 @@ veh-debug-adapter.exe              veh-mcp-server.exe
 |-----------|------|
 | `veh-debugger.dll` (`vcruntime_net.dll`) | Injected into target. Registers VEH handler, manages breakpoints, queries threads/stack/memory |
 | `veh-debug-adapter.exe` | DAP protocol server. DLL injection, Named Pipe IPC, JSON-RPC processing |
-| `veh-mcp-server.exe` | MCP tool server. 44 tools for AI agents to directly control the debugger |
+| `veh-mcp-server.exe` | MCP tool server. 45 tools for AI agents to directly control the debugger |
 | VSCode Extension | launch.json schema, adapter path configuration (minimal wrapper) |
 
 ## Build
@@ -290,7 +292,7 @@ enabled = true
 
 Restart the agent/IDE after configuring to activate.
 
-**MCP Tools (44)**
+**MCP Tools (45)**
 
 | Tool | Args | Description |
 |------|------|-------------|
@@ -334,6 +336,7 @@ Restart the agent/IDE after configuring to activate.
 | `veh_trace_callers` | `address, duration_sec?` | Profile function callers (auto-resume -> collect for N seconds -> auto-pause). Returns unique callers with hit counts. x64: RtlVirtualUnwind (accurate). x86: [ESP] (accurate only at function entry) |
 | `veh_trace_calls` | `addresses, duration_sec?, resolve?, system_only?` | Monitor where call/jmp instructions go at runtime. Sets BPs on call sites, runs program for N seconds, collects actual targets with API names. `resolve=true`: follow thunks/trampolines in natural call context to final API (handles exception-based obfuscation). `system_only=true`: return only system DLL targets. For IAT reconstruction on packed binaries. |
 | `veh_trace_basic_blocks` | `threadId, start, end, ..., stop_on_return?, collect_events?, collect_memory_events?, collect_register_events?, collect_code?, ...` | Bounded trace with optional function-return scope and ordered block/code/memory/register-occurrence streams, block/edge coverage, memory observations, dependencies, summaries, regions, and exceptions. |
+| `veh_targeted_capture` | `inputs, steps?, trace, trigger, window, environment?, output_directory, stop_on_error?` | Apply per-input setup and write occurrence-centered ordered trace/environment artifacts with compact hash/count/drop/truncation/match reports. |
 | `veh_checkpoint_create` | `threadId, regions?, capture_teb?, teb_size?` | Capture GPR/flags (plus x64 XMM), TEB and FS/GS environment, and selected memory. Optional TEB bytes are comparison-only OS-managed state and are not restored. |
 | `veh_checkpoint_restore` | `id` | Restore context and selected memory while the original thread is VEH-stopped; refuse changed mappings and attempt rollback on failure. |
 | `veh_checkpoint_diff` | `id, other_id?` | Compare a checkpoint with current state or another checkpoint and return register and changed-memory spans. |

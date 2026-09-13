@@ -241,6 +241,12 @@ public:
 		bool occurrenceWindowActive = true;
 		bool occurrenceWindowStarted = false;
 		bool occurrenceWindowCompleted = false;
+		TraceTargetWindow targetWindow{};
+		uint64_t targetOccurrenceHits = 0;
+		uint64_t targetTriggerSequence = 0;
+		uint64_t targetCaptureStartSequence = 0;
+		uint64_t targetCaptureEndSequence = 0;
+		bool targetMatched = false;
 		uint32_t filteredSteps = 0;
 		bool stopOnReturn = false;
 		bool functionReturned = false;
@@ -265,6 +271,9 @@ public:
 		std::vector<TraceBasicBlockCodeVersionEntry> codeVersions;
 		std::vector<uint8_t> codeBytes;
 		std::vector<uint8_t> codeScratch;
+		std::vector<TraceBasicBlockCodeVersionEntry> targetCodeVersionsScratch;
+		std::vector<uint8_t> targetCodeBytesScratch;
+		std::vector<uint32_t> targetCodeVersionRemap;
 		bool codeFileOutput = false;
 		uint32_t codeChunkBytes = 0;
 		uint64_t codeStreamToken = 0;
@@ -292,11 +301,15 @@ public:
 		bool memoryReadsTruncated = false;
 		bool dependencyIncomplete = false;
 		bool eventsTruncated = false;
+		uint64_t eventsDropped = 0;
 		uint32_t eventCount = 0;
+		uint32_t eventHead = 0;
 		uint32_t memoryEventCount = 0;
+		uint32_t memoryEventHead = 0;
 		uint64_t memoryEventsDropped = 0;
 		bool memoryEventsTruncated = false;
 		uint32_t registerEventCount = 0;
+		uint32_t registerEventHead = 0;
 		uint64_t registerEventsDropped = 0;
 		bool registerEventsTruncated = false;
 		TraceBasicBlockRegisterEventEntry pendingRegisterEvent{};
@@ -344,7 +357,7 @@ public:
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition, const TraceOccurrenceWindow& occurrenceWindow,
-		bool stopOnReturn,
+		bool stopOnReturn, const TraceTargetWindow& targetWindow,
 		std::vector<TraceBasicBlocksState::Instruction>&& instructions,
 		std::vector<uint64_t>&& staticBlockStarts);
 	void CancelTraceBasicBlocks(TraceBasicBlockStopReason reason);
@@ -488,6 +501,9 @@ private:
 	void RunBasicTraceCodeStreamWriter();
 	void StopBasicTraceCodeStream(bool abort);
 	bool AdvanceBasicTraceOccurrence(uint64_t address);
+	void AdvanceBasicTraceTarget(uint64_t address, uint64_t sequence);
+	void EvictBasicTraceTargetEvents(uint64_t sequence);
+	bool CompactBasicTraceTargetCode();
 	bool BasicTraceCollectionGate(const CONTEXT* ctx) const;
 	bool EvaluateBasicTraceCondition(const TraceCondition& condition, const CONTEXT* ctx) const;
 

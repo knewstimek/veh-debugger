@@ -310,6 +310,13 @@ public:
 		uint64_t entryStackPointer = 0;
 		uint64_t returnAddress = 0;
 		uint64_t externalSteps = 0;
+		bool targetWindowSupported = false;
+		TraceTargetWindow targetWindow{};
+		uint64_t targetOccurrenceHits = 0;
+		uint64_t targetTriggerSequence = 0;
+		uint64_t targetCaptureStartSequence = 0;
+		uint64_t targetCaptureEndSequence = 0;
+		bool targetMatched = false;
 		TraceBasicBlockStopReason stopReason = TraceBasicBlockStopReason::Completed;
 		bool truncated = false;
 		uint32_t exceptionsFollowed = 0;
@@ -326,6 +333,7 @@ public:
 		uint32_t threadId = 0;
 		bool eventCollectionEnabled = false;
 		bool eventsTruncated = false;
+		uint64_t eventsDropped = 0;
 		uint16_t eventSchemaVersion = 0;
 		bool codeCollectionEnabled = false;
 		bool codeTruncated = false;
@@ -370,7 +378,8 @@ public:
 		const TraceCondition& startCondition = {}, const TraceCondition& stopCondition = {},
 		const TraceCondition& collectCondition = {},
 		const TraceOccurrenceWindow& occurrenceWindow = {},
-		bool stopOnReturn = false);
+		bool stopOnReturn = false,
+		const TraceTargetWindow& targetWindow = {});
 
 	// --- Resolve (PDB) ---
 	uint64_t ResolveSourceLine(const std::string& file, uint32_t line);

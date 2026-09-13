@@ -76,6 +76,17 @@ def main():
             assert function_trace == {
                 "error": "injected DLL does not support stop_on_return",
             }, function_trace
+        if os.environ.get("VEH_TEST_EXPECT_TARGET_WINDOW_UNSUPPORTED") == "1":
+            extension_stop = stop_at_start()
+            target_trace = client.tool("veh_trace_basic_blocks", {
+                "threadId": extension_stop["threadId"], "start": hex(start),
+                "end": hex(start + 0x100),
+                "target_window": {"address": hex(start), "occurrence": 1,
+                                  "before_steps": 0, "after_steps": 1},
+            }, timeout=15)
+            assert target_trace == {
+                "error": "injected DLL does not support target_window",
+            }, target_trace
         print(json.dumps({
             "mcp": os.environ.get("VEH_TEST_BUILD_DIR", os.path.join(ROOT, "build")),
             "target": TARGET,

@@ -44,6 +44,7 @@ public:
 	json Execute(const json& steps);
 	void SetVariable(const std::string& name, const json& value);
 	void SetStopOnError(bool value) { stopOnError_ = value; }
+	json ResolveArguments(const json& args) { return ResolveArgs(args); }
 
 private:
 	// Execute a single step (tool call or control flow)
