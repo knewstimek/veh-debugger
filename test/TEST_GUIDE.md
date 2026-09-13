@@ -18,6 +18,8 @@ Run tests from the repository root. Test harnesses must use real timeouts,
 `try/finally` cleanup, and must terminate and wait for every process they start.
 DAP stdio tests should reuse `test/dap_test_client.py` so blocking pipe reads stay
 on a reader thread and the controlling test can enforce monotonic timeouts.
+Long control-channel changes should also run `test/test_trace_heartbeat_long.py`;
+it deliberately keeps one bounded trace active beyond the 30-second heartbeat window.
 
 ## Core integration coverage
 

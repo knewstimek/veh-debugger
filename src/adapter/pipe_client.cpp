@@ -195,6 +195,19 @@ bool PipeClient::SendAndReceive(IpcCommand cmd,
 	};
 	report(PipeExchangeFailure::None);
 	std::lock_guard<std::mutex> sendLock(sendReceiveMutex_);
+	struct RequestInFlightGuard {
+		std::mutex& mutex;
+		bool& active;
+		RequestInFlightGuard(std::mutex& valueMutex, bool& valueActive)
+			: mutex(valueMutex), active(valueActive) {
+			std::lock_guard<std::mutex> lock(mutex);
+			active = true;
+		}
+		~RequestInFlightGuard() {
+			std::lock_guard<std::mutex> lock(mutex);
+			active = false;
+		}
+	} requestGuard(requestStateMutex_, requestInFlight_);
 	if (!running_) {
 		// 리더 스레드 없으면 직접 읽기 (초기 연결 시)
 		if (!SendCommand(cmd, payload, payloadSize)) {
@@ -432,6 +445,12 @@ void PipeClient::HeartbeatThread() {
 			Sleep(100);
 		}
 		if (!heartbeatRunning_ || !connected_) break;
+		{
+			std::lock_guard<std::mutex> lock(requestStateMutex_);
+			// A synchronous command owns the response channel and its own bounded
+			// timeout. Lack of unrelated heartbeat traffic while it runs is expected.
+			if (requestInFlight_) continue;
+		}
 
 		// Heartbeat 전송
 		if (!SendCommand(IpcCommand::Heartbeat)) {
@@ -442,6 +461,8 @@ void PipeClient::HeartbeatThread() {
 		// 30초 무응답 체크
 		uint64_t elapsed = GetTickCount64() - lastRecvTime_;
 		if (elapsed > 30000) {
+			std::lock_guard<std::mutex> lock(requestStateMutex_);
+			if (requestInFlight_) continue;
 			LOG_ERROR("Heartbeat timeout: no response for %llu ms", elapsed);
 			connected_ = false;
 			if (stopEvent_) SetEvent(stopEvent_);
