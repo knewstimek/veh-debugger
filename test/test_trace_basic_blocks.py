@@ -110,6 +110,10 @@ def main():
         failure = rejected.get("failure", {})
         assert failure.get("reason") == "instruction_pointer_outside_range", rejected
         assert failure.get("status") == "not_found" and failure.get("status_code") == 2, rejected
+        assert failure.get("control_response_received") is True, rejected
+        assert failure.get("control_response_bytes", 0) > 0, rejected
+        assert failure.get("advertised_payload_bytes") == failure["control_response_bytes"], rejected
+        assert failure.get("response_header_bytes") == failure.get("expected_response_bytes"), rejected
         assert failure.get("stopped") is True and failure.get("ip_in_range") is False, rejected
         assert failure.get("decode_succeeded") is True, rejected
         assert failure.get("decoded_instruction_count", 0) > 0, rejected
@@ -758,6 +762,40 @@ def main():
         assert any(record["block"] == mid_start + mid_target_offset
                    for record in mid_artifact["records"]), mid_artifact
 
+        # Exercise a multi-megabyte control response like generated opcode VMs:
+        # 20k ordered register records, 20k read/write memory records, 10k edge
+        # events, and code versions must survive the control-pipe transfer.
+        stress = client.tool("veh_allocate_memory", {"size": 4096, "protection": "rwx"})
+        assert stress.get("success"), stress
+        stress_start = int(stress["address"], 0)
+        counter_address = stress_start + 16
+        if is_32bit:
+            stress_instruction = bytes.fromhex("ff 05") + counter_address.to_bytes(4, "little")
+        else:
+            stress_instruction = bytes.fromhex("ff 05 0a 00 00 00")
+        stress_code = stress_instruction + bytes.fromhex("eb f8") + b"\x90" * 8 + b"\0" * 4
+        assert client.tool("veh_write_memory", {
+            "address": hex(stress_start), "data": stress_code.hex(" "),
+        }).get("success")
+        assert client.tool("veh_set_register", {
+            "threadId": checkpoint_thread, "name": ip_name, "value": hex(stress_start),
+        }).get("success")
+        stress_trace = client.tool("veh_trace_basic_blocks", {
+            "threadId": checkpoint_thread, "start": hex(stress_start),
+            "end": hex(stress_start + 8), "max_steps": 20000,
+            "timeout_ms": 60000, "stack_bytes": 0,
+            "collect_events": True, "max_events": 20000,
+            "collect_memory_events": True, "max_memory_events": 20000,
+            "collect_register_events": True, "max_register_events": 20000,
+            "collect_code": True, "max_code_bytes": 1024, "max_code_versions": 8,
+        }, timeout=80)
+        assert stress_trace.get("steps_executed") == 20000, stress_trace
+        assert len(stress_trace["register_events"]) == 20000, stress_trace
+        assert stress_trace["register_events_dropped"] == 0, stress_trace
+        assert len(stress_trace["memory_events"]) == 20000, stress_trace
+        assert stress_trace["memory_events_dropped"] == 0, stress_trace
+        assert stress_trace["code_capture"]["complete"] is True, stress_trace
+
         # Dispatcher occurrence windows are entry-to-entry and AND-compose with
         # the existing start/collect conditions. The fourth visit closes [2,3]
         # before its instruction executes, so only two loop cycles are exported.
@@ -986,6 +1024,7 @@ def main():
         }).get("success")
         assert client.tool("veh_free_memory", {"address": hex(smc_start)}).get("success")
         assert client.tool("veh_free_memory", {"address": hex(mid_start)}).get("success")
+        assert client.tool("veh_free_memory", {"address": hex(stress_start)}).get("success")
         assert client.tool("veh_free_memory", {"address": hex(large_start)}).get("success")
 
         terminated = client.tool("veh_terminate")
@@ -1027,6 +1066,8 @@ def main():
             "executed_writes": sum(bool(w.get("executed_after_write")) for w in executable_trace["executable_writes"]),
             "lea_dependencies": lea_trace["final_dependencies"][destination_name],
             "code_versions": len(smc_trace["code_versions"]),
+            "stress_register_events": len(stress_trace["register_events"]),
+            "stress_memory_events": len(stress_trace["memory_events"]),
             "checkpoint_restored": True,
         }))
     finally:

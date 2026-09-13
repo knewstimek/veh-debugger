@@ -283,6 +283,13 @@ public:
 	struct TraceBasicBlocksResult {
 		bool ok = false;
 		IpcStatus status = IpcStatus::Error;
+		bool controlResponseReceived = false;
+		uint32_t controlResponseBytes = 0;
+		uint32_t advertisedPayloadBytes = 0;
+		uint32_t controlSystemError = ERROR_SUCCESS;
+		uint16_t responseHeaderSize = 0;
+		uint64_t expectedResponseBytes = 0;
+		std::string controlFailure;
 		TraceBasicBlocksStartFailure startFailure = TraceBasicBlocksStartFailure::None;
 		bool stopped = false;
 		bool ipInRange = false;

@@ -2681,7 +2681,8 @@ bool PipeServer::SendResponse(uint32_t command, const void* payload, uint32_t pa
 	if (!connected_ || pipe_ == INVALID_HANDLE_VALUE) return false;
 	auto msg = BuildIpcMessage(command, payload, payloadSize);
 	std::lock_guard<std::mutex> lock(writeMutex_);
-	return AsyncWriteExact(msg.data(), static_cast<DWORD>(msg.size()));
+	const DWORD timeoutMs = payloadSize > 1024 * 1024 ? 15000 : 3000;
+	return AsyncWriteExact(msg.data(), static_cast<DWORD>(msg.size()), timeoutMs);
 }
 
 void PipeServer::ApplyHwBreakpointsToAllThreads() {
