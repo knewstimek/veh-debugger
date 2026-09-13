@@ -88,8 +88,27 @@ static bool DecodeBasicTraceRange(uint64_t start, uint64_t end,
 	starts.insert(start);
 	uint64_t address = start;
 	while (address < end) {
+		MEMORY_BASIC_INFORMATION region{};
+		if (!VirtualQuery(reinterpret_cast<const void*>(static_cast<uintptr_t>(address)),
+				&region, sizeof(region))) {
+			return false;
+		}
+		const uint64_t regionBase = reinterpret_cast<uint64_t>(region.BaseAddress);
+		const uint64_t regionEnd = regionBase + static_cast<uint64_t>(region.RegionSize);
+		if (regionEnd <= address) return false;
+		const bool readable = region.State == MEM_COMMIT &&
+			(region.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+		if (!readable) {
+			// PE image ranges may contain reserved or inaccessible gaps between
+			// executable sections. They cannot contain an executed instruction, so
+			// skip the whole region without turning a valid trace into decode failure.
+			address = std::min(end, regionEnd);
+			continue;
+		}
 		uint8_t bytes[ZYDIS_MAX_INSTRUCTION_LENGTH] = {};
-		size_t available = static_cast<size_t>((end - address) < sizeof(bytes) ? (end - address) : sizeof(bytes));
+		const uint64_t readableEnd = std::min(end, regionEnd);
+		size_t available = static_cast<size_t>(std::min<uint64_t>(
+			readableEnd - address, sizeof(bytes)));
 		if (!SafeReadMem(address, bytes, available)) return false;
 
 		ZydisDecodedInstruction decoded{};

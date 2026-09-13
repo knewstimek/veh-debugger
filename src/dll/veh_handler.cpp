@@ -2174,6 +2174,14 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 			return EXCEPTION_CONTINUE_SEARCH;
 		}
 
+		// The IPC server deliberately uses local SEH probes while decoding target
+		// memory. Never surface those recoverable exceptions as debugger stops: the
+		// server thread is also the only thread that could service a continue, so
+		// parking it in NotifyAndWait would deadlock the control pipe.
+		if (tid == internalTid_.load(std::memory_order_relaxed)) {
+			return EXCEPTION_CONTINUE_SEARCH;
+		}
+
 		// TraceCalls follow-through: pass exceptions to SEH, keep TF
 		if (traceCalls_.following.load(std::memory_order_acquire) && tid == traceCalls_.followThreadId) {
 			traceCalls_.followSteps++;
