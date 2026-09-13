@@ -2285,6 +2285,12 @@ json McpServer::ToolCheckpointCreate(const json& args) {
 	checkpoint.threadId = threadId;
 	checkpoint.registers = *registers;
 	checkpoint.environment = environment;
+	const uint64_t checkpointStackPointer = registers->rsp;
+	MEMORY_BASIC_INFORMATION stackMbi{};
+	const bool hasStackMapping = checkpointStackPointer &&
+		VirtualQueryEx(session_.GetTargetProcess(),
+			reinterpret_cast<LPCVOID>(uintptr_t(checkpointStackPointer)),
+			&stackMbi, sizeof(stackMbi)) && stackMbi.State == MEM_COMMIT;
 	size_t totalBytes = 0;
 	for (size_t requestedIndex = 0; requestedIndex < regionsArg.size(); ++requestedIndex) {
 		const auto& requested = regionsArg[requestedIndex];
@@ -2329,7 +2335,17 @@ json McpServer::ToolCheckpointCreate(const json& args) {
 		region.regionSize = mbi.RegionSize;
 		region.type = mbi.Type;
 		region.protection = mbi.Protect;
-		region.kind = requestedIndex >= explicitRegionCount ? "teb" : "memory";
+		const bool isStack = requestedIndex < explicitRegionCount && hasStackMapping &&
+			mbi.AllocationBase == stackMbi.AllocationBase;
+		region.kind = requestedIndex >= explicitRegionCount ? "teb" : (isStack ? "stack" : "memory");
+		// The stopped thread is currently executing the VEH exception/wait machinery
+		// below its saved application SP.  Replacing that live prefix makes the
+		// checkpoint command appear successful but corrupts the resume path.  Restore
+		// the logical application stack (saved SP..end) and leave the live VEH frames
+		// below SP untouched.
+		if (isStack && address < checkpointStackPointer)
+			region.restoreOffset = static_cast<size_t>(std::min<uint64_t>(
+				checkpointStackPointer - address, size));
 		region.restorable = region.kind != "teb";
 		region.bytes = std::move(bytes);
 		checkpoint.regions.push_back(std::move(region));
@@ -2346,10 +2362,16 @@ json McpServer::ToolCheckpointCreate(const json& args) {
 		checkpoints_.emplace(checkpoint.id, checkpoint);
 	}
 	json regions = json::array();
-	for (const auto& region : checkpoint.regions)
-		regions.push_back({{"address",CheckpointHex(region.address)}, {"size",region.bytes.size()},
+	for (const auto& region : checkpoint.regions) {
+		json item = {{"address",CheckpointHex(region.address)}, {"size",region.bytes.size()},
 			{"allocation_base",CheckpointHex(region.allocationBase)}, {"kind", region.kind},
-			{"restorable", region.restorable}});
+			{"restorable", region.restorable}};
+		if (region.kind == "stack") {
+			item["restore_start"] = CheckpointHex(region.address + region.restoreOffset);
+			item["live_prefix_skipped"] = region.restoreOffset;
+		}
+		regions.push_back(std::move(item));
+	}
 	auto architecture = registers->is32bit ? (environment.wow64 ? "wow64" : "x86") : "x64";
 	json threadEnvironment = {{"architecture", architecture}, {"wow64", environment.wow64},
 		{"teb", CheckpointHex(environment.teb)},
@@ -2361,7 +2383,8 @@ json McpServer::ToolCheckpointCreate(const json& args) {
 		{"regions",std::move(regions)},
 		{"thread_environment", std::move(threadEnvironment)}, {"teb_captured", captureTeb},
 		{"context_scope",registers->is32bit ? "x86-gpr-flags" : "x64-gpr-flags-xmm"},
-		{"limitations",json::array({"selected memory only","TEB bytes and segment bases are observed but not restored",
+		{"limitations",json::array({"selected memory only","live VEH stack below the saved SP is not restored",
+			"TEB bytes and segment bases are observed but not restored",
 			"no heap metadata, handles, kernel state, or other threads"})}};
 }
 
@@ -2385,38 +2408,50 @@ json McpServer::ToolCheckpointRestore(const json& args) {
 	rollback.reserve(checkpoint.regions.size());
 	for (const auto& region : checkpoint.regions) {
 		if (!region.restorable) { rollback.emplace_back(); continue; }
+		const uint64_t restoreAddress = region.address + region.restoreOffset;
+		const size_t restoreSize = region.bytes.size() - region.restoreOffset;
+		if (!restoreSize) { rollback.emplace_back(); continue; }
 		MEMORY_BASIC_INFORMATION mbi{};
-		if (!VirtualQueryEx(session_.GetTargetProcess(), reinterpret_cast<LPCVOID>(uintptr_t(region.address)),
+		if (!VirtualQueryEx(session_.GetTargetProcess(), reinterpret_cast<LPCVOID>(uintptr_t(restoreAddress)),
 				&mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
 			reinterpret_cast<uint64_t>(mbi.AllocationBase) != region.allocationBase ||
-			mbi.Type != region.type || region.address + region.bytes.size() >
+			mbi.Type != region.type || restoreAddress + restoreSize >
 				reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize)
 			return {{"error", "memory mapping changed since checkpoint; restore refused"},
-				{"address",CheckpointHex(region.address)}};
-		auto current = session_.ReadMemory(region.address, static_cast<uint32_t>(region.bytes.size()));
-		if (current.size() != region.bytes.size())
+				{"address",CheckpointHex(restoreAddress)}};
+		auto current = session_.ReadMemory(restoreAddress, static_cast<uint32_t>(restoreSize));
+		if (current.size() != restoreSize)
 			return {{"error", "failed to prepare restore rollback image"}};
 		rollback.push_back(std::move(current));
 	}
 	size_t written = 0;
 	for (; written < checkpoint.regions.size(); ++written) {
 		const auto& region = checkpoint.regions[written];
-		if (!region.restorable) continue;
-		if (!session_.WriteMemory(region.address, region.bytes.data(), static_cast<uint32_t>(region.bytes.size()))) {
+		const size_t restoreSize = region.bytes.size() - region.restoreOffset;
+		if (!region.restorable || !restoreSize) continue;
+		const uint64_t restoreAddress = region.address + region.restoreOffset;
+		if (!session_.WriteMemory(restoreAddress, region.bytes.data() + region.restoreOffset,
+				static_cast<uint32_t>(restoreSize))) {
 			for (size_t i = 0; i <= written && i < rollback.size(); ++i)
-				if (checkpoint.regions[i].restorable) session_.WriteMemory(checkpoint.regions[i].address, rollback[i].data(),
+				if (!rollback[i].empty()) session_.WriteMemory(
+					checkpoint.regions[i].address + checkpoint.regions[i].restoreOffset, rollback[i].data(),
 					static_cast<uint32_t>(rollback[i].size()));
 			return {{"error", "memory restore failed; rollback attempted"}, {"failed_region",written}};
 		}
 	}
 	if (!session_.SetRegisters(checkpoint.threadId, checkpoint.registers)) {
 		for (size_t i = 0; i < rollback.size(); ++i)
-			if (checkpoint.regions[i].restorable) session_.WriteMemory(checkpoint.regions[i].address, rollback[i].data(),
+			if (!rollback[i].empty()) session_.WriteMemory(
+				checkpoint.regions[i].address + checkpoint.regions[i].restoreOffset, rollback[i].data(),
 				static_cast<uint32_t>(rollback[i].size()));
 		return {{"error", "context restore failed; memory rollback attempted"}};
 	}
+	size_t liveStackBytesSkipped = 0;
+	for (const auto& region : checkpoint.regions)
+		if (region.kind == "stack") liveStackBytesSkipped += region.restoreOffset;
 	return {{"restored",true}, {"id",id}, {"threadId",checkpoint.threadId},
 		{"regions",checkpoint.regions.size()}, {"memory_bytes",checkpoint.byteSize},
+		{"live_stack_bytes_skipped",liveStackBytesSkipped},
 		{"warning","external process state (other threads, handles, allocations, files, sockets) was not restored"}};
 }
 
@@ -3496,7 +3531,7 @@ json McpServer::GetToolsList() {
 			,{"output_format", {{"type", "string"}, {"enum", {"json", "jsonl"}}, {"description", "output_file encoding (default json); JSONL uses a manifest plus section-item records"}}}
 		 }}, {"required", json::array({"threadId", "start", "end"})}}}},
 
-		{{"name", "veh_checkpoint_create"}, {"description", "Capture one VEH-stopped thread's GPR/flags (plus x64 XMM), TEB and FS/GS selector/base metadata, and explicitly selected memory ranges. Checkpoints are session-local and bounded; they do not capture other threads, handles, allocations, files, sockets, or kernel state."},
+		{{"name", "veh_checkpoint_create"}, {"description", "Capture one VEH-stopped thread's GPR/flags (plus x64 XMM), TEB and FS/GS selector/base metadata, and explicitly selected memory ranges. Stack ranges expose the safe logical restore start at the saved SP. Checkpoints are session-local and bounded; they do not capture other threads, handles, allocations, files, sockets, or kernel state."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "VEH-stopped thread to capture"}}},
 			{"regions", {{"type", "array"}, {"maxItems", 16}, {"items", {{"type", "object"}, {"properties", {
@@ -3506,7 +3541,7 @@ json McpServer::GetToolsList() {
 			{"teb_size", {{"type", "integer"}, {"minimum", 256}, {"maximum", 1048576}, {"description", "Bytes captured when capture_teb=true (default 4096)"}}}
 		 }}, {"required", json::array({"threadId"})}}}},
 
-		{{"name", "veh_checkpoint_restore"}, {"description", "Restore selected memory and the captured thread context. Refuses changed mappings, rolls memory back on failure, and requires the original thread to be VEH-stopped."},
+		{{"name", "veh_checkpoint_restore"}, {"description", "Restore selected memory and the captured thread context. Stack restores preserve live VEH exception/wait frames below saved SP and report skipped bytes. Refuses changed mappings, rolls memory back on failure, and requires the original thread to be VEH-stopped."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"id", {{"description", "Checkpoint ID returned by veh_checkpoint_create"}}}
 		 }}, {"required", json::array({"id"})}}}},
