@@ -15,9 +15,9 @@ Windows debugger based on **VEH (Vectored Exception Handler)** instead of the Wi
 - **Conditional breakpoints** — Break only when condition is met (`RAX==0x1234`, `*0x7FF600!=0`, `RCX>0x100`)
 - **Hit count breakpoints** — Break on Nth hit
 - **Log points** — Log `{RAX}`, `{*0x7FF600}` to Debug Console without stopping execution
-- **4 injection methods** — CreateRemoteThread, NtCreateThreadEx, Thread Hijack, QueueUserAPC
+- **Multiple injection methods** — CreateRemoteThread, NtCreateThreadEx, Thread Hijack, QueueUserAPC
 - **TCP remote mode** — Debug across VMs or network
-- **MCP tool server** — 45 tools for AI agent integration (Claude, Cursor, Codex, etc.)
+- **MCP tool server** — Debugger operations exposed directly to AI agents (Claude, Cursor, Codex, etc.)
 - **Bounded semantic tracing** — Aggregate blocks/edges plus optional ordered block, memory-access, register-delta, and runtime-code events in one sequence space without per-instruction MCP traffic
 - **Large trace artifacts** — Stream up to 400 MiB of runtime code to portable `.vtc` files or export complete trace results as JSON/JSONL with compact path, hash, count, and truncation metadata
 - **Occurrence-scoped capture** — Collect selected dispatcher/instruction visits and combine them explicitly with start, stop, and collection conditions
@@ -77,7 +77,7 @@ This is equivalent to Cheat Engine's "Find out what writes to this address" / "F
 
 ## MCP Tool Server (AI Integration)
 
-The bundled `veh-mcp-server.exe` exposes 45 debugging tools via the Model Context Protocol, allowing AI agents to directly control the debugger.
+The bundled `veh-mcp-server.exe` exposes debugging operations through the Model Context Protocol, allowing AI agents to directly control the debugger. The running server's MCP `tools/list` response is the authoritative tool inventory.
 
 `veh_trace_basic_blocks` supports x86/x64 ordered memory and register provenance,
 self-modifying code versions, dispatcher occurrence windows, and file-backed

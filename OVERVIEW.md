@@ -19,7 +19,7 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 - **Adapter** (`src/adapter/`): DAP protocol handler, DLL injection, PDB symbol engine
 - **DLL** (`src/dll/`): VEH handler, breakpoint/stepping, pipe server, stack walking
 - **Semantic trace**: bounded blocks/edges, register deltas, memory reads/writes, conservative dependency bitsets, conditions, region metadata, and exception continuations
-- **MCP** (`src/mcp/`): 44-tool MCP server for AI agents
+- **MCP** (`src/mcp/`): MCP server exposing debugger operations to AI agents
 - **Common** (`src/common/`): IPC protocol definitions, logger
 
 ## Key Files
@@ -42,7 +42,7 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 | `src/common/ipc_protocol.h` | All IPC command/event/struct definitions (shared) |
 | `src/common/logger.h` | Logging utility |
 | `src/mcp/debug_session.cpp/h` | DebugSession class - pure C++ IPC wrapper, no JSON dependency. Used by MCP (and future veh_batch) |
-| `src/mcp/mcp_server.cpp/h` | MCP JSON-RPC server, 44 debugger tools (delegates to DebugSession) |
+| `src/mcp/mcp_server.cpp/h` | MCP JSON-RPC server and debugger tool registry (delegates to DebugSession) |
 | `src/mcp/installer.cpp/h` | Auto-install to Claude/Cursor/Windsurf/Codex configs |
 | `docs/DEVELOPMENT_TOOLS.md` | Reusable MCP scenario, trace validator, parity, and IPC-compatibility tool catalog |
 
@@ -268,7 +268,7 @@ kernel objects, files, and sockets are intentionally outside the contract. A
 compatible allocation recreated at exactly the same address cannot be reliably
 distinguished by Windows metadata; callers should recreate a checkpoint after
 mapping churn. `veh_checkpoint_diff` reports GPR/flags, x64 XMM indices, and at
-most 1024 changed byte spans. All four operations are available in `veh_batch`
+most 1024 changed byte spans. These checkpoint operations are available in `veh_batch`
 and breakpoint actions.
 
 ## SyscallResolver (WinAPI BP Immunity)

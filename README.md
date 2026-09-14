@@ -12,10 +12,10 @@ in-process라는 점에서 하나 더. Windows Debug API 디버거는 프로세�
 
 ## 제어 경로: DAP와 MCP
 
-같은 디버깅 엔진을 두 프로토콜로 노출한다.
+같은 디버깅 엔진을 지원되는 클라이언트 인터페이스로 노출한다.
 
 - **DAP**: VSCode 디버그 패널에서 직접. 소스 BP, 스텝, 디스어셈블리, 레지스터 편집.
-- **MCP**: Claude, Cursor, Codex 등이 44개 도구를 직접 호출. GUI를 거치지 않고 디버깅 연산을 함수처럼 조합·자동화한다 — 에이전트가 디버거를 '조종'하는 게 아니라 primitive로 '프로그래밍'한다.
+- **MCP**: Claude, Cursor, Codex 등이 공개된 디버깅 도구를 직접 호출. GUI를 거치지 않고 디버깅 연산을 함수처럼 조합·자동화한다 — 에이전트가 디버거를 '조종'하는 게 아니라 primitive로 '프로그래밍'한다.
 
 ## 실전 시나리오
 
@@ -120,7 +120,7 @@ handler occurrence만 필요하면 `target_window={address,occurrence,before_ste
 
 - **VEH 기반**: Windows Debug API 대신 VEH를 사용하여 안티디버그 우회에 유리
 - **DAP 전체 지원**: VSCode, MCP debug 도구 등 모든 DAP 호환 클라이언트에서 사용 가능
-- **MCP 도구 서버**: AI 에이전트(Claude, Codex 등)가 직접 디버거를 제어하는 45개 도구 제공
+- **MCP 도구 서버**: AI 에이전트(Claude, Codex 등)가 공개된 MCP 도구로 디버거를 직접 제어
 - **TCP 모드**: `--tcp --port=PORT`로 원격 디버깅/MCP 연동 지원
 - **원격 접속**: `--remote` / `--bind=0.0.0.0`으로 VM/네트워크 너머 디버깅
 - **32/64비트 지원**: x86/x64 프로세스 모두 디버깅 (32비트 타겟은 별도 32비트 DLL 빌드 + WoW64 인젝션)
@@ -153,7 +153,7 @@ veh-debug-adapter.exe              veh-mcp-server.exe
 |---------|------|
 | `veh-debugger.dll` (`vcruntime_net.dll`) | 타겟 프로세스에 인젝션. VEH 핸들러 등록, 브레이크포인트 관리, 스레드/스택/메모리 조회 |
 | `veh-debug-adapter.exe` | DAP 프로토콜 서버. DLL 인젝션, Named Pipe 통신, JSON-RPC 처리 |
-| `veh-mcp-server.exe` | MCP 도구 서버. AI 에이전트가 44개 도구로 디버거 직접 제어 |
+| `veh-mcp-server.exe` | MCP 도구 서버. AI 에이전트가 공개된 디버깅 도구를 직접 호출 |
 | VSCode Extension | launch.json 스키마 정의, 어댑터 경로 설정 (최소 래퍼) |
 
 ## 빌드
@@ -309,7 +309,9 @@ enabled = true
 
 설정 후 에이전트/IDE를 재시작하면 활성화됩니다.
 
-**MCP 도구 목록 (44개)**
+**MCP 도구 목록**
+
+아래 표는 문서화된 공개 도구를 설명합니다. 실행 중인 서버가 제공하는 실제 목록은 MCP `tools/list` 응답을 기준으로 확인하세요.
 
 | 도구 | 인자 | 설명 |
 |------|------|------|

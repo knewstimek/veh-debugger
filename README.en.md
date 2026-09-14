@@ -12,10 +12,10 @@ Being in-process has a second effect. A Windows Debug API debugger attaches only
 
 ## Control paths: DAP and MCP
 
-The same debugging engine, exposed over two protocols.
+The same debugging engine is exposed through its supported client interfaces.
 
 - **DAP**: directly in the VSCode debug panel. Source BPs, stepping, disassembly, register editing.
-- **MCP**: Claude, Cursor, Codex, etc. call 45 tools directly. No GUI in the loop -- the agent composes and automates debugging operations as functions, *programming* the debugger rather than *driving* it.
+- **MCP**: Claude, Cursor, Codex, and other agents call the exposed debugging tools directly. No GUI in the loop -- the agent composes and automates debugging operations as functions, *programming* the debugger rather than *driving* it.
 
 ## Scenarios
 
@@ -118,7 +118,7 @@ For function-scoped evidence, set `stop_on_return=true`. The trace fixes the ent
 
 - **VEH-based**: Uses VEH instead of Windows Debug API - bypasses PEB/NtQuery-based anti-debug checks (Themida, VMProtect, etc.)
 - **Full DAP support**: Works with VSCode, MCP debug tools, and any DAP-compatible client
-- **MCP tool server**: 45 tools for AI agents (Claude, Cursor, Codex, etc.) to directly control the debugger
+- **MCP tool server**: Exposes debugger operations directly to AI agents (Claude, Cursor, Codex, etc.)
 - **TCP mode**: Remote debugging via `--tcp --port=PORT`
 - **Remote access**: `--remote` / `--bind=0.0.0.0` for VM/network debugging
 - **32/64-bit**: Debug both x86 and x64 processes (separate 32-bit DLL build; WoW64 injection for 32-bit targets)
@@ -151,7 +151,7 @@ veh-debug-adapter.exe              veh-mcp-server.exe
 |-----------|------|
 | `veh-debugger.dll` (`vcruntime_net.dll`) | Injected into target. Registers VEH handler, manages breakpoints, queries threads/stack/memory |
 | `veh-debug-adapter.exe` | DAP protocol server. DLL injection, Named Pipe IPC, JSON-RPC processing |
-| `veh-mcp-server.exe` | MCP tool server. 45 tools for AI agents to directly control the debugger |
+| `veh-mcp-server.exe` | MCP tool server. Exposes debugging operations directly to AI agents |
 | VSCode Extension | launch.json schema, adapter path configuration (minimal wrapper) |
 
 ## Build
@@ -292,7 +292,9 @@ enabled = true
 
 Restart the agent/IDE after configuring to activate.
 
-**MCP Tools (45)**
+**MCP Tools**
+
+The table below documents the public tool surface. Treat the running server's MCP `tools/list` response as the authoritative inventory.
 
 | Tool | Args | Description |
 |------|------|-------------|
@@ -394,7 +396,8 @@ For already running processes, use `attach` / `veh_attach`.
 
 ## DLL Injection Methods
 
-4 injection methods supported (auto-selected):
+Supported injection methods (auto-selected):
+
 1. **CreateRemoteThread** — Default method
 2. **NtCreateThreadEx** — For protected processes
 3. **Thread Hijacking** — Hijack existing thread
