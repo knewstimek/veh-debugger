@@ -1265,9 +1265,20 @@ def main():
         assert client.tool("veh_write_memory", {
             "address": hex(matrix_start), "data": matrix_bytes.hex(" "),
         }).get("success")
+        matrix_entry_bp = client.tool("veh_set_breakpoint", {
+            "address": hex(matrix_start),
+        })
+        assert matrix_entry_bp.get("success"), matrix_entry_bp
         assert client.tool("veh_set_register", {
             "threadId": matrix_thread, "name": matrix_ip, "value": hex(matrix_start),
         }).get("success")
+        matrix_entry_stop = client.tool("veh_continue", {
+            "wait": True, "timeout": 10,
+        }, timeout=15)
+        assert matrix_entry_stop.get("reason") == "breakpoint", matrix_entry_stop
+        assert matrix_entry_stop.get("breakpointId") == matrix_entry_bp["id"], matrix_entry_stop
+        matrix_thread = matrix_entry_stop["threadId"]
+        matrix_regs = client.tool("veh_registers", {"threadId": matrix_thread})["registers"]
         matrix_sp = int(matrix_regs["esp" if matrix_ip == "eip" else "rsp"], 0)
         stack_base, stack_size = committed_region(launch["pid"], matrix_sp)
         matrix_checkpoint = client.tool("veh_checkpoint_create", {
@@ -1282,7 +1293,7 @@ def main():
         matrix_dir = tempfile.mkdtemp(prefix=f"veh-targeted-{os.getpid()}-")
         artifact_dirs.append(matrix_dir)
         matrix = client.tool("veh_targeted_capture", {
-            "inputs": [{"name": "first"}, {"name": "second"}],
+            "inputs": [{"name": f"capture-{index}"} for index in range(4)],
             "steps": [
                 {"tool": "veh_checkpoint_restore", "args": {
                     "id": matrix_checkpoint["id"],
@@ -1301,7 +1312,7 @@ def main():
             "environment": {"capture_teb": True, "teb_size": 256},
             "output_directory": matrix_dir,
         }, timeout=30)
-        assert matrix.get("succeeded") == 2 and matrix.get("failed") == 0, matrix
+        assert matrix.get("succeeded") == 4 and matrix.get("failed") == 0, matrix
         matrix_paths = []
         for item in matrix["inputs"]:
             assert item["status"] == "ok" and item["stop_reason"] == "target_window", item
@@ -1321,7 +1332,7 @@ def main():
             teb_region = next(region for region in captured_environment["regions"]
                               if region["kind"] == "teb")
             assert teb_region["encoding"] == "hex" and len(teb_region["data"]) == 512, teb_region
-        assert len(set(matrix_paths)) == 2, matrix_paths
+        assert len(set(matrix_paths)) == 4, matrix_paths
         targeted_batch = client.tool("veh_batch", {"steps": [
             {"tool": "veh_set_register", "args": {
                 "threadId": matrix_thread, "name": matrix_accumulator, "value": "0",

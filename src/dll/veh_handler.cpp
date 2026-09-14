@@ -1275,6 +1275,10 @@ bool VehHandler::RecordBasicTraceEdge(uint64_t sourceBlock, uint64_t sourceInstr
 
 void VehHandler::FinishBasicTrace(TraceBasicBlockStopReason reason, uint64_t finalAddress, bool truncated) {
 	auto& tb = traceBasicBlocks_;
+	if (tb.entryBreakpointNeedsRearm) {
+		BreakpointManager::Instance().RearmBreakpoint(tb.entryBreakpointAddress);
+		tb.entryBreakpointNeedsRearm = false;
+	}
 	tb.stopReason = reason;
 	tb.finalAddress = finalAddress;
 	tb.truncated = tb.truncated || truncated;
@@ -1524,6 +1528,8 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.targetCaptureStartSequence = 0;
 	tb.targetCaptureEndSequence = 0;
 	tb.targetMatched = false;
+	tb.entryBreakpointAddress = 0;
+	tb.entryBreakpointNeedsRearm = false;
 	AdvanceBasicTraceOccurrence(ip);
 	AdvanceBasicTraceTarget(ip, 0);
 	tb.startConditionMet = startCondition.clauseCount == 0 || EvaluateBasicTraceCondition(startCondition, &ctx);
@@ -1538,10 +1544,25 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 			TraceBasicBlockEdgeKind::Fallthrough, 0, false, version);
 	}
 
+	// A restored checkpoint can point back at a software-breakpoint address after
+	// the breakpoint has already been rearmed by an earlier trace.  Execute the
+	// original entry instruction, then restore INT3 after its first single-step;
+	// otherwise identical captures alternate between success and a zero-step BP.
+	if (auto entryBreakpoint = BreakpointManager::Instance().FindByAddress(ip);
+		entryBreakpoint && entryBreakpoint->enabled) {
+		if (!BreakpointManager::Instance().Disable(entryBreakpoint->id)) {
+			StopBasicTraceCodeStream(true); return false;
+		}
+		tb.entryBreakpointAddress = ip;
+		tb.entryBreakpointNeedsRearm = true;
+	}
 	// Avoid leaving a generic step flag behind: write TF into the stopped context
 	// directly, then resume it as a normal continue.
 	ctx.EFlags |= 0x100;
 	if (!SetStoppedContext(threadId, ctx)) {
+		if (tb.entryBreakpointNeedsRearm)
+			BreakpointManager::Instance().RearmBreakpoint(tb.entryBreakpointAddress);
+		tb.entryBreakpointNeedsRearm = false;
 		StopBasicTraceCodeStream(true); return false;
 	}
 	if (tb.collectWindowActive) {
@@ -2185,6 +2206,11 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		// generic rearm/HW/step paths consume this event.
 		if (traceBasicBlocks_.active.load(std::memory_order_acquire) &&
 			tid == traceBasicBlocks_.threadId) {
+			if (traceBasicBlocks_.entryBreakpointNeedsRearm) {
+				BreakpointManager::Instance().RearmBreakpoint(
+					traceBasicBlocks_.entryBreakpointAddress);
+				traceBasicBlocks_.entryBreakpointNeedsRearm = false;
+			}
 			auto& traceRearm = GetPendingRearm();
 			if (traceRearm.active && traceRearm.threadId == tid) {
 				BreakpointManager::Instance().RearmBreakpoint(traceRearm.address);

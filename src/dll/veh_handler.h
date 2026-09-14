@@ -247,6 +247,8 @@ public:
 		uint64_t targetCaptureStartSequence = 0;
 		uint64_t targetCaptureEndSequence = 0;
 		bool targetMatched = false;
+		uint64_t entryBreakpointAddress = 0;
+		bool entryBreakpointNeedsRearm = false;
 		uint32_t filteredSteps = 0;
 		bool stopOnReturn = false;
 		bool functionReturned = false;
