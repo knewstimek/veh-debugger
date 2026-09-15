@@ -19,7 +19,7 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 - **Adapter** (`src/adapter/`): DAP protocol handler, DLL injection, PDB symbol engine
 - **DLL** (`src/dll/`): VEH handler, breakpoint/stepping, pipe server, stack walking
 - **Semantic trace**: bounded blocks/edges, register deltas, memory reads/writes, conservative dependency bitsets, conditions, region metadata, and exception continuations
-- **MCP** (`src/mcp/`): MCP server exposing debugger operations to AI agents
+- **MCP** (`src/mcp/`): MCP server with bounded eager profiles and a lazy toolbox gateway exposing the complete debugger operation surface to AI agents
 - **Common** (`src/common/`): IPC protocol definitions, logger
 
 ## Key Files

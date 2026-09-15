@@ -19,7 +19,7 @@ using json = nlohmann::json;
 
 class McpServer {
 public:
-	McpServer();
+	explicit McpServer(std::string toolProfile = "lite");
 	~McpServer();
 
 	void SetTransport(dap::Transport* transport);
@@ -86,9 +86,12 @@ private:
 	json ToolCheckpointRestore(const json& args);
 	json ToolCheckpointDiff(const json& args);
 	json ToolCheckpointDelete(const json& args);
+	json ToolToolbox(const json& args);
 
 	// Tool list definition
 	json GetToolsList();
+	json GetAllToolsList();
+	json DispatchTool(const std::string& name, const json& args, bool* known = nullptr);
 
 	// IPC event handler (breakpoint hit, etc.)
 	void OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t size);
@@ -112,6 +115,7 @@ private:
 
 	dap::Transport* transport_ = nullptr;
 	DebugSession session_;
+	std::string toolProfile_;
 	std::atomic<bool> running_{false};
 
 	// Last exception info (cached from ExceptionOccurred event)

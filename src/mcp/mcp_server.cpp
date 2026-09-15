@@ -68,7 +68,8 @@ static bool JsonBool(const json& args, const char* key, bool defaultVal = false)
 	return defaultVal;
 }
 
-McpServer::McpServer() {
+McpServer::McpServer(std::string toolProfile)
+	: toolProfile_(std::move(toolProfile)) {
 	StartRetryThread();
 }
 McpServer::~McpServer() {
@@ -226,24 +227,7 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 			{"version", "1.1.16"}
 		}},
 		{"instructions",
-			"VEH Debugger - in-process debugger for Windows x86/x64 executables.\n"
-			"\n"
-			"## Typical workflow\n"
-			"1. veh_launch(program, stopOnEntry=true)\n"
-			"2. veh_set_breakpoint / veh_set_source_breakpoint / veh_set_function_breakpoint\n"
-			"3. veh_continue(wait=true) -- blocks until stop\n"
-			"4. veh_registers / veh_disassemble / veh_read_memory / veh_stack_trace\n"
-			"5. veh_step_over / veh_step_in / veh_step_out\n"
-			"6. veh_detach\n"
-			"\n"
-			"## Key points\n"
-			"- veh_continue(wait=true) blocks until stop; timeout=N for custom timeout (default 10s, max 300s).\n"
-			"- Step commands are synchronous (wait for completion automatically).\n"
-			"- Inspection tools require the target to be stopped.\n"
-			"- veh_attach auto-detaches previous session. Cannot attach to CREATE_SUSPENDED processes.\n"
-			"- veh_registers returns 32-bit names (eax/esp/eip) on 32-bit targets, 64-bit (rax/rsp/rip) otherwise; check the is32bit flag.\n"
-			"- veh_set_module_breakpoint(module): stop right after a matching DLL is loaded (headless capture; fires post-DllMain).\n"
-			"- veh_batch: JSON array of commands; $N / $last / $prev reference prior results; supports if/loop/for_each flow control.\n"
+			"Windows x86/x64 in-process debugger. The default lite profile keeps common session tools eager; use veh_toolbox to discover, describe, and call all other tools. Inspection requires a stopped target."
 		}
 	};
 	SendResult(id, result);
@@ -261,57 +245,12 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 		LOG_INFO("Tool call: %s", name.c_str());
 
 		try {
-			json result;
-
-		if      (name == "veh_attach")                result = ToolAttach(args);
-		else if (name == "veh_launch")                result = ToolLaunch(args);
-		else if (name == "veh_detach")                result = ToolDetach(args);
-		else if (name == "veh_terminate")             result = ToolTerminate(args);
-		else if (name == "veh_set_breakpoint")        result = ToolSetBreakpoint(args);
-		else if (name == "veh_set_module_breakpoint") result = ToolSetModuleBreakpoint(args);
-		else if (name == "veh_remove_breakpoint")     result = ToolRemoveBreakpoint(args);
-		else if (name == "veh_set_data_breakpoint")   result = ToolSetDataBreakpoint(args);
-		else if (name == "veh_remove_data_breakpoint") result = ToolRemoveDataBreakpoint(args);
-		else if (name == "veh_continue")              result = ToolContinue(args);
-		else if (name == "veh_step_in")               result = ToolStepIn(args);
-		else if (name == "veh_step_over")             result = ToolStepOver(args);
-		else if (name == "veh_step_out")              result = ToolStepOut(args);
-		else if (name == "veh_pause")                 result = ToolPause(args);
-		else if (name == "veh_threads")               result = ToolThreads(args);
-		else if (name == "veh_stack_trace")           result = ToolStackTrace(args);
-		else if (name == "veh_registers")             result = ToolRegisters(args);
-		else if (name == "veh_read_memory")           result = ToolReadMemory(args);
-		else if (name == "veh_read_pointer_chain")    result = ToolReadPointerChain(args);
-		else if (name == "veh_write_memory")          result = ToolWriteMemory(args);
-		else if (name == "veh_modules")               result = ToolModules(args);
-		else if (name == "veh_disassemble")           result = ToolDisassemble(args);
-		else if (name == "veh_enum_locals")           result = ToolEnumLocals(args);
-		else if (name == "veh_set_source_breakpoint") result = ToolSetSourceBreakpoint(args);
-		else if (name == "veh_set_function_breakpoint") result = ToolSetFunctionBreakpoint(args);
-		else if (name == "veh_list_breakpoints")      result = ToolListBreakpoints(args);
-		else if (name == "veh_evaluate")              result = ToolEvaluate(args);
-		else if (name == "veh_set_register")          result = ToolSetRegister(args);
-		else if (name == "veh_exception_info")        result = ToolExceptionInfo(args);
-		else if (name == "veh_trace_callers")         result = ToolTraceCallers(args);
-		else if (name == "veh_dump_memory")           result = ToolDumpMemory(args);
-		else if (name == "veh_allocate_memory")       result = ToolAllocateMemory(args);
-		else if (name == "veh_free_memory")           result = ToolFreeMemory(args);
-		else if (name == "veh_execute_shellcode")     result = ToolExecuteShellcode(args);
-		else if (name == "veh_batch")                 result = ToolBatch(args);
-		else if (name == "veh_trace_register")        result = ToolTraceRegister(args);
-		else if (name == "veh_trace_memory")          result = ToolTraceMemory(args);
-		else if (name == "veh_resolve_imports")       result = ToolResolveImports(args);
-		else if (name == "veh_trace_calls")           result = ToolTraceCalls(args);
-		else if (name == "veh_trace_basic_blocks")    result = ToolTraceBasicBlocks(args);
-		else if (name == "veh_targeted_capture")      result = ToolTargetedCapture(args);
-		else if (name == "veh_checkpoint_create")     result = ToolCheckpointCreate(args);
-		else if (name == "veh_checkpoint_restore")    result = ToolCheckpointRestore(args);
-		else if (name == "veh_checkpoint_diff")       result = ToolCheckpointDiff(args);
-		else if (name == "veh_checkpoint_delete")     result = ToolCheckpointDelete(args);
-		else {
-			SendError(id, -32602, "Unknown tool: " + name);
-			return;
-		}
+			bool known = false;
+			json result = DispatchTool(name, args, &known);
+			if (!known) {
+				SendError(id, -32602, "Unknown tool: " + name);
+				return;
+			}
 
 		// MCP tool result format
 		SendResult(id, {
@@ -3315,7 +3254,7 @@ bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
 
 // --- Tool List Definition ---
 
-json McpServer::GetToolsList() {
+json McpServer::GetAllToolsList() {
 	json tools = json::array({
 		{{"name", "veh_attach"}, {"description", "Attach to a running process by PID. Injects VEH debugger DLL. Auto-detaches if already attached. Target process must be running (not CREATE_SUSPENDED)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
@@ -3607,18 +3546,9 @@ json McpServer::GetToolsList() {
 		 }}}}},
 
 		{{"name", "veh_batch"}, {"description",
-			"Execute multiple debugger commands in a single call, reducing round-trips. "
-			"Supports sequential execution, variable references ($N for step N result, $N.key for nested access; "
-			"$last / $prev for the most recent result and the one before it), "
-			"and control flow (if/loop/for_each). Optional inputs repeats the same steps sequentially in one session with $input bound per run. Reports per-step/input status, first failure, trace summaries, and artifact paths.\n"
-			"Note: veh_registers returns 32-bit names (eax/esp/eip) on 32-bit targets, 64-bit (rax/rsp/rip) otherwise; "
-			"pass args.fields (e.g. [\"esp\",\"eip\"]) to shrink per-step output in loops.\n"
-			"\nExamples:\n"
-			"  Sequential: {steps: [{tool: \"veh_registers\", args: {threadId: 1234}}, {tool: \"veh_read_memory\", args: {address: \"$0.registers.rsp\", size: 8}}]}\n"
-			"  Batch patch: {steps: [{tool: \"veh_write_memory\", args: {patches: [{address: \"0x1000\", data: \"90\"}, {address: \"0x2000\", data: \"90\"}]}}]}\n"
-			"  Loop (use $last, not a step index -- the index changes each iteration): {steps: [{loop: [{tool: \"veh_step_over\", args: {threadId: 1}}, {tool: \"veh_registers\", args: {threadId: 1, fields: [\"rax\"]}}], until: \"$last.registers.rax!=0\", max: 100}]}\n"
-			"  If: {steps: [{tool: \"veh_registers\", args: {threadId: 1}}, {if: \"$0.registers.rax==0\", then: [{tool: \"veh_write_memory\", args: {address: \"0x1000\", data: \"90\"}}]}]}\n"
-			"  For-each: {steps: [{for_each: [\"0x1000\",\"0x2000\",\"0x3000\"], as: \"$addr\", do: [{tool: \"veh_write_memory\", args: {address: \"$addr\", data: \"90\"}}]}]}"
+			"Execute sequential debugger steps, conditions, loops, or input matrices in one call. "
+			"Use $N/$last/$prev references between results and args.fields to bound register output. "
+			"Detailed examples are in docs/DEVELOPMENT_TOOLS.md."
 		},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"steps", {{"type", "array"}, {"items", {{"oneOf", json::array({json{{"type", "object"}}, json{{"type", "string"}}})}}}, {"description", "Array of step objects, or JSON-encoded object strings for compatibility. Each decoded step is {tool, args}, {if, then, else}, {loop, until, max}, or {for_each, as, do}."}}},
@@ -3677,7 +3607,194 @@ json McpServer::GetToolsList() {
 		{"description", "Run an input matrix in one attached session and write one bounded occurrence-triggered trace artifact per input. Setup steps may restore checkpoints and apply each $input; the trace retains a pre/post instruction ring with ordered code/register/memory events and embeds a pre-trace TEB/FS/GS environment snapshot. Success requires at least one completed instruction and the requested target-window stop; exception, zero-step, and partial windows fail explicitly. Returns per-input path/hash/count/drop/truncation/match/failure metadata. Session lifecycle tools are deliberately excluded from setup steps."},
 		{"inputSchema", {{"type", "object"}, {"properties", std::move(targetedProperties)},
 			{"required", json::array({"inputs", "trace", "trigger", "window", "output_directory"})}}}});
+	tools.push_back({{"name", "veh_toolbox"},
+		{"description", "Discover, describe, or call VEH tools that are not eager in the active profile. Describe before calling and reuse schema_handle when possible."},
+		{"inputSchema", {{"type", "object"}, {"properties", {
+			{"operation", {{"type", "string"}, {"enum", json::array({"list", "describe", "call", "profiles"})}, {"description", "Operation (default: list)"}}},
+			{"tool", {{"type", "string"}, {"description", "Tool name for describe or call"}}},
+			{"arguments", {{"type", "object"}, {"description", "Arguments for call"}}},
+			{"profile", {{"type", "string"}, {"enum", json::array({"lite", "interactive", "capture", "full"})}, {"description", "Filter list by profile"}}},
+			{"query", {{"type", "string"}, {"description", "Case-insensitive list filter"}}},
+			{"schema_handle", {{"type", "string"}, {"description", "Handle from an earlier describe"}}}
+		}}}}});
 	return tools;
+}
+
+static const std::vector<std::string>& ToolProfileNames(const std::string& profile) {
+	static const std::vector<std::string> lite = {
+		"veh_toolbox", "veh_launch", "veh_continue", "veh_batch", "veh_terminate"
+	};
+	static const std::vector<std::string> interactive = {
+		"veh_toolbox", "veh_attach", "veh_launch", "veh_terminate", "veh_continue",
+		"veh_set_breakpoint", "veh_set_data_breakpoint", "veh_registers",
+		"veh_disassemble", "veh_read_memory"
+	};
+	static const std::vector<std::string> capture = {
+		"veh_toolbox", "veh_launch", "veh_terminate", "veh_continue", "veh_batch",
+		"veh_trace_basic_blocks", "veh_targeted_capture", "veh_checkpoint_create",
+		"veh_checkpoint_restore", "veh_checkpoint_delete"
+	};
+	if (profile == "interactive") return interactive;
+	if (profile == "capture") return capture;
+	return lite;
+}
+
+static bool ToolInProfile(const std::string& name, const std::string& profile) {
+	if (profile == "full") return true;
+	const auto& names = ToolProfileNames(profile);
+	return std::find(names.begin(), names.end(), name) != names.end();
+}
+
+static std::string ToolCategory(const std::string& name) {
+	if (name == "veh_toolbox" || name == "veh_batch") return "orchestration";
+	if (name.find("checkpoint") != std::string::npos) return "checkpoint";
+	if (name.find("breakpoint") != std::string::npos) return "breakpoint";
+	if (name.find("trace") != std::string::npos || name == "veh_targeted_capture" ||
+		name == "veh_resolve_imports") return "trace";
+	if (name.find("memory") != std::string::npos || name == "veh_execute_shellcode") return "memory";
+	if (name == "veh_registers" || name == "veh_modules" || name == "veh_disassemble" ||
+		name == "veh_enum_locals" || name == "veh_evaluate" ||
+		name == "veh_exception_info" || name == "veh_stack_trace") return "inspect";
+	return "session";
+}
+
+static std::string CompactToolSummary(const std::string& description) {
+	size_t end = description.find('.');
+	if (end == std::string::npos || end > 180) end = std::min<size_t>(description.size(), 180);
+	else ++end;
+	return description.substr(0, end);
+}
+
+static std::string ToolSchemaHandle(const json& definition) {
+	const std::string bytes = definition.dump();
+	uint64_t hash = 1469598103934665603ULL;
+	for (unsigned char value : bytes) {
+		hash ^= value;
+		hash *= 1099511628211ULL;
+	}
+	char buffer[32];
+	snprintf(buffer, sizeof(buffer), "veh_%016llx", static_cast<unsigned long long>(hash));
+	return buffer;
+}
+
+json McpServer::GetToolsList() {
+	json exposed = json::array();
+	for (auto& tool : GetAllToolsList()) {
+		if (ToolInProfile(tool.value("name", ""), toolProfile_)) exposed.push_back(std::move(tool));
+	}
+	return exposed;
+}
+
+json McpServer::DispatchTool(const std::string& name, const json& args, bool* known) {
+	if (known) *known = true;
+	if      (name == "veh_attach")                return ToolAttach(args);
+	else if (name == "veh_launch")                return ToolLaunch(args);
+	else if (name == "veh_detach")                return ToolDetach(args);
+	else if (name == "veh_terminate")             return ToolTerminate(args);
+	else if (name == "veh_set_breakpoint")        return ToolSetBreakpoint(args);
+	else if (name == "veh_set_module_breakpoint") return ToolSetModuleBreakpoint(args);
+	else if (name == "veh_remove_breakpoint")     return ToolRemoveBreakpoint(args);
+	else if (name == "veh_set_data_breakpoint")   return ToolSetDataBreakpoint(args);
+	else if (name == "veh_remove_data_breakpoint") return ToolRemoveDataBreakpoint(args);
+	else if (name == "veh_continue")              return ToolContinue(args);
+	else if (name == "veh_step_in")               return ToolStepIn(args);
+	else if (name == "veh_step_over")              return ToolStepOver(args);
+	else if (name == "veh_step_out")               return ToolStepOut(args);
+	else if (name == "veh_pause")                 return ToolPause(args);
+	else if (name == "veh_threads")               return ToolThreads(args);
+	else if (name == "veh_stack_trace")           return ToolStackTrace(args);
+	else if (name == "veh_registers")             return ToolRegisters(args);
+	else if (name == "veh_read_memory")           return ToolReadMemory(args);
+	else if (name == "veh_read_pointer_chain")    return ToolReadPointerChain(args);
+	else if (name == "veh_write_memory")          return ToolWriteMemory(args);
+	else if (name == "veh_modules")               return ToolModules(args);
+	else if (name == "veh_disassemble")           return ToolDisassemble(args);
+	else if (name == "veh_enum_locals")           return ToolEnumLocals(args);
+	else if (name == "veh_set_source_breakpoint") return ToolSetSourceBreakpoint(args);
+	else if (name == "veh_set_function_breakpoint") return ToolSetFunctionBreakpoint(args);
+	else if (name == "veh_list_breakpoints")      return ToolListBreakpoints(args);
+	else if (name == "veh_evaluate")              return ToolEvaluate(args);
+	else if (name == "veh_set_register")          return ToolSetRegister(args);
+	else if (name == "veh_exception_info")        return ToolExceptionInfo(args);
+	else if (name == "veh_trace_callers")         return ToolTraceCallers(args);
+	else if (name == "veh_dump_memory")           return ToolDumpMemory(args);
+	else if (name == "veh_allocate_memory")       return ToolAllocateMemory(args);
+	else if (name == "veh_free_memory")           return ToolFreeMemory(args);
+	else if (name == "veh_execute_shellcode")     return ToolExecuteShellcode(args);
+	else if (name == "veh_batch")                 return ToolBatch(args);
+	else if (name == "veh_trace_register")        return ToolTraceRegister(args);
+	else if (name == "veh_trace_memory")          return ToolTraceMemory(args);
+	else if (name == "veh_resolve_imports")       return ToolResolveImports(args);
+	else if (name == "veh_trace_calls")           return ToolTraceCalls(args);
+	else if (name == "veh_trace_basic_blocks")    return ToolTraceBasicBlocks(args);
+	else if (name == "veh_targeted_capture")      return ToolTargetedCapture(args);
+	else if (name == "veh_checkpoint_create")     return ToolCheckpointCreate(args);
+	else if (name == "veh_checkpoint_restore")    return ToolCheckpointRestore(args);
+	else if (name == "veh_checkpoint_diff")       return ToolCheckpointDiff(args);
+	else if (name == "veh_checkpoint_delete")     return ToolCheckpointDelete(args);
+	else if (name == "veh_toolbox")              return ToolToolbox(args);
+	if (known) *known = false;
+	return {{"error", "Unknown tool: " + name}};
+}
+
+json McpServer::ToolToolbox(const json& args) {
+	const std::string operation = args.value("operation", "list");
+	if (operation == "profiles") {
+		return {{"active", toolProfile_}, {"profiles", json::array({
+			json{{"name", "lite"}, {"eager_tools", ToolProfileNames("lite").size()}},
+			json{{"name", "interactive"}, {"eager_tools", ToolProfileNames("interactive").size()}},
+			json{{"name", "capture"}, {"eager_tools", ToolProfileNames("capture").size()}},
+			json{{"name", "full"}, {"eager_tools", GetAllToolsList().size()}}
+		})}};
+	}
+
+	const json all = GetAllToolsList();
+	if (operation == "list") {
+		std::string profile = args.value("profile", "full");
+		if (profile != "lite" && profile != "interactive" && profile != "capture" && profile != "full")
+			return {{"error", "profile must be lite, interactive, capture, or full"}};
+		std::string query = args.value("query", "");
+		std::transform(query.begin(), query.end(), query.begin(),
+			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		json matches = json::array();
+		for (const auto& definition : all) {
+			const std::string name = definition.value("name", "");
+			if (!ToolInProfile(name, profile)) continue;
+			const std::string summary = CompactToolSummary(definition.value("description", ""));
+			std::string haystack = name + " " + summary + " " + ToolCategory(name);
+			std::transform(haystack.begin(), haystack.end(), haystack.begin(),
+				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			if (!query.empty() && haystack.find(query) == std::string::npos) continue;
+			matches.push_back({{"name", name}, {"category", ToolCategory(name)}, {"summary", summary}});
+		}
+		return {{"active_profile", toolProfile_}, {"filter_profile", profile},
+			{"count", matches.size()}, {"tools", std::move(matches)}};
+	}
+
+	const std::string name = args.value("tool", "");
+	if (name.empty()) return {{"error", "tool is required for describe or call"}};
+	if (operation == "describe") {
+		for (const auto& definition : all) {
+			if (definition.value("name", "") != name) continue;
+			const std::string handle = ToolSchemaHandle(definition);
+			if (args.value("schema_handle", "") == handle)
+				return {{"tool", name}, {"schema_handle", handle}, {"unchanged", true}};
+			return {{"tool", name}, {"category", ToolCategory(name)}, {"schema_handle", handle},
+				{"description", definition.value("description", "")},
+				{"inputSchema", definition.value("inputSchema", json::object())}};
+		}
+		return {{"error", "Unknown tool: " + name}};
+	}
+	if (operation == "call") {
+		if (name == "veh_toolbox") return {{"error", "veh_toolbox cannot call itself"}};
+		if (args.contains("arguments") && !args["arguments"].is_object())
+			return {{"error", "arguments must be an object"}};
+		bool known = false;
+		json result = DispatchTool(name, args.value("arguments", json::object()), &known);
+		if (!known) return {{"error", "Unknown tool: " + name}};
+		return {{"tool", name}, {"result", std::move(result)}};
+	}
+	return {{"error", "operation must be list, describe, call, or profiles"}};
 }
 
 std::string McpServer::NotAttachedMessage() {

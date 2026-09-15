@@ -12,11 +12,11 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
 class McpClient:
-    def __init__(self, executable=None, *, cwd=None, env=None, stderr_lines=200):
+    def __init__(self, executable=None, *, args=None, cwd=None, env=None, stderr_lines=200):
         build_dir = os.environ.get("VEH_TEST_BUILD_DIR", os.path.join(ROOT, "build"))
         executable = executable or os.path.join(build_dir, "bin", "Release", "veh-mcp-server.exe")
         self.proc = subprocess.Popen(
-            [executable], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            [executable, *(args or [])], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=cwd, env=env,
         )
         self.seq = 0

@@ -81,7 +81,7 @@ def read_code_artifact(path):
 
 
 def main():
-    client = Client()
+    client = Client(args=["--profile=full"])
     artifact_paths = []
     artifact_dirs = []
     def artifact_path(label):
