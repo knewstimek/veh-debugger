@@ -144,6 +144,22 @@ function Invoke-Logged {
     Write-Host "[$Name] passed" -ForegroundColor Green
 }
 
+function Test-NativeSuccess {
+    param(
+        [Parameter(Mandatory = $true)][string]$Program,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+    $savedErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $Program @Arguments *> $null
+        return $LASTEXITCODE -eq 0
+    }
+    finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+}
+
 function Assert-PublicReleaseInputs {
     $diffCheck = @(git diff --check)
     if ($LASTEXITCODE -ne 0 -or $diffCheck.Count -ne 0) {
@@ -256,7 +272,7 @@ function Publish-Release {
     }
 
     $tag = "v$Version"
-    if (git rev-parse -q --verify "refs/tags/$tag" 2>$null) {
+    if (Test-NativeSuccess 'git' @('rev-parse', '-q', '--verify', "refs/tags/$tag")) {
         if ((git cat-file -t $tag) -ne 'tag' -or (git rev-list -n 1 $tag) -ne (git rev-parse HEAD)) {
             throw "$tag exists but is not an annotated tag for HEAD."
         }
@@ -271,8 +287,7 @@ function Publish-Release {
     $vsixPath = Join-Path $repoRoot "extension\veh-debugger-$Version.vsix"
     $zipPath = Join-Path $repoRoot "extension\veh-debugger-$Version-bin.zip"
     if ($PSCmdlet.ShouldProcess($tag, 'Create or repair the GitHub Release and upload reviewed assets')) {
-        gh release view $tag *> $null
-        if ($LASTEXITCODE -eq 0) {
+        if (Test-NativeSuccess 'gh' @('release', 'view', $tag)) {
             gh release upload $tag $vsixPath $zipPath --clobber
             if ($LASTEXITCODE -ne 0) { throw 'GitHub Release asset repair failed.' }
             gh release edit $tag --title $tag --notes-file $releaseNote --latest
