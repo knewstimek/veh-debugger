@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Fixed
-- **Marketplace publication verification tolerates propagation delay** -- the guarded release script now polls the Marketplace's public extension metadata for up to three minutes after a successful publish instead of treating the first stale response as a failed publication.
+- **Marketplace publication verification tolerates propagation delay** -- the guarded release script now polls the Marketplace's public extension metadata for up to fifteen minutes after a successful publish instead of treating the first stale response as a failed publication. The v1.1.17 release took roughly eight minutes to become visible after `vsce publish` returned success.
 
 ## 1.1.17 - 2026-09-16
 
