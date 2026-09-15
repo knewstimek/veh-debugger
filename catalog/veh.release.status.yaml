@@ -1,0 +1,19 @@
+id: veh.release.status
+revision: 1
+summary: Query recent VEH Debugger GitHub Releases using a bounded supported field set
+use_when:
+  - checking whether a version is draft, prerelease, published, or latest
+tags: [veh-debugger, release, github, status]
+execution:
+  kind: cli
+  executable_ref: gh
+  cwd: .
+  argv_template: [release, list, --limit, "20", --json, "tagName,name,isDraft,isPrerelease,publishedAt,isLatest"]
+  trusted_for_run: true
+  timeout_sec: 30
+  artifact_mode: metadata
+  preflight:
+    - {id: github.cli, kind: executable, ref: gh, requirement: required, argv: [--version]}
+    - {id: git.repository, kind: git, requirement: required}
+docs: [RELEASING.md, docs/releases/v1.1.17.md]
+cache_policy: disabled

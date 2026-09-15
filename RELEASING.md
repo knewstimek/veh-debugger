@@ -26,6 +26,14 @@ user explicitly authorizes publishing and chooses the version number.
 Do not put a Marketplace PAT, GitHub token, private host, or other credential in
 the repository or directly in a recorded command.
 
+The guarded one-command path updates the version metadata, freezes `Unreleased`,
+creates a tracked-note draft when absent, builds, runs the release test set, and
+validates both archives. It never publishes unless `-Publish` is explicit:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/release.ps1 -Version VERSION
+```
+
 ## 2. Build and test
 
 Configure build directories when they do not already exist:
@@ -82,6 +90,15 @@ Inspect both archives before continuing.
    credential store or a protected environment variable. Never place the token in
    documentation or command text.
 5. Verify the GitHub assets and Marketplace version after publication.
+
+After reviewing and committing the prepared metadata, note, and automation changes,
+push the intended branch and use the guarded publish mode. It requires a completely
+clean worktree, a tracked canonical note, and `HEAD` equal to its fetched upstream;
+it reruns build and tests before creating any external release state:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/release.ps1 -Version VERSION -Publish
+```
 
 If any verification fails, stop before publishing and fix the same release
 candidate. Do not silently increment or choose a version on the user's behalf.

@@ -1,0 +1,26 @@
+id: veh.mcp.scenario
+revision: 1
+summary: Run a bounded MCP call scenario with named result references and owned-process cleanup
+use_when:
+  - reproducing a multi-call MCP workflow from a neutral tracked scenario
+tags: [veh-debugger, mcp, scenario, integration]
+execution:
+  kind: cli
+  executable_ref: py
+  cwd: .
+  argv_template: [-3, tools/run_mcp_scenario.py, "{scenario}"]
+  trusted_for_run: true
+  timeout_sec: 600
+  artifact_mode: metadata
+  preflight:
+    - {id: windows.platform, kind: platform, ref: windows, requirement: required}
+    - {id: python.version, kind: executable, ref: py, requirement: required, argv: [-3, --version]}
+    - {id: mcp.binary, kind: file, ref: build/bin/Release/veh-mcp-server.exe, requirement: required}
+arguments:
+  scenario:
+    type: project_path
+    required: true
+    description: Workspace-relative JSON scenario path
+inputs: [tools/run_mcp_scenario.py, test/mcp_test_client.py, build/bin/Release/**]
+docs: [docs/DEVELOPMENT_TOOLS.md]
+cache_policy: disabled

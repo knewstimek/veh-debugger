@@ -1,0 +1,22 @@
+id: veh.mcp.schema-measure
+revision: 1
+summary: Measure initialize and tools/list schema costs for every VEH MCP exposure profile
+use_when:
+  - checking eager MCP inventory and serialized schema budgets after tool changes
+tags: [veh-debugger, mcp, schema, measurement]
+execution:
+  kind: cli
+  executable_ref: py
+  cwd: .
+  argv_template: [-3, tools/measure_mcp_schema.py]
+  trusted_for_run: true
+  timeout_sec: 180
+  artifact_mode: metadata
+  preflight:
+    - {id: windows.platform, kind: platform, ref: windows, requirement: required}
+    - {id: python.version, kind: executable, ref: py, requirement: required, argv: [-3, --version]}
+    - {id: mcp.binary, kind: file, ref: build/bin/Release/veh-mcp-server.exe, requirement: required}
+inputs: [tools/measure_mcp_schema.py, test/mcp_test_client.py, build/bin/Release/veh-mcp-server.exe]
+checks: [veh.mcp.profile-budget]
+docs: [docs/DEVELOPMENT_TOOLS.md]
+cache_policy: disabled

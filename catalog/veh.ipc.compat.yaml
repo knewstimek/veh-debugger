@@ -1,0 +1,28 @@
+id: veh.ipc.compat
+revision: 1
+summary: Stage and run a bounded old/new MCP and injected-DLL compatibility matrix
+use_when:
+  - verifying trace IPC compatibility against a retained older build
+tags: [veh-debugger, ipc, compatibility, integration]
+execution:
+  kind: cli
+  executable_ref: py
+  cwd: .
+  argv_template: [-3, tools/run_ipc_compat_matrix.py, --old-build-dir, "{old_build}", --new-build-dir, build, --target, build/bin/Release/test_target.exe]
+  trusted_for_run: true
+  timeout_sec: 600
+  artifact_mode: metadata
+  preflight:
+    - {id: windows.platform, kind: platform, ref: windows, requirement: required}
+    - {id: python.version, kind: executable, ref: py, requirement: required, argv: [-3, --version]}
+    - {id: new.mcp, kind: file, ref: build/bin/Release/veh-mcp-server.exe, requirement: required}
+    - {id: test.target, kind: file, ref: build/bin/Release/test_target.exe, requirement: required}
+arguments:
+  old_build:
+    type: project_path
+    required: true
+    description: Workspace-relative retained build directory for the older MCP and DLL pair
+inputs: [tools/run_ipc_compat_matrix.py, test/test_trace_ipc_compat.py, test/mcp_test_client.py, build/bin/Release/**]
+checks: [veh.ipc.old-new-compatibility]
+docs: [docs/DEVELOPMENT_TOOLS.md]
+cache_policy: disabled

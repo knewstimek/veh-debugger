@@ -1,0 +1,29 @@
+id: veh.release.publish
+revision: 3
+summary: Run the guarded release gate and publish reviewed VEH Debugger assets to GitHub and Marketplace
+use_when:
+  - publishing a chosen version after its prepared metadata and canonical note are committed and pushed
+tags: [veh-debugger, release, github, marketplace, publish]
+execution:
+  kind: cli
+  executable_ref: powershell
+  cwd: .
+  argv_template: [-NoProfile, -ExecutionPolicy, Bypass, -File, scripts/release.ps1, -Version, "{version}", -Publish, -Confirm:$false]
+  trusted_for_run: true
+  timeout_sec: 3600
+  artifact_mode: metadata
+  preflight:
+    - {id: windows.platform, kind: platform, ref: windows, requirement: required}
+    - {id: powershell.version, kind: executable, ref: powershell, requirement: required, argv: [-NoProfile, -Command, "$PSVersionTable.PSVersion.ToString()"]}
+    - {id: github.cli, kind: executable, ref: gh, requirement: required, argv: [--version]}
+    - {id: node.version, kind: executable, ref: npx.cmd, requirement: required, argv: [--version]}
+    - {id: git.repository, kind: git, requirement: required}
+arguments:
+  version:
+    type: string
+    required: true
+    description: Stable SemVer without a leading v
+inputs: [CMakeLists.txt, src/**, extension/**, docs/releases/**, test/**, tools/**, scripts/**]
+outputs: [extension/veh-debugger-*.vsix, extension/veh-debugger-*-bin.zip, build/release-logs/**]
+docs: [RELEASING.md]
+cache_policy: disabled

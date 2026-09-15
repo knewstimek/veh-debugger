@@ -1,0 +1,24 @@
+id: veh.trace.validate
+revision: 1
+summary: Validate one exported VEH trace artifact for ordering, counts, hashes, and code references
+use_when:
+  - checking a JSON or JSONL trace written by veh_trace_basic_blocks
+tags: [veh-debugger, trace, validation, artifact]
+execution:
+  kind: cli
+  executable_ref: py
+  cwd: .
+  argv_template: [-3, tools/validate_trace_output.py, "{trace_file}"]
+  trusted_for_run: true
+  timeout_sec: 300
+  artifact_mode: metadata
+  preflight:
+    - {id: python.version, kind: executable, ref: py, requirement: required, argv: [-3, --version]}
+arguments:
+  trace_file:
+    type: project_path
+    required: true
+    description: Workspace-relative exported trace JSON or JSONL path
+inputs: [tools/validate_trace_output.py]
+docs: [docs/DEVELOPMENT_TOOLS.md]
+cache_policy: disabled

@@ -1,0 +1,31 @@
+id: veh.release.prepare
+revision: 3
+summary: Prepare, build, test, package, and inspect one local VEH Debugger release candidate
+use_when:
+  - preparing a reviewed VSIX and binary ZIP before committing or publishing a release
+tags: [veh-debugger, release, build, verification, package]
+execution:
+  kind: cli
+  executable_ref: powershell
+  cwd: .
+  argv_template: [-NoProfile, -ExecutionPolicy, Bypass, -File, scripts/release.ps1, -Version, "{version}"]
+  trusted_for_run: true
+  timeout_sec: 3600
+  artifact_mode: capture
+  preflight:
+    - {id: windows.platform, kind: platform, ref: windows, requirement: required}
+    - {id: powershell.version, kind: executable, ref: powershell, requirement: required, argv: [-NoProfile, -Command, "$PSVersionTable.PSVersion.ToString()"]}
+    - {id: cmake.version, kind: executable, ref: cmake, requirement: required, argv: [--version]}
+    - {id: python.version, kind: executable, ref: py, requirement: required, argv: [-3, --version]}
+    - {id: node.version, kind: executable, ref: npm.cmd, requirement: required, argv: [--version]}
+    - {id: git.repository, kind: git, requirement: required}
+arguments:
+  version:
+    type: string
+    required: true
+    description: Stable SemVer without a leading v
+inputs: [CMakeLists.txt, src/**, extension/package.json, extension/package-lock.json, extension/CHANGELOG.md, extension/src/**, test/**, test_target/**, tools/**, scripts/**]
+outputs: [extension/veh-debugger-*.vsix, extension/veh-debugger-*-bin.zip, build/release-logs/**]
+checks: [veh.release.metadata, veh.release.core-tests, veh.release.trace-parity, veh.release.archive-layout]
+docs: [RELEASING.md, test/TEST_GUIDE.md, docs/DEVELOPMENT_TOOLS.md]
+cache_policy: disabled

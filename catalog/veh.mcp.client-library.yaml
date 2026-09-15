@@ -1,0 +1,9 @@
+id: veh.mcp.client-library
+revision: 1
+summary: Shared timeout-aware MCP stdio client used by VEH integration runners
+use_when:
+  - implementing a reusable MCP scenario or integration harness
+tags: [veh-debugger, mcp, testing, library]
+inputs: [test/mcp_test_client.py]
+docs: [docs/DEVELOPMENT_TOOLS.md, test/TEST_GUIDE.md]
+cache_policy: disabled
