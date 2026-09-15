@@ -1,5 +1,5 @@
 id: veh.release.publish
-revision: 4
+revision: 5
 summary: Run the guarded release gate and publish reviewed VEH Debugger assets to GitHub and Marketplace
 use_when:
   - publishing a chosen version after its prepared metadata and canonical note are committed and pushed
@@ -8,7 +8,7 @@ execution:
   kind: cli
   executable_ref: powershell
   cwd: .
-  argv_template: [-NoProfile, -ExecutionPolicy, Bypass, -File, scripts/release.ps1, -Version, "{version}", -Publish, -Confirm:$false]
+  argv_template: [-NoProfile, -ExecutionPolicy, Bypass, -File, scripts/release.ps1, -Version, "{version}", -Publish]
   trusted_for_run: true
   timeout_sec: 3600
   artifact_mode: metadata
