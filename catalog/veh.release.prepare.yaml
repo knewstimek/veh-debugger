@@ -1,5 +1,5 @@
 id: veh.release.prepare
-revision: 4
+revision: 5
 summary: Prepare, build, test, package, and inspect one local VEH Debugger release candidate
 use_when:
   - preparing a reviewed VSIX and binary ZIP before committing or publishing a release
