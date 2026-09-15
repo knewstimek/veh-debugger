@@ -19,6 +19,7 @@ void PrintUsage() {
 		"  --uninstall [AGENT]  Uninstall from AI agent config\n"
 		"  --log=FILE           Log to file\n"
 		"  --log-level=LEVEL    Log level: debug, info, warn, error (default: info)\n"
+		"  --profile=PROFILE    MCP exposure: lite, interactive, capture, full (default: lite)\n"
 		"  --help               Show this help\n"
 		"\n"
 		"Agents: claude-code, claude-desktop, cursor, windsurf, codex, all\n"
@@ -113,6 +114,7 @@ int main(int argc, char* argv[]) {
 	bool doInstall = false;
 	bool doUninstall = false;
 	std::string targetAgent;
+	std::string toolProfile = "lite";
 
 	for (int i = 1; i < argc; i++) {
 		std::string arg = argv[i];
@@ -136,6 +138,13 @@ int main(int argc, char* argv[]) {
 			else if (level == "info")  logLevel = veh::LogLevel::Info;
 			else if (level == "warn")  logLevel = veh::LogLevel::Warning;
 			else if (level == "error") logLevel = veh::LogLevel::Error;
+		} else if (arg.substr(0, 10) == "--profile=") {
+			toolProfile = arg.substr(10);
+			if (toolProfile != "lite" && toolProfile != "interactive" &&
+				toolProfile != "capture" && toolProfile != "full") {
+				fprintf(stderr, "Unknown MCP profile: %s\n", toolProfile.c_str());
+				return 1;
+			}
 		} else if (arg == "--help" || arg == "-h") {
 			PrintUsage();
 			return 0;
@@ -165,7 +174,7 @@ int main(int argc, char* argv[]) {
 
 	// MCP는 줄바꿈 구분 JSON (Content-Length 프레이밍이 아닌 MCP 표준)
 	veh::dap::McpStdioTransport transport;
-	veh::McpServer server;
+	veh::McpServer server(toolProfile);
 	server.SetTransport(&transport);
 
 	server.Run();

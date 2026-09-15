@@ -11,8 +11,38 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 | `tools/validate_trace_output.py` | Validates exported trace JSON/JSONL ordering, thread ownership, counts, hashes, and optional `.vtc` code-version references. |
 | `tools/run_trace_parity.py` | Runs the trace integration suite against one or more build roots to cover direct, `veh_batch`, and breakpoint-action semantics. |
 | `tools/run_ipc_compat_matrix.py` | Stages old-MCP/new-DLL and new-MCP/old-DLL pairs in a temporary directory and runs bounded compatibility smoke tests. |
+| `tools/measure_mcp_schema.py` | Measures bounded initialize and `tools/list` bytes, input-schema bytes, output-schema count, and eager names for every exposure profile. |
 
 All process-launching helpers use finite timeouts and wait for their children during cleanup. The compatibility runner stages copies under an OS temporary directory and removes them when complete.
+
+## MCP exposure profiles and lazy toolbox
+
+The server defaults to `--profile=lite`. Keep each eager surface at ten tools or fewer, and use `veh_toolbox` for the long tail:
+
+| Profile | Eager tools | Intended workflow |
+|---|---:|---|
+| `lite` | 5 | Start/continue/batch/terminate plus lazy discovery |
+| `interactive` | 10 | Attach, breakpoints, registers, disassembly, and memory inspection |
+| `capture` | 10 | VM trace, targeted input capture, and checkpoint restore loops |
+| `full` | 46 | Compatibility with clients that require the complete eager inventory |
+
+```json
+{"operation":"list","query":"checkpoint"}
+{"operation":"describe","tool":"veh_checkpoint_create"}
+{"operation":"call","tool":"veh_checkpoint_create","arguments":{"threadId":1234}}
+```
+
+Reuse the returned `schema_handle` in a later `describe`; an unchanged schema returns only the name, handle, and `unchanged:true`. Tools remain directly callable by name even when they are not in the active `tools/list`, preserving existing scenario, analyzer, and batch automation. `veh_toolbox` is control-plane discovery and deliberately cannot call itself or be nested in `veh_batch`/breakpoint actions.
+
+Measure the current executable rather than estimating token counts from source:
+
+```powershell
+py -3 tools/measure_mcp_schema.py
+```
+
+For the initial implementation, compact JSON sizes were 5,255 bytes (`lite`), 7,736 (`interactive`), 15,006 (`capture`), and 33,952 (`full`), versus 34,527 bytes for the preceding 45-tool build. Schemas are standalone MCP definitions, so source-level `$defs` deduplication would not reduce the transmitted catalog; profile/gateway exposure removes the repeated prompt surface instead.
+
+The server currently publishes no `outputSchema`. A bounded A/B probe against the installed Codex CLI used a synthetic 256-field output schema: total input tokens were identical both without a tool call and when the tool was forced and called. This verifies that client did not place `outputSchema` in the model prompt in that version; repeat the probe when upgrading clients rather than treating this as a protocol-wide guarantee. Add output schemas only for an actual validation/contract need.
 
 ## Scenario runner
 
@@ -65,6 +95,22 @@ For handler-focused work, `target_window={address,occurrence,before_steps,after_
 ## Batch input reports
 
 `veh_batch` accepts optional `inputs` (1-256), binds each item to `input_variable` (default `$input`), and runs the same steps sequentially in one debug session. `stop_on_error` stops the current execution and remaining inputs after the first failed step. Reports retain existing `results`/step data and add per-input index, status, steps, success/failure counts, first failure, trace summaries, artifact metadata, and top-level totals. No implicit checkpoint restore occurs between inputs; include explicit checkpoint steps when isolation is required.
+
+```json
+{"steps":[{"tool":"veh_registers","args":{"threadId":1234,"fields":["rsp"]}},{"tool":"veh_read_memory","args":{"address":"$0.registers.rsp","size":8}}]}
+```
+
+Use `$last` for loop results because absolute step indices change on each iteration:
+
+```json
+{"steps":[{"loop":[{"tool":"veh_step_over","args":{"threadId":1234}},{"tool":"veh_registers","args":{"threadId":1234,"fields":["rax"]}}],"until":"$last.registers.rax!=0","max":100}]}
+```
+
+Input matrices can restore a checkpoint explicitly before applying each input:
+
+```json
+{"inputs":[1,2,3],"steps":[{"tool":"veh_checkpoint_restore","args":{"id":"checkpoint-id"}},{"tool":"veh_set_register","args":{"threadId":1234,"name":"rax","value":"$input"}}]}
+```
 
 ## Parity and compatibility
 

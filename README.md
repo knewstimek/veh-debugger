@@ -309,12 +309,15 @@ enabled = true
 
 설정 후 에이전트/IDE를 재시작하면 활성화됩니다.
 
+기본 `lite` 프로필은 `veh_toolbox`, launch/continue/batch/terminate만 먼저 노출하여 매 요청의 도구 스키마 비용을 줄입니다. 나머지는 `veh_toolbox`로 검색 → schema 확인 → 호출하며, 이름을 아는 자동화는 숨겨진 도구도 기존처럼 직접 호출할 수 있습니다. BP/inspection 중심은 `--profile=interactive`, VM trace/checkpoint 중심은 `--profile=capture`, 기존 전체 목록은 `--profile=full`을 사용하세요.
+
 **MCP 도구 목록**
 
-아래 표는 문서화된 공개 도구를 설명합니다. 실행 중인 서버가 제공하는 실제 목록은 MCP `tools/list` 응답을 기준으로 확인하세요.
+아래 표는 전체 공개 도구를 설명합니다. 실행 중인 서버의 현재 eager 목록은 MCP `tools/list` 응답을 기준으로 확인하세요.
 
 | 도구 | 인자 | 설명 |
 |------|------|------|
+| `veh_toolbox` | `operation, tool?, arguments?, profile?, query?, schema_handle?` | 현재 프로필에 eager 노출되지 않은 도구를 검색·설명·호출하는 lazy gateway. `describe`가 반환한 `schema_handle`을 재사용하면 변경 없음만 짧게 확인한다. |
 | `veh_attach` | `pid` | 프로세스에 DLL 인젝션 + 파이프 연결 |
 | `veh_launch` | `program, args?, stopOnEntry?, cwd?, env?` | 프로세스 생성 + 인젝션. `cwd`로 타겟 작업 디렉토리 지정(생략 시 디버거 cwd 상속). `env`로 타겟에 환경변수 전달 (`{"KEY":"VAL"}` 또는 `["KEY=VALUE"]`, 부모 환경 위에 덮어씀) |
 | `veh_detach` | - | 디버거 분리 (타겟은 계속 실행) |
@@ -373,6 +376,7 @@ enabled = true
 |------|------|
 | `--install [AGENT]` | AI 에이전트 설정에 MCP 서버 등록 (전체 또는 특정) |
 | `--uninstall [AGENT]` | AI 에이전트 설정에서 MCP 서버 제거 |
+| `--profile=PROFILE` | eager 도구 노출 범위: `lite`(기본), `interactive`, `capture`, `full` |
 | `--log=FILE` | 로그 파일 경로 |
 | `--log-level=LEVEL` | 로그 레벨: debug, info, warn, error |
 | `--help` | 도움말 출력 |

@@ -292,12 +292,15 @@ enabled = true
 
 Restart the agent/IDE after configuring to activate.
 
+The default `lite` profile eagerly exposes only `veh_toolbox` plus launch/continue/batch/terminate, reducing the tool-schema cost on each request. Use `veh_toolbox` to search, describe, then call other tools; automation that already knows a hidden tool name can still call it directly. Select `--profile=interactive` for breakpoint/inspection work, `--profile=capture` for VM trace/checkpoint work, or `--profile=full` for the legacy complete inventory.
+
 **MCP Tools**
 
-The table below documents the public tool surface. Treat the running server's MCP `tools/list` response as the authoritative inventory.
+The table below documents the complete public tool surface. Treat the running server's MCP `tools/list` response as the authoritative eager inventory for its active profile.
 
 | Tool | Args | Description |
 |------|------|-------------|
+| `veh_toolbox` | `operation, tool?, arguments?, profile?, query?, schema_handle?` | Lazy gateway for tools not eager in the active profile. Search, describe, and call tools; reuse a `describe` response's `schema_handle` for a short unchanged check. |
 | `veh_attach` | `pid` | Inject DLL + connect pipe |
 | `veh_launch` | `program, args?, stopOnEntry?, cwd?, env?` | Create process + inject. `cwd` sets the target's working directory (omit to inherit the debugger's cwd). `env` passes environment variables to the target (`{"KEY":"VAL"}` or `["KEY=VALUE"]`, overlaid on the inherited parent environment) |
 | `veh_detach` | - | Detach debugger (target keeps running) |
@@ -356,6 +359,7 @@ The table below documents the public tool surface. Treat the running server's MC
 |--------|-------------|
 | `--install [AGENT]` | Register the MCP server in AI agent configs (all or specific) |
 | `--uninstall [AGENT]` | Remove the MCP server from AI agent configs |
+| `--profile=PROFILE` | Eager tool exposure: `lite` (default), `interactive`, `capture`, or `full` |
 | `--log=FILE` | Log file path |
 | `--log-level=LEVEL` | Log level: debug, info, warn, error |
 | `--help` | Print help |
