@@ -336,11 +336,11 @@ function Publish-Release {
         if ($marketplace.versions[0].version -ne $Version) {
             npx.cmd --yes '@vscode/vsce' publish --packagePath $vsixPath
             if ($LASTEXITCODE -ne 0) { throw 'Marketplace publication failed.' }
-            for ($attempt = 1; $attempt -le 12; $attempt++) {
+            for ($attempt = 1; $attempt -le 60; $attempt++) {
                 $marketplace = npx.cmd --yes '@vscode/vsce' show knewstimek.veh-debugger --json | ConvertFrom-Json
                 if ($LASTEXITCODE -ne 0) { throw 'Marketplace post-publication status check failed.' }
                 if ($marketplace.versions[0].version -eq $Version) { break }
-                if ($attempt -lt 12) { Start-Sleep -Seconds 15 }
+                if ($attempt -lt 60) { Start-Sleep -Seconds 15 }
             }
         }
         if ($marketplace.versions[0].version -ne $Version) {
