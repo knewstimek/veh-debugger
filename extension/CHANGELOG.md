@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.1.17 - 2026-09-16
+
 ### Added
 - **Token-bounded MCP exposure profiles and lazy gateway** -- `veh-mcp-server` now defaults to a five-tool `lite` inventory with `veh_toolbox` discovery/describe/call access to the complete surface. `interactive` and `capture` keep workflow-specific eager sets at ten tools, while `--profile=full` preserves the complete legacy inventory. Hidden tools remain directly callable for existing automation, schema handles avoid repeated descriptions, and `tools/measure_mcp_schema.py` reports bounded catalog costs.
 - **Targeted input-matrix capture** -- `veh_targeted_capture` applies bounded batch setup steps for up to 256 inputs in one attached session, retains an occurrence-triggered pre/post ring of ordered block/code/register/memory events, embeds a pre-trace x86/WOW64/x64 TEB/FS/GS and selected-memory snapshot, and writes one no-overwrite JSON artifact per input. Compact results include path, SHA-256, byte size, event counts, exact ordered-event drops, truncation, matched occurrence, and first failure.

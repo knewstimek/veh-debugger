@@ -15,6 +15,16 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 
 All process-launching helpers use finite timeouts and wait for their children during cleanup. The compatibility runner stages copies under an OS temporary directory and removes them when complete.
 
+## RepoPlane catalog
+
+The reusable commands above and the guarded release workflow are registered as
+typed capabilities under `catalog/`. After refreshing RepoPlane catalog discovery,
+use `catalog_query` with terms such as `veh trace`, `veh mcp`, or `veh release`.
+Executable capabilities still require Runner authorization; catalog discovery alone
+does not authorize a build, target launch, tag push, GitHub Release, or Marketplace
+publication. `veh.release.publish` is deliberately separate from
+`veh.release.prepare` so preparation cannot create external release state.
+
 ## MCP exposure profiles and lazy toolbox
 
 The server defaults to `--profile=lite`. Keep each eager surface at ten tools or fewer, and use `veh_toolbox` for the long tail:

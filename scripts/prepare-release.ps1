@@ -91,7 +91,7 @@ try {
         Invoke-Checked 'npm.cmd' @('ci')
         Invoke-Checked 'npm.cmd' @('run', 'compile')
         $vsixName = "veh-debugger-$Version.vsix"
-        Invoke-Checked 'npx.cmd' @('@vscode/vsce', 'package', '--no-git-tag-version', '--out', $vsixName)
+        Invoke-Checked 'npx.cmd' @('--yes', '@vscode/vsce', 'package', '--no-git-tag-version', '--out', $vsixName)
     }
     finally {
         Pop-Location
