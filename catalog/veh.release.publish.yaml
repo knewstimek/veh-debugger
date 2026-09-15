@@ -1,5 +1,5 @@
 id: veh.release.publish
-revision: 3
+revision: 4
 summary: Run the guarded release gate and publish reviewed VEH Debugger assets to GitHub and Marketplace
 use_when:
   - publishing a chosen version after its prepared metadata and canonical note are committed and pushed
