@@ -574,7 +574,7 @@ void DapServer::OnSetBreakpoints(const Request& req) {
 			if (it->vehId != 0) {
 				DAP_TRACE("RemoveSourceBP", "vehId=" + std::to_string(it->vehId) + " addr=" + FormatAddress(it->address));
 				changedAddresses.push_back(it->address);
-				RemoveBreakpointRequest rmReq;
+				RemoveBreakpointRequest rmReq{};
 				rmReq.id = it->vehId;
 				pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
 			}
@@ -635,7 +635,7 @@ void DapServer::OnSetBreakpoints(const Request& req) {
 		if (found) continue;
 
 		// 새 BP 설정
-		SetBreakpointRequest setReq;
+		SetBreakpointRequest setReq{};
 		setReq.address = rb.address;
 
 		std::vector<uint8_t> respData;
@@ -688,7 +688,7 @@ void DapServer::OnSetFunctionBreakpoints(const Request& req) {
 	for (auto it = breakpointMappings_.begin(); it != breakpointMappings_.end(); ) {
 		if (it->type == BpType::Function) {
 			if (it->vehId != 0) {  // pending(vehId==0)은 실제 DLL BP가 없으므로 생략
-				RemoveBreakpointRequest rmReq;
+				RemoveBreakpointRequest rmReq{};
 				rmReq.id = it->vehId;
 				pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
 			}
@@ -741,7 +741,7 @@ void DapServer::OnSetFunctionBreakpoints(const Request& req) {
 		}
 
 		// INT3 브레이크포인트 설정
-		SetBreakpointRequest setReq;
+		SetBreakpointRequest setReq{};
 		setReq.address = address;
 
 		std::vector<uint8_t> respData;
@@ -865,7 +865,7 @@ void DapServer::RetryPendingBreakpointsOnce() {
 			if (addr == 0) continue;  // 아직 해석 불가 (이 모듈이 아님)
 
 			// 실제 BP 설정
-			SetBreakpointRequest sreq;
+			SetBreakpointRequest sreq{};
 			sreq.address = addr;
 			std::vector<uint8_t> sresp;
 			uint32_t newVehId = 0;
@@ -904,7 +904,7 @@ void DapServer::RetryPendingBreakpointsOnce() {
 				DAP_TRACE("DeferredBPResolved", (r.isFunc ? r.functionName : (r.source + ":" + std::to_string(r.line))) + " -> " + FormatAddress(addr));
 			} else {
 				// 매핑이 사라짐(동시 재설정) -> 방금 설정한 BP 정리
-				RemoveBreakpointRequest rmReq;
+				RemoveBreakpointRequest rmReq{};
 				rmReq.id = newVehId;
 				pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
 			}
@@ -932,7 +932,7 @@ void DapServer::OnSetInstructionBreakpoints(const Request& req) {
 	// 기존 instruction breakpoint 제거 (전체 교체 방식)
 	for (auto it = breakpointMappings_.begin(); it != breakpointMappings_.end(); ) {
 		if (it->type == BpType::Instruction) {
-			RemoveBreakpointRequest rmReq;
+			RemoveBreakpointRequest rmReq{};
 			rmReq.id = it->vehId;
 			pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
 			it = breakpointMappings_.erase(it);
@@ -970,7 +970,7 @@ void DapServer::OnSetInstructionBreakpoints(const Request& req) {
 			continue;
 		}
 
-		SetBreakpointRequest setReq;
+		SetBreakpointRequest setReq{};
 		setReq.address = address;
 
 		std::vector<uint8_t> respData;
@@ -1008,7 +1008,9 @@ void DapServer::OnSetInstructionBreakpoints(const Request& req) {
 // --- Execution Control ---
 
 void DapServer::OnContinue(const Request& req) {
-	uint32_t threadId = req.arguments.value("threadId", 0);
+	// DAP: continue resumes every thread unless the client asks for singleThread.
+	const bool singleThread = req.arguments.value("singleThread", false);
+	uint32_t threadId = singleThread ? req.arguments.value("threadId", 0u) : 0;
 
 	// Continue 시 이전 스텝의 temp BP 정리
 	CleanupStaleTempBp();
@@ -1066,7 +1068,7 @@ void DapServer::OnNext(const Request& req) {
 		// 현재 RIP 획득 (IPC GetStackTrace)
 		uint64_t currentIP = 0;
 		{
-			GetStackTraceRequest stReq;
+			GetStackTraceRequest stReq{};
 			stReq.threadId = threadId;
 			stReq.startFrame = 0;
 			stReq.maxFrames = 1;
@@ -1120,7 +1122,7 @@ void DapServer::OnNext(const Request& req) {
 					lineRange.nextLineAddress);
 
 				// temp BP 설정
-				SetBreakpointRequest bpReq;
+				SetBreakpointRequest bpReq{};
 				bpReq.address = lineRange.nextLineAddress;
 				std::vector<uint8_t> bpResp;
 				if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq), bpResp)
@@ -1135,7 +1137,7 @@ void DapServer::OnNext(const Request& req) {
 						LOG_INFO("OnNext PDB: temp BP id=%u at 0x%llX", r->id, lineRange.nextLineAddress);
 
 						// Continue → temp BP에서 멈춤 (single-step 0회)
-						ContinueRequest contReq;
+						ContinueRequest contReq{};
 						contReq.threadId = threadId;
 						pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 						goto send_response;
@@ -1175,7 +1177,7 @@ void DapServer::OnNext(const Request& req) {
 		}
 
 		if (callAfterAddr != 0) {
-			SetBreakpointRequest bpReq;
+			SetBreakpointRequest bpReq{};
 			bpReq.address = callAfterAddr;
 			std::vector<uint8_t> bpResp;
 			if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq), bpResp)
@@ -1187,7 +1189,7 @@ void DapServer::OnNext(const Request& req) {
 						stepOverTempBpId_ = r->id;
 						stepOverTempBpAddr_ = callAfterAddr;
 					}
-					ContinueRequest contReq;
+					ContinueRequest contReq{};
 					contReq.threadId = threadId;
 					pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 					callSkipped = true;
@@ -1195,7 +1197,7 @@ void DapServer::OnNext(const Request& req) {
 			}
 		}
 		if (!callSkipped) {
-			StepRequest stepReq;
+			StepRequest stepReq{};
 			stepReq.threadId = threadId;
 			pipeClient_.SendCommand(IpcCommand::StepOver, &stepReq, sizeof(stepReq));
 		}
@@ -1228,7 +1230,7 @@ void DapServer::OnStepIn(const Request& req) {
 		ResolveStepRange(threadId);
 	}
 
-	StepRequest stepReq;
+	StepRequest stepReq{};
 	stepReq.threadId = threadId;
 	pipeClient_.SendCommand(IpcCommand::StepInto, &stepReq, sizeof(stepReq));
 
@@ -1253,7 +1255,7 @@ void DapServer::OnStepOut(const Request& req) {
 		steppingNextLineAddr_ = 0;
 	}
 
-	StepRequest stepReq;
+	StepRequest stepReq{};
 	stepReq.threadId = threadId;
 	pipeClient_.SendCommand(IpcCommand::StepOut, &stepReq, sizeof(stepReq));
 
@@ -1266,7 +1268,7 @@ void DapServer::OnStepOut(const Request& req) {
 
 void DapServer::OnPause(const Request& req) {
 	uint32_t threadId = req.arguments.value("threadId", 0);
-	PauseRequest pauseReq;
+	PauseRequest pauseReq{};
 	pauseReq.threadId = threadId;
 	pipeClient_.SendCommand(IpcCommand::Pause, &pauseReq, sizeof(pauseReq));
 
@@ -1334,7 +1336,7 @@ void DapServer::OnStackTrace(const Request& req) {
 	int startFrame = req.arguments.value("startFrame", 0);
 	int levels = req.arguments.value("levels", 20);
 
-	GetStackTraceRequest stReq;
+	GetStackTraceRequest stReq{};
 	stReq.threadId = threadId;
 	stReq.startFrame = startFrame;
 	stReq.maxFrames = levels;
@@ -1419,7 +1421,7 @@ void DapServer::OnStackTrace(const Request& req) {
 	// 사용자가 Scopes/Variables도 볼 수 없게 됨.
 	// → GetRegisters로 현재 RIP를 가져와 합성 프레임 1개를 만들어 최소한의 디버깅 보장.
 	if (framesJson.empty() && startFrame == 0) {
-		GetRegistersRequest regReq;
+		GetRegistersRequest regReq{};
 		regReq.threadId = threadId;
 		std::vector<uint8_t> regData;
 		if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), regData)) {
@@ -1514,7 +1516,7 @@ void DapServer::OnVariables(const Request& req) {
 
 	if (scopeType == SCOPE_REGISTERS) {
 		// 레지스터 값 가져오기
-		GetRegistersRequest regReq;
+		GetRegistersRequest regReq{};
 		regReq.threadId = threadId;
 
 		LOG_INFO("OnVariables: requesting registers for threadId=%u (frameId=%d, mapFound=%d)",
@@ -1604,7 +1606,7 @@ void DapServer::OnVariables(const Request& req) {
 			v.type = "string";
 			varsJson.push_back(v.ToJson());
 		} else {
-			EnumLocalsRequest locReq;
+			EnumLocalsRequest locReq{};
 			locReq.threadId = threadId;
 			locReq.instructionAddress = instrAddr;
 			locReq.frameBase = fBase;
@@ -1649,7 +1651,7 @@ void DapServer::OnVariables(const Request& req) {
 
 							if (tn.find("char*") != std::string::npos && ptr != 0) {
 								// char*: read pointed-to string via ReadMemory IPC
-								ReadMemoryRequest rmReq;
+								ReadMemoryRequest rmReq{};
 								rmReq.address = ptr;
 								rmReq.size = 128;
 								std::vector<uint8_t> rmData;
@@ -1794,7 +1796,7 @@ void DapServer::OnEvaluate(const Request& req) {
 
 	// 1) 레지스터 이름 인식 (hover에서 레지스터 값 표시)
 	if (TryParseRegisterName(expression)) {
-		GetRegistersRequest regReq;
+		GetRegistersRequest regReq{};
 		regReq.threadId = threadId;
 
 		std::vector<uint8_t> respData;
@@ -1824,7 +1826,7 @@ void DapServer::OnEvaluate(const Request& req) {
 	if (expression.size() > 2 && expression[0] == '0' && (expression[1] == 'x' || expression[1] == 'X')) {
 		try {
 			uint64_t addr = std::stoull(expression, nullptr, 16);
-			ReadMemoryRequest readReq;
+			ReadMemoryRequest readReq{};
 			readReq.address = addr;
 			readReq.size = 8;
 
@@ -1884,7 +1886,7 @@ void DapServer::OnEvaluate(const Request& req) {
 					if (ntStatus == 0) {
 						uint64_t tebAddr = reinterpret_cast<uint64_t>(tbi.TebBaseAddress);
 						uint64_t targetAddr = tebAddr + offset;
-						ReadMemoryRequest readReq;
+						ReadMemoryRequest readReq{};
 						readReq.address = targetAddr;
 						readReq.size = 8;
 						std::vector<uint8_t> respData;
@@ -1921,7 +1923,7 @@ void DapServer::OnEvaluate(const Request& req) {
 		} catch (...) {}
 
 		if (!resolved && threadId != 0) {
-			GetRegistersRequest regReq;
+			GetRegistersRequest regReq{};
 			regReq.threadId = threadId;
 			std::vector<uint8_t> regResp;
 			if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), regResp)
@@ -1974,7 +1976,7 @@ void DapServer::OnEvaluate(const Request& req) {
 		}
 
 		if (resolved) {
-			ReadMemoryRequest readReq;
+			ReadMemoryRequest readReq{};
 			readReq.address = addr;
 			readReq.size = 8;
 			std::vector<uint8_t> respData;
@@ -2069,7 +2071,7 @@ void DapServer::OnSetVariable(const Request& req) {
 	if (threadId == 0) threadId = launchedMainThreadId_;
 
 	// IPC로 레지스터 수정 요청
-	SetRegisterRequest setReq;
+	SetRegisterRequest setReq{};
 	setReq.threadId = threadId;
 	setReq.regIndex = regIndex;
 	setReq.value = newVal;
@@ -2207,7 +2209,7 @@ void DapServer::OnReadMemory(const Request& req) {
 	}
 	addr += offset;
 
-	ReadMemoryRequest readReq;
+	ReadMemoryRequest readReq{};
 	readReq.address = addr;
 	readReq.size = count;
 
@@ -2261,7 +2263,7 @@ void DapServer::OnWriteMemory(const Request& req) {
 	addr += offset;
 	auto bytes = Base64Decode(data);
 
-	WriteMemoryRequest writeReq;
+	WriteMemoryRequest writeReq{};
 	writeReq.address = addr;
 	writeReq.size = (uint32_t)bytes.size();
 
@@ -2326,7 +2328,7 @@ void DapServer::OnDisassemble(const Request& req) {
 	}
 
 	uint32_t readSize = (uint32_t)totalNeeded * 15;
-	ReadMemoryRequest readReq;
+	ReadMemoryRequest readReq{};
 	readReq.address = startAddr;
 	readReq.size = readSize;
 
@@ -2445,7 +2447,7 @@ void DapServer::OnSetDataBreakpoints(const Request& req) {
 
 	// 기존 data breakpoints 제거
 	for (auto& m : dataBreakpointMappings_) {
-		RemoveHwBreakpointRequest rmReq;
+		RemoveHwBreakpointRequest rmReq{};
 		rmReq.id = m.vehId;
 		pipeClient_.SendCommand(IpcCommand::RemoveHwBreakpoint, &rmReq, sizeof(rmReq));
 	}
@@ -2469,7 +2471,7 @@ void DapServer::OnSetDataBreakpoints(const Request& req) {
 			continue;
 		}
 
-		SetHwBreakpointRequest hwReq;
+		SetHwBreakpointRequest hwReq{};
 		hwReq.address = address;
 		hwReq.type = (accessType == "readWrite") ? 3 : 1; // 1=write, 3=readwrite (DR7 R/W field)
 		hwReq.size = 8; // 기본 8바이트 감시
@@ -2657,7 +2659,7 @@ void DapServer::OnTerminateThreads(const Request& req) {
 	bool allOk = true;
 	for (auto& tid : threadIds) {
 		if (!tid.is_number()) continue;
-		TerminateThreadRequest termReq;
+		TerminateThreadRequest termReq{};
 		termReq.threadId = tid.get<uint32_t>();
 
 		std::vector<uint8_t> respData;
@@ -2713,7 +2715,7 @@ void DapServer::OnGoto(const Request& req) {
 
 	// targetId가 유효한 주소인 경우 RIP 설정
 	if (targetId > 0) {
-		SetInstructionPointerRequest ipReq;
+		SetInstructionPointerRequest ipReq{};
 		ipReq.threadId = threadId;
 		ipReq.address = static_cast<uint64_t>(targetId);
 
@@ -2818,7 +2820,7 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 					}
 				}
 				if (!isUserBp) {
-					RemoveBreakpointRequest rmReq;
+					RemoveBreakpointRequest rmReq{};
 					rmReq.id = e->breakpointId;
 					pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
 				}
@@ -2839,7 +2841,7 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				if (sameLine) {
 					// 같은 라인 → 계속 스텝
 					LOG_DEBUG("Temp BP: still same line, auto-stepping");
-					StepRequest stepReq;
+					StepRequest stepReq{};
 					stepReq.threadId = e->threadId;
 					pipeClient_.SendCommand(IpcCommand::StepOver, &stepReq, sizeof(stepReq));
 					break;
@@ -2908,7 +2910,7 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				});
 			} else {
 				// 조건 불만족 or Log Point → 자동 Continue
-				ContinueRequest contReq;
+				ContinueRequest contReq{};
 				contReq.threadId = e->threadId;
 				pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 			}
@@ -2958,14 +2960,14 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 								&& (mn[2]=='l'||mn[2]=='L') && (mn[3]=='l'||mn[3]=='L')) {
 								uint64_t retAddr = e->address + insns[0].length;
 								LOG_INFO("StepOver fallback: CALL at 0x%llX, temp BP at 0x%llX", e->address, retAddr);
-								SetBreakpointRequest bpReq;
+								SetBreakpointRequest bpReq{};
 								bpReq.address = retAddr;
 								pipeClient_.SendCommand(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq));
 								{
 									std::lock_guard<std::mutex> stepLock(steppingMutex_);
 									stepOverTempBpAddr_ = retAddr;
 								}
-								ContinueRequest contReq;
+								ContinueRequest contReq{};
 								contReq.threadId = e->threadId;
 								pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 								break;
@@ -3001,7 +3003,7 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 					if (isCall) {
 						LOG_INFO("Auto-step: CALL at 0x%llX, temp BP at 0x%llX", e->address, callRetAddr);
 						// 임시 BP 설정 (fire-and-forget) + Continue
-						SetBreakpointRequest bpReq;
+						SetBreakpointRequest bpReq{};
 						bpReq.address = callRetAddr;
 						pipeClient_.SendCommand(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq));
 						{
@@ -3009,11 +3011,11 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 							stepOverTempBpAddr_ = callRetAddr;
 						}
 
-						ContinueRequest contReq;
+						ContinueRequest contReq{};
 						contReq.threadId = e->threadId;
 						pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 					} else {
-						StepRequest stepReq;
+						StepRequest stepReq{};
 						stepReq.threadId = e->threadId;
 						pipeClient_.SendCommand(IpcCommand::StepOver, &stepReq, sizeof(stepReq));
 					}
@@ -3303,7 +3305,7 @@ bool DapServer::EvaluateCondition(const std::string& condition, uint32_t threadI
 		if (cachedRegs) {
 			lhsVal = ResolveRegisterByName(lhs, *cachedRegs);
 		} else {
-			GetRegistersRequest regReq;
+			GetRegistersRequest regReq{};
 			regReq.threadId = threadId;
 			std::vector<uint8_t> respData;
 			if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
@@ -3323,7 +3325,7 @@ bool DapServer::EvaluateCondition(const std::string& condition, uint32_t threadI
 		if (cachedRegs) {
 			rhsVal = ResolveRegisterByName(rhs, *cachedRegs);
 		} else {
-			GetRegistersRequest regReq;
+			GetRegistersRequest regReq{};
 			regReq.threadId = threadId;
 			std::vector<uint8_t> respData;
 			if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
@@ -3358,7 +3360,7 @@ std::string DapServer::ExpandLogMessage(const std::string& msg, uint32_t threadI
 	RegisterSet regs = cachedRegs ? *cachedRegs : RegisterSet{};
 	auto ensureRegs = [&]() {
 		if (!regsLoaded) {
-			GetRegistersRequest regReq;
+			GetRegistersRequest regReq{};
 			regReq.threadId = threadId;
 			std::vector<uint8_t> respData;
 			if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
@@ -3429,7 +3431,7 @@ bool DapServer::IsCallInstruction(uint32_t threadId, uint64_t& nextInsnAddr) {
 	if (!targetProcess_) return false;
 
 	// 현재 RIP 가져오기 (GetStackTrace IPC)
-	GetStackTraceRequest stReq;
+	GetStackTraceRequest stReq{};
 	stReq.threadId = threadId;
 	stReq.startFrame = 0;
 	stReq.maxFrames = 1;
@@ -3478,7 +3480,7 @@ bool DapServer::IsNextInstructionCall(uint32_t threadId, uint64_t& addrAfterCall
 	if (!targetProcess_) return false;
 
 	// 현재 RIP 가져오기
-	GetStackTraceRequest stReq;
+	GetStackTraceRequest stReq{};
 	stReq.threadId = threadId;
 	stReq.startFrame = 0;
 	stReq.maxFrames = 1;
@@ -3555,7 +3557,7 @@ void DapServer::CleanupStaleTempBp() {
 	if (tempId != 0) {
 		if (!isUserBpId(tempId)) {
 			LOG_INFO("CleanupStaleTempBp: removing id=%u", tempId);
-			RemoveBreakpointRequest rmReq;
+			RemoveBreakpointRequest rmReq{};
 			rmReq.id = tempId;
 			pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
 		} else {
@@ -3564,7 +3566,7 @@ void DapServer::CleanupStaleTempBp() {
 	} else if (tempAddr != 0) {
 		if (!isUserBpAddr(tempAddr)) {
 			LOG_INFO("CleanupStaleTempBp: removing by addr=0x%llX", tempAddr);
-			RemoveBreakpointByAddrRequest rmReq;
+			RemoveBreakpointByAddrRequest rmReq{};
 			rmReq.address = tempAddr;
 			pipeClient_.SendCommand(IpcCommand::RemoveBreakpointByAddr, &rmReq, sizeof(rmReq));
 		} else {
@@ -3579,7 +3581,7 @@ void DapServer::CleanupStaleTempBp() {
 }
 
 bool DapServer::GetTopFrameSourceLine(uint32_t threadId, std::string& file, uint32_t& line) {
-	GetStackTraceRequest stReq;
+	GetStackTraceRequest stReq{};
 	stReq.threadId = threadId;
 	stReq.startFrame = 0;
 	stReq.maxFrames = 1;

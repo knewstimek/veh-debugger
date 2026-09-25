@@ -354,7 +354,7 @@ bool DebugSession::IsTargetAlive() {
 
 BpResult DebugSession::SetBreakpoint(uint64_t address) {
 	BpResult result;
-	SetBreakpointRequest req;
+	SetBreakpointRequest req{};
 	req.address = address;
 
 	std::vector<uint8_t> respData;
@@ -388,7 +388,7 @@ bool DebugSession::SetModuleLoadStop(const std::string& name, int action) {
 }
 
 bool DebugSession::RemoveBreakpoint(uint32_t id) {
-	RemoveBreakpointRequest req;
+	RemoveBreakpointRequest req{};
 	req.id = id;
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::RemoveBreakpoint, &req, sizeof(req), respData))
@@ -413,7 +413,7 @@ bool DebugSession::RemoveBreakpointByAddress(uint64_t address) {
 
 HwBpResult DebugSession::SetHwBreakpoint(uint64_t address, uint8_t type, uint8_t size) {
 	HwBpResult result;
-	SetHwBreakpointRequest req;
+	SetHwBreakpointRequest req{};
 	req.address = address;
 	req.type = type;
 	req.size = size;
@@ -434,7 +434,7 @@ HwBpResult DebugSession::SetHwBreakpoint(uint64_t address, uint8_t type, uint8_t
 }
 
 bool DebugSession::RemoveHwBreakpoint(uint32_t id) {
-	RemoveHwBreakpointRequest req;
+	RemoveHwBreakpointRequest req{};
 	req.id = id;
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::RemoveHwBreakpoint, &req, sizeof(req), respData))
@@ -511,7 +511,7 @@ ContinueResult DebugSession::ContinueWithDetails(uint32_t threadId, bool passExc
 }
 
 bool DebugSession::StepIn(uint32_t threadId) {
-	StepRequest req;
+	StepRequest req{};
 	req.threadId = threadId;
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::StepInto, &req, sizeof(req), respData))
@@ -524,7 +524,7 @@ bool DebugSession::StepIn(uint32_t threadId) {
 }
 
 bool DebugSession::StepOver(uint32_t threadId) {
-	StepRequest req;
+	StepRequest req{};
 	req.threadId = threadId;
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::StepOver, &req, sizeof(req), respData))
@@ -537,7 +537,7 @@ bool DebugSession::StepOver(uint32_t threadId) {
 }
 
 bool DebugSession::StepOut(uint32_t threadId) {
-	StepRequest req;
+	StepRequest req{};
 	req.threadId = threadId;
 	std::vector<uint8_t> respData;
 	if (!pipeClient_.SendAndReceive(IpcCommand::StepOut, &req, sizeof(req), respData))
@@ -550,7 +550,7 @@ bool DebugSession::StepOut(uint32_t threadId) {
 }
 
 bool DebugSession::Pause(uint32_t threadId) {
-	PauseRequest req;
+	PauseRequest req{};
 	req.threadId = threadId;
 	std::vector<uint8_t> respData;
 	return pipeClient_.SendAndReceive(IpcCommand::Pause, &req, sizeof(req), respData);
@@ -697,7 +697,7 @@ std::vector<ThreadEntry> DebugSession::GetThreads() {
 
 std::vector<StackFrame> DebugSession::GetStackTrace(uint32_t threadId, uint32_t maxFrames) {
 	std::vector<StackFrame> result;
-	GetStackTraceRequest req;
+	GetStackTraceRequest req{};
 	req.threadId = threadId;
 	req.startFrame = 0;
 	req.maxFrames = maxFrames;
@@ -732,7 +732,7 @@ std::vector<StackFrame> DebugSession::GetStackTrace(uint32_t threadId, uint32_t 
 }
 
 std::optional<RegisterSet> DebugSession::GetRegisters(uint32_t threadId) {
-	GetRegistersRequest req;
+	GetRegistersRequest req{};
 	req.threadId = threadId;
 
 	std::vector<uint8_t> respData;
@@ -747,7 +747,7 @@ std::optional<RegisterSet> DebugSession::GetRegisters(uint32_t threadId) {
 }
 
 bool DebugSession::SetRegister(uint32_t threadId, uint32_t regIndex, uint64_t value) {
-	SetRegisterRequest req;
+	SetRegisterRequest req{};
 	req.threadId = threadId;
 	req.regIndex = regIndex;
 	req.value = value;
@@ -816,7 +816,7 @@ std::vector<LocalVarEntry> DebugSession::EnumLocals(uint32_t threadId, uint64_t 
 		if (instrAddr == 0) return result;
 	}
 
-	EnumLocalsRequest req;
+	EnumLocalsRequest req{};
 	req.threadId = threadId;
 	req.instructionAddress = instrAddr;
 	req.frameBase = frameBase;
@@ -860,7 +860,7 @@ std::vector<LocalVarEntry> DebugSession::EnumLocals(uint32_t threadId, uint64_t 
 // --- Memory ---
 
 std::vector<uint8_t> DebugSession::ReadMemory(uint64_t address, uint32_t size) {
-	ReadMemoryRequest req;
+	ReadMemoryRequest req{};
 	req.address = address;
 	req.size = size;
 
@@ -897,7 +897,7 @@ bool DebugSession::WriteMemory(uint64_t address, const uint8_t* data, uint32_t s
 }
 
 uint64_t DebugSession::AllocateMemory(uint32_t size, uint32_t protection) {
-	AllocateMemoryRequest req;
+	AllocateMemoryRequest req{};
 	req.size = size;
 	req.protection = protection;
 
@@ -912,7 +912,7 @@ uint64_t DebugSession::AllocateMemory(uint32_t size, uint32_t protection) {
 }
 
 bool DebugSession::FreeMemory(uint64_t address) {
-	FreeMemoryRequest req;
+	FreeMemoryRequest req{};
 	req.address = address;
 	req.size = 0;
 
@@ -1199,20 +1199,20 @@ TraceResult DebugSession::TraceCallers(uint64_t address, uint32_t durationSec) {
 	contReq.threadId = 0;
 	pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 
-	TraceCallersRequest req;
+	TraceCallersRequest req{};
 	req.address = address;
 	req.durationMs = durationSec * 1000;
 
 	std::vector<uint8_t> respData;
 	int timeoutMs = (durationSec + 10) * 1000;
 	if (!pipeClient_.SendAndReceive(IpcCommand::TraceCallers, &req, sizeof(req), respData, timeoutMs)) {
-		PauseRequest pauseReq; pauseReq.threadId = 0;
+		PauseRequest pauseReq{}; pauseReq.threadId = 0;
 		pipeClient_.SendCommand(IpcCommand::Pause, &pauseReq, sizeof(pauseReq));
 		return result;
 	}
 
 	// Auto-pause after collection
-	PauseRequest pauseReq; pauseReq.threadId = 0;
+	PauseRequest pauseReq{}; pauseReq.threadId = 0;
 	pipeClient_.SendCommand(IpcCommand::Pause, &pauseReq, sizeof(pauseReq));
 
 	// Drain stale stop events
@@ -1245,7 +1245,7 @@ TraceResult DebugSession::TraceCallers(uint64_t address, uint32_t durationSec) {
 DebugSession::TraceRegResult DebugSession::TraceRegister(uint32_t threadId, uint32_t regIndex,
                                                           uint32_t maxSteps, uint8_t mode, uint64_t compareValue) {
 	TraceRegResult result;
-	TraceRegisterRequest req;
+	TraceRegisterRequest req{};
 	req.threadId = threadId;
 	req.regIndex = regIndex;
 	req.maxSteps = maxSteps;
@@ -1270,7 +1270,7 @@ DebugSession::TraceRegResult DebugSession::TraceRegister(uint32_t threadId, uint
 
 DebugSession::TraceMemResult DebugSession::TraceMemoryWrite(uint64_t address, uint32_t size, uint32_t timeoutMs) {
 	TraceMemResult result;
-	TraceMemoryRequest req;
+	TraceMemoryRequest req{};
 	req.address = address;
 	req.size = size;
 	req.timeoutMs = timeoutMs;

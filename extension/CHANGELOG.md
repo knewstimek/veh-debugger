@@ -10,6 +10,8 @@
 - Each MCP tool's handler, category, eager profiles, nested-call permission, and schema now live in one server table.
 
 ### Fixed
+- **Step over (F10) could kill the debuggee** -- IPC request structs were sent without zero-initialization, so the `passException` byte added to `ContinueRequest` carried stack garbage in the step-over temp-breakpoint path. When it was nonzero the DLL forwarded the breakpoint to SEH and the target terminated with `STATUS_BREAKPOINT`. Reproduced on x86 (timing-dependent; debug logging hid it). All adapter and MCP IPC requests are now value-initialized.
+- **DAP `continue` resumed only the selected thread** -- since the continue-state change, `continue` with a `threadId` resumed just that thread, leaving others frozen after an all-threads stop (and stranding stop-on-entry launches continued with a different thread id). `continue` now resumes all threads unless the client sends `singleThread: true`, as the DAP specification requires.
 - **Batch steps did not wait for completion** -- `veh_step_in/over/out` inside `veh_batch` returned as soon as the step command was sent, so a following `veh_registers` could observe the pre-step state. Steps now wait for completion exactly like direct calls.
 - **Batch address arguments used an outdated parser** -- literal arithmetic (`0x1000+0x34`), full-consumption checks, and overflow rejection from v1.1.13 now apply to batch and breakpoint-action steps.
 - **MCP tool failures set `isError`** -- results with a top-level `error` (including failures returned through `veh_toolbox` `call`, which now hoists the inner `error`) are flagged `isError: true` instead of appearing successful to MCP clients.
