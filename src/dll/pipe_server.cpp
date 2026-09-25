@@ -70,19 +70,153 @@ static uint8_t BasicTraceRegisterIndex(ZydisMachineMode mode, ZydisRegister reg)
 	}
 }
 
+static bool InitTraceDecoder(ZydisDecoder& decoder, ZydisMachineMode& machineMode) {
+#ifdef _WIN64
+	machineMode = ZYDIS_MACHINE_MODE_LONG_64;
+	return ZYAN_SUCCESS(ZydisDecoderInit(&decoder, machineMode, ZYDIS_STACK_WIDTH_64));
+#else
+	machineMode = ZYDIS_MACHINE_MODE_LONG_COMPAT_32;
+	return ZYAN_SUCCESS(ZydisDecoderInit(&decoder, machineMode, ZYDIS_STACK_WIDTH_32));
+#endif
+}
+
+// Decodes one instruction into trace metadata and returns its length (1 for
+// undecodable bytes). With starts, also records the sweep's block starts.
+static uint8_t DecodeTraceInstruction(const ZydisDecoder& decoder, ZydisMachineMode machineMode,
+		uint64_t address, const uint8_t* bytes, size_t available,
+		veh::VehHandler::TraceBasicBlocksState::Instruction& meta, bool& decodedOk,
+		std::set<uint64_t>* starts, uint64_t start, uint64_t end) {
+	decodedOk = false;
+	ZydisDecodedInstruction decoded{};
+	ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT] = {};
+	uint8_t length = 1;
+	bool terminal = false;
+	bool indirect = false;
+	meta.address = address;
+	veh::TraceBasicBlockEdgeKind kind = veh::TraceBasicBlockEdgeKind::Fallthrough;
+	if (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, bytes, available, &decoded, operands))) {
+		decodedOk = true;
+		length = decoded.length;
+		switch (decoded.meta.category) {
+		case ZYDIS_CATEGORY_CALL:
+			terminal = true; kind = veh::TraceBasicBlockEdgeKind::Call; break;
+		case ZYDIS_CATEGORY_RET:
+			terminal = true; kind = veh::TraceBasicBlockEdgeKind::Return; break;
+		case ZYDIS_CATEGORY_COND_BR:
+		case ZYDIS_CATEGORY_UNCOND_BR:
+		case ZYDIS_CATEGORY_INTERRUPT:
+		case ZYDIS_CATEGORY_SYSCALL:
+		case ZYDIS_CATEGORY_SYSRET:
+			terminal = true; kind = veh::TraceBasicBlockEdgeKind::Branch; break;
+		default:
+			break;
+		}
+		if (terminal && (decoded.meta.category == ZYDIS_CATEGORY_CALL ||
+				decoded.meta.category == ZYDIS_CATEGORY_UNCOND_BR) &&
+				decoded.operand_count_visible > 0) {
+			indirect = operands[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE;
+		}
+		if (terminal) {
+			uint64_t next = address + length;
+			if (starts && next < end) starts->insert(next);
+			for (uint8_t i = 0; i < decoded.operand_count_visible; ++i) {
+				if (operands[i].type != ZYDIS_OPERAND_TYPE_IMMEDIATE || !operands[i].imm.is_relative)
+					continue;
+				ZyanU64 target = 0;
+				if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&decoded, &operands[i], address, &target)) &&
+					starts && target >= start && target < end) starts->insert(target);
+			}
+		}
+
+		bool repeated = (decoded.attributes & (ZYDIS_ATTRIB_HAS_REP |
+			ZYDIS_ATTRIB_HAS_REPE | ZYDIS_ATTRIB_HAS_REPNE)) != 0;
+		if (decoded.cpu_flags) {
+			meta.readsFlags = decoded.cpu_flags->tested != 0;
+			meta.writesFlags = (decoded.cpu_flags->modified | decoded.cpu_flags->set_0 |
+				decoded.cpu_flags->set_1 | decoded.cpu_flags->undefined) != 0;
+		}
+		if ((decoded.mnemonic == ZYDIS_MNEMONIC_XOR || decoded.mnemonic == ZYDIS_MNEMONIC_SUB) &&
+			decoded.operand_count_visible >= 2 && operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+			operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+			ZydisRegisterGetLargestEnclosing(machineMode, operands[0].reg.value) ==
+			ZydisRegisterGetLargestEnclosing(machineMode, operands[1].reg.value))
+			meta.clearsDependencies = 1;
+		for (uint8_t i = 0; i < decoded.operand_count; ++i) {
+			const auto& operand = operands[i];
+			if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+				uint8_t reg = BasicTraceRegisterIndex(machineMode, operand.reg.value);
+				if (reg < 16) {
+					if (operand.actions & ZYDIS_OPERAND_ACTION_READ) meta.readRegisterMask |= 1u << reg;
+					if (operand.actions & ZYDIS_OPERAND_ACTION_WRITE) meta.writeRegisterMask |= 1u << reg;
+				}
+				continue;
+			}
+			if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY) continue;
+			// LEA consumes the address expression, not memory at that address. Zydis
+			// represents the source as a memory-form operand, so carry its base/index
+			// register origins into the enclosing destination register explicitly and
+			// do not emit a synthetic memory-read observation.
+			if (decoded.mnemonic == ZYDIS_MNEMONIC_LEA) {
+				uint8_t base = BasicTraceRegisterIndex(machineMode, operand.mem.base);
+				uint8_t index = BasicTraceRegisterIndex(machineMode, operand.mem.index);
+				if (base < 16) meta.readRegisterMask |= 1u << base;
+				if (index < 16) meta.readRegisterMask |= 1u << index;
+				continue;
+			}
+			// Intel multi-byte NOP encodings carry a memory-form operand for
+			// instruction length, but they neither calculate an effective address
+			// nor access memory. Treating NOP [reg] as a read creates a false
+			// unsupported access when the decorative register value is unmapped.
+			if (decoded.mnemonic == ZYDIS_MNEMONIC_NOP) continue;
+			bool readable = (operand.actions & ZYDIS_OPERAND_ACTION_READ) != 0;
+			bool writable = (operand.actions & ZYDIS_OPERAND_ACTION_WRITE) != 0;
+			if (!readable && !writable) continue;
+			bool unsupported = repeated || operand.size == 0 ||
+				operand.size > veh::kTraceMemoryMaxValueBytes * 8 ||
+				operand.mem.segment == ZYDIS_REGISTER_FS || operand.mem.segment == ZYDIS_REGISTER_GS ||
+				(writable && meta.writeOperandCount >= veh::VehHandler::TraceBasicBlocksState::kMaxWriteOperands) ||
+				(readable && meta.readOperandCount >= veh::VehHandler::TraceBasicBlocksState::kMaxReadOperands);
+			if (unsupported) {
+				if (writable) meta.unsupportedWrites++;
+				if (readable) meta.unsupportedReads++;
+				continue;
+			}
+			veh::VehHandler::TraceBasicBlocksState::WriteOperand parsed{};
+			parsed.size = static_cast<uint8_t>((operand.size + 7) / 8);
+			parsed.scale = operand.mem.scale;
+			parsed.displacement = operand.mem.disp.has_displacement ? operand.mem.disp.value : 0;
+			parsed.ripRelative = operand.mem.base == ZYDIS_REGISTER_RIP ? 1 : 0;
+			parsed.base = parsed.ripRelative ? 0xFF : BasicTraceRegisterIndex(machineMode, operand.mem.base);
+			parsed.index = BasicTraceRegisterIndex(machineMode, operand.mem.index);
+			// PUSH and CALL decrement SP before storing; Zydis reports the stack
+			// operand relative to the pre-instruction SP.
+			parsed.preDecrementStack = writable && (decoded.meta.category == ZYDIS_CATEGORY_PUSH ||
+				decoded.meta.category == ZYDIS_CATEGORY_CALL) && parsed.base == 7 ? 1 : 0;
+			if ((!parsed.ripRelative && operand.mem.base != ZYDIS_REGISTER_NONE && parsed.base == 0xFF) ||
+				(operand.mem.index != ZYDIS_REGISTER_NONE && parsed.index == 0xFF)) {
+				if (writable) meta.unsupportedWrites++;
+				if (readable) meta.unsupportedReads++;
+				continue;
+			}
+			if (writable) meta.writeOperands[meta.writeOperandCount++] = parsed;
+			if (readable) meta.readOperands[meta.readOperandCount++] = parsed;
+		}
+	}
+
+	meta.next = address + length;
+	meta.terminal = terminal ? 1 : 0;
+	meta.indirect = indirect ? 1 : 0;
+	meta.kind = kind;
+	return length;
+}
+
 static bool DecodeBasicTraceRange(uint64_t start, uint64_t end,
 		std::vector<veh::VehHandler::TraceBasicBlocksState::Instruction>& instructions,
 		std::vector<uint64_t>& blockStarts) {
 	if (start >= end) return false;
 	ZydisDecoder decoder;
-#ifdef _WIN64
-	const ZydisMachineMode machineMode = ZYDIS_MACHINE_MODE_LONG_64;
-	const ZydisStackWidth stackWidth = ZYDIS_STACK_WIDTH_64;
-#else
-	const ZydisMachineMode machineMode = ZYDIS_MACHINE_MODE_LONG_COMPAT_32;
-	const ZydisStackWidth stackWidth = ZYDIS_STACK_WIDTH_32;
-#endif
-	if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, machineMode, stackWidth))) return false;
+	ZydisMachineMode machineMode;
+	if (!InitTraceDecoder(decoder, machineMode)) return false;
 
 	std::set<uint64_t> starts;
 	starts.insert(start);
@@ -110,125 +244,10 @@ static bool DecodeBasicTraceRange(uint64_t start, uint64_t end,
 		size_t available = static_cast<size_t>(std::min<uint64_t>(
 			readableEnd - address, sizeof(bytes)));
 		if (!SafeReadMem(address, bytes, available)) return false;
-
-		ZydisDecodedInstruction decoded{};
-		ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT] = {};
-		uint8_t length = 1;
-		bool terminal = false;
-		bool indirect = false;
 		veh::VehHandler::TraceBasicBlocksState::Instruction meta;
-		meta.address = address;
-		veh::TraceBasicBlockEdgeKind kind = veh::TraceBasicBlockEdgeKind::Fallthrough;
-		if (ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, bytes, available, &decoded, operands))) {
-			length = decoded.length;
-			switch (decoded.meta.category) {
-			case ZYDIS_CATEGORY_CALL:
-				terminal = true; kind = veh::TraceBasicBlockEdgeKind::Call; break;
-			case ZYDIS_CATEGORY_RET:
-				terminal = true; kind = veh::TraceBasicBlockEdgeKind::Return; break;
-			case ZYDIS_CATEGORY_COND_BR:
-			case ZYDIS_CATEGORY_UNCOND_BR:
-			case ZYDIS_CATEGORY_INTERRUPT:
-			case ZYDIS_CATEGORY_SYSCALL:
-			case ZYDIS_CATEGORY_SYSRET:
-				terminal = true; kind = veh::TraceBasicBlockEdgeKind::Branch; break;
-			default:
-				break;
-			}
-			if (terminal && (decoded.meta.category == ZYDIS_CATEGORY_CALL ||
-					decoded.meta.category == ZYDIS_CATEGORY_UNCOND_BR) &&
-					decoded.operand_count_visible > 0) {
-				indirect = operands[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE;
-			}
-			if (terminal) {
-				uint64_t next = address + length;
-				if (next < end) starts.insert(next);
-				for (uint8_t i = 0; i < decoded.operand_count_visible; ++i) {
-					if (operands[i].type != ZYDIS_OPERAND_TYPE_IMMEDIATE || !operands[i].imm.is_relative)
-						continue;
-					ZyanU64 target = 0;
-					if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&decoded, &operands[i], address, &target)) &&
-						target >= start && target < end) starts.insert(target);
-				}
-			}
-
-			bool repeated = (decoded.attributes & (ZYDIS_ATTRIB_HAS_REP |
-				ZYDIS_ATTRIB_HAS_REPE | ZYDIS_ATTRIB_HAS_REPNE)) != 0;
-			if (decoded.cpu_flags) {
-				meta.readsFlags = decoded.cpu_flags->tested != 0;
-				meta.writesFlags = (decoded.cpu_flags->modified | decoded.cpu_flags->set_0 |
-					decoded.cpu_flags->set_1 | decoded.cpu_flags->undefined) != 0;
-			}
-			if ((decoded.mnemonic == ZYDIS_MNEMONIC_XOR || decoded.mnemonic == ZYDIS_MNEMONIC_SUB) &&
-				decoded.operand_count_visible >= 2 && operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
-				operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
-				ZydisRegisterGetLargestEnclosing(machineMode, operands[0].reg.value) ==
-				ZydisRegisterGetLargestEnclosing(machineMode, operands[1].reg.value))
-				meta.clearsDependencies = 1;
-			for (uint8_t i = 0; i < decoded.operand_count; ++i) {
-				const auto& operand = operands[i];
-				if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-					uint8_t reg = BasicTraceRegisterIndex(machineMode, operand.reg.value);
-					if (reg < 16) {
-						if (operand.actions & ZYDIS_OPERAND_ACTION_READ) meta.readRegisterMask |= 1u << reg;
-						if (operand.actions & ZYDIS_OPERAND_ACTION_WRITE) meta.writeRegisterMask |= 1u << reg;
-					}
-					continue;
-				}
-				if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY) continue;
-				// LEA consumes the address expression, not memory at that address. Zydis
-				// represents the source as a memory-form operand, so carry its base/index
-				// register origins into the enclosing destination register explicitly and
-				// do not emit a synthetic memory-read observation.
-				if (decoded.mnemonic == ZYDIS_MNEMONIC_LEA) {
-					uint8_t base = BasicTraceRegisterIndex(machineMode, operand.mem.base);
-					uint8_t index = BasicTraceRegisterIndex(machineMode, operand.mem.index);
-					if (base < 16) meta.readRegisterMask |= 1u << base;
-					if (index < 16) meta.readRegisterMask |= 1u << index;
-					continue;
-				}
-				// Intel multi-byte NOP encodings carry a memory-form operand for
-				// instruction length, but they neither calculate an effective address
-				// nor access memory. Treating NOP [reg] as a read creates a false
-				// unsupported access when the decorative register value is unmapped.
-				if (decoded.mnemonic == ZYDIS_MNEMONIC_NOP) continue;
-				bool readable = (operand.actions & ZYDIS_OPERAND_ACTION_READ) != 0;
-				bool writable = (operand.actions & ZYDIS_OPERAND_ACTION_WRITE) != 0;
-				if (!readable && !writable) continue;
-				bool unsupported = repeated || operand.size == 0 ||
-					operand.size > veh::kTraceMemoryMaxValueBytes * 8 ||
-					operand.mem.segment == ZYDIS_REGISTER_FS || operand.mem.segment == ZYDIS_REGISTER_GS ||
-					(writable && meta.writeOperandCount >= veh::VehHandler::TraceBasicBlocksState::kMaxWriteOperands) ||
-					(readable && meta.readOperandCount >= veh::VehHandler::TraceBasicBlocksState::kMaxReadOperands);
-				if (unsupported) {
-					if (writable) meta.unsupportedWrites++;
-					if (readable) meta.unsupportedReads++;
-					continue;
-				}
-				veh::VehHandler::TraceBasicBlocksState::WriteOperand parsed{};
-				parsed.size = static_cast<uint8_t>((operand.size + 7) / 8);
-				parsed.scale = operand.mem.scale;
-				parsed.displacement = operand.mem.disp.has_displacement ? operand.mem.disp.value : 0;
-				parsed.ripRelative = operand.mem.base == ZYDIS_REGISTER_RIP ? 1 : 0;
-				parsed.base = parsed.ripRelative ? 0xFF : BasicTraceRegisterIndex(machineMode, operand.mem.base);
-				parsed.index = BasicTraceRegisterIndex(machineMode, operand.mem.index);
-				parsed.preDecrementStack = writable && decoded.meta.category == ZYDIS_CATEGORY_PUSH &&
-					parsed.base == 7 ? 1 : 0;
-				if ((!parsed.ripRelative && operand.mem.base != ZYDIS_REGISTER_NONE && parsed.base == 0xFF) ||
-					(operand.mem.index != ZYDIS_REGISTER_NONE && parsed.index == 0xFF)) {
-					if (writable) meta.unsupportedWrites++;
-					if (readable) meta.unsupportedReads++;
-					continue;
-				}
-				if (writable) meta.writeOperands[meta.writeOperandCount++] = parsed;
-				if (readable) meta.readOperands[meta.readOperandCount++] = parsed;
-			}
-		}
-
-		meta.next = address + length;
-		meta.terminal = terminal ? 1 : 0;
-		meta.indirect = indirect ? 1 : 0;
-		meta.kind = kind;
+		bool decodedOk = false;
+		uint8_t length = DecodeTraceInstruction(decoder, machineMode, address, bytes, available,
+			meta, decodedOk, &starts, start, end);
 		instructions.push_back(meta);
 		if (instructions.size() > 1000000) return false;
 		address += length;
@@ -242,6 +261,35 @@ static bool DecodeBasicTraceRange(uint64_t start, uint64_t end,
 		instruction.staticBlockStart = blockStarts[blockIndex];
 	}
 	return !instructions.empty();
+}
+
+// Single-instruction decode used by the exception handler for addresses the
+// sweep did not produce. Reads only the committed, readable part of the page
+// run (no SEH inside the handler) and never allocates.
+bool veh::DecodeTraceInstructionAt(uint64_t address, uint64_t limit,
+		veh::VehHandler::TraceBasicBlocksState::Instruction& out) {
+	if (address >= limit) return false;
+	size_t available = static_cast<size_t>(std::min<uint64_t>(limit - address, ZYDIS_MAX_INSTRUCTION_LENGTH));
+	for (uint64_t cursor = address; cursor < address + available;) {
+		MEMORY_BASIC_INFORMATION region{};
+		if (!VirtualQuery(reinterpret_cast<const void*>(static_cast<uintptr_t>(cursor)), &region, sizeof(region)) ||
+				region.State != MEM_COMMIT || (region.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
+			available = static_cast<size_t>(cursor - address);
+			break;
+		}
+		cursor = reinterpret_cast<uint64_t>(region.BaseAddress) + static_cast<uint64_t>(region.RegionSize);
+	}
+	if (!available) return false;
+	uint8_t bytes[ZYDIS_MAX_INSTRUCTION_LENGTH] = {};
+	memcpy(bytes, reinterpret_cast<const void*>(static_cast<uintptr_t>(address)), available);
+	ZydisDecoder decoder;
+	ZydisMachineMode machineMode;
+	if (!InitTraceDecoder(decoder, machineMode)) return false;
+	out = {};
+	bool decodedOk = false;
+	DecodeTraceInstruction(decoder, machineMode, address, bytes, available, out, decodedOk, nullptr, 0, 0);
+	out.staticBlockStart = 0;  // dynamic: no static block boundary
+	return decodedOk;
 }
 
 static uint64_t RegFromCtx(const CONTEXT& ctx, uint8_t idx) {
@@ -2417,12 +2465,12 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			entry.start = blockStart;
 			entry.end = blockStart;
 			entry.firstSnapshot = firstSnapshots[blockStart];
-			auto it = std::lower_bound(tb.instructions.begin(), tb.instructions.end(), blockStart,
-				[](const auto& instruction, uint64_t address) { return instruction.address < address; });
-			if (it != tb.instructions.end() && it->address == blockStart) {
-				entry.hitCount = it->hitCount;
-				for (auto cur = it; cur != tb.instructions.end(); ++cur) {
-					if (cur != it && cur->address != entry.end) break;
+			// Walk contiguous instructions from both the static sweep and the table of
+			// instructions decoded on execution (off-sweep, e.g. overlapping code).
+			auto& handler = VehHandler::Instance();
+			if (auto* first = handler.FindBasicTraceInstruction(blockStart)) {
+				entry.hitCount = first->hitCount;
+				for (auto* cur = first; cur; cur = handler.FindBasicTraceInstruction(cur->next)) {
 					entry.end = cur->next;
 					if (cur->terminal || observedTerminators.count(cur->address) || allBoundaries.count(cur->next)) break;
 				}

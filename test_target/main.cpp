@@ -69,6 +69,16 @@ void WorkFunction() {
 	printf("[%d] Working... pi=%.2f msg=%s\n", localCounter, pi, msg);
 }
 
+// Overlapping instructions (valid x86 and x64): a linear sweep decodes +2 as
+// "mov eax, imm32" (B8 31 C0 90 90), but execution jumps from +0 to +3 and runs
+// xor eax,eax / nop / nop / ret, so +3/+5/+6 are executed off the sweep.
+static const unsigned char kTraceOverlapCode[] = {0xEB, 0x01, 0xB8, 0x31, 0xC0, 0x90, 0x90, 0xC3};
+
+__declspec(noinline) int TraceOverlapTarget() {
+	auto* code = static_cast<unsigned char*>(g_trace_executable) + 0x100;
+	return reinterpret_cast<int (*)()>(code)();
+}
+
 int main(int argc, char* argv[]) {
 	printf("=== VEH Debugger Test Target ===\n");
 	printf("PID: %u\n", GetCurrentProcessId());
@@ -88,6 +98,7 @@ int main(int argc, char* argv[]) {
 		PAGE_EXECUTE_READWRITE);
 	if (!g_trace_executable) return 2;
 	*static_cast<unsigned char*>(g_trace_executable) = 0xC3;
+	memcpy(static_cast<unsigned char*>(g_trace_executable) + 0x100, kTraceOverlapCode, sizeof(kTraceOverlapCode));
 	bool traceExceptionMode = argc > 1 && strcmp(argv[1], "--trace-exception") == 0;
 	if (traceExceptionMode)
 		AddVectoredExceptionHandler(0, TraceCoverageExceptionHandler);
@@ -101,6 +112,7 @@ int main(int argc, char* argv[]) {
 		g_counter = TraceIndirectCoverageTarget(g_counter);
 		TraceExecutableWriteTarget();
 		WorkFunction();
+		TraceOverlapTarget();
 		SleepEx(1000, TRUE);  // alertable wait — APC 인젝션 테스트 가능
 	}
 

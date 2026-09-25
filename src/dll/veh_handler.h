@@ -260,6 +260,17 @@ public:
 		uint32_t returnSnapshot = UINT32_MAX;
 		std::vector<Instruction> instructions;
 		std::vector<uint64_t> staticBlockStarts;
+		// Executed addresses the linear sweep did not produce (overlapping or
+		// obfuscated code) are decoded on first execution. Distinct executed
+		// addresses cannot exceed max_steps, so both buffers are sized from it at
+		// trace start: the dense array is reserved (pages commit on use) and the
+		// index is an open-addressing table of array positions. Appends stay within
+		// the reservation, so the handler never allocates and pointers stay valid.
+		static constexpr uint32_t kMaxDynamicInstructions = 1u << 19;
+		std::vector<Instruction> dynamicInstructions;
+		std::vector<uint32_t> dynamicInstructionIndex;  // UINT32_MAX = empty
+		uint32_t dynamicInstructionLimit = 0;
+		bool dynamicDecodeExhausted = false;
 		std::vector<BlockSlot> blockTable;
 		std::vector<EdgeSlot> edgeTable;
 		std::vector<MemoryWriteSlot> memoryWriteTable;
@@ -346,6 +357,10 @@ public:
 		TraceBasicBlockSnapshot pendingExceptionSnapshot{};
 	};
 	TraceBasicBlocksState traceBasicBlocks_;
+	// Trace metadata for an address from the static sweep or the dynamic table
+	TraceBasicBlocksState::Instruction* FindBasicTraceInstruction(uint64_t address);
+	// Same, decoding in-range instructions on first execution when the sweep missed them
+	TraceBasicBlocksState::Instruction* EnsureBasicTraceInstruction(uint64_t address);
 	bool StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, uint64_t rangeEnd,
 		uint32_t maxBlocks, uint32_t maxEdges, uint32_t maxSteps, uint16_t stackBytes,
 		bool followExceptions, bool collectMemoryWrites, uint32_t maxMemoryWrites,
@@ -480,7 +495,6 @@ private:
 		TraceBasicBlockEdgeKind kind, uint32_t exceptionCode, bool indirect, const CONTEXT* ctx,
 		uint32_t* snapshotOut = nullptr, uint64_t faultAddress = 0,
 		const TraceBasicBlockSnapshot* faultSnapshot = nullptr);
-	TraceBasicBlocksState::Instruction* FindBasicTraceInstruction(uint64_t address);
 	uint64_t NormalizeBasicTraceBlockStart(uint64_t address, bool dynamicTarget) const;
 	void PrepareBasicTraceMemoryWrites(const TraceBasicBlocksState::Instruction* instruction,
 		const CONTEXT* ctx);
@@ -571,5 +585,10 @@ private:
 	DWORD pendingRearmTlsSlot_ = TLS_OUT_OF_INDEXES;
 	PendingRearm& GetPendingRearm();
 };
+
+// Decodes one instruction into trace metadata (defined with the range sweep in
+// pipe_server.cpp). Allocation-free, so it is safe inside the exception handler.
+bool DecodeTraceInstructionAt(uint64_t address, uint64_t limit,
+	VehHandler::TraceBasicBlocksState::Instruction& out);
 
 } // namespace veh

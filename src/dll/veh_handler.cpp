@@ -419,7 +419,54 @@ VehHandler::TraceBasicBlocksState::Instruction* VehHandler::FindBasicTraceInstru
 		if (insns[mid].address < address) lo = mid + 1;
 		else hi = mid;
 	}
-	return (lo < insns.size() && insns[lo].address == address) ? &insns[lo] : nullptr;
+	if (lo < insns.size() && insns[lo].address == address) return &insns[lo];
+
+	auto& tb = traceBasicBlocks_;
+	const auto& table = tb.dynamicInstructionIndex;
+	if (table.empty() || !address) return nullptr;
+	const size_t mask = table.size() - 1;
+	for (size_t slot = static_cast<size_t>(BasicTraceHash(address)) & mask, probe = 0;
+			probe < table.size(); ++probe, slot = (slot + 1) & mask) {
+		if (table[slot] == UINT32_MAX) return nullptr;
+		auto& instruction = tb.dynamicInstructions[table[slot]];
+		if (instruction.address == address) return &instruction;
+	}
+	return nullptr;
+}
+
+// The static table is a linear sweep of the range, which misses executed
+// addresses inside overlapping or obfuscated instruction streams. Decode such an
+// address on first execution, continuing through the straight-line run so the
+// block's code and later steps are covered, until a terminal instruction, the
+// range end, or realignment with an already known instruction.
+VehHandler::TraceBasicBlocksState::Instruction* VehHandler::EnsureBasicTraceInstruction(uint64_t address) {
+	if (auto* known = FindBasicTraceInstruction(address)) return known;
+	auto& tb = traceBasicBlocks_;
+	if (address < tb.rangeStart || address >= tb.rangeEnd || tb.dynamicInstructionIndex.empty()) return nullptr;
+
+	constexpr uint32_t kMaxRun = 64;
+	const size_t mask = tb.dynamicInstructionIndex.size() - 1;
+	TraceBasicBlocksState::Instruction* first = nullptr;
+	uint64_t cursor = address;
+	for (uint32_t decoded = 0; decoded < kMaxRun && cursor < tb.rangeEnd; ++decoded) {
+		if (decoded && FindBasicTraceInstruction(cursor)) break;
+		if (tb.dynamicInstructions.size() >= tb.dynamicInstructionLimit) {
+			// Executed code past this point loses its metadata; report it.
+			tb.dynamicDecodeExhausted = true;
+			if (tb.collectCode) tb.codeTruncated = true;
+			break;
+		}
+		TraceBasicBlocksState::Instruction meta{};
+		if (!DecodeTraceInstructionAt(cursor, tb.rangeEnd, meta)) break;
+		size_t slot = static_cast<size_t>(BasicTraceHash(cursor)) & mask;
+		while (tb.dynamicInstructionIndex[slot] != UINT32_MAX) slot = (slot + 1) & mask;
+		tb.dynamicInstructionIndex[slot] = static_cast<uint32_t>(tb.dynamicInstructions.size());
+		tb.dynamicInstructions.push_back(meta);  // within the reservation: no allocation
+		if (!first) first = &tb.dynamicInstructions.back();
+		if (meta.terminal) break;
+		cursor = meta.next;
+	}
+	return first;
 }
 
 uint64_t VehHandler::NormalizeBasicTraceBlockStart(uint64_t address, bool dynamicTarget) const {
@@ -909,7 +956,9 @@ uint32_t VehHandler::CaptureBasicTraceCodeVersion(uint64_t blockStart, uint64_t 
 	uint64_t blockEnd = first->next;
 	for (auto* current = first; !current->terminal;) {
 		auto* next = FindBasicTraceInstruction(current->next);
-		if (!next || next->address != blockEnd || next->staticBlockStart != first->staticBlockStart) break;
+		// Stop at a static block start; instructions decoded on execution carry no
+		// static start (0), so a run crossing between both tables stays one version.
+		if (!next || next->address != blockEnd || next->staticBlockStart == next->address) break;
 		blockEnd = next->next;
 		current = next;
 	}
@@ -1395,6 +1444,11 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.targetWindow = targetWindow;
 	tb.instructions = std::move(instructions);
 	tb.staticBlockStarts = std::move(staticBlockStarts);
+	tb.dynamicInstructionLimit = std::min<uint32_t>(maxSteps, TraceBasicBlocksState::kMaxDynamicInstructions);
+	tb.dynamicInstructions.clear();
+	tb.dynamicInstructions.reserve(tb.dynamicInstructionLimit);
+	tb.dynamicInstructionIndex.assign(nextPowerOfTwo(static_cast<size_t>(tb.dynamicInstructionLimit) * 2), UINT32_MAX);
+	tb.dynamicDecodeExhausted = false;
 	tb.blockTable.assign(nextPowerOfTwo(static_cast<size_t>(maxBlocks) * 2), {});
 	tb.edgeTable.assign(nextPowerOfTwo(static_cast<size_t>(maxEdges) * 2), {});
 	if (collectMemoryWrites)
@@ -1530,6 +1584,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.targetMatched = false;
 	tb.entryBreakpointAddress = 0;
 	tb.entryBreakpointNeedsRearm = false;
+	EnsureBasicTraceInstruction(ip);  // the entry may itself sit off the linear sweep
 	AdvanceBasicTraceOccurrence(ip);
 	AdvanceBasicTraceTarget(ip, 0);
 	tb.startConditionMet = startCondition.clauseCount == 0 || EvaluateBasicTraceCondition(startCondition, &ctx);
@@ -1566,7 +1621,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		StopBasicTraceCodeStream(true); return false;
 	}
 	if (tb.collectWindowActive) {
-		PrepareBasicTraceMemoryWrites(FindBasicTraceInstruction(ip), &ctx);
+		PrepareBasicTraceMemoryWrites(EnsureBasicTraceInstruction(ip), &ctx);
 		PrepareBasicTraceRegisterEvent(ip, &ctx);
 	}
 	tb.active.store(true, std::memory_order_release);
@@ -1595,7 +1650,7 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 		return BasicTraceStepResult::Stop;
 	}
 	bool inRange = addr >= tb.rangeStart && addr < tb.rangeEnd;
-	auto* current = inRange ? FindBasicTraceInstruction(addr) : nullptr;
+	auto* current = inRange ? EnsureBasicTraceInstruction(addr) : nullptr;
 	if (inRange) AdvanceBasicTraceTarget(addr, tb.stepsExecuted + 1);
 	auto* previousInstruction = FindBasicTraceInstruction(tb.previousInstruction);
 	if (tb.stopOnReturn && previousInstruction &&
@@ -1921,7 +1976,7 @@ LONG VehHandler::HandleContinue(PEXCEPTION_POINTERS info) {
 					tb.pendingStopReason = TraceBasicBlockStopReason::MaxBlocks;
 					tb.truncated = true;
 				} else {
-					PrepareBasicTraceMemoryWrites(FindBasicTraceInstruction(destination), info->ContextRecord);
+					PrepareBasicTraceMemoryWrites(EnsureBasicTraceInstruction(destination), info->ContextRecord);
 					PrepareBasicTraceRegisterEvent(destination, info->ContextRecord);
 				}
 			}
@@ -1967,7 +2022,7 @@ LONG VehHandler::HandleContinue(PEXCEPTION_POINTERS info) {
 	}
 	tb.finalAddress = destination;
 	if (!tb.stopPending) {
-		PrepareBasicTraceMemoryWrites(FindBasicTraceInstruction(destination), info->ContextRecord);
+		PrepareBasicTraceMemoryWrites(EnsureBasicTraceInstruction(destination), info->ContextRecord);
 		PrepareBasicTraceRegisterEvent(destination, info->ContextRecord);
 	}
 	// Even when a limit was reached, one final TF event is needed to park the
