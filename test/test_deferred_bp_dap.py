@@ -6,7 +6,6 @@
   4. host late-loads the DLL -> ModuleLoaded -> worker re-resolves -> sends
      'breakpoint' event (reason=changed, verified=true), then BP hits -> 'stopped'
 """
-# requires: x64 (deferred_host.exe is only built for x64)
 import subprocess, json, sys, time, os
 from build_paths import RELEASE
 from bounded_pipe import bound
@@ -14,13 +13,7 @@ from bounded_pipe import bound
 BASE = RELEASE
 ADAPTER = os.path.join(BASE, "veh-debug-adapter.exe")
 HOST = os.path.join(BASE, "deferred_host.exe")
-# Source breakpoints only need the path embedded in the DLL's PDB, not the file itself.
-SOURCE = None
-PDB = os.path.join(BASE, "deferred_dll.pdb")
-if os.path.exists(PDB):
-    import re
-    match = re.search(rb"[A-Za-z]:[^\x00]*?deferred_dll\.cpp", open(PDB, "rb").read(), re.I)
-    SOURCE = match.group(0).decode() if match else None
+SOURCE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "test_target", "deferred_dll.cpp"))
 
 proc = subprocess.Popen([ADAPTER], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE, bufsize=0)
@@ -69,7 +62,7 @@ def fail(msg):
     proc.kill()
     sys.exit(1)
 
-if SOURCE is None or not os.path.exists(HOST):
+if not os.path.exists(SOURCE) or not os.path.exists(HOST):
     fail(f"missing prerequisites (SOURCE={SOURCE}, HOST exists={os.path.exists(HOST)})")
 print(f"  source = {SOURCE}")
 

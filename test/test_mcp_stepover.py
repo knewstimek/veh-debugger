@@ -7,7 +7,6 @@ Strategy:
 4. Continue -> BP hit on first loop iteration
 5. Step-over the CALL -> verify we skip over it
 """
-# requires: x64 (reads the x64 rip register)
 import subprocess
 from build_paths import RELEASE
 import json
@@ -96,7 +95,7 @@ class McpClient:
         rip = data.get("rip") or data.get("RIP")
         if not rip:
             regs = data.get("registers", {})
-            rip = regs.get("rip") or regs.get("RIP")
+            rip = regs.get("rip") or regs.get("eip")  # eip on 32-bit targets
         return rip
 
     def close(self):

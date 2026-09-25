@@ -2,7 +2,6 @@
 
 Each test verifies actual correctness of returned data against known ground truth.
 """
-# requires: x64 (asserts x64 register names (RSP/RCX))
 import time
 from build_paths import RELEASE
 import sys
@@ -219,7 +218,7 @@ def test_set_register_verify():
         # Verify via veh_registers (response: {"registers": {"rcx": "0x..."}})
         regs_resp = c.call("veh_registers", {"threadId": tid})
         regs = regs_resp.get("registers", regs_resp)
-        rcx_from_regs = regs.get("rcx", regs.get("RCX", ""))
+        rcx_from_regs = regs.get("rcx", regs.get("ecx", ""))  # ecx on 32-bit targets
         print(f"    RCX via registers = {rcx_from_regs}")
         check("RCX == 0xCAFEBABE (registers)", "CAFEBABE" in rcx_from_regs.upper(), rcx_from_regs)
 

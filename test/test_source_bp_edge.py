@@ -1,10 +1,10 @@
 """Test edge cases for setBreakpoints on PDB-less binary."""
 import subprocess, json, sys, time, os
-from build_paths import RELEASE
+from build_paths import RELEASE, crackme
 from bounded_pipe import bound
 
 ADAPTER = os.path.join(RELEASE, "veh-debug-adapter.exe")
-TARGET = os.path.join(os.path.dirname(__file__), "challenges", "crackme", "crackme_x64.exe")
+TARGET = crackme("crackme")
 
 proc = subprocess.Popen(
     [ADAPTER, "--log-level=debug"],

@@ -8,10 +8,8 @@ Scenario:
      -> deferred_func() is hit -> stop reason "breakpoint"
   5. list_breakpoints -> status "active" (bound)
 
-Requires build_deferred.bat to have produced deferred_host.exe + deferred_dll.dll
-in build/bin/Release/.
+deferred_host.exe / deferred_dll.dll are built from test_target/ with the rest of the tree.
 """
-# requires: x64 (deferred_host.exe is only built for x64)
 import subprocess
 from build_paths import RELEASE
 import json
@@ -86,7 +84,7 @@ class McpClient:
 
 def main():
     if not os.path.exists(HOST):
-        print(f"FAIL: {HOST} missing - run build_deferred.bat first")
+        print(f"FAIL: {HOST} missing - build the deferred_host target")
         return 1
 
     c = McpClient()
