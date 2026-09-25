@@ -226,6 +226,14 @@ public:
 	bool WriteMemory(uint64_t address, const uint8_t* data, uint32_t size);
 	uint64_t AllocateMemory(uint32_t size, uint32_t protection);
 	bool FreeMemory(uint64_t address);
+	struct ProtectMemoryResult {
+		bool ok = false;
+		uint32_t oldProtection = 0;
+		uint32_t errorCode = 0;
+		ProtectMemoryMethod method = ProtectMemoryMethod::Api;
+	};
+	ProtectMemoryResult ProtectMemory(uint64_t address, uint64_t size, uint32_t protection,
+		ProtectMemoryMethod method);
 	ShellcodeResult ExecuteShellcode(const uint8_t* code, uint32_t size, uint32_t timeoutMs);
 
 	struct MemoryMapResult {

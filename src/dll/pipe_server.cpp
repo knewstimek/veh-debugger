@@ -1650,6 +1650,29 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		break;
 	}
 
+	case IpcCommand::ProtectMemory: {
+		ProtectMemoryResponse resp{};
+		if (payloadSize != sizeof(ProtectMemoryRequest)) {
+			resp.status = IpcStatus::InvalidArgs;
+			resp.errorCode = ERROR_INVALID_PARAMETER;
+			SendResponse(command, &resp, sizeof(resp));
+			return;
+		}
+		auto* req = reinterpret_cast<const ProtectMemoryRequest*>(payload);
+		resp.method = req->method;
+		if (req->method > ProtectMemoryMethod::Syscall) {
+			resp.status = IpcStatus::InvalidArgs;
+			resp.errorCode = ERROR_INVALID_PARAMETER;
+			SendResponse(command, &resp, sizeof(resp));
+			return;
+		}
+		bool ok = MemoryManager::Instance().Protect(req->address, req->size, req->protection,
+			req->method, resp.oldProtection, resp.method, resp.errorCode);
+		resp.status = ok ? IpcStatus::Ok : IpcStatus::Error;
+		SendResponse(command, &resp, sizeof(resp));
+		break;
+	}
+
 	case IpcCommand::QueryMemoryMap: {
 		if (payloadSize < sizeof(QueryMemoryMapRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;

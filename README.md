@@ -349,6 +349,7 @@ enabled = true
 | `veh_write_memory` | `address, data` 또는 `patches` | 메모리 쓰기. 배치: `patches=[{address,data},...]` |
 | `veh_dump_memory` | `address, size, output_path` | 메모리를 바이너리 파일로 덤프 (최대 64MB) |
 | `veh_memory_map` | `start?, end?, module?, include_free?, max_regions?` | 가상 메모리 영역 목록 (상태/보호/타입/소유 모듈). 잘리면 `next_start`로 이어서 조회 |
+| `veh_protect_memory` | `address, size, protection, method?` | 타겟 내부에서 페이지 보호를 변경하고 이전 보호를 반환. `api`(기본값), `nt`, `syscall` 방식 지원; syscall을 사용할 수 없으면 nt로 폴백 |
 | `veh_search_memory` | `pattern` 또는 `string` 또는 `value`, `start?, end?, module?, writable?, executable?, type?, alignment?, max_results?` | 타겟 내부에서 메모리 검색. AOB(`??`, `4?` 와일드카드), 문자열(ascii/utf8/utf16), 숫자 값. BP 바이트는 원본으로 비교 |
 | `veh_value_scan` | `operation, value_type?, compare?, value?, value2?, ...` | 치트엔진식 값 스캔 세션 (`first`/`next`/`results`/`reset`). exact/between/greater/less/unknown 첫 스캔, changed/unchanged/increased/decreased 다음 스캔. 후보는 타겟 DLL 안에 유지 |
 | `veh_assemble` | `code, address?, arch?, write?` | Intel 문법 x86/x64 어셈블 (AsmJit+AsmTK). 주소 기준으로 상대 jmp/call/rip 오프셋 계산, `;`/줄바꿈 구분, 레이블 지원, 디코딩 목록 반환. `write:true`로 타겟에 패치. 타겟 없이도 동작 |
@@ -371,7 +372,7 @@ enabled = true
 | `veh_checkpoint_diff` | `id, other_id?` | checkpoint와 현재 상태 또는 다른 checkpoint의 register 및 변경 메모리 구간을 비교한다. |
 | `veh_checkpoint_delete` | `id` | checkpoint를 삭제하고 서버 메모리 예산을 반환한다. |
 
-> **Non-stop 조회 (타겟 정지 불필요)**: `veh_read_memory` / `veh_read_pointer_chain` / `veh_write_memory` / `veh_dump_memory` / `veh_disassemble` / `veh_modules` / `veh_memory_map` / `veh_search_memory` / `veh_value_scan` / `veh_symbolize` / `veh_display_type` 는 타겟이 **실행 중에도** 동작합니다 (DLL 내 전용 파이프 스레드가 처리 -- 다른 스레드를 멈추지 않음). GUI를 조작하면서 라이브 값을 읽을 때 BP를 걸거나 detach/attach를 왕복할 필요가 없습니다. 반대로 `veh_registers` / `veh_stack_trace` / `veh_enum_locals` / `veh_step_*` 는 스레드 컨텍스트가 필요하므로 BP 히트나 `veh_pause`로 정지된 상태에서만 동작합니다.
+> **Non-stop 조회 (타겟 정지 불필요)**: `veh_read_memory` / `veh_read_pointer_chain` / `veh_write_memory` / `veh_dump_memory` / `veh_disassemble` / `veh_modules` / `veh_memory_map` / `veh_protect_memory` / `veh_search_memory` / `veh_value_scan` / `veh_symbolize` / `veh_display_type` 는 타겟이 **실행 중에도** 동작합니다 (DLL 내 전용 파이프 스레드가 처리 -- 다른 스레드를 멈추지 않음). GUI를 조작하면서 라이브 값을 읽을 때 BP를 걸거나 detach/attach를 왕복할 필요가 없습니다. 반대로 `veh_registers` / `veh_stack_trace` / `veh_enum_locals` / `veh_step_*` 는 스레드 컨텍스트가 필요하므로 BP 히트나 `veh_pause`로 정지된 상태에서만 동작합니다.
 
 > **Tip**: 주소 인자는 hex (`"0x401000"`), 10진수 (`4198400`), **모듈+RVA** (`"crackme.exe+0x1000"`) 모두 허용합니다. 모듈+RVA는 ASLR 계산 없이 사용 가능합니다.
 

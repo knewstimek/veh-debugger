@@ -1057,6 +1057,29 @@ bool DebugSession::FreeMemory(uint64_t address) {
 	return false;
 }
 
+DebugSession::ProtectMemoryResult DebugSession::ProtectMemory(uint64_t address, uint64_t size,
+	uint32_t protection, ProtectMemoryMethod method) {
+	ProtectMemoryRequest req{};
+	req.address = address;
+	req.size = size;
+	req.protection = protection;
+	req.method = method;
+
+	ProtectMemoryResult result;
+	result.method = method;
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::ProtectMemory, &req, sizeof(req), respData))
+		return result;
+	if (respData.size() < sizeof(ProtectMemoryResponse)) return result;
+
+	auto* resp = reinterpret_cast<const ProtectMemoryResponse*>(respData.data());
+	result.oldProtection = resp->oldProtection;
+	result.errorCode = resp->errorCode;
+	result.method = resp->method;
+	result.ok = resp->status == IpcStatus::Ok;
+	return result;
+}
+
 ShellcodeResult DebugSession::ExecuteShellcode(const uint8_t* code, uint32_t size, uint32_t timeoutMs) {
 	ShellcodeResult result;
 

@@ -79,6 +79,7 @@ private:
 	json ToolTraceCallers(const json& args);
 	json ToolDumpMemory(const json& args);
 	json ToolAllocateMemory(const json& args);
+	json ToolProtectMemory(const json& args);
 	json ToolFreeMemory(const json& args);
 	json ToolMemoryMap(const json& args);
 	json ToolSearchMemory(const json& args);
