@@ -292,6 +292,7 @@ public:
 		uint64_t codeStreamToken = 0;
 		HANDLE codeStreamPipe = INVALID_HANDLE_VALUE;
 		HANDLE codeStreamReadyEvent = nullptr;
+		HANDLE codeStreamSpaceEvent = nullptr;
 		std::thread codeStreamThread;
 		std::array<CodeStreamBuffer, kMaxCodeStreamBuffers> codeStreamBuffers;
 		uint32_t codeStreamBufferCount = 0;
@@ -302,6 +303,30 @@ public:
 		bool codeStreamAccepting = false;
 		std::atomic<bool> codeStreamProducerDone{false};
 		std::atomic<bool> codeStreamTransferFailed{false};
+		static constexpr uint32_t kEventStreamBufferCount = 4;
+		bool eventFileOutput = false;
+		uint32_t eventChunkBytes = 0;
+		uint64_t maxEventFileBytes = 0;
+		uint64_t eventStreamToken = 0;
+		HANDLE eventStreamPipe = INVALID_HANDLE_VALUE;
+		HANDLE eventStreamReadyEvent = nullptr;
+		HANDLE eventStreamSpaceEvent = nullptr;
+		std::thread eventStreamThread;
+		std::array<CodeStreamBuffer, kEventStreamBufferCount> eventStreamBuffers;
+		uint32_t eventStreamProducerIndex = 0;
+		uint64_t eventStreamNextChunk = 0;
+		uint64_t eventStreamProducedBytes = 0;
+		uint64_t eventStreamCommittedBytes = 0;
+		uint64_t eventStreamWaitTicks = 0;
+		uint64_t eventStreamPerformanceFrequency = 0;
+		uint64_t streamedEventCount = 0;
+		uint64_t streamedMemoryEventCount = 0;
+		uint64_t streamedRegisterEventCount = 0;
+		bool eventStreamAccepting = false;
+		bool eventStreamTruncated = false;
+		TraceEventTruncationReason eventStreamTruncationReason = TraceEventTruncationReason::None;
+		std::atomic<bool> eventStreamProducerDone{false};
+		std::atomic<bool> eventStreamTransferFailed{false};
 		uint32_t blockCount = 0;
 		uint32_t edgeCount = 0;
 		uint32_t snapshotCount = 0;
@@ -369,6 +394,8 @@ public:
 		bool collectCode, uint32_t maxCodeBytes, uint32_t maxCodeVersions,
 		TraceCodeOutputMode codeOutputMode, uint32_t codeChunkBytes,
 		uint64_t codeStreamToken, HANDLE codeStreamPipe,
+		TraceEventOutputMode eventOutputMode, uint32_t eventChunkBytes,
+		uint64_t maxEventFileBytes, uint64_t eventStreamToken, HANDLE eventStreamPipe,
 		bool collectMemoryEvents, uint32_t maxMemoryEvents,
 		bool collectRegisterEvents, uint32_t maxRegisterEvents,
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
@@ -378,7 +405,7 @@ public:
 		std::vector<TraceBasicBlocksState::Instruction>&& instructions,
 		std::vector<uint64_t>&& staticBlockStarts);
 	void CancelTraceBasicBlocks(TraceBasicBlockStopReason reason);
-	void FinalizeTraceBasicBlocksCodeStream();
+	void FinalizeTraceBasicBlocksStreams();
 
 	// TraceRegister: single-step loop inside VEH, no IPC per step
 	struct TraceRegState {
@@ -515,6 +542,11 @@ private:
 	bool PublishBasicTraceCodeStreamBuffer();
 	void RunBasicTraceCodeStreamWriter();
 	void StopBasicTraceCodeStream(bool abort);
+	bool AppendBasicTraceEventStreamRecord(TraceEventRecordType type, const void* data, uint32_t size);
+	bool AppendBasicTraceEventStream(const void* data, size_t size);
+	bool PublishBasicTraceEventStreamBuffer();
+	void RunBasicTraceEventStreamWriter();
+	void StopBasicTraceEventStream(bool abort);
 	bool AdvanceBasicTraceOccurrence(uint64_t address);
 	void AdvanceBasicTraceTarget(uint64_t address, uint64_t sequence);
 	void EvictBasicTraceTargetEvents(uint64_t sequence);

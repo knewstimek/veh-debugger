@@ -56,8 +56,11 @@ static void CollectBatchTraceMetadata(const json& value, json& summaries, json& 
 			value["output_file"].contains("path")) artifacts.push_back(value["output_file"]);
 		if (value.contains("code_artifact") && value["code_artifact"].is_object() &&
 			value["code_artifact"].contains("path")) artifacts.push_back(value["code_artifact"]);
+		if (value.contains("event_file") && value["event_file"].is_object() &&
+			value["event_file"].contains("path")) artifacts.push_back(value["event_file"]);
 		for (const auto& [key, child] : value.items())
-			if (key != "output_file" && key != "code_artifact") CollectBatchTraceMetadata(child, summaries, artifacts);
+			if (key != "output_file" && key != "code_artifact" && key != "event_file")
+				CollectBatchTraceMetadata(child, summaries, artifacts);
 	} else if (value.is_array()) {
 		for (const auto& child : value) CollectBatchTraceMetadata(child, summaries, artifacts);
 	}

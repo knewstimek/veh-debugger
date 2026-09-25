@@ -10,6 +10,7 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 | `test/mcp_test_client.py` | Shared timeout-aware MCP stdio client. It bounds captured diagnostics and terminates only processes it started. |
 | `tools/run_mcp_scenario.py` | Runs 1-500 calls from a JSON scenario, supports named result references, stops on errors by default, and optionally writes a new report without overwriting. |
 | `tools/validate_trace_output.py` | Validates exported trace JSON/JSONL ordering, thread ownership, counts, hashes, and optional `.vtc` code-version references. |
+| `tools/read_trace_event_stream.py` | Validates a portable `.vte` ordered-event artifact and converts its interleaved block/edge, memory, and register records to JSON Lines. |
 | `tools/run_trace_parity.py` | Runs the trace integration suite against one or more build roots to cover direct, `veh_batch`, and breakpoint-action semantics. |
 | `tools/run_ipc_compat_matrix.py` | Stages old-MCP/new-DLL and new-MCP/old-DLL pairs in a temporary directory and runs bounded compatibility smoke tests. |
 | `tools/measure_mcp_schema.py` | Measures bounded initialize and `tools/list` bytes, input-schema bytes, output-schema count, and eager names for every exposure profile. |
@@ -86,6 +87,29 @@ py -3 tools/validate_trace_output.py trace.jsonl --sha256 <expected-sha256>
 ```
 
 The separate `code_output="file"` mode stores executed code versions in a portable `.vtc` artifact. A full trace export can reference that artifact, and the validator checks the referenced version IDs. Relative artifact paths are resolved from the trace file directory. After copying artifacts to another Windows, Linux, or macOS host, pass `--code-artifact <local-file.vtc>` to replace the capture host's path; the file formats themselves do not depend on the capture OS.
+
+The opt-in `events_output="file"` mode stores block/edge, memory, and register events in their actual emission order in a portable `.vte` artifact. Set `events_output_path` to a new MCP-host path, or omit it for a generated temporary path. Existing files are never overwritten. `max_event_file_bytes` includes the header and complete records, defaults to 4 GiB, and accepts lower limits from 88 bytes through 4 GiB. File mode does not allocate or return the inline event arrays, and their legacy per-kind caps do not limit capture. If the byte limit cannot fit the next complete record, event capture stops with `truncated=true` and `limit_reason="size_limit"`; aggregate tracing continues and the file remains parseable. Four fixed 256 KiB buffers are allocated before tracing. If all are full, the traced thread waits for the writer instead of dropping records, and `wait_time_ns`/`wait_time_ms` report that backpressure cost. File event streaming works through direct calls, `veh_batch`, and breakpoint actions. It can be combined with occurrence windows, but not `target_window`, whose pre-trigger eviction semantics require its existing bounded inline rings.
+
+```powershell
+py -3 tools/read_trace_event_stream.py trace.vte --output trace-events.jsonl
+```
+
+### Ordered-event artifact format (`.vte`)
+
+Schema 1 is packed little-endian and independent of target pointer width. The file begins with this 88-byte header:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `magic` | `u64` | `0x00544E5645484556` (`VEHEVNT\0`) |
+| `schema_version`, `header_size`, `flags` | `u32` each | Version 1; 88 bytes; bit 0 complete and bit 1 truncated |
+| `record_header_size` | `u32` | 8 bytes |
+| `event_entry_size`, `memory_entry_size`, `register_entry_size` | `u32` each | 48, 84, and 320 bytes for schema 1 |
+| `record_bytes` | `u64` | Bytes after the file header |
+| `event_count`, `memory_event_count`, `register_event_count` | `u64` each | Per-kind record counts |
+| `wait_time_ns` | `u64` | Time the traced thread waited for a free stream buffer |
+| `truncation_reason`, `chunk_count`, `reserved` | `u32` each | Reason 0 none, 1 size limit, 2 transfer failure; transmitted chunk count; zero |
+
+Each following record has an 8-byte header: `type:u16`, `reserved:u16`, and `payload_size:u32`. Type 1 contains the 48-byte `TraceBasicBlockEventEntry`, type 2 the 84-byte `TraceBasicBlockMemoryEventEntry`, and type 3 the 320-byte `TraceBasicBlockRegisterEventEntry`, as defined in `src/common/ipc_protocol.h`. Records remain interleaved in capture order and share the trace-step `sequence`; multiple records may have the same sequence. Readers must use `payload_size`, reject unknown types or nonzero reserved fields for schema 1, and stop at exactly `header_size + record_bytes`. A truncated size-limited file ends after a complete record, never in a record header or payload. The supplied reader performs these checks and emits a manifest followed by one JSON object per record.
 
 ## Occurrence-scoped collection
 

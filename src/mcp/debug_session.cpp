@@ -1553,6 +1553,8 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		bool collectCode, uint32_t maxCodeBytes, uint32_t maxCodeVersions,
 		TraceCodeOutputMode codeOutputMode, uint32_t codeChunkBytes,
 		const std::string& codeOutputPath,
+		TraceEventOutputMode eventOutputMode, uint64_t maxEventFileBytes,
+		const std::string& eventOutputPath,
 		bool collectMemoryEvents, uint32_t maxMemoryEvents,
 		bool collectRegisterEvents, uint32_t maxRegisterEvents,
 		const std::vector<TraceDependencySource>& dependencySources,
@@ -1561,10 +1563,18 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		bool stopOnReturn, const TraceTargetWindow& targetWindow) {
 	TraceBasicBlocksResult result;
 	TraceCodeArtifactReceiver codeArtifactReceiver;
+	TraceEventArtifactReceiver eventArtifactReceiver;
 	const bool fileCodeOutput = collectCode && codeOutputMode == TraceCodeOutputMode::File;
+	const bool fileEventOutput = eventOutputMode == TraceEventOutputMode::File;
 	if (fileCodeOutput && !codeArtifactReceiver.Start(codeOutputPath, codeChunkBytes,
 			maxCodeBytes, rangeStart, rangeEnd)) {
 		result.codeArtifact = codeArtifactReceiver.Finish(false);
+		return result;
+	}
+	if (fileEventOutput && !eventArtifactReceiver.Start(eventOutputPath,
+			kTraceEventDefaultChunkBytes, maxEventFileBytes)) {
+		result.eventArtifact = eventArtifactReceiver.Finish(false);
+		if (fileCodeOutput) result.codeArtifact = codeArtifactReceiver.Finish(false);
 		return result;
 	}
 	TraceBasicBlocksRequest req{};
@@ -1596,6 +1606,11 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	req.codeChunkBytes = fileCodeOutput ? codeChunkBytes : 0;
 	req.codeStreamOwnerPid = fileCodeOutput ? codeArtifactReceiver.OwnerPid() : 0;
 	req.codeStreamToken = fileCodeOutput ? codeArtifactReceiver.Token() : 0;
+	req.eventOutputMode = static_cast<uint8_t>(eventOutputMode);
+	req.eventChunkBytes = fileEventOutput ? kTraceEventDefaultChunkBytes : 0;
+	req.eventStreamOwnerPid = fileEventOutput ? eventArtifactReceiver.OwnerPid() : 0;
+	req.eventStreamToken = fileEventOutput ? eventArtifactReceiver.Token() : 0;
+	req.maxEventFileBytes = fileEventOutput ? maxEventFileBytes : 0;
 	req.dependencySourceCount = static_cast<uint8_t>(std::min<size_t>(dependencySources.size(), kTraceDependencyMaxSources));
 	if (req.dependencySourceCount) memcpy(req.dependencySources, dependencySources.data(),
 		static_cast<size_t>(req.dependencySourceCount) * sizeof(req.dependencySources[0]));
@@ -1634,6 +1649,11 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		if (!received && result.codeArtifact.error.empty())
 			result.codeArtifact.error = "trace control response failed";
 	}
+	if (fileEventOutput) {
+		result.eventArtifact = eventArtifactReceiver.Finish(streamExpected);
+		if (!received && result.eventArtifact.error.empty())
+			result.eventArtifact.error = "trace control response failed";
+	}
 	if (!received) return result;
 	if (data.size() < sizeof(IpcStatus)) {
 		result.controlFailure = "response_too_small_for_status";
@@ -1642,6 +1662,9 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	result.status = *reinterpret_cast<const IpcStatus*>(data.data());
 	if (fileCodeOutput && result.status == IpcStatus::InvalidArgs && result.codeArtifact.error.empty())
 		result.codeArtifact.error = "injected DLL does not support code_output=file";
+	if (fileEventOutput && (!result.eventArtifact.success || result.status == IpcStatus::InvalidArgs) &&
+		result.eventArtifact.error.empty())
+		result.eventArtifact.error = "injected DLL does not support events_output=file";
 	if (data.size() < kTraceBasicBlocksResponseV3Size) {
 		result.controlFailure = "response_too_small_for_trace_header";
 		return result;
