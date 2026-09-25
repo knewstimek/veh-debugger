@@ -1,4 +1,5 @@
 #include "debug_session.h"
+#include "adapter/expr_eval.h"
 #include "adapter/pipe_client.h"
 #include "common/logger.h"
 #include <sstream>
@@ -6,6 +7,7 @@
 #include <filesystem>
 #include <TlHelp32.h>
 #include <Psapi.h>
+#include <utility>
 
 namespace veh {
 
@@ -1128,232 +1130,19 @@ std::vector<DisasmInsn> DebugSession::Disassemble(uint64_t address, uint32_t cou
 }
 
 bool DebugSession::ResolveAddrExpr(const std::string& innerIn, const RegisterSet* regs, uint64_t& out) {
-	std::string inner = innerIn;
-	while (!inner.empty() && inner.front() == ' ') inner.erase(inner.begin());
-	while (!inner.empty() && inner.back() == ' ') inner.pop_back();
-	if (inner.empty()) return false;
-
-	auto parseNum = [](const std::string& s, uint64_t& v) -> bool {
-		if (s.empty()) return false;
-		try { size_t pos; v = std::stoull(s, &pos, 0); return pos == s.size(); }
-		catch (...) { return false; }
-	};
-
-	// Whole token is a plain number (fully consumed -- rejects "0x10+0x20" here so it
-	// falls through to the operator branch instead of silently parsing just "0x10").
-	if (parseNum(inner, out)) return true;
-
-	// <term> (+|-) <term>, where term is a register or a literal. Scan from index 1 so a
-	// leading sign is never mistaken for the operator.
-	size_t opPos = std::string::npos; char opChar = 0;
-	for (size_t i = 1; i < inner.size(); i++) {
-		if (inner[i] == '+' || inner[i] == '-') { opPos = i; opChar = inner[i]; break; }
-	}
-	if (opPos != std::string::npos) {
-		std::string lhs = inner.substr(0, opPos);
-		std::string rhs = inner.substr(opPos + 1);
-		while (!lhs.empty() && lhs.back() == ' ') lhs.pop_back();
-		while (!rhs.empty() && rhs.front() == ' ') rhs.erase(rhs.begin());
-
-		uint64_t lv = 0, rv = 0; bool lok = false, rok = false;
-		if (TryParseRegisterName(lhs)) { if (regs) { lv = ResolveRegisterByName(lhs, *regs); lok = true; } }
-		else lok = parseNum(lhs, lv);
-		if (TryParseRegisterName(rhs)) { if (regs) { rv = ResolveRegisterByName(rhs, *regs); rok = true; } }
-		else rok = parseNum(rhs, rv);
-
-		if (lok && rok) {
-			if (opChar == '+') { uint64_t r = lv + rv; if (r < lv) return false; out = r; }  // overflow
-			else { if (rv > lv) return false; out = lv - rv; }                                // underflow
-			return true;
-		}
-		return false;
-	}
-
-	// Bare register.
-	if (TryParseRegisterName(inner)) {
-		if (!regs) return false;
-		out = ResolveRegisterByName(inner, *regs);
-		return true;
-	}
-	return false;
+	return ResolveExpressionAddress(innerIn, regs, out, ExprEvalFrontend::Mcp);
 }
 
 EvalResult DebugSession::Evaluate(const std::string& expression, uint32_t threadId) {
+	auto evaluated = EvaluateExpression(*ipcTransport_, targetProcess_, expression, threadId,
+		ExprEvalFrontend::Mcp);
 	EvalResult result;
-
-	// Memory reads below are pointer-sized for the target (4 bytes on a WoW64 process).
-	BOOL targetWow64 = FALSE;
-	if (targetProcess_) IsWow64Process(targetProcess_, &targetWow64);
-	const uint32_t ptrSize = targetWow64 ? 4 : 8;
-	auto readPointer = [&](uint64_t addr, uint64_t& value) {
-		auto mem = ReadMemory(addr, ptrSize);
-		if (mem.size() < ptrSize) return false;
-		value = 0;
-		memcpy(&value, mem.data(), ptrSize);
-		return true;
-	};
-	auto formatPointer = [&](uint64_t value) {
-		char buf[24];
-		snprintf(buf, sizeof(buf), ptrSize == 4 ? "0x%08llX" : "0x%016llX", value);
-		return std::string(buf);
-	};
-
-	std::string expr = expression;
-	// Trim
-	while (!expr.empty() && expr.front() == ' ') expr.erase(expr.begin());
-	while (!expr.empty() && expr.back() == ' ') expr.pop_back();
-
-	// 1) Register name
-	if (TryParseRegisterName(expr)) {
-		if (threadId == 0) {
-			result.error = "threadId is required for register evaluation";
-			return result;
-		}
-		auto regs = GetRegisters(threadId);
-		if (!regs) {
-			result.error = "Failed to read registers";
-			return result;
-		}
-		uint64_t val = ResolveRegisterByName(expr, *regs);
-		char buf[32];
-		if (regs->is32bit)
-			snprintf(buf, sizeof(buf), "0x%08X", (uint32_t)val);
-		else
-			snprintf(buf, sizeof(buf), "0x%016llX", val);
-		result.ok = true;
-		result.value = buf;
-		result.type = regs->is32bit ? "uint32" : "uint64";
-		return result;
-	}
-
-	// 2) Hex address (0x...) -> memory preview
-	if (expr.size() > 2 && expr[0] == '0' && (expr[1] == 'x' || expr[1] == 'X')) {
-		try {
-			uint64_t addr = std::stoull(expr, nullptr, 16);
-			uint64_t val = 0;
-			if (readPointer(addr, val)) {
-				char buf[32];
-				snprintf(buf, sizeof(buf), "[0x%llX] = ", addr);
-				result.ok = true;
-				result.value = buf + formatPointer(val);
-				result.type = "memory";
-				return result;
-			}
-		} catch (...) {}
-		result.error = "Failed to read memory at " + expr;
-		return result;
-	}
-
-	// 3) gs:[offset] or fs:[offset]
-	{
-		std::string upper = expr;
-		std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
-		bool isGs = (upper.substr(0, 4) == "GS:[");
-		bool isFs = (upper.substr(0, 4) == "FS:[");
-		if (isGs || isFs) {
-			std::string offsetStr = expr.substr(4);
-			if (!offsetStr.empty() && offsetStr.back() == ']') offsetStr.pop_back();
-			while (!offsetStr.empty() && offsetStr.front() == ' ') offsetStr.erase(offsetStr.begin());
-			try {
-				uint64_t offset = std::stoull(offsetStr, nullptr, 0);
-				if (threadId == 0) {
-					result.error = "threadId is required for segment register evaluation";
-					return result;
-				}
-				HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION, FALSE, threadId);
-				if (!hThread) {
-					result.error = "Failed to open thread";
-					return result;
-				}
-
-				typedef struct {
-					LONG ExitStatus;
-					PVOID TebBaseAddress;
-					struct { HANDLE UniqueProcess; HANDLE UniqueThread; } ClientId;
-					ULONG_PTR AffinityMask;
-					LONG Priority;
-					LONG BasePriority;
-				} THREAD_BASIC_INFORMATION;
-
-				typedef LONG(NTAPI* NtQueryInformationThread_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
-				auto NtQueryInformationThread = reinterpret_cast<NtQueryInformationThread_t>(
-					GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
-				if (!NtQueryInformationThread) {
-					CloseHandle(hThread);
-					result.error = "NtQueryInformationThread not found";
-					return result;
-				}
-
-				BOOL isWow64 = FALSE;
-				IsWow64Process(targetProcess_ ? targetProcess_ : GetCurrentProcess(), &isWow64);
-				if ((!isWow64 && isFs) || (isWow64 && isGs)) {
-					CloseHandle(hThread);
-					result.error = isFs ? "fs:[] is x86 only (use gs:[] for x64)" : "gs:[] is x64 only (use fs:[] for x86)";
-					return result;
-				}
-
-				THREAD_BASIC_INFORMATION tbi = {};
-				LONG ntStatus = NtQueryInformationThread(hThread, 0, &tbi, sizeof(tbi), nullptr);
-				CloseHandle(hThread);
-
-				if (ntStatus != 0) {
-					result.error = "NtQueryInformationThread failed";
-					return result;
-				}
-
-				uint64_t tebAddr = reinterpret_cast<uint64_t>(tbi.TebBaseAddress);
-				uint64_t targetAddr = tebAddr + offset;
-
-				uint64_t val = 0;
-				if (readPointer(targetAddr, val)) {
-					char buf[64];
-					snprintf(buf, sizeof(buf), " (TEB=0x%llX + 0x%llX)", tebAddr, offset);
-					result.ok = true;
-					result.value = formatPointer(val) + buf;
-					result.type = "segment";
-					result.tebAddress = (std::ostringstream() << "0x" << std::hex << tebAddr).str();
-					return result;
-				}
-				result.error = "Failed to read memory at segment base + offset";
-				return result;
-			} catch (...) {}
-			result.error = "Invalid offset in segment expression";
-			return result;
-		}
-	}
-
-	// 4) *expr or [expr] -> pointer dereference
-	if (!expr.empty() && (expr[0] == '*' || expr[0] == '[')) {
-		std::string inner = expr.substr(1);
-		if (!inner.empty() && inner.back() == ']') inner.pop_back();
-		while (!inner.empty() && inner.front() == ' ') inner.erase(inner.begin());
-		while (!inner.empty() && inner.back() == ' ') inner.pop_back();
-
-		uint64_t addr = 0;
-		bool resolved = ResolveAddrExpr(inner, nullptr, addr);  // literal / literal-arithmetic fast path
-		if (!resolved && threadId != 0) {
-			auto regs = GetRegisters(threadId);
-			if (regs) resolved = ResolveAddrExpr(inner, &*regs, addr);
-		}
-
-		if (!resolved) {
-			result.error = "Cannot parse address expression: " + inner;
-			return result;
-		}
-
-		result.address = addr;
-		uint64_t val = 0;
-		if (readPointer(addr, val)) {
-			result.ok = true;
-			result.value = formatPointer(val);
-			result.type = "pointer";
-			return result;
-		}
-		result.error = "Failed to read memory at computed address";
-		return result;
-	}
-
-	result.error = "Supported: register (RAX), 0x<addr>, [addr], [reg+offset], gs:[offset], fs:[offset]";
+	result.ok = evaluated.ok;
+	result.value = std::move(evaluated.value);
+	result.type = std::move(evaluated.type);
+	result.address = evaluated.address;
+	result.tebAddress = std::move(evaluated.tebAddress);
+	result.error = std::move(evaluated.error);
 	return result;
 }
 
@@ -1955,41 +1744,11 @@ void DebugSession::StopProcessMonitor() {
 // --- Register helpers (static) ---
 
 bool DebugSession::TryParseRegisterName(const std::string& name) {
-	std::string upper = name;
-	if (!upper.empty() && upper[0] == '$') upper = upper.substr(1);
-	std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
-	static const char* regNames[] = {
-		"RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP",
-		"R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15",
-		"RIP", "RFLAGS",
-		"EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP",
-		"EIP", "EFLAGS",
-	};
-	for (auto* rn : regNames) {
-		if (upper == rn) return true;
-	}
-	return false;
+	return TryParseExpressionRegister(name);
 }
 
 uint64_t DebugSession::ResolveRegisterByName(const std::string& name, const RegisterSet& regs) {
-	std::string upper = name;
-	if (!upper.empty() && upper[0] == '$') upper = upper.substr(1);
-	std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
-	const uint64_t* r = &regs.rax;
-	static const std::pair<const char*, int> map[] = {
-		{"RAX",0},{"EAX",0},{"RBX",1},{"EBX",1},{"RCX",2},{"ECX",2},{"RDX",3},{"EDX",3},
-		{"RSI",4},{"ESI",4},{"RDI",5},{"EDI",5},{"RBP",6},{"EBP",6},{"RSP",7},{"ESP",7},
-		{"R8",8},{"R9",9},{"R10",10},{"R11",11},{"R12",12},{"R13",13},{"R14",14},{"R15",15},
-		{"RIP",16},{"EIP",16},{"RFLAGS",17},{"EFLAGS",17},
-	};
-	for (auto& [rn, idx] : map) {
-		if (upper == rn) {
-			uint64_t val = r[idx];
-			if (upper[0] == 'E' && upper != "EFLAGS") val &= 0xFFFFFFFF;
-			return val;
-		}
-	}
-	return 0;
+	return ResolveExpressionRegister(name, regs, ExprEvalFrontend::Mcp);
 }
 
 uint32_t DebugSession::GetRegisterIndex(const std::string& name) {
