@@ -1,6 +1,14 @@
 add_executable(veh-mcp-server
 	main.cpp
 	mcp_server.cpp
+	tools_common.cpp
+	tools_session.cpp
+	tools_breakpoint.cpp
+	tools_inspect.cpp
+	tools_memory.cpp
+	tools_trace.cpp
+	tools_checkpoint.cpp
+	tools_orchestration.cpp
 	debug_session.cpp
 	batch_executor.cpp
 	trace_basic_blocks_tool.cpp
