@@ -227,7 +227,7 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 		}},
 		{"serverInfo", {
 			{"name", "veh-debugger"},
-			{"version", "1.1.17"}
+			{"version", "1.1.18"}
 		}},
 		{"instructions",
 			"Windows x86/x64 in-process debugger. The default lite profile keeps common session tools eager; use veh_toolbox to discover, describe, and call all other tools. veh_batch steps call most tools by name without describe. Inspection requires a stopped target."

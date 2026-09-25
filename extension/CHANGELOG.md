@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.1.18 - 2026-09-25
+
 ### Changed
 - **`lite` MCP profile adds `veh_attach` and `veh_registers`** -- attach-first sessions and the most common stopped-state inspection no longer need a `veh_toolbox` describe/call round-trip. Server instructions now note that `veh_batch` steps call most tools by name. The tool catalog is built once per server instead of on every `tools/list`/`veh_toolbox` request.
 - **`veh_batch`, targeted-capture setup, and breakpoint actions run the direct tool implementations** -- the separate batch copies of 33 tools were removed, so every nested step now has direct-call arguments, validation, and result fields. Newly callable in batch/actions: `veh_exception_info`, `veh_read_pointer_chain`, `veh_resolve_imports`, `veh_trace_calls`. Visible differences: thread-scoped tools require `threadId`, size/range checks and error messages match direct calls, `veh_step_*` results include `instructionPointer`, `veh_enum_locals` returns `variables` with typed values (was `locals` with raw hex), and `veh_stack_trace` frames omit `source`/`line` when no symbol source exists. `veh_attach`/`launch`/`detach`/`terminate`, `veh_batch`, `veh_targeted_capture`, and `veh_toolbox` are rejected inside nested steps.

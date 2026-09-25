@@ -1,0 +1,23 @@
+id: veh.tests.suite
+revision: 1
+summary: Run every DAP/MCP integration test file against the x64 build with per-file timeouts and process cleanup
+use_when:
+  - verifying a change across the whole integration suite before committing or releasing
+tags: [veh-debugger, tests, integration, dap, mcp, x64]
+execution:
+  kind: cli
+  executable_ref: py
+  cwd: .
+  argv_template: [-3, tools/run_tests.py, --timeout, "120"]
+  trusted_for_run: true
+  timeout_sec: 1800
+  artifact_mode: metadata
+  preflight:
+    - {id: windows.platform, kind: platform, ref: windows, requirement: required}
+    - {id: python.version, kind: executable, ref: py, requirement: required, argv: [-3, --version]}
+    - {id: x64.mcp, kind: file, ref: build/bin/Release/veh-mcp-server.exe, requirement: required}
+    - {id: x64.adapter, kind: file, ref: build/bin/Release/veh-debug-adapter.exe, requirement: required}
+inputs: [tools/run_tests.py, test/**, build/bin/Release/**]
+checks: [veh.tests.x64-suite]
+docs: [docs/DEVELOPMENT_TOOLS.md, OVERVIEW.md]
+cache_policy: disabled
