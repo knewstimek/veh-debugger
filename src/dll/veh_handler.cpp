@@ -469,20 +469,6 @@ VehHandler::TraceBasicBlocksState::Instruction* VehHandler::EnsureBasicTraceInst
 	return first;
 }
 
-uint64_t VehHandler::NormalizeBasicTraceBlockStart(uint64_t address, bool dynamicTarget) const {
-	if (dynamicTarget) return address;
-	const auto& insns = traceBasicBlocks_.instructions;
-	size_t lo = 0, hi = insns.size();
-	while (lo < hi) {
-		size_t mid = lo + (hi - lo) / 2;
-		if (insns[mid].address < address) lo = mid + 1;
-		else hi = mid;
-	}
-	if (lo < insns.size() && insns[lo].address == address)
-		return insns[lo].staticBlockStart;
-	return address;
-}
-
 static void FillBasicTraceRegisterValues(const CONTEXT* ctx, uint64_t* regs, uint8_t& is32bit) {
 	memset(regs, 0, sizeof(uint64_t) * kTraceBasicBlockRegisterCount);
 	if (!ctx) return;
@@ -1813,18 +1799,15 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 		} else if (previous && previous->terminal) kind = previous->kind;
 		else if (!nonSequential) kind = TraceBasicBlockEdgeKind::Fallthrough;
 
-		bool dynamicTarget = nonSequential && !(previous && previous->terminal);
-		uint64_t targetBlock = inRange ? NormalizeBasicTraceBlockStart(addr, dynamicTarget) : addr;
+		// Always the executed address: an indirect jmp or ret can land inside a
+		// linearly swept block, and its sweep start never executed.
+		uint64_t targetBlock = addr;
 		uint32_t snapshot = UINT32_MAX;
 		if (!RecordBasicTraceEdge(tb.currentBlock, tb.previousInstruction, targetBlock,
 				kind, 0, previous && previous->indirect != 0, info->ContextRecord, &snapshot)) {
 			FinishBasicTrace(TraceBasicBlockStopReason::MaxEdges, addr, true);
 			return BasicTraceStepResult::Stop;
 		}
-		// The aggregate CFG target may be normalized to a static block start that
-		// was never executed (for example after self-modifying a direct branch).
-		// Capture from the concrete destination so completeness describes executed
-		// instruction bytes and the ordered edge points at their containing version.
 		uint32_t version = inRange ? CaptureBasicTraceCodeVersion(addr, tb.stepsExecuted) : UINT32_MAX;
 		RecordBasicTraceEvent(TraceBasicBlockEventType::Edge, tb.stepsExecuted,
 			tb.currentBlock, tb.previousInstruction, targetBlock, kind, 0,
@@ -2010,7 +1993,7 @@ LONG VehHandler::HandleContinue(PEXCEPTION_POINTERS info) {
 		tb.stopPending = true;
 		tb.pendingStopReason = TraceBasicBlockStopReason::LeftRange;
 	} else if (!tb.stopPending) {
-		uint64_t targetBlock = NormalizeBasicTraceBlockStart(destination, true);
+		uint64_t targetBlock = destination;
 		if (!RecordBasicTraceBlock(targetBlock, info->ContextRecord, snapshot)) {
 			tb.stopPending = true;
 			tb.pendingStopReason = TraceBasicBlockStopReason::MaxBlocks;

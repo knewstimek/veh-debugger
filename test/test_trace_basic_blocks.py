@@ -943,12 +943,14 @@ def main():
         mid_trace = run_mid_entry_trace()
         assert mid_trace["code_truncated"] is False, mid_trace
         assert mid_trace["code_capture"]["complete"] is True, mid_trace
-        assert any(block["hits"] == 0 for block in mid_trace["blocks"]), mid_trace
+        # The patched jump lands inside the swept nop block: no block may claim the
+        # nops before the landing point, and the edge names the executed address.
+        assert all(block["hits"] > 0 for block in mid_trace["blocks"]), mid_trace
         mid_edge = next(event for event in mid_trace["events"]
                         if int(event.get("source_instruction", "0"), 0) == mid_start + 10)
         mid_version = next(version for version in mid_trace["code_versions"]
                            if version["id"] == mid_edge["code_version"])
-        assert int(mid_edge["target"], 0) == mid_start + 15, mid_trace
+        assert int(mid_edge["target"], 0) == mid_start + mid_target_offset, mid_trace
         assert int(mid_version["block"], 0) == mid_start + mid_target_offset, mid_trace
 
         mid_artifact_path = artifact_path("mid-entry")

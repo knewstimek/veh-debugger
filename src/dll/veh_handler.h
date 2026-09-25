@@ -495,7 +495,6 @@ private:
 		TraceBasicBlockEdgeKind kind, uint32_t exceptionCode, bool indirect, const CONTEXT* ctx,
 		uint32_t* snapshotOut = nullptr, uint64_t faultAddress = 0,
 		const TraceBasicBlockSnapshot* faultSnapshot = nullptr);
-	uint64_t NormalizeBasicTraceBlockStart(uint64_t address, bool dynamicTarget) const;
 	void PrepareBasicTraceMemoryWrites(const TraceBasicBlocksState::Instruction* instruction,
 		const CONTEXT* ctx);
 	void CompleteBasicTraceMemoryWrites();

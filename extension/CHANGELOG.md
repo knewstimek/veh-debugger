@@ -7,6 +7,7 @@
 - **`veh_memory_map`** -- lists virtual memory regions with state, protection, type, and owning module, limited to a range or module; `next_start` pages through large maps.
 
 ### Fixed
+- **Trace reported unexecuted instructions after an indirect jump or return** -- when a `jmp reg`/`ret` landed inside a block of the range's linear decode, `veh_trace_basic_blocks` recorded the edge target and the entered block as that decoded block's start instead of the executed address, so tools replaying the trace treated the instructions in between as executed (register models drifted from the first such jump on). Edge targets and blocks now always use the executed address. Check: the step after an edge happens at the edge target.
 - **Long IPC commands could trip the DLL's idle heartbeat timeout** -- the idle timer was measured from when a command arrived, so a command running longer than the timeout was followed by an emergency cleanup. The timer now restarts when the command finishes.
 
 ## 1.1.18 - 2026-09-25

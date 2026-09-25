@@ -83,6 +83,26 @@ __declspec(noinline) int TraceOverlapTarget() {
 	return reinterpret_cast<int (*)()>(code)();
 }
 
+// Indirect jump into the middle of a linearly swept block: the nops before the
+// target sit in the same static block but never execute.
+#ifdef _WIN64
+// +0 lea rax,[rip+7] (rax = +14) | +7 jmp rax | +9 nop x5 | +14 nop | +15 ret
+static const unsigned char kTraceMidBlockCode[] = {
+	0x48, 0x8D, 0x05, 0x07, 0x00, 0x00, 0x00, 0xFF, 0xE0, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xC3};
+constexpr unsigned kTraceMidBlockTarget = 14;
+#else
+// +0 call +5 | +5 pop eax | +6 add eax,11 (eax = +16) | +9 jmp eax | +11 nop x5 | +16 nop | +17 ret
+static const unsigned char kTraceMidBlockCode[] = {
+	0xE8, 0x00, 0x00, 0x00, 0x00, 0x58, 0x83, 0xC0, 0x0B, 0xFF, 0xE0,
+	0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xC3};
+constexpr unsigned kTraceMidBlockTarget = 16;
+#endif
+
+__declspec(noinline) int TraceMidBlockTarget() {
+	auto* code = static_cast<unsigned char*>(g_trace_executable) + 0x200;
+	return reinterpret_cast<int (*)()>(code)();
+}
+
 int main(int argc, char* argv[]) {
 	printf("=== VEH Debugger Test Target ===\n");
 	printf("PID: %u\n", GetCurrentProcessId());
@@ -103,6 +123,8 @@ int main(int argc, char* argv[]) {
 	if (!g_trace_executable) return 2;
 	*static_cast<unsigned char*>(g_trace_executable) = 0xC3;
 	memcpy(static_cast<unsigned char*>(g_trace_executable) + 0x100, kTraceOverlapCode, sizeof(kTraceOverlapCode));
+	memcpy(static_cast<unsigned char*>(g_trace_executable) + 0x200, kTraceMidBlockCode, sizeof(kTraceMidBlockCode));
+	(void)kTraceMidBlockTarget;
 	bool traceExceptionMode = argc > 1 && strcmp(argv[1], "--trace-exception") == 0;
 	if (traceExceptionMode)
 		AddVectoredExceptionHandler(0, TraceCoverageExceptionHandler);
@@ -117,6 +139,7 @@ int main(int argc, char* argv[]) {
 		TraceExecutableWriteTarget();
 		WorkFunction();
 		TraceOverlapTarget();
+		TraceMidBlockTarget();
 		g_scan_value += 1 + (g_search_marker[0] >> 7);  // +1; the read keeps the marker alive
 		SleepEx(1000, TRUE);  // alertable wait — APC 인젝션 테스트 가능
 	}
