@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.2.0 - 2026-09-26
+
 ### Added
 - **`veh_protect_memory`**: changes target page protection through `VirtualProtect`, `NtProtectVirtualMemory`, or the existing copied direct-syscall stub, reports the previous protection and actual method, and falls back from unavailable syscall resolution to ntdll. Direct, batch, and breakpoint-action calls share the same target-side IPC implementation.
 - **File-backed ordered trace event streams** -- `veh_trace_basic_blocks` can write interleaved block/edge, memory, and register events to a versioned `.vte` artifact without the inline per-kind caps or the 16 MiB control-pipe limit. Four preallocated target buffers apply lossless backpressure, a configurable total file limit defaults to 4 GiB and truncates only between complete records, compact results report hashes/counts/reason/wait time, and `tools/read_trace_event_stream.py` converts the portable format to JSON Lines. Direct, batch, and breakpoint-action calls share the same arguments and semantics; legacy inline capture is unchanged.
