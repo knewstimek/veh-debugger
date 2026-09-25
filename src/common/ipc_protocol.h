@@ -70,6 +70,7 @@ enum class IpcCommand : uint32_t {
 	ResolveFunction        = 0x0041,
 	EnumLocals             = 0x0042,
 	Symbolize              = 0x0043,  // addresses -> module!function+offset, source line
+	DisplayType            = 0x0044,  // PDB struct layout (+ values) at an address
 
 	// Tracing
 	TraceCallers           = 0x0050,
@@ -408,6 +409,43 @@ struct SymbolizeEntry {
 struct SymbolizeResponse {
 	IpcStatus status;
 	uint32_t  count;             // followed by SymbolizeEntry[count]
+};
+
+static constexpr uint32_t kDisplayTypeMaxMembers = 1024;
+
+struct DisplayTypeRequest {
+	uint64_t address;            // 0 = layout only, no values
+	uint32_t maxMembers;
+	uint8_t  maxDepth;           // nested struct/base-class expansion levels (0 = top level only)
+	uint8_t  reserved[3];
+	char     typeName[256];      // "Type" or "module!Type"
+};
+
+enum class TypeMemberKind : uint8_t {
+	Other, Int, UInt, Float, Bool, Char, Pointer, Struct, Array, Enum, BaseClass,
+};
+
+struct DisplayTypeMember {
+	uint32_t       offset;       // from the start of the displayed type
+	uint32_t       size;         // bytes (storage size for bitfields)
+	uint32_t       bitPosition;
+	uint32_t       bitLength;    // 0 when not a bitfield
+	uint8_t        depth;        // nesting level, 0 = direct member
+	TypeMemberKind kind;
+	uint8_t        valueSize;    // bytes in value, 0 = not read
+	uint8_t        reserved;
+	uint8_t        value[8];     // little-endian; bitfields already shifted and masked
+	char           name[128];    // dotted path for nested members
+	char           typeName[128];
+};
+
+struct DisplayTypeResponse {
+	IpcStatus status;
+	uint32_t  count;             // followed by DisplayTypeMember[count]
+	uint32_t  typeSize;
+	uint8_t   truncated;         // maxMembers reached
+	uint8_t   reserved[3];
+	char      moduleName[64];    // module whose PDB defined the type
 };
 
 // Local variable enumeration (via PDB symbols)

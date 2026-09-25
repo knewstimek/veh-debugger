@@ -11,6 +11,21 @@ volatile int g_trace_memory = 0;
 volatile unsigned char g_search_marker[16] = {
 	0x5A, 0x3C, 0x96, 0xE1, 0x7D, 0x42, 0xB8, 0x0F, 0xC6, 0x29, 0x73, 0xAE, 0x14, 0xD5, 0x68, 0x9B};
 volatile int g_scan_value = 1000;
+
+// veh_display_type fixture: base class, bitfields, float, nested struct, enum, array, pointer.
+enum class TypeFixtureMode : int { Idle = 1, Busy = 7 };
+struct TypeFixtureBase { int baseId; };
+struct TypeFixtureInner { short x; short y; };
+struct TypeFixture : TypeFixtureBase {
+	unsigned flagA : 3;
+	unsigned flagB : 5;
+	float ratio;
+	TypeFixtureInner inner;
+	TypeFixtureMode mode;
+	char tag[4];
+	void* self;
+};
+TypeFixture g_type_fixture = {{42}, 5, 17, 1.5f, {-3, 9}, TypeFixtureMode::Busy, {'a', 'b', 'c', '\0'}, nullptr};
 void* volatile g_trace_executable = nullptr;
 
 __declspec(noinline) int TraceCoverageTarget(volatile int value) {
@@ -118,6 +133,7 @@ int main(int argc, char* argv[]) {
 	}
 
 	printf("Press Ctrl+C to exit.\n\n");
+	g_type_fixture.self = &g_type_fixture;
 	g_trace_executable = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE,
 		PAGE_EXECUTE_READWRITE);
 	if (!g_trace_executable) return 2;

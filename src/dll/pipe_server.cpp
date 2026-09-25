@@ -1505,6 +1505,28 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		break;
 	}
 
+	case IpcCommand::DisplayType: {
+		if (payloadSize < sizeof(DisplayTypeRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		DisplayTypeRequest req;
+		memcpy(&req, payload, sizeof(req));
+		req.typeName[sizeof(req.typeName) - 1] = '\0';
+		if (req.maxMembers == 0 || req.maxMembers > kDisplayTypeMaxMembers) req.maxMembers = kDisplayTypeMaxMembers;
+		DisplayTypeResponse resp{};
+		std::vector<DisplayTypeMember> members;
+		resp.status = StackWalker::Instance().DisplayType(req, resp, members) ? IpcStatus::Ok : IpcStatus::NotFound;
+		resp.count = static_cast<uint32_t>(members.size());
+		std::vector<uint8_t> buf(sizeof(resp) + members.size() * sizeof(DisplayTypeMember));
+		memcpy(buf.data(), &resp, sizeof(resp));
+		if (!members.empty())
+			memcpy(buf.data() + sizeof(resp), members.data(), members.size() * sizeof(DisplayTypeMember));
+		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
+		break;
+	}
+
 	case IpcCommand::GetModules: {
 		HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, targetPid_);
 		if (snap == INVALID_HANDLE_VALUE) {

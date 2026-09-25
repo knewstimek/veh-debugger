@@ -41,7 +41,7 @@ def test_named_profiles_are_bounded_and_full_remains_available():
 
     assert len(interactive) <= 10
     assert len(capture) <= 10
-    assert len(full) == 51
+    assert len(full) == 52
     assert "veh_trace_basic_blocks" not in {tool["name"] for tool in interactive}
     assert "veh_trace_basic_blocks" in {tool["name"] for tool in capture}
     assert "veh_checkpoint_restore" in {tool["name"] for tool in capture}

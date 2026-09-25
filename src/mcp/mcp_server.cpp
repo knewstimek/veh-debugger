@@ -1213,6 +1213,62 @@ json McpServer::ToolSymbolize(const json& args) {
 	return {{"symbols", symbols}, {"count", symbols.size()}};
 }
 
+static json TypeMemberValue(const DisplayTypeMember& m) {
+	uint64_t raw = 0;
+	memcpy(&raw, m.value, sizeof(raw));
+	if (m.bitLength) return raw;
+	switch (m.kind) {
+	case TypeMemberKind::Pointer: return HexAddr(raw);
+	case TypeMemberKind::Bool: return raw != 0;
+	case TypeMemberKind::Float:
+		if (m.valueSize == 4) { float f; memcpy(&f, m.value, 4); return f; }
+		if (m.valueSize == 8) { double d; memcpy(&d, m.value, 8); return d; }
+		break;
+	case TypeMemberKind::Int: {
+		const unsigned bits = m.valueSize * 8;
+		int64_t v = static_cast<int64_t>(raw);
+		if (bits < 64) v = static_cast<int64_t>(raw << (64 - bits)) >> (64 - bits);  // sign-extend
+		return v;
+	}
+	default: break;
+	}
+	return raw;
+}
+
+json McpServer::ToolDisplayType(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+	std::string type = args.value("type", "");
+	if (type.empty() || type.size() >= sizeof(DisplayTypeRequest::typeName)) return {{"error", "type is required (\"Type\" or \"module!Type\")"}};
+
+	DisplayTypeRequest req{};
+	strncpy_s(req.typeName, type.c_str(), _TRUNCATE);
+	std::string addrStr = args.value("address", "");
+	if (!addrStr.empty() && !ParseAddress(addrStr, req.address)) return {{"error", "invalid address format"}};
+	int depth = JsonInt(args, "depth", 1);
+	if (depth < 0 || depth > 4) return {{"error", "depth must be 0-4"}};
+	req.maxDepth = static_cast<uint8_t>(depth);
+	req.maxMembers = JsonUint32(args, "max_members", 200);
+	if (req.maxMembers == 0 || req.maxMembers > kDisplayTypeMaxMembers) return {{"error", "max_members must be 1-1024"}};
+
+	DisplayTypeResponse header{};
+	std::vector<DisplayTypeMember> members;
+	if (!session_.DisplayType(req, header, members))
+		return {{"error", "type not found in loaded PDB symbols: " + type}};
+
+	json list = json::array();
+	for (auto& m : members) {
+		json item = {{"offset", HexAddr(m.offset)}, {"name", m.name}, {"type", m.typeName}, {"size", m.size}};
+		if (m.depth) item["depth"] = m.depth;
+		if (m.bitLength) item["bits"] = std::to_string(m.bitPosition) + ":" + std::to_string(m.bitLength);
+		if (m.valueSize) item["value"] = TypeMemberValue(m);
+		list.push_back(std::move(item));
+	}
+	json result = {{"type", type}, {"module", header.moduleName}, {"size", header.typeSize},
+	               {"members", list}, {"count", list.size()}, {"truncated", header.truncated != 0}};
+	if (req.address) result["address"] = HexAddr(req.address);
+	return result;
+}
+
 json McpServer::ToolEnumLocals(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
@@ -3998,6 +4054,15 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"address", {{"type", "string"}, {"description", "One address (hex, or module+RVA)"}}},
 			{"addresses", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Several addresses (max 256)"}}}
 		 }}}}}),
+
+		Tool(&McpServer::ToolDisplayType, "inspect", 0, true,
+			{{"name", "veh_display_type"}, {"description", "Show a PDB struct/class/union layout like WinDbg dt: member offsets, types, sizes, bitfields, base classes, and nested members up to depth. With address, also reads scalar, pointer, enum and bitfield values from that address. Needs PDB type info for the module (\"module!Type\" to pick one)."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"type", {{"type", "string"}, {"description", "Type name, e.g. \"Player\" or \"game.exe!Player\""}}},
+			{"address", {{"type", "string"}, {"description", "Instance address to read values from (omit for layout only)"}}},
+			{"depth", {{"type", "integer"}, {"description", "Nested struct/base-class expansion levels, 0-4 (default 1)"}}},
+			{"max_members", {{"type", "integer"}, {"description", "Maximum members returned (default 200, max 1024)"}}}
+		 }}, {"required", json::array({"type"})}}}}),
 
 		Tool(&McpServer::ToolEvaluate, "inspect", 0, true,
 			{{"name", "veh_evaluate"}, {"description", "Evaluate an expression. Supports: register names (RAX, RBX, etc.), hex addresses (0x...), pointer dereference (*addr, [addr], [RAX+0x10], [RAX-8], [RAX+RBX]), and segment registers (gs:[0x60] for PEB, fs:[0x30] for TEB on x86)."},

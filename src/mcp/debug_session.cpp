@@ -844,6 +844,23 @@ std::vector<SymbolizeEntry> DebugSession::Symbolize(const std::vector<uint64_t>&
 	return result;
 }
 
+bool DebugSession::DisplayType(const DisplayTypeRequest& request, DisplayTypeResponse& header,
+	std::vector<DisplayTypeMember>& members) {
+	members.clear();
+	std::vector<uint8_t> respData;
+	// The first lookup in a module may load its PDB.
+	if (!pipeClient_.SendAndReceive(IpcCommand::DisplayType, &request, sizeof(request), respData, 30000))
+		return false;
+	if (respData.size() < sizeof(DisplayTypeResponse)) return false;
+	memcpy(&header, respData.data(), sizeof(header));
+	if (header.status != IpcStatus::Ok) return false;
+	size_t count = (std::min)(static_cast<size_t>(header.count),
+		(respData.size() - sizeof(DisplayTypeResponse)) / sizeof(DisplayTypeMember));
+	auto* entries = reinterpret_cast<const DisplayTypeMember*>(respData.data() + sizeof(DisplayTypeResponse));
+	members.assign(entries, entries + count);
+	return true;
+}
+
 std::vector<LocalVarEntry> DebugSession::EnumLocals(uint32_t threadId, uint64_t instrAddr, uint64_t frameBase) {
 	std::vector<LocalVarEntry> result;
 

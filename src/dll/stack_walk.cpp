@@ -2,7 +2,10 @@
 #include "stack_walk.h"
 #include "veh_handler.h"
 #include "threads.h"
+#include "memory.h"
 #include "../common/logger.h"
+#include <algorithm>
+#include <string>
 
 #include <dbghelp.h>
 #include <psapi.h>
@@ -416,6 +419,193 @@ static void ResolveTypeName(HANDLE hProcess, DWORD64 modBase, ULONG typeIndex,
 	if (SymGetTypeInfo(hProcess, modBase, typeIndex, TI_GET_LENGTH, &typeLen)) {
 		snprintf(out, outSize, "(%llu bytes)", typeLen);
 	}
+}
+
+namespace {
+
+// SymTag values from cvconst.h
+constexpr DWORD kSymTagData = 7, kSymTagUDT = 11, kSymTagEnum = 12, kSymTagPointer = 14,
+	kSymTagArray = 15, kSymTagBaseType = 16, kSymTagTypedef = 17, kSymTagBaseClass = 18;
+
+struct TypeWalk {
+	HANDLE process;
+	DWORD64 modBase;
+	uint64_t address;
+	uint32_t maxMembers;
+	uint8_t maxDepth;
+	bool truncated = false;
+	std::vector<DisplayTypeMember>* out;
+};
+
+DWORD UnderlyingTypeTag(const TypeWalk& walk, ULONG& typeId) {
+	DWORD tag = 0;
+	for (int hops = 0; hops < 8; ++hops) {
+		if (!SymGetTypeInfo(walk.process, walk.modBase, typeId, TI_GET_SYMTAG, &tag)) return 0;
+		if (tag != kSymTagTypedef) return tag;
+		DWORD next = 0;
+		if (!SymGetTypeInfo(walk.process, walk.modBase, typeId, TI_GET_TYPEID, &next)) return tag;
+		typeId = next;
+	}
+	return tag;
+}
+
+TypeMemberKind KindOf(const TypeWalk& walk, ULONG typeId, DWORD tag) {
+	switch (tag) {
+	case kSymTagPointer: return TypeMemberKind::Pointer;
+	case kSymTagUDT: return TypeMemberKind::Struct;
+	case kSymTagArray: return TypeMemberKind::Array;
+	case kSymTagEnum: return TypeMemberKind::Enum;
+	case kSymTagBaseType: {
+		DWORD base = 0;
+		SymGetTypeInfo(walk.process, walk.modBase, typeId, TI_GET_BASETYPE, &base);
+		switch (base) {
+		case 2: case 3: return TypeMemberKind::Char;        // btChar, btWChar
+		case 6: case 13: return TypeMemberKind::Int;        // btInt, btLong
+		case 7: case 14: return TypeMemberKind::UInt;       // btUInt, btULong
+		case 8: return TypeMemberKind::Float;
+		case 10: return TypeMemberKind::Bool;
+		default: return TypeMemberKind::Other;
+		}
+	}
+	default: return TypeMemberKind::Other;
+	}
+}
+
+void ReadMemberValue(const TypeWalk& walk, DisplayTypeMember& m) {
+	if (!walk.address || m.size == 0 || m.size > sizeof(m.value)) return;
+	if (m.kind == TypeMemberKind::Struct || m.kind == TypeMemberKind::Array ||
+		m.kind == TypeMemberKind::BaseClass || m.kind == TypeMemberKind::Other) return;
+	auto bytes = MemoryManager::Instance().Read(walk.address + m.offset, m.size);
+	if (bytes.size() != m.size) return;
+	uint64_t raw = 0;
+	memcpy(&raw, bytes.data(), bytes.size());
+	if (m.bitLength) {
+		raw >>= m.bitPosition;
+		if (m.bitLength < 64) raw &= (1ull << m.bitLength) - 1;
+	}
+	memcpy(m.value, &raw, sizeof(m.value));
+	m.valueSize = static_cast<uint8_t>(m.size);
+}
+
+// Appends the members of UDT typeId located at baseOffset; nested UDTs and
+// base classes expand while depth < maxDepth.
+void WalkMembers(TypeWalk& walk, ULONG typeId, uint32_t baseOffset, uint8_t depth, const std::string& prefix) {
+	DWORD childCount = 0;
+	if (!SymGetTypeInfo(walk.process, walk.modBase, typeId, TI_GET_CHILDRENCOUNT, &childCount) || !childCount)
+		return;
+	std::vector<uint8_t> buffer(sizeof(TI_FINDCHILDREN_PARAMS) + childCount * sizeof(ULONG));
+	auto* children = reinterpret_cast<TI_FINDCHILDREN_PARAMS*>(buffer.data());
+	children->Count = childCount;
+	children->Start = 0;
+	if (!SymGetTypeInfo(walk.process, walk.modBase, typeId, TI_FINDCHILDREN, children)) return;
+
+	for (DWORD i = 0; i < childCount; ++i) {
+		const ULONG child = children->ChildId[i];
+		DWORD childTag = 0;
+		SymGetTypeInfo(walk.process, walk.modBase, child, TI_GET_SYMTAG, &childTag);
+		if (childTag != kSymTagData && childTag != kSymTagBaseClass) continue;  // skip functions, typedefs
+		DWORD offset = 0;
+		if (!SymGetTypeInfo(walk.process, walk.modBase, child, TI_GET_OFFSET, &offset)) continue;  // static member
+
+		if (walk.out->size() >= walk.maxMembers) { walk.truncated = true; return; }
+		DisplayTypeMember m{};
+		m.offset = baseOffset + offset;
+		m.depth = depth;
+
+		ULONG memberType = 0;
+		SymGetTypeInfo(walk.process, walk.modBase, child, TI_GET_TYPEID, &memberType);
+		DWORD64 length = 0;
+		SymGetTypeInfo(walk.process, walk.modBase, memberType, TI_GET_LENGTH, &length);
+		m.size = static_cast<uint32_t>(length);
+		ResolveTypeName(walk.process, walk.modBase, memberType, m.size, m.typeName, sizeof(m.typeName));
+
+		std::string name;
+		if (childTag == kSymTagBaseClass) {
+			m.kind = TypeMemberKind::BaseClass;
+			name = prefix + "<" + m.typeName + ">";
+		} else {
+			WCHAR* wide = nullptr;
+			if (SymGetTypeInfo(walk.process, walk.modBase, child, TI_GET_SYMNAME, &wide) && wide) {
+				char narrow[128] = {};
+				WideCharToMultiByte(CP_UTF8, 0, wide, -1, narrow, sizeof(narrow), nullptr, nullptr);
+				LocalFree(wide);
+				name = prefix + narrow;
+			}
+			DWORD bitPosition = 0;
+			if (SymGetTypeInfo(walk.process, walk.modBase, child, TI_GET_BITPOSITION, &bitPosition)) {
+				DWORD64 bits = 0;
+				SymGetTypeInfo(walk.process, walk.modBase, child, TI_GET_LENGTH, &bits);
+				m.bitPosition = bitPosition;
+				m.bitLength = static_cast<uint32_t>(bits);
+			}
+			ULONG resolved = memberType;
+			m.kind = KindOf(walk, resolved, UnderlyingTypeTag(walk, resolved));
+		}
+		strncpy_s(m.name, name.c_str(), _TRUNCATE);
+		ReadMemberValue(walk, m);
+		walk.out->push_back(m);
+
+		if ((m.kind == TypeMemberKind::Struct || m.kind == TypeMemberKind::BaseClass) && depth < walk.maxDepth) {
+			ULONG nested = memberType;
+			UnderlyingTypeTag(walk, nested);
+			WalkMembers(walk, nested, m.offset, static_cast<uint8_t>(depth + 1),
+				m.kind == TypeMemberKind::BaseClass ? prefix : name + ".");
+			if (walk.truncated) return;
+		}
+	}
+}
+
+} // namespace
+
+bool StackWalker::DisplayType(const DisplayTypeRequest& req, DisplayTypeResponse& resp,
+                              std::vector<DisplayTypeMember>& members) {
+	if (!initialized_) return false;
+	std::lock_guard<std::mutex> lock(dbghelpMutex_);
+	HANDLE process = GetCurrentProcess();
+
+	std::string typeName(req.typeName, strnlen(req.typeName, sizeof(req.typeName)));
+	std::string moduleFilter;
+	if (auto bang = typeName.find('!'); bang != std::string::npos) {
+		moduleFilter = typeName.substr(0, bang);
+		typeName = typeName.substr(bang + 1);
+	}
+
+	// Candidate modules: the named one, else the main executable first, then every loaded module.
+	std::vector<HMODULE> candidates;
+	if (!moduleFilter.empty()) {
+		if (HMODULE named = GetModuleHandleA(moduleFilter.c_str())) candidates.push_back(named);
+	} else {
+		candidates.push_back(GetModuleHandleW(nullptr));
+		HMODULE modules[1024];
+		DWORD needed = 0;
+		if (EnumProcessModules(process, modules, sizeof(modules), &needed))
+			candidates.insert(candidates.end(), modules, modules + (std::min)(static_cast<size_t>(needed) / sizeof(HMODULE), size_t(1024)));
+	}
+
+	constexpr size_t kSymBufSize = sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(TCHAR);
+	uint8_t symBuf[kSymBufSize] = {};
+	auto* symInfo = reinterpret_cast<SYMBOL_INFO*>(symBuf);
+	for (HMODULE module : candidates) {
+		symInfo->SizeOfStruct = sizeof(SYMBOL_INFO);
+		symInfo->MaxNameLen = MAX_SYM_NAME;
+		if (!SymGetTypeFromName(process, reinterpret_cast<DWORD64>(module), typeName.c_str(), symInfo)) continue;
+
+		TypeWalk walk{process, symInfo->ModBase, req.address, req.maxMembers, req.maxDepth, false, &members};
+		ULONG typeId = symInfo->TypeIndex;
+		UnderlyingTypeTag(walk, typeId);
+		DWORD64 length = 0;
+		SymGetTypeInfo(process, walk.modBase, typeId, TI_GET_LENGTH, &length);
+		resp.typeSize = static_cast<uint32_t>(length);
+		char path[MAX_PATH] = {};
+		if (GetModuleFileNameA(module, path, MAX_PATH)) {
+			const char* slash = strrchr(path, '\\');
+			strncpy_s(resp.moduleName, slash ? slash + 1 : path, _TRUNCATE);
+		}
+		WalkMembers(walk, typeId, 0, 0, "");
+		resp.truncated = walk.truncated ? 1 : 0;
+		return true;
+	}
+	return false;
 }
 
 // CV register constants for x64 (from cvconst.h)

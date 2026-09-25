@@ -216,6 +216,9 @@ public:
 	std::vector<LocalVarEntry> EnumLocals(uint32_t threadId, uint64_t instrAddr, uint64_t frameBase);
 	// At most kSymbolizeMaxAddresses; empty on failure
 	std::vector<SymbolizeEntry> Symbolize(const std::vector<uint64_t>& addresses);
+	// false when the type is unknown or the call failed
+	bool DisplayType(const DisplayTypeRequest& request, DisplayTypeResponse& header,
+		std::vector<DisplayTypeMember>& members);
 
 	// --- Memory ---
 	std::vector<uint8_t> ReadMemory(uint64_t address, uint32_t size);

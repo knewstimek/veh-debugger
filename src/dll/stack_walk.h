@@ -38,6 +38,10 @@ public:
 	// Module/function/line for arbitrary addresses (same resolution as stack frames)
 	std::vector<AddressSymbol> Symbolize(const std::vector<uint64_t>& addresses);
 
+	// PDB type layout (and values when req.address != 0). false when the type is not found.
+	bool DisplayType(const DisplayTypeRequest& req, DisplayTypeResponse& resp,
+	                 std::vector<DisplayTypeMember>& members);
+
 	// Enumerate local variables for a given frame using PDB symbols
 	std::vector<LocalVariableInfo> EnumLocals(uint32_t threadId, uint64_t instructionAddress, uint64_t frameBase);
 
