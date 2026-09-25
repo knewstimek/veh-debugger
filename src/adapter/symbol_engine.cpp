@@ -176,6 +176,27 @@ LineRange SymbolEngine::GetCurrentLineRange(uint64_t currentIP) {
 	return result;
 }
 
+bool SymbolEngine::GetSourceLine(uint64_t address, std::string& file, uint32_t& line) {
+	std::lock_guard<std::mutex> lock(mutex_);
+	if (!initialized_) return false;
+
+	DWORD displacement = 0;
+	IMAGEHLP_LINEW64 info = {};
+	info.SizeOfStruct = sizeof(info);
+	if (!SymGetLineFromAddrW64(hProcess_, address, &displacement, &info)) return false;
+
+	line = info.LineNumber;
+	file.clear();
+	if (info.FileName) {
+		int len = WideCharToMultiByte(CP_UTF8, 0, info.FileName, -1, nullptr, 0, nullptr, nullptr);
+		if (len > 0) {
+			file.resize(len - 1);
+			WideCharToMultiByte(CP_UTF8, 0, info.FileName, -1, &file[0], len, nullptr, nullptr);
+		}
+	}
+	return true;
+}
+
 void SymbolEngine::Cleanup() {
 	std::lock_guard<std::mutex> lock(mutex_);
 	if (!initialized_) return;

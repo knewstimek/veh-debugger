@@ -34,6 +34,9 @@ public:
 	// 성공 시 startAddress = 현재 라인 시작, nextLineAddress = 다음 라인 시작
 	LineRange GetCurrentLineRange(uint64_t currentIP);
 
+	// 주소가 속한 소스 파일/라인 (라인 정보가 없으면 false)
+	bool GetSourceLine(uint64_t address, std::string& file, uint32_t& line);
+
 	void Cleanup();
 	bool IsInitialized() const { return initialized_; }
 

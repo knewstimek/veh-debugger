@@ -2824,20 +2824,25 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 					rmReq.id = e->breakpointId;
 					pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
 				}
-				bool sameLine = false;
+				bool lineStep = false;
+				uint64_t startAddr = 0, nextLineAddr = 0;
+				std::string sourceFile;
+				uint32_t sourceLine = 0;
 				{
 					std::lock_guard<std::mutex> stepLock(steppingMutex_);
 					stepOverTempBpId_ = 0;
 					stepOverTempBpAddr_ = 0;
 
 					// 소스 라인 스텝 중이면 라인 변경 확인 (instruction 모드는 스킵)
-					if (steppingMode_ == SteppingMode::Over && !steppingInstruction_
-						&& steppingSourceLine_ != 0
-						&& steppingStartAddr_ != 0 && steppingNextLineAddr_ != 0
-						&& e->address >= steppingStartAddr_ && e->address < steppingNextLineAddr_) {
-						sameLine = true;
-					}
+					lineStep = steppingMode_ == SteppingMode::Over && !steppingInstruction_
+						&& steppingSourceLine_ != 0;
+					startAddr = steppingStartAddr_;
+					nextLineAddr = steppingNextLineAddr_;
+					sourceFile = steppingSourceFile_;
+					sourceLine = steppingSourceLine_;
 				}
+				const bool sameLine = lineStep &&
+					IsSameStepLine(e->address, startAddr, nextLineAddr, sourceFile, sourceLine);
 				if (sameLine) {
 					// 같은 라인 → 계속 스텝
 					LOG_DEBUG("Temp BP: still same line, auto-stepping");
@@ -2927,6 +2932,8 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 			uint32_t curThreadId;
 			bool curInstruction;
 			uint64_t curStartAddr, curNextLineAddr;
+			std::string curSourceFile;
+			uint32_t curSourceLine;
 			{
 				std::lock_guard<std::mutex> stepLock(steppingMutex_);
 				curMode = steppingMode_;
@@ -2934,6 +2941,8 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				curInstruction = steppingInstruction_;
 				curStartAddr = steppingStartAddr_;
 				curNextLineAddr = steppingNextLineAddr_;
+				curSourceFile = steppingSourceFile_;
+				curSourceLine = steppingSourceLine_;
 			}
 			LOG_INFO("StepCompleted: threadId=%u addr=0x%llX mode=%d", e->threadId, e->address, (int)curMode);
 
@@ -2941,11 +2950,8 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 			// instruction 모드면 auto-step 안 함 → 바로 stopped
 			if (curMode == SteppingMode::Over && !curInstruction
 				&& e->threadId == curThreadId) {
-				// 주소 범위로 판별: steppingStartAddr_ <= addr < steppingNextLineAddr_이면 같은 라인
-				bool sameLine = false;
-				if (curStartAddr != 0 && curNextLineAddr != 0) {
-					sameLine = (e->address >= curStartAddr && e->address < curNextLineAddr);
-				}
+				bool sameLine = IsSameStepLine(e->address, curStartAddr, curNextLineAddr,
+					curSourceFile, curSourceLine);
 
 				// 범위 resolve 실패 시에도 CALL 감지하여 스킵 (함수 안으로 빠지는 것 방지)
 				if (!sameLine && targetProcess_) {
@@ -3578,6 +3584,20 @@ void DapServer::CleanupStaleTempBp() {
 		stepOverTempBpId_ = 0;
 		stepOverTempBpAddr_ = 0;
 	}
+}
+
+// Step-over line test. [startAddr, nextLineAddr) is empty when the next source line has
+// no code (e.g. a function's closing brace), so compare the real source line when the
+// adapter's symbols know it and fall back to the address range otherwise.
+bool DapServer::IsSameStepLine(uint64_t address, uint64_t startAddr, uint64_t nextLineAddr,
+	const std::string& file, uint32_t line) {
+	std::string curFile;
+	uint32_t curLine = 0;
+	if (line != 0 && symbolEngineReady_ && symbolEngine_.GetSourceLine(address, curFile, curLine)) {
+		if (curLine == 0xFEEFEE) return true;  // compiler-generated hidden line: keep stepping
+		return curLine == line && (file.empty() || _stricmp(curFile.c_str(), file.c_str()) == 0);
+	}
+	return startAddr != 0 && nextLineAddr != 0 && address >= startAddr && address < nextLineAddr;
 }
 
 bool DapServer::GetTopFrameSourceLine(uint32_t threadId, std::string& file, uint32_t& line) {

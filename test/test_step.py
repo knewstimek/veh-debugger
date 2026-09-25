@@ -33,6 +33,7 @@ def main():
         thread_id = hit["body"]["threadId"]
         stack = client.request("stackTrace", {"threadId": thread_id, "startFrame": 0, "levels": 1})
         before = stack["body"]["stackFrames"][0]["instructionPointerReference"]
+        lines = [stack["body"]["stackFrames"][0].get("line")]
         observed = []
         for _ in range(3):
             response = client.request("next", {"threadId": thread_id})
@@ -41,8 +42,11 @@ def main():
             thread_id = stopped["body"]["threadId"]
             stack = client.request("stackTrace", {"threadId": thread_id, "startFrame": 0, "levels": 1})
             observed.append(stack["body"]["stackFrames"][0]["instructionPointerReference"])
+            lines.append(stack["body"]["stackFrames"][0].get("line"))
         assert any(address != before for address in observed), (before, observed)
-        print(f"PASS: DAP next changed instruction pointer across {len(observed)} bounded steps")
+        # A statement step must leave the current source line (x86 used to stop twice on a closing brace).
+        assert all(a != b for a, b in zip(lines, lines[1:])), lines
+        print(f"PASS: DAP next moved across source lines {lines}")
     finally:
         client.close()
 
