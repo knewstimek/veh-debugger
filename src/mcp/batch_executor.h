@@ -1,5 +1,4 @@
 #pragma once
-#include "debug_session.h"
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
@@ -11,6 +10,8 @@ namespace veh {
 using json = nlohmann::json;
 
 // BatchExecutor: executes a sequence of debugger commands with variable references.
+// It owns only $ref resolution and flow control; every tool call goes through the
+// ToolRunner, so batch steps share the direct MCP tool implementations.
 //
 // Step format:
 //   {tool: "veh_registers", args: {threadId: 1234}}
@@ -35,10 +36,8 @@ using json = nlohmann::json;
 
 class BatchExecutor {
 public:
-	using BreakpointActionSink = std::function<void(uint32_t, const json&)>;
-	using GenericToolSink = std::function<json(const std::string&, const json&)>;
-	explicit BatchExecutor(DebugSession& session, BreakpointActionSink actionSink = {},
-		GenericToolSink genericToolSink = {});
+	using ToolRunner = std::function<json(const std::string&, const json&)>;
+	explicit BatchExecutor(ToolRunner runTool);
 
 	// Execute a batch of steps. Returns array of step results.
 	json Execute(const json& steps);
@@ -50,26 +49,18 @@ private:
 	// Execute a single step (tool call or control flow)
 	json ExecuteStep(const json& step);
 
-	// Execute a tool call via DebugSession
-	json CallTool(const std::string& toolName, const json& args);
-
 	// Variable resolution
 	std::string ResolveString(const std::string& str);
 	json ResolveArgs(const json& args);
 	json ResolveValue(const std::string& ref);
 
-	// Condition evaluation (delegates to DebugSession or simple comparison)
+	// Condition evaluation (simple comparison)
 	bool EvaluateCondition(const std::string& condition);
 
-	// Map tool name -> DebugSession method call -> json result
-	json DispatchTool(const std::string& name, const json& args);
+	// Sub-executor for a nested block, inheriting results and variables
+	BatchExecutor Nested() const;
 
-	// Resolve address string with module+RVA support
-	uint64_t ResolveAddress(const std::string& addrStr);
-
-	DebugSession& session_;
-	BreakpointActionSink actionSink_;
-	GenericToolSink genericToolSink_;
+	ToolRunner runTool_;
 	std::vector<json> results_;  // step results indexed by step number
 	std::unordered_map<std::string, json> namedVars_;  // named variables ($addr, etc.)
 	int depth_ = 0;  // nesting depth (max 20)

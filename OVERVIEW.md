@@ -41,8 +41,9 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 | `src/dll/stack_walk.cpp/h` | StackWalk64 + DIA SDK local variable enumeration |
 | `src/common/ipc_protocol.h` | All IPC command/event/struct definitions (shared) |
 | `src/common/logger.h` | Logging utility |
-| `src/mcp/debug_session.cpp/h` | DebugSession class - pure C++ IPC wrapper, no JSON dependency. Used by MCP (and future veh_batch) |
-| `src/mcp/mcp_server.cpp/h` | MCP JSON-RPC server and debugger tool registry (delegates to DebugSession) |
+| `src/mcp/debug_session.cpp/h` | DebugSession class - pure C++ IPC wrapper, no JSON dependency |
+| `src/mcp/mcp_server.cpp/h` | MCP JSON-RPC server; one `ToolDef` table holds each tool's handler, category, eager profiles, nested-call permission, and schema (delegates to DebugSession) |
+| `src/mcp/batch_executor.cpp/h` | `$ref` resolution and if/loop/for_each for `veh_batch`, targeted-capture setup, and breakpoint actions; every step dispatches through the same tool table |
 | `src/mcp/installer.cpp/h` | Auto-install to Claude/Cursor/Windsurf/Codex configs |
 | `docs/DEVELOPMENT_TOOLS.md` | Reusable MCP scenario, trace validator, parity, and IPC-compatibility tool catalog |
 

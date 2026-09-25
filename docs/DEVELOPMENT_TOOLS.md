@@ -44,6 +44,8 @@ The server defaults to `--profile=lite`. Keep each eager surface at ten tools or
 
 Reuse the returned `schema_handle` in a later `describe`; an unchanged schema returns only the name, handle, and `unchanged:true`. Tools remain directly callable by name even when they are not in the active `tools/list`, preserving existing scenario, analyzer, and batch automation. `veh_toolbox` is control-plane discovery and deliberately cannot call itself or be nested in `veh_batch`/breakpoint actions.
 
+Batch steps, targeted-capture setup steps, and breakpoint actions call the same tool implementations as direct MCP calls, so arguments, validation, and result fields are identical everywhere. Only session lifecycle tools (`veh_attach`, `veh_launch`, `veh_detach`, `veh_terminate`) and re-entrant orchestrators (`veh_batch`, `veh_targeted_capture`, `veh_toolbox`) are rejected in those nested contexts; the `nested` flag in the server tool table is the single source for that policy.
+
 Measure the current executable rather than estimating token counts from source:
 
 ```powershell

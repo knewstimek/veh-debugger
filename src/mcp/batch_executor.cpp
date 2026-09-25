@@ -1,10 +1,5 @@
 #include "batch_executor.h"
-#include "trace_basic_blocks_tool.h"
-#include "common/logger.h"
-#include <sstream>
-#include <iomanip>
-#include <algorithm>
-#include <regex>
+#include <cstdio>
 
 namespace veh {
 
@@ -23,65 +18,17 @@ static std::string ToHex(uint64_t v) {
 	return buf;
 }
 
-// Distinguish "process exited" from "never attached" so wait=false + exit
-// doesn't collapse into a vague "Not attached" (mirrors McpServer::NotAttachedMessage).
-static std::string NotAttachedReason(DebugSession& session) {
-	HANDLE hProc = session.GetTargetProcess();
-	// WaitForSingleObject(,0) reliably detects termination; GetExitCodeProcess alone is
-	// ambiguous when the real exit code is 259 (== STILL_ACTIVE).
-	if (hProc && WaitForSingleObject(hProc, 0) == WAIT_OBJECT_0) {
-		DWORD exitCode = 0;
-		GetExitCodeProcess(hProc, &exitCode);
-		char buf[128];
-		snprintf(buf, sizeof(buf), "Not attached - target process exited (code %lu)", exitCode);
-		return buf;
-	}
-	return "Not attached to any process";
-}
-
-static std::vector<uint8_t> ParseHexBytes(const std::string& hexStr) {
-	std::string clean;
-	for (char c : hexStr) {
-		if (std::isxdigit(static_cast<unsigned char>(c))) clean += c;
-	}
-	std::vector<uint8_t> out;
-	if (clean.size() % 2 != 0) return out;
-	for (size_t i = 0; i < clean.size(); i += 2) {
-		out.push_back(static_cast<uint8_t>(std::stoi(clean.substr(i, 2), nullptr, 16)));
-	}
-	return out;
-}
-
 // --- BatchExecutor ---
 
-BatchExecutor::BatchExecutor(DebugSession& session, BreakpointActionSink actionSink,
-		GenericToolSink genericToolSink)
-	: session_(session), actionSink_(std::move(actionSink)),
-	  genericToolSink_(std::move(genericToolSink)) {}
+BatchExecutor::BatchExecutor(ToolRunner runTool) : runTool_(std::move(runTool)) {}
 
-uint64_t BatchExecutor::ResolveAddress(const std::string& s) {
-	if (s.empty()) return 0;
-	auto plusPos = s.find('+');
-	if (plusPos != std::string::npos && plusPos > 0) {
-		std::string mod = s.substr(0, plusPos);
-		bool isModule = false;
-		for (char c : mod) {
-			if (c == '.' || c == '_' || c == '-') { isModule = true; break; }
-			if (std::isalpha(c) && !std::isxdigit(c)) { isModule = true; break; }
-		}
-		if (isModule) {
-			auto modules = session_.GetModules();
-			std::string modLower = mod;
-			std::transform(modLower.begin(), modLower.end(), modLower.begin(), ::tolower);
-			for (auto& m : modules) {
-				std::string nl = m.name;
-				std::transform(nl.begin(), nl.end(), nl.begin(), ::tolower);
-				if (nl == modLower) return m.baseAddress + ParseHexOrDec(s.substr(plusPos + 1));
-			}
-			return 0;
-		}
-	}
-	return ParseHexOrDec(s);
+BatchExecutor BatchExecutor::Nested() const {
+	BatchExecutor sub(runTool_);
+	sub.depth_ = depth_ + 1;
+	sub.stopOnError_ = stopOnError_;
+	sub.results_ = results_;
+	sub.namedVars_ = namedVars_;
+	return sub;
 }
 
 static bool BatchResultFailed(const json& value) {
@@ -195,11 +142,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 		std::string condition = ResolveString(step["if"].get<std::string>());
 		bool result = EvaluateCondition(condition);
 		if (result && step.contains("then") && step["then"].is_array()) {
-			BatchExecutor sub(session_, actionSink_, genericToolSink_);
-			sub.depth_ = depth_ + 1;
-			sub.stopOnError_ = stopOnError_;
-			sub.results_ = results_;
-			sub.namedVars_ = namedVars_;
+			BatchExecutor sub = Nested();
 			size_t parentSize = results_.size();
 			json r = sub.Execute(step["then"]);
 			// Merge only new results (avoid duplicating inherited parent results)
@@ -207,11 +150,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 				results_.push_back(sub.results_[j]);
 			return {{"type", "if"}, {"condition", condition}, {"branch", "then"}, {"result", r}};
 		} else if (!result && step.contains("else") && step["else"].is_array()) {
-			BatchExecutor sub(session_, actionSink_, genericToolSink_);
-			sub.depth_ = depth_ + 1;
-			sub.stopOnError_ = stopOnError_;
-			sub.results_ = results_;
-			sub.namedVars_ = namedVars_;
+			BatchExecutor sub = Nested();
 			size_t parentSize = results_.size();
 			json r = sub.Execute(step["else"]);
 			for (size_t j = parentSize; j < sub.results_.size(); j++)
@@ -230,11 +169,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 		json loopResults = json::array();
 		int iterations = 0;
 		for (int i = 0; i < maxIter; i++) {
-			BatchExecutor sub(session_, actionSink_, genericToolSink_);
-			sub.depth_ = depth_ + 1;
-			sub.stopOnError_ = stopOnError_;
-			sub.results_ = results_;
-			sub.namedVars_ = namedVars_;
+			BatchExecutor sub = Nested();
 			json r = sub.Execute(step["loop"]);
 			// Update our results with sub-results
 			results_ = sub.results_;
@@ -280,11 +215,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 		json foreachResults = json::array();
 		for (size_t i = 0; i < items.size(); i++) {
 			namedVars_[varName] = items[i];
-			BatchExecutor sub(session_, actionSink_, genericToolSink_);
-			sub.depth_ = depth_ + 1;
-			sub.stopOnError_ = stopOnError_;
-			sub.results_ = results_;
-			sub.namedVars_ = namedVars_;
+			BatchExecutor sub = Nested();
 			json r = sub.Execute(step["do"]);
 			results_ = sub.results_;
 			namedVars_ = sub.namedVars_;
@@ -301,7 +232,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 		json resolvedArgs = ResolveArgs(args);
 
 		// Store result with optional name
-		json result = DispatchTool(toolName, resolvedArgs);
+		json result = runTool_(toolName, resolvedArgs);
 		if (step.contains("as")) {
 			namedVars_[step["as"].get<std::string>()] = result;
 		}
@@ -481,480 +412,5 @@ bool BatchExecutor::EvaluateCondition(const std::string& condition) {
 	return !condition.empty();
 }
 
-// --- Tool Dispatch ---
-
-json BatchExecutor::DispatchTool(const std::string& name, const json& args) {
-	if (!session_.IsAttached()) {
-		return {{"error", NotAttachedReason(session_)}};
-	}
-
-	auto hexArg = [&](const std::string& key) -> uint64_t {
-		return ResolveAddress(args.value(key, ""));
-	};
-	auto intArg = [&](const std::string& key, int def) -> int {
-		if (!args.contains(key)) return def;
-		auto& v = args[key];
-		if (v.is_number()) return v.get<int>();
-		if (v.is_string()) { try { return std::stoi(v.get<std::string>()); } catch (...) {} }
-		return def;
-	};
-	auto uint32Arg = [&](const std::string& key) -> uint32_t {
-		if (!args.contains(key)) return 0;
-		auto& v = args[key];
-		if (v.is_number()) return v.get<uint32_t>();
-		if (v.is_string()) { try { return static_cast<uint32_t>(ParseHexOrDec(v.get<std::string>())); } catch (...) {} }
-		return 0;
-	};
-	auto boolArg = [&](const std::string& key) -> bool {
-		if (!args.contains(key)) return false;
-		auto& v = args[key];
-		if (v.is_boolean()) return v.get<bool>();
-		if (v.is_string()) return v.get<std::string>() == "true";
-		return false;
-	};
-
-	// --- Execution control ---
-	if (name == "veh_continue") {
-		bool passEx = boolArg("pass_exception");
-		uint32_t tid = uint32Arg("threadId");
-		bool wait = boolArg("wait");
-		int timeout = intArg("timeout", 10);
-
-		if (wait) {
-			auto cached = session_.ConsumeCachedStop();
-			if (cached && !passEx) {
-				return {{"stopped", true}, {"reason", cached->reason},
-				        {"address", ToHex(cached->address)}, {"threadId", cached->threadId},
-				        {"breakpointId", cached->breakpointId}};
-			}
-		}
-
-		auto continueResult = session_.ContinueWithDetails(tid, passEx);
-		if (!continueResult.ok) {
-			return {{"error", "Continue failed"}};
-		}
-		auto addResumeDetails = [&](json& result) {
-			result["resumeScope"] = tid == 0 ? "all" : "single";
-			result["requestedThreadId"] = tid;
-			result["resumedThreadIds"] = continueResult.resumedThreadIds;
-			result["stillStoppedThreadIds"] = continueResult.stillStoppedThreadIds;
-		};
-		if (!wait) {
-			json result = {{"success", true}};
-			addResumeDetails(result);
-			return result;
-		}
-
-		auto stop = session_.WaitForStop(timeout);
-		if (stop.timeout) {
-			json result = {{"timeout", true}};
-			addResumeDetails(result);
-			return result;
-		}
-		json result = {{"stopped", true}, {"reason", stop.reason},
-		        {"address", ToHex(stop.address)}, {"threadId", stop.threadId},
-		        {"breakpointId", stop.breakpointId}};
-		addResumeDetails(result);
-		return result;
-	}
-
-	if (name == "veh_step_in") {
-		uint32_t tid = uint32Arg("threadId");
-		if (!session_.StepIn(tid)) return {{"error", "StepIn failed"}};
-		return {{"success", true}, {"threadId", tid}};
-	}
-	if (name == "veh_step_over") {
-		uint32_t tid = uint32Arg("threadId");
-		if (!session_.StepOver(tid)) return {{"error", "StepOver failed"}};
-		return {{"success", true}, {"threadId", tid}};
-	}
-	if (name == "veh_step_out") {
-		uint32_t tid = uint32Arg("threadId");
-		if (!session_.StepOut(tid)) return {{"error", "StepOut failed"}};
-		return {{"success", true}, {"threadId", tid}};
-	}
-	if (name == "veh_pause") {
-		uint32_t tid = uint32Arg("threadId");
-		if (!session_.Pause(tid)) return {{"error", "Pause failed"}};
-		return {{"success", true}};
-	}
-
-	// --- Breakpoints ---
-	if (name == "veh_set_breakpoint") {
-		uint64_t addr = hexArg("address");
-		if (addr == 0) return {{"error", "address is required or invalid"}};
-		if (args.contains("action") && !args["action"].is_array()) {
-			return {{"error", "action must be an array of batch steps"}};
-		}
-		auto r = session_.SetBreakpoint(addr);
-		if (!r.ok) return {{"error", "SetBreakpoint failed"}};
-		{
-			std::lock_guard<std::mutex> lock(session_.GetBpMutex());
-			auto& bps = session_.GetSwBreakpoints();
-			auto it = std::find_if(bps.begin(), bps.end(),
-				[r](const SwBpInfo& bp) { return bp.id == r.id; });
-			if (it == bps.end()) {
-				SwBpInfo bp{};
-				bp.id = r.id;
-				bp.address = addr;
-				bps.push_back(std::move(bp));
-				it = std::prev(bps.end());
-			}
-			it->condition = args.value("condition", "");
-			it->hitCondition = args.value("hitCondition", "");
-			it->logMessage = args.value("logMessage", "");
-		}
-		if (args.contains("action") && actionSink_) actionSink_(r.id, args["action"]);
-		json result = {{"success", true}, {"id", r.id}, {"address", ToHex(addr)}};
-		if (args.contains("action")) result["hasAction"] = true;
-		return result;
-	}
-	if (name == "veh_set_module_breakpoint") {
-		if (boolArg("clear")) {
-			bool ok = session_.SetModuleLoadStop("", 2);
-			return {{"success", ok}, {"cleared", true}};
-		}
-		std::string module = args.value("module", "");
-		if (module.empty()) return {{"error", "module is required (or pass clear=true)"}};
-		bool enabled = args.contains("enabled") ? boolArg("enabled") : true;
-		if (!session_.SetModuleLoadStop(module, enabled ? 0 : 1))
-			return {{"error", "SetModuleLoadStop failed"}};
-		return {{"success", true}, {"module", module}, {"action", enabled ? "add" : "remove"}};
-	}
-	if (name == "veh_remove_breakpoint") {
-		uint32_t id = uint32Arg("id");
-		if (!session_.RemoveBreakpoint(id)) return {{"error", "RemoveBreakpoint failed"}};
-		{
-			std::lock_guard<std::mutex> lock(session_.GetBpMutex());
-			auto& bps = session_.GetSwBreakpoints();
-			bps.erase(std::remove_if(bps.begin(), bps.end(),
-				[id](const SwBpInfo& bp) { return bp.id == id; }), bps.end());
-		}
-		if (actionSink_) actionSink_(id, json());
-		return {{"success", true}, {"id", id}};
-	}
-	if (name == "veh_set_data_breakpoint") {
-		uint64_t addr = hexArg("address");
-		std::string typeStr = args.value("type", "write");
-		uint8_t type = 1; // write
-		if (typeStr == "execute") type = 0;
-		else if (typeStr == "readwrite") type = 3;
-		uint8_t sz = static_cast<uint8_t>(intArg("size", 4));
-		auto r = session_.SetHwBreakpoint(addr, type, sz);
-		if (!r.ok) return {{"error", "SetHwBreakpoint failed"}};
-		return {{"success", true}, {"id", r.id}, {"slot", r.slot}};
-	}
-	if (name == "veh_remove_data_breakpoint") {
-		uint32_t id = uint32Arg("id");
-		if (!session_.RemoveHwBreakpoint(id)) return {{"error", "RemoveHwBreakpoint failed"}};
-		return {{"success", true}, {"id", id}};
-	}
-
-	// --- State queries ---
-	if (name == "veh_threads") {
-		auto threads = session_.GetThreads();
-		json arr = json::array();
-		for (auto& t : threads) arr.push_back({{"id", t.id}, {"name", t.name}});
-		return {{"threads", arr}, {"count", threads.size()}};
-	}
-	if (name == "veh_registers") {
-		uint32_t tid = uint32Arg("threadId");
-		auto regs = session_.GetRegisters(tid);
-		if (!regs) return {{"error", "GetRegisters failed"}};
-		auto hex = [](uint64_t v) { char b[20]; snprintf(b, sizeof(b), "0x%llX", v); return std::string(b); };
-		json r;
-		// Emit 32-bit register names for 32-bit targets (mirror direct veh_registers).
-		// Otherwise $N.registers.esp silently fails to resolve on a 32-bit process.
-		if (regs->is32bit) {
-			r["eax"] = hex(regs->rax); r["ebx"] = hex(regs->rbx);
-			r["ecx"] = hex(regs->rcx); r["edx"] = hex(regs->rdx);
-			r["esi"] = hex(regs->rsi); r["edi"] = hex(regs->rdi);
-			r["ebp"] = hex(regs->rbp); r["esp"] = hex(regs->rsp);
-			r["eip"] = hex(regs->rip);
-		} else {
-			r["rax"] = hex(regs->rax); r["rbx"] = hex(regs->rbx);
-			r["rcx"] = hex(regs->rcx); r["rdx"] = hex(regs->rdx);
-			r["rsi"] = hex(regs->rsi); r["rdi"] = hex(regs->rdi);
-			r["rbp"] = hex(regs->rbp); r["rsp"] = hex(regs->rsp);
-			r["r8"] = hex(regs->r8); r["r9"] = hex(regs->r9);
-			r["r10"] = hex(regs->r10); r["r11"] = hex(regs->r11);
-			r["r12"] = hex(regs->r12); r["r13"] = hex(regs->r13);
-			r["r14"] = hex(regs->r14); r["r15"] = hex(regs->r15);
-			r["rip"] = hex(regs->rip);
-		}
-		r["eflags"] = hex(regs->rflags);  // match direct veh_registers key name
-		r["is32bit"] = (bool)regs->is32bit;
-		// Optional field selection keeps loop dumps small (e.g. fields: ["esp","eip"]).
-		if (args.contains("fields") && args["fields"].is_array() && !args["fields"].empty()) {
-			json filtered;
-			for (auto& f : args["fields"]) {
-				if (f.is_string() && r.contains(f.get<std::string>()))
-					filtered[f.get<std::string>()] = r[f.get<std::string>()];
-			}
-			filtered["is32bit"] = r["is32bit"];
-			return {{"registers", filtered}};
-		}
-		return {{"registers", r}};
-	}
-	if (name == "veh_stack_trace") {
-		uint32_t tid = uint32Arg("threadId");
-		int maxFrames = intArg("maxFrames", 20);
-		auto frames = session_.GetStackTrace(tid, maxFrames);
-		json arr = json::array();
-		for (auto& f : frames) {
-			arr.push_back({{"address", ToHex(f.address)}, {"module", f.moduleName},
-			               {"function", f.functionName}, {"source", f.sourceFile}, {"line", f.line}});
-		}
-		return {{"frames", arr}, {"count", frames.size()}};
-	}
-	if (name == "veh_modules") {
-		auto mods = session_.GetModules();
-		json arr = json::array();
-		for (auto& m : mods) {
-			arr.push_back({{"name", m.name}, {"path", m.path},
-			               {"baseAddress", ToHex(m.baseAddress)}, {"size", m.size}});
-		}
-		return {{"modules", arr}, {"count", mods.size()}};
-	}
-
-	// --- Memory ---
-	if (name == "veh_read_memory") {
-		uint64_t addr = hexArg("address");
-		int size = intArg("size", 64);
-		auto data = session_.ReadMemory(addr, size);
-		if (data.empty()) return {{"error", "ReadMemory failed"}};
-		std::ostringstream oss;
-		for (size_t i = 0; i < data.size(); i++) {
-			if (i > 0 && i % 16 == 0) oss << "\n";
-			else if (i > 0) oss << " ";
-			oss << std::hex << std::setfill('0') << std::setw(2) << (int)data[i];
-		}
-		return {{"address", ToHex(addr)}, {"size", data.size()}, {"hex", oss.str()}};
-	}
-	if (name == "veh_write_memory") {
-		// Batch patches mode
-		if (args.contains("patches") && args["patches"].is_array()) {
-			int ok = 0, fail = 0;
-			for (auto& p : args["patches"]) {
-				uint64_t a = ResolveAddress(p.value("address", "0"));
-				auto bytes = ParseHexBytes(p.value("data", ""));
-				if (!bytes.empty() && a != 0 && session_.WriteMemory(a, bytes.data(), static_cast<uint32_t>(bytes.size()))) ok++;
-				else fail++;
-			}
-			return {{"success", fail == 0}, {"succeeded", ok}, {"failed", fail}};
-		}
-		// Single mode
-		uint64_t addr = hexArg("address");
-		auto bytes = ParseHexBytes(args.value("data", ""));
-		if (bytes.empty()) return {{"error", "No data"}};
-		if (!session_.WriteMemory(addr, bytes.data(), static_cast<uint32_t>(bytes.size())))
-			return {{"error", "WriteMemory failed"}};
-		return {{"success", true}, {"bytesWritten", bytes.size()}};
-	}
-	if (name == "veh_allocate_memory") {
-		int size = intArg("size", 4096);
-		std::string prot = args.value("protection", "rwx");
-		uint32_t p = 0x40; // PAGE_EXECUTE_READWRITE
-		if (prot == "rw") p = 0x04;
-		else if (prot == "rx") p = 0x20;
-		else if (prot == "r") p = 0x02;
-		uint64_t addr = session_.AllocateMemory(size, p);
-		if (!addr) return {{"error", "AllocateMemory failed"}};
-		return {{"success", true}, {"address", ToHex(addr)}, {"size", size}};
-	}
-	if (name == "veh_free_memory") {
-		uint64_t addr = hexArg("address");
-		if (!session_.FreeMemory(addr)) return {{"error", "FreeMemory failed"}};
-		return {{"success", true}};
-	}
-	if (name == "veh_execute_shellcode") {
-		auto bytes = ParseHexBytes(args.value("shellcode", ""));
-		if (bytes.empty()) return {{"error", "No shellcode"}};
-		int timeout = intArg("timeout_ms", 5000);
-		auto r = session_.ExecuteShellcode(bytes.data(), static_cast<uint32_t>(bytes.size()), timeout);
-		json ret = {{"success", r.ok}, {"exitCode", r.exitCode}};
-		if (r.crashed) {
-			char codeBuf[12]; snprintf(codeBuf, sizeof(codeBuf), "0x%08X", r.exceptionCode);
-			ret["crashed"] = true;
-			ret["exceptionCode"] = codeBuf;
-			ret["exceptionAddress"] = ToHex(r.exceptionAddress);
-		}
-		return ret;
-	}
-
-	// --- Analysis ---
-	if (name == "veh_evaluate") {
-		std::string expr = args.value("expression", "");
-		uint32_t tid = uint32Arg("threadId");
-		auto r = session_.Evaluate(expr, tid);
-		if (!r.ok) return {{"error", r.error}};
-		json ret = {{"value", r.value}, {"type", r.type}};
-		if (r.address) ret["address"] = ToHex(r.address);
-		if (!r.tebAddress.empty()) ret["tebAddress"] = r.tebAddress;
-		return ret;
-	}
-	if (name == "veh_disassemble") {
-		uint64_t addr = hexArg("address");
-		int count = intArg("count", 20);
-		auto insns = session_.Disassemble(addr, count);
-		json arr = json::array();
-		for (auto& i : insns) arr.push_back({{"address", i.address}, {"bytes", i.bytes}, {"mnemonic", i.mnemonic}});
-		return {{"instructions", arr}, {"count", insns.size()}};
-	}
-	if (name == "veh_set_register") {
-		uint32_t tid = uint32Arg("threadId");
-		std::string regName = args.value("name", "");
-		uint32_t idx = DebugSession::GetRegisterIndex(regName);
-		if (idx == UINT32_MAX) return {{"error", "Unknown register: " + regName}};
-		uint64_t val = ParseHexOrDec(args.value("value", "0"));
-		if (!session_.SetRegister(tid, idx, val)) return {{"error", "SetRegister failed"}};
-		return {{"success", true}, {"name", regName}, {"value", ToHex(val)}};
-	}
-
-	if (name == "veh_list_breakpoints") {
-		json sw = json::array(), hw = json::array();
-		{
-			std::lock_guard<std::mutex> lock(session_.GetBpMutex());
-			for (auto& bp : session_.GetSwBreakpoints())
-				sw.push_back({{"id", bp.id}, {"address", ToHex(bp.address)}, {"status", bp.pending ? "pending" : "active"}});
-			for (auto& bp : session_.GetHwBreakpoints())
-				hw.push_back({{"id", bp.id}, {"address", ToHex(bp.address)}});
-		}
-		return {{"software", sw}, {"hardware", hw}};
-	}
-
-	if (name == "veh_enum_locals") {
-		uint32_t tid = uint32Arg("threadId");
-		uint64_t ip = hexArg("instructionAddress");
-		uint64_t fb = hexArg("frameBase");
-		auto locals = session_.EnumLocals(tid, ip, fb);
-		json arr = json::array();
-		for (auto& l : locals) {
-			std::ostringstream oss;
-			for (size_t i = 0; i < l.value.size(); i++) {
-				if (i > 0) oss << " ";
-				oss << std::hex << std::setfill('0') << std::setw(2) << (int)l.value[i];
-			}
-			arr.push_back({{"name", l.name}, {"type", l.typeName}, {"address", ToHex(l.address)},
-			               {"size", l.size}, {"value", oss.str()}});
-		}
-		return {{"locals", arr}, {"count", locals.size()}};
-	}
-	if (name == "veh_exception_info") {
-		// Exception info is MCP-level cached state, not available in batch directly
-		return {{"error", "veh_exception_info not available in batch mode (use directly)"}};
-	}
-	if (name == "veh_trace_callers") {
-		uint64_t addr = hexArg("address");
-		int dur = intArg("duration_sec", 5);
-		auto r = session_.TraceCallers(addr, dur);
-		json arr = json::array();
-		for (auto& c : r.callers) arr.push_back({{"address", ToHex(c.address)}, {"hitCount", c.hitCount}});
-		return {{"totalHits", r.totalHits}, {"uniqueCallers", r.uniqueCallers}, {"callers", arr}};
-	}
-	if (name == "veh_dump_memory") {
-		uint64_t addr = hexArg("address");
-		int size = intArg("size", 4096);
-		std::string path = args.value("output_path", "");
-		if (path.empty()) return {{"error", "output_path is required"}};
-		// Read in chunks and write to file
-		FILE* fp = fopen(path.c_str(), "wb");
-		if (!fp) return {{"error", "Cannot open file: " + path}};
-		uint64_t written = 0, remaining = size;
-		uint64_t cur = addr;
-		while (remaining > 0) {
-			uint32_t chunk = static_cast<uint32_t>((remaining > 1048576) ? 1048576 : remaining);
-			auto data = session_.ReadMemory(cur, chunk);
-			if (data.empty()) break;
-			fwrite(data.data(), 1, data.size(), fp);
-			written += data.size();
-			cur += data.size();
-			if (data.size() > remaining) break;
-			remaining -= data.size();
-		}
-		fclose(fp);
-		return {{"success", true}, {"size", written}, {"output_path", path}};
-	}
-	if (name == "veh_set_source_breakpoint") {
-		std::string src = args.value("source", "");
-		int line = intArg("line", 0);
-		uint64_t addr = session_.ResolveSourceLine(src, line);
-		if (!addr) return {{"error", "Cannot resolve " + src + ":" + std::to_string(line)}};
-		auto r = session_.SetBreakpoint(addr);
-		if (!r.ok) return {{"error", "SetBreakpoint failed"}};
-		return {{"success", true}, {"id", r.id}, {"address", ToHex(addr)}};
-	}
-	if (name == "veh_set_function_breakpoint") {
-		std::string fname = args.value("name", "");
-		uint64_t addr = session_.ResolveFunction(fname);
-		if (!addr) return {{"error", "Cannot resolve function: " + fname}};
-		auto r = session_.SetBreakpoint(addr);
-		if (!r.ok) return {{"error", "SetBreakpoint failed"}};
-		return {{"success", true}, {"id", r.id}, {"address", ToHex(addr)}};
-	}
-	if (name == "veh_trace_register") {
-		uint32_t tid = uint32Arg("threadId");
-		std::string regName = args.value("register", "");
-		uint32_t regIdx = DebugSession::GetRegisterIndex(regName);
-		if (regIdx == UINT32_MAX) return {{"error", "Unknown register: " + regName}};
-		int maxSteps = intArg("max_steps", 10000);
-		std::string modeStr = args.value("mode", "changed");
-		uint8_t mode = 0;
-		if (modeStr == "equals") mode = 1;
-		else if (modeStr == "not_equals") mode = 2;
-		uint64_t cmpVal = 0;
-		std::string valStr = args.value("value", "");
-		if (!valStr.empty()) { try { cmpVal = ParseHexOrDec(valStr); } catch (...) {} }
-		auto r = session_.TraceRegister(tid, regIdx, maxSteps, mode, cmpVal);
-		if (!r.ok) return {{"error", "TraceRegister failed"}};
-		json ret = {{"found", r.found}, {"stepsExecuted", r.stepsExecuted},
-		            {"address", ToHex(r.address)}, {"oldValue", ToHex(r.oldValue)}, {"newValue", ToHex(r.newValue)}};
-		if (r.found && r.address) {
-			auto insns = session_.Disassemble(r.address, 1);
-			if (!insns.empty()) ret["instruction"] = insns[0].mnemonic;
-		}
-		return ret;
-	}
-	if (name == "veh_trace_memory") {
-		uint64_t addr = hexArg("address");
-		int sz = intArg("size", 4);
-		int tms = intArg("timeout_ms", 10000);
-		auto r = session_.TraceMemoryWrite(addr, sz, tms);
-		if (!r.ok) return {{"error", "TraceMemory failed"}};
-		json ret = {{"found", r.found}, {"address", ToHex(addr)}, {"threadId", r.threadId}};
-		if (r.found) {
-			ret["instructionAddress"] = ToHex(r.instructionAddress);
-			ret["oldValue"] = ToHex(r.oldValue);
-			ret["newValue"] = ToHex(r.newValue);
-			if (r.instructionAddress) {
-				auto insns = session_.Disassemble(r.instructionAddress, 1);
-				if (!insns.empty()) ret["instruction"] = insns[0].mnemonic;
-			}
-		}
-		return ret;
-	}
-	if (name == "veh_trace_basic_blocks") {
-		return ExecuteTraceBasicBlocksTool(session_, args,
-			[this](const std::string& text, uint64_t& value) {
-				try {
-					value = ResolveAddress(text);
-					return value != 0;
-				} catch (...) {
-					return false;
-				}
-			});
-	}
-	if (name == "veh_attach" || name == "veh_launch" || name == "veh_detach") {
-		return {{"error", name + " is not available in batch mode (session lifecycle)"}};
-	}
-	if (genericToolSink_ && name.rfind("veh_checkpoint_", 0) == 0)
-		return genericToolSink_(name, args);
-
-	return {{"error", "Unknown tool: " + name}};
-}
-
-json BatchExecutor::CallTool(const std::string& toolName, const json& args) {
-	return DispatchTool(toolName, ResolveArgs(args));
-}
 
 } // namespace veh

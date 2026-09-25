@@ -68,6 +68,9 @@ static bool JsonBool(const json& args, const char* key, bool defaultVal = false)
 	return defaultVal;
 }
 
+// Eager-profile bits for McpServer::ToolDef::profiles
+constexpr unsigned kLite = 1, kInteractive = 2, kCapture = 4, kFullProfile = ~0u;
+
 McpServer::McpServer(std::string toolProfile)
 	: toolProfile_(std::move(toolProfile)) {
 	StartRetryThread();
@@ -1133,7 +1136,7 @@ json McpServer::ToolStackTrace(const json& args) {
 		arr.push_back(frame);
 	}
 
-	return {{"frames", arr}, {"totalFrames", arr.size()}};
+	return {{"frames", arr}, {"count", arr.size()}, {"totalFrames", arr.size()}};
 }
 
 json McpServer::ToolEnumLocals(const json& args) {
@@ -1249,6 +1252,14 @@ json McpServer::ToolRegisters(const json& args) {
 	regs["dr6"] = hex(r.dr6); regs["dr7"] = hex(r.dr7);
 	regs["is32bit"] = (bool)r.is32bit;
 
+	if (args.contains("fields") && args["fields"].is_array() && !args["fields"].empty()) {
+		json selected = {{"is32bit", regs["is32bit"]}};
+		for (const auto& field : args["fields"]) {
+			if (field.is_string() && regs.contains(field.get<std::string>()))
+				selected[field.get<std::string>()] = regs[field.get<std::string>()];
+		}
+		return {{"registers", std::move(selected)}};
+	}
 	return {{"registers", regs}};
 }
 
@@ -1665,15 +1676,7 @@ json McpServer::ToolBatch(const json& args) {
 	const bool stopOnError = args.value("stop_on_error", false);
 
 	auto run = [&](const json* input, const std::string& inputVariable) {
-		BatchExecutor executor(session_, [this](uint32_t id, const json& action) {
-			StoreBreakpointAction(id, action);
-		}, [this](const std::string& name, const json& toolArgs) {
-			if (name == "veh_checkpoint_create") return ToolCheckpointCreate(toolArgs);
-			if (name == "veh_checkpoint_restore") return ToolCheckpointRestore(toolArgs);
-			if (name == "veh_checkpoint_diff") return ToolCheckpointDiff(toolArgs);
-			if (name == "veh_checkpoint_delete") return ToolCheckpointDelete(toolArgs);
-			return json{{"error", "Unsupported batch tool: " + name}};
-		});
+		BatchExecutor executor = NewBatchExecutor();
 		executor.SetStopOnError(stopOnError);
 		if (input) executor.SetVariable(inputVariable, *input);
 		return executor.Execute(steps);
@@ -2015,15 +2018,7 @@ json McpServer::ToolTargetedCapture(const json& args) {
 
 	for (size_t index = 0; index < args["inputs"].size(); ++index) {
 		const auto& input = args["inputs"][index];
-		BatchExecutor executor(session_, [this](uint32_t id, const json& action) {
-			StoreBreakpointAction(id, action);
-		}, [this](const std::string& name, const json& toolArgs) {
-			if (name == "veh_checkpoint_create") return ToolCheckpointCreate(toolArgs);
-			if (name == "veh_checkpoint_restore") return ToolCheckpointRestore(toolArgs);
-			if (name == "veh_checkpoint_diff") return ToolCheckpointDiff(toolArgs);
-			if (name == "veh_checkpoint_delete") return ToolCheckpointDelete(toolArgs);
-			return json{{"error", "Unsupported targeted setup tool: " + name}};
-		});
+		BatchExecutor executor = NewBatchExecutor();
 		executor.SetStopOnError(true);
 		executor.SetVariable(inputVariable, input);
 		json setup = setupSteps.empty() ? json{{"results", json::array()}, {"failed", 0}, {"succeeded", 0}}
@@ -2569,15 +2564,7 @@ void McpServer::FlushEvents() {
 	while (!actions.empty()) {
 		auto pending = std::move(actions.front());
 		actions.pop();
-		BatchExecutor executor(session_, [this](uint32_t id, const json& action) {
-			StoreBreakpointAction(id, action);
-		}, [this](const std::string& name, const json& toolArgs) {
-			if (name == "veh_checkpoint_create") return ToolCheckpointCreate(toolArgs);
-			if (name == "veh_checkpoint_restore") return ToolCheckpointRestore(toolArgs);
-			if (name == "veh_checkpoint_diff") return ToolCheckpointDiff(toolArgs);
-			if (name == "veh_checkpoint_delete") return ToolCheckpointDelete(toolArgs);
-			return json{{"error", "Unsupported action tool: " + name}};
-		});
+		BatchExecutor executor = NewBatchExecutor();
 		json result = executor.Execute(pending.steps);
 		if (result.dump().find("\"error\"") != std::string::npos) {
 			LOG_WARN("Breakpoint action completed with an error: %s", result.dump().c_str());
@@ -3256,15 +3243,17 @@ bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
 
 // --- Tool List Definition ---
 
-json McpServer::BuildAllToolsList() {
-	json tools = json::array({
-		{{"name", "veh_attach"}, {"description", "Attach to a running process by PID. Injects VEH debugger DLL. Auto-detaches if already attached. Target process must be running (not CREATE_SUSPENDED)."},
+std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
+	std::vector<ToolDef> tools = {
+		Tool(&McpServer::ToolAttach, "session", kLite | kInteractive, false,
+			{{"name", "veh_attach"}, {"description", "Attach to a running process by PID. Injects VEH debugger DLL. Auto-detaches if already attached. Target process must be running (not CREATE_SUSPENDED)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"pid", {{"type", "integer"}, {"description", "Process ID to attach to"}}},
 			{"logFile", {{"type", "string"}, {"description", "Enable server-side logging to this file path (e.g. 'veh-mcp.log'). Omit to disable logging."}}}
-		 }}, {"required", json::array({"pid"})}}}},
+		 }}, {"required", json::array({"pid"})}}}}),
 
-		{{"name", "veh_launch"}, {"description", "Launch a program and attach the debugger. Auto-detaches if already attached. Handles CREATE_SUSPENDED internally."},
+		Tool(&McpServer::ToolLaunch, "session", kLite | kInteractive | kCapture, false,
+			{{"name", "veh_launch"}, {"description", "Launch a program and attach the debugger. Auto-detaches if already attached. Handles CREATE_SUSPENDED internally."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"program", {{"type", "string"}, {"description", "Path to executable"}}},
 			{"args", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Command line arguments"}}},
@@ -3274,175 +3263,205 @@ json McpServer::BuildAllToolsList() {
 			{"runAsInvoker", {{"type", "boolean"}, {"description", "Bypass UAC elevation prompt by setting __COMPAT_LAYER=RunAsInvoker (default: false)"}}},
 			{"injectionMethod", {{"type", "string"}, {"enum", json::array({"auto", "createRemoteThread", "ntCreateThreadEx", "threadHijack", "queueUserApc"})}, {"description", "DLL injection method (default: auto). Auto tries all methods in order."}}},
 			{"logFile", {{"type", "string"}, {"description", "Enable server-side logging to this file path (e.g. 'veh-mcp.log'). Omit to disable logging."}}}
-		 }}, {"required", json::array({"program"})}}}},
+		 }}, {"required", json::array({"program"})}}}}),
 
-		{{"name", "veh_detach"}, {"description", "Detach debugger from the target process (leaves it running)."},
-		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}},
+		Tool(&McpServer::ToolDetach, "session", 0, false,
+			{{"name", "veh_detach"}, {"description", "Detach debugger from the target process (leaves it running)."},
+		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
 
-		{{"name", "veh_terminate"}, {"description", "Kill the target process from inside (the injected DLL calls TerminateProcess on its own process). Works even on self-protected targets that deny external OpenProcess/taskkill (deny-DACL or higher integrity), because a process's own-handle always has terminate rights. Detaches afterward. Use this instead of the WM_CLOSE->detach->taskkill dance."},
+		Tool(&McpServer::ToolTerminate, "session", kLite | kInteractive | kCapture, false,
+			{{"name", "veh_terminate"}, {"description", "Kill the target process from inside (the injected DLL calls TerminateProcess on its own process). Works even on self-protected targets that deny external OpenProcess/taskkill (deny-DACL or higher integrity), because a process's own-handle always has terminate rights. Detaches afterward. Use this instead of the WM_CLOSE->detach->taskkill dance."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"exitCode", {{"type", "integer"}, {"description", "Process exit code (default: 0)"}}}
-		 }}}}},
+		 }}}}}),
 
-		{{"name", "veh_set_breakpoint"}, {"description", "Set a software breakpoint (INT3) at an address. Supports module+RVA (e.g. 'crackme.exe+0x1000'). Duplicate address returns existing BP id. Use 'action' to auto-execute commands on hit (no agent intervention needed)."},
+		Tool(&McpServer::ToolSetBreakpoint, "breakpoint", kInteractive, true,
+			{{"name", "veh_set_breakpoint"}, {"description", "Set a software breakpoint (INT3) at an address. Supports module+RVA (e.g. 'crackme.exe+0x1000'). Duplicate address returns existing BP id. Use 'action' to auto-execute commands on hit (no agent intervention needed)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Address: hex (0x7FF600001000) or module+RVA (crackme.exe+0x1000)"}}},
 			{"condition", {{"type", "string"}, {"description", "Condition expression (e.g. 'RAX==0x1000', 'RCX>5'). BP only fires when true."}}},
 			{"hitCondition", {{"type", "string"}, {"description", "Hit count threshold. BP fires only on Nth hit (e.g. '5' = fire on 5th hit)."}}},
 			{"logMessage", {{"type", "string"}, {"description", "Log message template (logpoint). Use {expr} for interpolation (e.g. 'x={RAX}'). Does NOT stop execution."}}},
 			{"action", {{"type", "array"}, {"items", {{"oneOf", json::array({json{{"type", "object"}}, json{{"type", "string"}}})}}}, {"description", "Auto-execute on BP hit (same format as veh_batch steps). Items may be step objects or JSON-encoded object strings. After action, auto-continues. Example: [{\"tool\":\"veh_set_register\",\"args\":{\"threadId\":0,\"name\":\"RAX\",\"value\":\"1\"}}]"}}}
-		 }}, {"required", json::array({"address"})}}}},
+		 }}, {"required", json::array({"address"})}}}}),
 
-		{{"name", "veh_remove_breakpoint"}, {"description", "Remove a software breakpoint by ID."},
+		Tool(&McpServer::ToolRemoveBreakpoint, "breakpoint", 0, true,
+			{{"name", "veh_remove_breakpoint"}, {"description", "Remove a software breakpoint by ID."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"id", {{"type", "integer"}, {"description", "Breakpoint ID from veh_set_breakpoint"}}}
-		 }}, {"required", json::array({"id"})}}}},
+		 }}, {"required", json::array({"id"})}}}}),
 
-		{{"name", "veh_set_source_breakpoint"}, {"description", "Set a breakpoint by source file and line number. Requires PDB symbols. If the symbol's module is not loaded yet, the breakpoint is kept pending (response has pending:true) and auto-binds when the module loads -- poll veh_list_breakpoints (status: pending|active). This is normal, not an error."},
+		Tool(&McpServer::ToolSetSourceBreakpoint, "breakpoint", 0, true,
+			{{"name", "veh_set_source_breakpoint"}, {"description", "Set a breakpoint by source file and line number. Requires PDB symbols. If the symbol's module is not loaded yet, the breakpoint is kept pending (response has pending:true) and auto-binds when the module loads -- poll veh_list_breakpoints (status: pending|active). This is normal, not an error."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"source", {{"type", "string"}, {"description", "Source file path (e.g. 'main.cpp', 'src/app.cpp')"}}},
 			{"line", {{"type", "integer"}, {"description", "Line number in the source file"}}},
 			{"condition", {{"type", "string"}, {"description", "Condition expression (e.g. 'RAX==0x1000')"}}},
 			{"hitCondition", {{"type", "string"}, {"description", "Hit count threshold"}}},
 			{"logMessage", {{"type", "string"}, {"description", "Log message template (logpoint)"}}}
-		 }}, {"required", json::array({"source", "line"})}}}},
+		 }}, {"required", json::array({"source", "line"})}}}}),
 
-		{{"name", "veh_set_function_breakpoint"}, {"description", "Set a breakpoint at the entry of a function by name. Requires PDB symbols. If the function's module is not loaded yet, the breakpoint is kept pending (response has pending:true) and auto-binds when the module loads -- poll veh_list_breakpoints (status: pending|active). This is normal, not an error."},
+		Tool(&McpServer::ToolSetFunctionBreakpoint, "breakpoint", 0, true,
+			{{"name", "veh_set_function_breakpoint"}, {"description", "Set a breakpoint at the entry of a function by name. Requires PDB symbols. If the function's module is not loaded yet, the breakpoint is kept pending (response has pending:true) and auto-binds when the module loads -- poll veh_list_breakpoints (status: pending|active). This is normal, not an error."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"name", {{"type", "string"}, {"description", "Function name (e.g. 'main', 'MyClass::DoSomething')"}}},
 			{"condition", {{"type", "string"}, {"description", "Condition expression"}}},
 			{"hitCondition", {{"type", "string"}, {"description", "Hit count threshold"}}},
 			{"logMessage", {{"type", "string"}, {"description", "Log message template (logpoint)"}}}
-		 }}, {"required", json::array({"name"})}}}},
+		 }}, {"required", json::array({"name"})}}}}),
 
-		{{"name", "veh_list_breakpoints"}, {"description", "List all active software and hardware breakpoints with their properties."},
-		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}},
+		Tool(&McpServer::ToolListBreakpoints, "breakpoint", 0, true,
+			{{"name", "veh_list_breakpoints"}, {"description", "List all active software and hardware breakpoints with their properties."},
+		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
 
-		{{"name", "veh_set_data_breakpoint"}, {"description", "Set a hardware data breakpoint (DR0-DR3). Like Cheat Engine's 'Find out what writes/accesses'. Max 4 simultaneous. Supports condition/hitCondition to filter noisy writes (e.g. a clear-helper writing 0)."},
+		Tool(&McpServer::ToolSetDataBreakpoint, "breakpoint", kInteractive, true,
+			{{"name", "veh_set_data_breakpoint"}, {"description", "Set a hardware data breakpoint (DR0-DR3). Like Cheat Engine's 'Find out what writes/accesses'. Max 4 simultaneous. Supports condition/hitCondition to filter noisy writes (e.g. a clear-helper writing 0)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Hex address to watch (also accepts module+RVA)"}}},
 			{"type", {{"type", "string"}, {"enum", json::array({"write", "readwrite", "execute"})}, {"description", "Breakpoint type (default: write)"}}},
 			{"size", {{"type", "integer"}, {"enum", json::array({1, 2, 4, 8})}, {"description", "Watch size in bytes (default: 4)"}}},
 			{"condition", {{"type", "string"}, {"description", "Only stop when true. Token 'value' = current value at the watched address (e.g. 'value != 0' skips zero-writes; 'value > 100'). Registers and [0xADDR] deref also allowed."}}},
 			{"hitCondition", {{"type", "string"}, {"description", "Stop only on the Nth hit (skips first N-1). E.g. '5' = stop on 5th write."}}}
-		 }}, {"required", json::array({"address"})}}}},
+		 }}, {"required", json::array({"address"})}}}}),
 
-		{{"name", "veh_remove_data_breakpoint"}, {"description", "Remove a hardware data breakpoint by ID."},
+		Tool(&McpServer::ToolRemoveDataBreakpoint, "breakpoint", 0, true,
+			{{"name", "veh_remove_data_breakpoint"}, {"description", "Remove a hardware data breakpoint by ID."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"id", {{"type", "integer"}, {"description", "Data breakpoint ID"}}}
-		 }}, {"required", json::array({"id"})}}}},
+		 }}, {"required", json::array({"id"})}}}}),
 
-		{{"name", "veh_continue"}, {"description", "Continue execution. threadId=0 resumes all debugger-stopped threads; threadId=X resumes only X and leaves the others stopped. Every executed continue reports resumedThreadIds and stillStoppedThreadIds. Use wait=true to block until a breakpoint hit, exception, pause, or process exit occurs (returns stop reason, address, threadId). Use pass_exception=true to forward the current exception to the process's own SEH handler (for CFF/obfuscated INT3, etc.). Default timeout 10s, configurable."},
+		Tool(&McpServer::ToolContinue, "session", kLite | kInteractive | kCapture, true,
+			{{"name", "veh_continue"}, {"description", "Continue execution. threadId=0 resumes all debugger-stopped threads; threadId=X resumes only X and leaves the others stopped. Every executed continue reports resumedThreadIds and stillStoppedThreadIds. Use wait=true to block until a breakpoint hit, exception, pause, or process exit occurs (returns stop reason, address, threadId). Use pass_exception=true to forward the current exception to the process's own SEH handler (for CFF/obfuscated INT3, etc.). Default timeout 10s, configurable."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "Thread ID (0 = resume all debugger-stopped threads; nonzero = resume only that thread and keep all others stopped; default: 0)"}}},
 			{"wait", {{"type", "boolean"}, {"description", "If true, block until target stops (breakpoint/exception/pause/exit). Default: false"}}},
 			{"timeout", {{"type", "integer"}, {"description", "Max seconds to wait when wait=true (1-300, default: 10)"}}},
 			{"pass_exception", {{"type", "boolean"}, {"description", "If true, pass the current exception to the process's SEH handler instead of handling it. Use for CFF/obfuscated code with INT3. Default: false"}}},
 			{"ignore_exceptions", {{"type", "array"}, {"items", {{"type", "integer"}}}, {"description", "Exception codes to auto-pass to SEH (persistent until changed). E.g. [2147483651] for INT3 (0x80000003). Filters exceptions while catching real crashes."}}}
-		 }}}}},
+		 }}}}}),
 
-		{{"name", "veh_step_in"}, {"description", "Single step into (execute one instruction, entering calls). Waits for completion and returns the new instruction pointer."},
+		Tool(&McpServer::ToolStepIn, "session", 0, true,
+			{{"name", "veh_step_in"}, {"description", "Single step into (execute one instruction, entering calls). Waits for completion and returns the new instruction pointer."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}}
-		 }}, {"required", json::array({"threadId"})}}}},
+		 }}, {"required", json::array({"threadId"})}}}}),
 
-		{{"name", "veh_step_over"}, {"description", "Step over (execute one instruction, skipping calls). Waits for completion and returns the new instruction pointer."},
+		Tool(&McpServer::ToolStepOver, "session", 0, true,
+			{{"name", "veh_step_over"}, {"description", "Step over (execute one instruction, skipping calls). Waits for completion and returns the new instruction pointer."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}}
-		 }}, {"required", json::array({"threadId"})}}}},
+		 }}, {"required", json::array({"threadId"})}}}}),
 
-		{{"name", "veh_step_out"}, {"description", "Step out (run until current function returns)."},
+		Tool(&McpServer::ToolStepOut, "session", 0, true,
+			{{"name", "veh_step_out"}, {"description", "Step out (run until current function returns)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}}
-		 }}, {"required", json::array({"threadId"})}}}},
+		 }}, {"required", json::array({"threadId"})}}}}),
 
-		{{"name", "veh_pause"}, {"description", "Pause execution. threadId=0 pauses all threads."},
+		Tool(&McpServer::ToolPause, "session", 0, true,
+			{{"name", "veh_pause"}, {"description", "Pause execution. threadId=0 pauses all threads."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "Thread ID (0 = all)"}}}
-		 }}}}},
+		 }}}}}),
 
-		{{"name", "veh_threads"}, {"description", "List all threads in the target process."},
-		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}},
+		Tool(&McpServer::ToolThreads, "session", 0, true,
+			{{"name", "veh_threads"}, {"description", "List all threads in the target process."},
+		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
 
-		{{"name", "veh_stack_trace"}, {"description", "Get stack trace for a thread."},
+		Tool(&McpServer::ToolStackTrace, "trace", 0, true,
+			{{"name", "veh_stack_trace"}, {"description", "Get stack trace for a thread."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}},
 			{"maxFrames", {{"type", "integer"}, {"description", "Max frames to return (default: 20)"}}}
-		 }}, {"required", json::array({"threadId"})}}}},
+		 }}, {"required", json::array({"threadId"})}}}}),
 
-		{{"name", "veh_registers"}, {"description", "Get CPU registers for a thread. 32-bit targets return eax/ebx/.../esp/eip; 64-bit targets return rax/.../rsp/rip plus r8-r15. The is32bit flag tells which set to expect. (In veh_batch, pass fields:[...] to return only selected registers.)"},
+		Tool(&McpServer::ToolRegisters, "inspect", kLite | kInteractive, true,
+			{{"name", "veh_registers"}, {"description", "Get CPU registers for a thread. 32-bit targets return eax/ebx/.../esp/eip; 64-bit targets return rax/.../rsp/rip plus r8-r15. The is32bit flag tells which set to expect."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}}
-		 }}, {"required", json::array({"threadId"})}}}},
+			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}},
+			{"fields", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Return only these registers (e.g. [\"rsp\",\"rip\"]); is32bit is always included"}}}
+		 }}, {"required", json::array({"threadId"})}}}}),
 
-		{{"name", "veh_read_memory"}, {"description", "Read memory from the target process. Returns hex dump."},
+		Tool(&McpServer::ToolReadMemory, "memory", kInteractive, true,
+			{{"name", "veh_read_memory"}, {"description", "Read memory from the target process. Returns hex dump."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Hex address"}}},
 			{"size", {{"type", "integer"}, {"description", "Bytes to read (default: 64, max: 1MB)"}}}
-		 }}, {"required", json::array({"address"})}}}},
+		 }}, {"required", json::array({"address"})}}}}),
 
-		{{"name", "veh_read_pointer_chain"}, {"description", "Follow a pointer chain in one call (no per-hop round-trips). Starts at base, then for each offset dereferences *(cur+offset). E.g. base='unit', offsets=['0x2c','0x1c','0x10','0x58'] resolves unit->+0x2c->+0x1c->+0x10->+0x58. Auto-detects 4/8-byte pointers (x86/x64). Returns each hop and the final resolved address; pass size>0 to also read bytes there."},
+		Tool(&McpServer::ToolReadPointerChain, "memory", 0, true,
+			{{"name", "veh_read_pointer_chain"}, {"description", "Follow a pointer chain in one call (no per-hop round-trips). Starts at base, then for each offset dereferences *(cur+offset). E.g. base='unit', offsets=['0x2c','0x1c','0x10','0x58'] resolves unit->+0x2c->+0x1c->+0x10->+0x58. Auto-detects 4/8-byte pointers (x86/x64). Returns each hop and the final resolved address; pass size>0 to also read bytes there."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"base", {{"type", "string"}, {"description", "Base address: hex or module+RVA (e.g. 'game.exe+0x1a340')"}}},
 			{"offsets", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Offsets applied and dereferenced in order, hex strings or ints (e.g. ['0x2c','0x1c','0x10'])"}}},
 			{"derefFinal", {{"type", "boolean"}, {"description", "If true (default) the last offset is also dereferenced (resolved = final pointer value). If false, resolved = cur+lastOffset (the address itself, not dereferenced)."}}},
 			{"size", {{"type", "integer"}, {"description", "If >0, also read this many bytes at the resolved address (max 4096). Returns hex + little-endian integer value."}}}
-		 }}, {"required", json::array({"base", "offsets"})}}}},
+		 }}, {"required", json::array({"base", "offsets"})}}}}),
 
-		{{"name", "veh_write_memory"}, {"description", "Write memory to the target process. Single mode: address+data. Batch mode: patches array for multi-address patching in one call."},
+		Tool(&McpServer::ToolWriteMemory, "memory", 0, true,
+			{{"name", "veh_write_memory"}, {"description", "Write memory to the target process. Single mode: address+data. Batch mode: patches array for multi-address patching in one call."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Hex address (single mode)"}}},
 			{"data", {{"type", "string"}, {"description", "Hex bytes to write (single mode, e.g. '90 90 90')"}}},
 			{"patches", {{"type", "array"}, {"items", {{"type", "object"}, {"properties", {{"address", {{"type", "string"}}}, {"data", {{"type", "string"}}}}}}}, {"description", "Batch mode: [{address, data}, ...]. Overrides address/data if provided."}}}
-		 }}}}},
+		 }}}}}),
 
-		{{"name", "veh_modules"}, {"description", "List loaded modules (DLLs) in the target process."},
-		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}},
+		Tool(&McpServer::ToolModules, "inspect", 0, true,
+			{{"name", "veh_modules"}, {"description", "List loaded modules (DLLs) in the target process."},
+		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
 
-		{{"name", "veh_disassemble"}, {"description", "Disassemble instructions at an address."},
+		Tool(&McpServer::ToolDisassemble, "inspect", kInteractive, true,
+			{{"name", "veh_disassemble"}, {"description", "Disassemble instructions at an address."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Hex address"}}},
 			{"count", {{"type", "integer"}, {"description", "Number of instructions (default: 20)"}}}
-		 }}, {"required", json::array({"address"})}}}},
+		 }}, {"required", json::array({"address"})}}}}),
 
-		{{"name", "veh_enum_locals"}, {"description", "Enumerate local variables and parameters for a stopped thread's stack frame. Returns variable names, types, addresses, and values."},
+		Tool(&McpServer::ToolEnumLocals, "inspect", 0, true,
+			{{"name", "veh_enum_locals"}, {"description", "Enumerate local variables and parameters for a stopped thread's stack frame. Returns variable names, types, addresses, and values."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}},
 			{"instructionAddress", {{"type", "string"}, {"description", "RIP/EIP hex address of the frame (auto-detected from top frame if omitted)"}}},
 			{"frameBase", {{"type", "string"}, {"description", "RBP/EBP hex address (auto-detected from top frame if omitted)"}}}
-		 }}, {"required", json::array({"threadId"})}}}},
+		 }}, {"required", json::array({"threadId"})}}}}),
 
-		{{"name", "veh_evaluate"}, {"description", "Evaluate an expression. Supports: register names (RAX, RBX, etc.), hex addresses (0x...), pointer dereference (*addr, [addr], [RAX+0x10], [RAX-8], [RAX+RBX]), and segment registers (gs:[0x60] for PEB, fs:[0x30] for TEB on x86)."},
+		Tool(&McpServer::ToolEvaluate, "inspect", 0, true,
+			{{"name", "veh_evaluate"}, {"description", "Evaluate an expression. Supports: register names (RAX, RBX, etc.), hex addresses (0x...), pointer dereference (*addr, [addr], [RAX+0x10], [RAX-8], [RAX+RBX]), and segment registers (gs:[0x60] for PEB, fs:[0x30] for TEB on x86)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"expression", {{"type", "string"}, {"description", "Expression to evaluate (register name, hex address, *addr for dereference)"}}},
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID for register context"}}}
-		 }}, {"required", json::array({"expression", "threadId"})}}}},
+		 }}, {"required", json::array({"expression", "threadId"})}}}}),
 
-		{{"name", "veh_set_register"}, {"description", "Set a CPU register value for a stopped thread."},
+		Tool(&McpServer::ToolSetRegister, "session", 0, true,
+			{{"name", "veh_set_register"}, {"description", "Set a CPU register value for a stopped thread."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID"}}},
 			{"name", {{"type", "string"}, {"description", "Register name (e.g. RAX, RBX, RCX, RDX, RSP, RBP, RSI, RDI, R8-R15, RIP, RFLAGS)"}}},
 			{"value", {{"type", "string"}, {"description", "New value (hex or decimal, e.g. '0x1000' or '4096')"}}}
-		 }}, {"required", json::array({"threadId", "name", "value"})}}}},
+		 }}, {"required", json::array({"threadId", "name", "value"})}}}}),
 
-		{{"name", "veh_exception_info"}, {"description", "Get information about the last exception that occurred in the target process."},
-		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}},
+		Tool(&McpServer::ToolExceptionInfo, "inspect", 0, true,
+			{{"name", "veh_exception_info"}, {"description", "Get information about the last exception that occurred in the target process."},
+		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
 
-		{{"name", "veh_trace_callers"}, {"description", "Profile who calls a function: sets BP at address, auto-resumes process, collects all unique callers with hit counts for duration_sec seconds, then pauses and returns results. Useful for call graph analysis and finding hot callers. x64: uses RtlVirtualUnwind for accurate caller resolution. x86: uses [ESP] (accurate only at function entry). Process is automatically resumed before tracing and paused after."},
+		Tool(&McpServer::ToolTraceCallers, "trace", 0, true,
+			{{"name", "veh_trace_callers"}, {"description", "Profile who calls a function: sets BP at address, auto-resumes process, collects all unique callers with hit counts for duration_sec seconds, then pauses and returns results. Useful for call graph analysis and finding hot callers. x64: uses RtlVirtualUnwind for accurate caller resolution. x86: uses [ESP] (accurate only at function entry). Process is automatically resumed before tracing and paused after."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Hex address to set breakpoint (e.g. '0x7FF600001000')"}}},
 			{"duration_sec", {{"type", "integer"}, {"description", "How long to collect callers in seconds (default: 5, max: 60)"}}}
-		 }}, {"required", json::array({"address"})}}}},
+		 }}, {"required", json::array({"address"})}}}}),
 
-		{{"name", "veh_trace_calls"}, {"description", "Monitor where call/jmp instructions go at runtime. Sets breakpoints on call sites, runs program for N seconds, collects actual targets. With resolve=true, follows through obfuscated thunks to the final API using natural call context (no forced RIP). Ideal for IAT reconstruction on packed binaries."},
+		Tool(&McpServer::ToolTraceCalls, "trace", 0, true,
+			{{"name", "veh_trace_calls"}, {"description", "Monitor where call/jmp instructions go at runtime. Sets breakpoints on call sites, runs program for N seconds, collects actual targets. With resolve=true, follows through obfuscated thunks to the final API using natural call context (no forced RIP). Ideal for IAT reconstruction on packed binaries."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"addresses", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Array of call/jmp site addresses to monitor (hex or module+RVA)"}}},
 			{"duration_sec", {{"type", "integer"}, {"description", "How long to monitor in seconds (default: 5, max: 60)"}}},
 			{"resolve", {{"type", "boolean"}, {"description", "Follow through thunks to final target (system DLL). Uses natural call context. Default: false"}}},
 			{"system_only", {{"type", "boolean"}, {"description", "Only resolve to system DLLs. Default: false"}}}
-		 }}, {"required", json::array({"addresses"})}}}},
+		 }}, {"required", json::array({"addresses"})}}}}),
 
-		{{"name", "veh_trace_basic_blocks"}, {"description", "Bounded semantic trace for one VEH-stopped thread. Returns versioned aggregate metadata and unique blocks/edges; optional ordered streams cover transitions, per-occurrence memory accesses, instruction register deltas, and runtime code versions in one sequence space. Function-scoped mode records the entry return contract, filters external-call execution, and stops at the original return. Startup failures report structured stopped/IP/range/decode diagnostics."},
+		Tool(&McpServer::ToolTraceBasicBlocks, "trace", kCapture, true,
+			{{"name", "veh_trace_basic_blocks"}, {"description", "Bounded semantic trace for one VEH-stopped thread. Returns versioned aggregate metadata and unique blocks/edges; optional ordered streams cover transitions, per-occurrence memory accesses, instruction register deltas, and runtime code versions in one sequence space. Function-scoped mode records the entry return contract, filters external-call execution, and stops at the original return. Startup failures report structured stopped/IP/range/decode diagnostics."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID currently stopped by VEH; its RIP/EIP must be inside the range"}}},
 			{"start", {{"type", "string"}, {"description", "Inclusive range start (hex or module+RVA)"}}},
@@ -3487,9 +3506,10 @@ json McpServer::BuildAllToolsList() {
 			}}, {"required", json::array({"address", "occurrence", "before_steps", "after_steps"})}, {"description", "Bounded pre-trigger ring plus post-trigger capture; incompatible with occurrence_window, conditions, stop_on_return, and code_output=file"}}}
 			,{"output_file", {{"type", "string"}, {"description", "Write the complete trace result to a new MCP-host file and return compact path/hash/count metadata"}}}
 			,{"output_format", {{"type", "string"}, {"enum", {"json", "jsonl"}}, {"description", "output_file encoding (default json); JSONL uses a manifest plus section-item records"}}}
-		 }}, {"required", json::array({"threadId", "start", "end"})}}}},
+		 }}, {"required", json::array({"threadId", "start", "end"})}}}}),
 
-		{{"name", "veh_checkpoint_create"}, {"description", "Capture one VEH-stopped thread's GPR/flags (plus x64 XMM), TEB and FS/GS selector/base metadata, and explicitly selected memory ranges. Stack ranges expose the safe logical restore start at the saved SP. Checkpoints are session-local and bounded; they do not capture other threads, handles, allocations, files, sockets, or kernel state."},
+		Tool(&McpServer::ToolCheckpointCreate, "checkpoint", kCapture, true,
+			{{"name", "veh_checkpoint_create"}, {"description", "Capture one VEH-stopped thread's GPR/flags (plus x64 XMM), TEB and FS/GS selector/base metadata, and explicitly selected memory ranges. Stack ranges expose the safe logical restore start at the saved SP. Checkpoints are session-local and bounded; they do not capture other threads, handles, allocations, files, sockets, or kernel state."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "VEH-stopped thread to capture"}}},
 			{"regions", {{"type", "array"}, {"maxItems", 16}, {"items", {{"type", "object"}, {"properties", {
@@ -3497,57 +3517,66 @@ json McpServer::BuildAllToolsList() {
 			}} , {"required", json::array({"address", "size"})}}}, {"description", "Non-overlapping committed ranges; max 16 MiB total"}}},
 			{"capture_teb", {{"type", "boolean"}, {"description", "Also capture bytes at the effective x86/WOW64/x64 TEB address (default false)"}}},
 			{"teb_size", {{"type", "integer"}, {"minimum", 256}, {"maximum", 1048576}, {"description", "Bytes captured when capture_teb=true (default 4096)"}}}
-		 }}, {"required", json::array({"threadId"})}}}},
+		 }}, {"required", json::array({"threadId"})}}}}),
 
-		{{"name", "veh_checkpoint_restore"}, {"description", "Restore selected memory and the captured thread context. Stack restores preserve live VEH exception/wait frames below saved SP and report skipped bytes. Refuses changed mappings, rolls memory back on failure, and requires the original thread to be VEH-stopped."},
+		Tool(&McpServer::ToolCheckpointRestore, "checkpoint", kCapture, true,
+			{{"name", "veh_checkpoint_restore"}, {"description", "Restore selected memory and the captured thread context. Stack restores preserve live VEH exception/wait frames below saved SP and report skipped bytes. Refuses changed mappings, rolls memory back on failure, and requires the original thread to be VEH-stopped."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"id", {{"description", "Checkpoint ID returned by veh_checkpoint_create"}}}
-		 }}, {"required", json::array({"id"})}}}},
+		 }}, {"required", json::array({"id"})}}}}),
 
-		{{"name", "veh_checkpoint_diff"}, {"description", "Compare a checkpoint with current stopped-thread state or another compatible checkpoint. Returns register changes and bounded changed-memory spans."},
+		Tool(&McpServer::ToolCheckpointDiff, "checkpoint", 0, true,
+			{{"name", "veh_checkpoint_diff"}, {"description", "Compare a checkpoint with current stopped-thread state or another compatible checkpoint. Returns register changes and bounded changed-memory spans."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"id", {{"description", "Base checkpoint ID"}}},
 			{"other_id", {{"description", "Optional checkpoint ID; omit to compare with current state"}}}
-		 }}, {"required", json::array({"id"})}}}},
+		 }}, {"required", json::array({"id"})}}}}),
 
-		{{"name", "veh_checkpoint_delete"}, {"description", "Delete a session-local checkpoint and release its memory budget."},
+		Tool(&McpServer::ToolCheckpointDelete, "checkpoint", kCapture, true,
+			{{"name", "veh_checkpoint_delete"}, {"description", "Delete a session-local checkpoint and release its memory budget."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"id", {{"description", "Checkpoint ID to delete"}}}
-		 }}, {"required", json::array({"id"})}}}},
+		 }}, {"required", json::array({"id"})}}}}),
 
-		{{"name", "veh_dump_memory"}, {"description", "Dump memory to a binary file. Reads in 1MB chunks, supports up to 64MB. Avoids token overhead of hex string encoding."},
+		Tool(&McpServer::ToolDumpMemory, "memory", 0, true,
+			{{"name", "veh_dump_memory"}, {"description", "Dump memory to a binary file. Reads in 1MB chunks, supports up to 64MB. Avoids token overhead of hex string encoding."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Hex start address"}}},
 			{"size", {{"type", "integer"}, {"description", "Bytes to dump (default: 4096, max: 64MB)"}}},
 			{"output_path", {{"type", "string"}, {"description", "Output file path for the binary dump"}}}
-		 }}, {"required", json::array({"address", "output_path"})}}}},
+		 }}, {"required", json::array({"address", "output_path"})}}}}),
 
-		{{"name", "veh_allocate_memory"}, {"description", "Allocate memory pages in the target process via VirtualAlloc."},
+		Tool(&McpServer::ToolAllocateMemory, "memory", 0, true,
+			{{"name", "veh_allocate_memory"}, {"description", "Allocate memory pages in the target process via VirtualAlloc."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"size", {{"type", "integer"}, {"description", "Allocation size in bytes (default: 4096)"}}},
 			{"protection", {{"type", "string"}, {"enum", json::array({"rwx", "rw", "rx", "r"})}, {"description", "Memory protection (default: rwx = PAGE_EXECUTE_READWRITE)"}}}
-		 }}}}},
+		 }}}}}),
 
-		{{"name", "veh_free_memory"}, {"description", "Free previously allocated memory pages in the target process via VirtualFree."},
+		Tool(&McpServer::ToolFreeMemory, "memory", 0, true,
+			{{"name", "veh_free_memory"}, {"description", "Free previously allocated memory pages in the target process via VirtualFree."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Hex address of the allocation to free"}}}
-		 }}, {"required", json::array({"address"})}}}},
+		 }}, {"required", json::array({"address"})}}}}),
 
-		{{"name", "veh_execute_shellcode"}, {"description", "Execute shellcode in the target process. Allocates RWX page, copies code, creates thread, waits for completion, frees page. Set timeout_ms=0 for fire-and-forget (page not freed)."},
+		Tool(&McpServer::ToolExecuteShellcode, "memory", 0, true,
+			{{"name", "veh_execute_shellcode"}, {"description", "Execute shellcode in the target process. Allocates RWX page, copies code, creates thread, waits for completion, frees page. Set timeout_ms=0 for fire-and-forget (page not freed)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"shellcode", {{"type", "string"}, {"description", "Hex-encoded shellcode bytes (e.g. 'C3' for ret, '33C0C3' for xor eax,eax; ret)"}}},
 			{"timeout_ms", {{"type", "integer"}, {"description", "Max wait time in ms (default: 5000, max: 60000). 0 = fire-and-forget (don't wait, don't free)."}}}
-		 }}, {"required", json::array({"shellcode"})}}}},
+		 }}, {"required", json::array({"shellcode"})}}}}),
 
-		{{"name", "veh_set_module_breakpoint"}, {"description",
+		Tool(&McpServer::ToolSetModuleBreakpoint, "breakpoint", 0, true,
+			{{"name", "veh_set_module_breakpoint"}, {"description",
 			"Stop when a module (DLL) whose name matches is loaded into the target. Matching is case-insensitive substring on the base name (e.g. \"D2Common\" matches \"D2Common.dll\"). The loading thread is frozen right after the module is mapped (via LdrRegisterDllNotification), so you can then set breakpoints inside it, resolve its exports, or dump it -- ideal for headless capture. NOTE: on modern Windows the notification fires AFTER the module's own DllMain has run, so use this to catch a module becoming present/initialized, not to freeze before its init code executes. Pass enabled=false to remove one pattern, or clear=true to remove all. The stop surfaces via veh_continue(wait=true) with reason \"module-load\". While stopped here, registers/memory/stack/modules are readable, but this is an inspection stop -- register/RIP writes (veh_set_register) are not applied to the loader thread."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"module", {{"type", "string"}, {"description", "Module-name substring to stop on (case-insensitive), e.g. \"D2Common.dll\""}}},
 			{"enabled", {{"type", "boolean"}, {"description", "false removes this pattern; default true adds it"}}},
 			{"clear", {{"type", "boolean"}, {"description", "true clears ALL module-load breakpoints (module ignored)"}}}
-		 }}}}},
+		 }}}}}),
 
-		{{"name", "veh_batch"}, {"description",
+		Tool(&McpServer::ToolBatch, "orchestration", kLite | kCapture, false,
+			{{"name", "veh_batch"}, {"description",
 			"Execute sequential debugger steps, conditions, loops, or input matrices in one call. "
 			"Use $N/$last/$prev references between results and args.fields to bound register output. "
 			"Detailed examples are in docs/DEVELOPMENT_TOOLS.md."
@@ -3558,25 +3587,28 @@ json McpServer::BuildAllToolsList() {
 			{"inputs", {{"type", "array"}, {"maxItems", 256}, {"description", "Repeat the steps once per input object/value in the same debug session"}}},
 			{"input_variable", {{"type", "string"}, {"description", "Variable bound to each input (default $input)"}}},
 			{"stop_on_error", {{"type", "boolean"}, {"description", "Stop the current batch and any remaining input runs after the first failed step (default false)"}}}
-		 }}}}},
+		 }}}}}),
 
-		{{"name", "veh_trace_register"}, {"description", "Trace a register: single-steps internally (inside DLL, zero IPC overhead per step) until the register meets a condition. Returns the instruction that caused the change. Thread must be stopped at a breakpoint (not via veh_pause). Much faster than manual step+check loops."},
+		Tool(&McpServer::ToolTraceRegister, "trace", 0, true,
+			{{"name", "veh_trace_register"}, {"description", "Trace a register: single-steps internally (inside DLL, zero IPC overhead per step) until the register meets a condition. Returns the instruction that caused the change. Thread must be stopped at a breakpoint (not via veh_pause). Much faster than manual step+check loops."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (must be stopped)"}}},
 			{"register", {{"type", "string"}, {"description", "Register name (RAX, RBX, RCX, etc.)"}}},
 			{"mode", {{"type", "string"}, {"enum", json::array({"changed", "equals", "not_equals"})}, {"description", "Condition: 'changed' (any change), 'equals' (== value), 'not_equals' (!= value). Default: changed"}}},
 			{"value", {{"type", "string"}, {"description", "Compare value for equals/not_equals mode (hex or decimal)"}}},
 			{"max_steps", {{"type", "integer"}, {"description", "Max instructions to step (default: 10000, max: 100000)"}}}
-		 }}, {"required", json::array({"threadId", "register"})}}}},
+		 }}, {"required", json::array({"threadId", "register"})}}}}),
 
-		{{"name", "veh_trace_memory"}, {"description", "Trace memory writes: sets a temporary hardware data breakpoint, resumes the process, and waits for any thread to write to the address. Returns the writing instruction, thread ID, and old/new values. Uses DR0-DR3 (1 slot occupied during trace)."},
+		Tool(&McpServer::ToolTraceMemory, "trace", 0, true,
+			{{"name", "veh_trace_memory"}, {"description", "Trace memory writes: sets a temporary hardware data breakpoint, resumes the process, and waits for any thread to write to the address. Returns the writing instruction, thread ID, and old/new values. Uses DR0-DR3 (1 slot occupied during trace)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Memory address to watch (hex or module+RVA)"}}},
 			{"size", {{"type", "integer"}, {"enum", json::array({1, 2, 4, 8})}, {"description", "Watch size in bytes (default: 4)"}}},
 			{"timeout_ms", {{"type", "integer"}, {"description", "Max wait time in ms (default: 10000, max: 60000)"}}}
-		 }}, {"required", json::array({"address"})}}}},
+		 }}, {"required", json::array({"address"})}}}}),
 
-		{{"name", "veh_resolve_imports"}, {"description", "Resolve obfuscated/packed imports by single-stepping from thunk addresses until RIP enters a loaded DLL. Returns API names (module!function) for each thunk. Processes up to 2000 imports in a single call. With follow_exceptions=true, passes non-single-step exceptions (INT3, AV, PRIV_INSTRUCTION) to SEH handlers while keeping trace active -- enables resolving exception-based obfuscated thunks (Themida, VMProtect style). Thread must be stopped at a breakpoint."},
+		Tool(&McpServer::ToolResolveImports, "trace", 0, true,
+			{{"name", "veh_resolve_imports"}, {"description", "Resolve obfuscated/packed imports by single-stepping from thunk addresses until RIP enters a loaded DLL. Returns API names (module!function) for each thunk. Processes up to 2000 imports in a single call. With follow_exceptions=true, passes non-single-step exceptions (INT3, AV, PRIV_INSTRUCTION) to SEH handlers while keeping trace active -- enables resolving exception-based obfuscated thunks (Themida, VMProtect style). Thread must be stopped at a breakpoint."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (must be stopped at breakpoint)"}}},
 			{"addresses", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Array of thunk addresses (hex or module+RVA)"}}},
@@ -3584,8 +3616,8 @@ json McpServer::BuildAllToolsList() {
 			{"follow_exceptions", {{"type", "boolean"}, {"description", "Pass non-SINGLE_STEP exceptions to SEH during trace (for exception-based obfuscated thunks). Default: false"}}},
 			{"system_only", {{"type", "boolean"}, {"description", "Only resolve to system DLLs (C:\\Windows\\System32). Filters out packer/runtime DLLs. Default: false"}}},
 			{"target_modules", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Only resolve to these specific modules (e.g. [\"kernel32\", \"ntdll\"]). Overrides system_only."}}}
-		 }}, {"required", json::array({"threadId", "addresses"})}}}}
-	});
+		 }}, {"required", json::array({"threadId", "addresses"})}}}})
+	};
 	json targetedProperties = json::object();
 	targetedProperties["inputs"] = {{"type", "array"}, {"minItems", 1}, {"maxItems", 256},
 		{"description", "Sequential input matrix"}};
@@ -3605,11 +3637,13 @@ json McpServer::BuildAllToolsList() {
 		{"description", "MCP-host artifact directory"}};
 	targetedProperties["stop_on_error"] = {{"type", "boolean"},
 		{"description", "Stop after first failed input (default true)"}};
-	tools.push_back({{"name", "veh_targeted_capture"},
+	tools.push_back(Tool(&McpServer::ToolTargetedCapture, "trace", kCapture, false,
+			{{"name", "veh_targeted_capture"},
 		{"description", "Run an input matrix in one attached session and write one bounded occurrence-triggered trace artifact per input. Setup steps may restore checkpoints and apply each $input; the trace retains a pre/post instruction ring with ordered code/register/memory events and embeds a pre-trace TEB/FS/GS environment snapshot. Success requires at least one completed instruction and the requested target-window stop; exception, zero-step, and partial windows fail explicitly. Returns per-input path/hash/count/drop/truncation/match/failure metadata. Session lifecycle tools are deliberately excluded from setup steps."},
 		{"inputSchema", {{"type", "object"}, {"properties", std::move(targetedProperties)},
-			{"required", json::array({"inputs", "trace", "trigger", "window", "output_directory"})}}}});
-	tools.push_back({{"name", "veh_toolbox"},
+			{"required", json::array({"inputs", "trace", "trigger", "window", "output_directory"})}}}}));
+	tools.push_back(Tool(&McpServer::ToolToolbox, "orchestration", kLite | kInteractive | kCapture, false,
+			{{"name", "veh_toolbox"},
 		{"description", "Discover, describe, or call VEH tools that are not eager in the active profile. Describe before calling and reuse schema_handle when possible."},
 		{"inputSchema", {{"type", "object"}, {"properties", {
 			{"operation", {{"type", "string"}, {"enum", json::array({"list", "describe", "call", "profiles"})}, {"description", "Operation (default: list)"}}},
@@ -3618,47 +3652,23 @@ json McpServer::BuildAllToolsList() {
 			{"profile", {{"type", "string"}, {"enum", json::array({"lite", "interactive", "capture", "full"})}, {"description", "Filter list by profile"}}},
 			{"query", {{"type", "string"}, {"description", "Case-insensitive list filter"}}},
 			{"schema_handle", {{"type", "string"}, {"description", "Handle from an earlier describe"}}}
-		}}}}});
+		}}}}}));
 	return tools;
 }
 
-static const std::vector<std::string>& ToolProfileNames(const std::string& profile) {
-	static const std::vector<std::string> lite = {
-		"veh_toolbox", "veh_attach", "veh_launch", "veh_continue", "veh_batch",
-		"veh_terminate", "veh_registers"
-	};
-	static const std::vector<std::string> interactive = {
-		"veh_toolbox", "veh_attach", "veh_launch", "veh_terminate", "veh_continue",
-		"veh_set_breakpoint", "veh_set_data_breakpoint", "veh_registers",
-		"veh_disassemble", "veh_read_memory"
-	};
-	static const std::vector<std::string> capture = {
-		"veh_toolbox", "veh_launch", "veh_terminate", "veh_continue", "veh_batch",
-		"veh_trace_basic_blocks", "veh_targeted_capture", "veh_checkpoint_create",
-		"veh_checkpoint_restore", "veh_checkpoint_delete"
-	};
-	if (profile == "interactive") return interactive;
-	if (profile == "capture") return capture;
-	return lite;
+McpServer::ToolDef McpServer::Tool(json (McpServer::*handler)(const json&), const char* category,
+	unsigned profiles, bool nested, json definition) {
+	std::string name = definition.value("name", "");
+	return {std::move(name), handler, category, profiles, nested, std::move(definition)};
 }
 
-static bool ToolInProfile(const std::string& name, const std::string& profile) {
-	if (profile == "full") return true;
-	const auto& names = ToolProfileNames(profile);
-	return std::find(names.begin(), names.end(), name) != names.end();
-}
-
-static std::string ToolCategory(const std::string& name) {
-	if (name == "veh_toolbox" || name == "veh_batch") return "orchestration";
-	if (name.find("checkpoint") != std::string::npos) return "checkpoint";
-	if (name.find("breakpoint") != std::string::npos) return "breakpoint";
-	if (name.find("trace") != std::string::npos || name == "veh_targeted_capture" ||
-		name == "veh_resolve_imports") return "trace";
-	if (name.find("memory") != std::string::npos || name == "veh_execute_shellcode") return "memory";
-	if (name == "veh_registers" || name == "veh_modules" || name == "veh_disassemble" ||
-		name == "veh_enum_locals" || name == "veh_evaluate" ||
-		name == "veh_exception_info" || name == "veh_stack_trace") return "inspect";
-	return "session";
+// Profile name -> ToolDef::profiles mask; 0 for an unknown profile
+static unsigned ProfileMask(const std::string& profile) {
+	if (profile == "lite") return kLite;
+	if (profile == "interactive") return kInteractive;
+	if (profile == "capture") return kCapture;
+	if (profile == "full") return kFullProfile;
+	return 0;
 }
 
 static std::string CompactToolSummary(const std::string& description) {
@@ -3681,94 +3691,68 @@ static std::string ToolSchemaHandle(const json& definition) {
 }
 
 json McpServer::GetToolsList() const {
+	const unsigned mask = ProfileMask(toolProfile_);
 	json exposed = json::array();
-	for (const auto& tool : allTools_) {
-		if (ToolInProfile(tool.value("name", ""), toolProfile_)) exposed.push_back(tool);
+	for (const auto& tool : tools_) {
+		if (tool.InProfile(mask)) exposed.push_back(tool.definition);
 	}
 	return exposed;
 }
 
+const McpServer::ToolDef* McpServer::FindTool(const std::string& name) const {
+	auto it = std::find_if(tools_.begin(), tools_.end(),
+		[&name](const ToolDef& tool) { return tool.name == name; });
+	return it == tools_.end() ? nullptr : &*it;
+}
+
 json McpServer::DispatchTool(const std::string& name, const json& args, bool* known) {
-	if (known) *known = true;
-	if      (name == "veh_attach")                return ToolAttach(args);
-	else if (name == "veh_launch")                return ToolLaunch(args);
-	else if (name == "veh_detach")                return ToolDetach(args);
-	else if (name == "veh_terminate")             return ToolTerminate(args);
-	else if (name == "veh_set_breakpoint")        return ToolSetBreakpoint(args);
-	else if (name == "veh_set_module_breakpoint") return ToolSetModuleBreakpoint(args);
-	else if (name == "veh_remove_breakpoint")     return ToolRemoveBreakpoint(args);
-	else if (name == "veh_set_data_breakpoint")   return ToolSetDataBreakpoint(args);
-	else if (name == "veh_remove_data_breakpoint") return ToolRemoveDataBreakpoint(args);
-	else if (name == "veh_continue")              return ToolContinue(args);
-	else if (name == "veh_step_in")               return ToolStepIn(args);
-	else if (name == "veh_step_over")              return ToolStepOver(args);
-	else if (name == "veh_step_out")               return ToolStepOut(args);
-	else if (name == "veh_pause")                 return ToolPause(args);
-	else if (name == "veh_threads")               return ToolThreads(args);
-	else if (name == "veh_stack_trace")           return ToolStackTrace(args);
-	else if (name == "veh_registers")             return ToolRegisters(args);
-	else if (name == "veh_read_memory")           return ToolReadMemory(args);
-	else if (name == "veh_read_pointer_chain")    return ToolReadPointerChain(args);
-	else if (name == "veh_write_memory")          return ToolWriteMemory(args);
-	else if (name == "veh_modules")               return ToolModules(args);
-	else if (name == "veh_disassemble")           return ToolDisassemble(args);
-	else if (name == "veh_enum_locals")           return ToolEnumLocals(args);
-	else if (name == "veh_set_source_breakpoint") return ToolSetSourceBreakpoint(args);
-	else if (name == "veh_set_function_breakpoint") return ToolSetFunctionBreakpoint(args);
-	else if (name == "veh_list_breakpoints")      return ToolListBreakpoints(args);
-	else if (name == "veh_evaluate")              return ToolEvaluate(args);
-	else if (name == "veh_set_register")          return ToolSetRegister(args);
-	else if (name == "veh_exception_info")        return ToolExceptionInfo(args);
-	else if (name == "veh_trace_callers")         return ToolTraceCallers(args);
-	else if (name == "veh_dump_memory")           return ToolDumpMemory(args);
-	else if (name == "veh_allocate_memory")       return ToolAllocateMemory(args);
-	else if (name == "veh_free_memory")           return ToolFreeMemory(args);
-	else if (name == "veh_execute_shellcode")     return ToolExecuteShellcode(args);
-	else if (name == "veh_batch")                 return ToolBatch(args);
-	else if (name == "veh_trace_register")        return ToolTraceRegister(args);
-	else if (name == "veh_trace_memory")          return ToolTraceMemory(args);
-	else if (name == "veh_resolve_imports")       return ToolResolveImports(args);
-	else if (name == "veh_trace_calls")           return ToolTraceCalls(args);
-	else if (name == "veh_trace_basic_blocks")    return ToolTraceBasicBlocks(args);
-	else if (name == "veh_targeted_capture")      return ToolTargetedCapture(args);
-	else if (name == "veh_checkpoint_create")     return ToolCheckpointCreate(args);
-	else if (name == "veh_checkpoint_restore")    return ToolCheckpointRestore(args);
-	else if (name == "veh_checkpoint_diff")       return ToolCheckpointDiff(args);
-	else if (name == "veh_checkpoint_delete")     return ToolCheckpointDelete(args);
-	else if (name == "veh_toolbox")              return ToolToolbox(args);
-	if (known) *known = false;
-	return {{"error", "Unknown tool: " + name}};
+	const ToolDef* tool = FindTool(name);
+	if (known) *known = tool != nullptr;
+	if (!tool) return {{"error", "Unknown tool: " + name}};
+	return (this->*tool->handler)(args);
+}
+
+json McpServer::RunNestedTool(const std::string& name, const json& args) {
+	const ToolDef* tool = FindTool(name);
+	if (tool && !tool->nested)
+		return {{"error", name + " is not available in batch steps, capture setup, or breakpoint actions"}};
+	return DispatchTool(name, args);
+}
+
+BatchExecutor McpServer::NewBatchExecutor() {
+	return BatchExecutor([this](const std::string& name, const json& args) {
+		return RunNestedTool(name, args);
+	});
 }
 
 json McpServer::ToolToolbox(const json& args) {
 	const std::string operation = args.value("operation", "list");
 	if (operation == "profiles") {
-		return {{"active", toolProfile_}, {"profiles", json::array({
-			json{{"name", "lite"}, {"eager_tools", ToolProfileNames("lite").size()}},
-			json{{"name", "interactive"}, {"eager_tools", ToolProfileNames("interactive").size()}},
-			json{{"name", "capture"}, {"eager_tools", ToolProfileNames("capture").size()}},
-			json{{"name", "full"}, {"eager_tools", allTools_.size()}}
-		})}};
+		json profiles = json::array();
+		for (const char* profile : {"lite", "interactive", "capture", "full"}) {
+			const unsigned mask = ProfileMask(profile);
+			profiles.push_back({{"name", profile}, {"eager_tools", std::count_if(tools_.begin(), tools_.end(),
+				[mask](const ToolDef& tool) { return tool.InProfile(mask); })}});
+		}
+		return {{"active", toolProfile_}, {"profiles", std::move(profiles)}};
 	}
 
-	const json& all = allTools_;
 	if (operation == "list") {
-		std::string profile = args.value("profile", "full");
-		if (profile != "lite" && profile != "interactive" && profile != "capture" && profile != "full")
-			return {{"error", "profile must be lite, interactive, capture, or full"}};
+		const std::string profile = args.value("profile", "full");
+		const unsigned mask = ProfileMask(profile);
+		if (!mask) return {{"error", "profile must be lite, interactive, capture, or full"}};
 		std::string query = args.value("query", "");
 		std::transform(query.begin(), query.end(), query.begin(),
 			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 		json matches = json::array();
-		for (const auto& definition : all) {
-			const std::string name = definition.value("name", "");
-			if (!ToolInProfile(name, profile)) continue;
-			const std::string summary = CompactToolSummary(definition.value("description", ""));
-			std::string haystack = name + " " + summary + " " + ToolCategory(name);
+		for (const auto& tool : tools_) {
+			if (!tool.InProfile(mask)) continue;
+			const std::string summary = CompactToolSummary(tool.definition.value("description", ""));
+			std::string haystack = tool.name + " " + summary + " " + tool.category;
 			std::transform(haystack.begin(), haystack.end(), haystack.begin(),
 				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 			if (!query.empty() && haystack.find(query) == std::string::npos) continue;
-			matches.push_back({{"name", name}, {"category", ToolCategory(name)}, {"summary", summary}});
+			matches.push_back({{"name", tool.name}, {"category", tool.category}, {"summary", summary}});
 		}
 		return {{"active_profile", toolProfile_}, {"filter_profile", profile},
 			{"count", matches.size()}, {"tools", std::move(matches)}};
@@ -3777,16 +3761,14 @@ json McpServer::ToolToolbox(const json& args) {
 	const std::string name = args.value("tool", "");
 	if (name.empty()) return {{"error", "tool is required for describe or call"}};
 	if (operation == "describe") {
-		for (const auto& definition : all) {
-			if (definition.value("name", "") != name) continue;
-			const std::string handle = ToolSchemaHandle(definition);
-			if (args.value("schema_handle", "") == handle)
-				return {{"tool", name}, {"schema_handle", handle}, {"unchanged", true}};
-			return {{"tool", name}, {"category", ToolCategory(name)}, {"schema_handle", handle},
-				{"description", definition.value("description", "")},
-				{"inputSchema", definition.value("inputSchema", json::object())}};
-		}
-		return {{"error", "Unknown tool: " + name}};
+		const ToolDef* tool = FindTool(name);
+		if (!tool) return {{"error", "Unknown tool: " + name}};
+		const std::string handle = ToolSchemaHandle(tool->definition);
+		if (args.value("schema_handle", "") == handle)
+			return {{"tool", name}, {"schema_handle", handle}, {"unchanged", true}};
+		return {{"tool", name}, {"category", tool->category}, {"schema_handle", handle},
+			{"description", tool->definition.value("description", "")},
+			{"inputSchema", tool->definition.value("inputSchema", json::object())}};
 	}
 	if (operation == "call") {
 		if (name == "veh_toolbox") return {{"error", "veh_toolbox cannot call itself"}};

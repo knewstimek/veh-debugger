@@ -5,7 +5,13 @@
 ### Changed
 - **`lite` MCP profile adds `veh_attach` and `veh_registers`** -- attach-first sessions and the most common stopped-state inspection no longer need a `veh_toolbox` describe/call round-trip. Server instructions now note that `veh_batch` steps call most tools by name. The tool catalog is built once per server instead of on every `tools/list`/`veh_toolbox` request.
 
+- **`veh_batch`, targeted-capture setup, and breakpoint actions run the direct tool implementations** -- the separate batch copies of 33 tools were removed, so every nested step now has direct-call arguments, validation, and result fields. Newly callable in batch/actions: `veh_exception_info`, `veh_read_pointer_chain`, `veh_resolve_imports`, `veh_trace_calls`. Visible differences: thread-scoped tools require `threadId`, size/range checks and error messages match direct calls, `veh_step_*` results include `instructionPointer`, `veh_enum_locals` returns `variables` with typed values (was `locals` with raw hex), and `veh_stack_trace` frames omit `source`/`line` when no symbol source exists. `veh_attach`/`launch`/`detach`/`terminate`, `veh_batch`, `veh_targeted_capture`, and `veh_toolbox` are rejected inside nested steps.
+- **`veh_registers` accepts `fields`** in direct calls too (previously batch-only); `veh_stack_trace` adds `count` alongside `totalFrames`.
+- Each MCP tool's handler, category, eager profiles, nested-call permission, and schema now live in one server table.
+
 ### Fixed
+- **Batch steps did not wait for completion** -- `veh_step_in/over/out` inside `veh_batch` returned as soon as the step command was sent, so a following `veh_registers` could observe the pre-step state. Steps now wait for completion exactly like direct calls.
+- **Batch address arguments used an outdated parser** -- literal arithmetic (`0x1000+0x34`), full-consumption checks, and overflow rejection from v1.1.13 now apply to batch and breakpoint-action steps.
 - **MCP tool failures set `isError`** -- results with a top-level `error` (including failures returned through `veh_toolbox` `call`, which now hoists the inner `error`) are flagged `isError: true` instead of appearing successful to MCP clients.
 - **Marketplace publication verification tolerates propagation delay** -- the guarded release script now polls the Marketplace's public extension metadata for up to fifteen minutes after a successful publish instead of treating the first stale response as a failed publication. The v1.1.17 release took roughly eight minutes to become visible after `vsce publish` returned success.
 

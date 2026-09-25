@@ -17,6 +17,8 @@ namespace veh {
 
 using json = nlohmann::json;
 
+class BatchExecutor;
+
 class McpServer {
 public:
 	explicit McpServer(std::string toolProfile = "lite");
@@ -89,9 +91,25 @@ private:
 	json ToolToolbox(const json& args);
 
 	// Tool list definition
+	// One entry per MCP tool: handler, discovery metadata, and the MCP definition
+	struct ToolDef {
+		std::string name;
+		json (McpServer::*handler)(const json&);
+		const char* category;
+		unsigned profiles;  // eager-profile bits; the full profile exposes every tool
+		bool nested;        // callable from batch steps, capture setup, breakpoint actions
+		json definition;    // {name, description, inputSchema}
+		bool InProfile(unsigned mask) const { return mask == ~0u || (profiles & mask) != 0; }
+	};
+	static ToolDef Tool(json (McpServer::*handler)(const json&), const char* category,
+		unsigned profiles, bool nested, json definition);
+	static std::vector<ToolDef> BuildAllToolsList();
+	const ToolDef* FindTool(const std::string& name) const;
 	json GetToolsList() const;
-	static json BuildAllToolsList();
 	json DispatchTool(const std::string& name, const json& args, bool* known = nullptr);
+	// Tool runner for batch steps, targeted-capture setup, and breakpoint actions
+	json RunNestedTool(const std::string& name, const json& args);
+	BatchExecutor NewBatchExecutor();
 
 	// IPC event handler (breakpoint hit, etc.)
 	void OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t size);
@@ -116,7 +134,7 @@ private:
 	dap::Transport* transport_ = nullptr;
 	DebugSession session_;
 	std::string toolProfile_;
-	const json allTools_ = BuildAllToolsList();	// 정적 카탈로그: toolbox/tools/list 호출마다 재생성하지 않음
+	const std::vector<ToolDef> tools_ = BuildAllToolsList();
 	std::atomic<bool> running_{false};
 
 	// Last exception info (cached from ExceptionOccurred event)
