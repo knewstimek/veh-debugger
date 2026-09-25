@@ -6,6 +6,7 @@ add_executable(veh-mcp-server
 	trace_basic_blocks_tool.cpp
 	trace_code_artifact.cpp
 	trace_output_file.cpp
+	assembler.cpp
 	installer.cpp
 	../adapter/transport.cpp
 	../adapter/pipe_client.cpp
@@ -18,6 +19,7 @@ target_link_libraries(veh-mcp-server PRIVATE
 	veh_common
 	nlohmann_json
 	Zydis
+	asmtk
 	ws2_32
 	dbghelp
 	shell32

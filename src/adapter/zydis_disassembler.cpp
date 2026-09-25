@@ -25,6 +25,9 @@ std::vector<DisasmInstruction> ZydisDisassembler::Disassemble(
 	if (!ZYAN_SUCCESS(ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_INTEL))) {
 		return result;
 	}
+	// Always print memory operand sizes: by default Zydis drops them for forms
+	// like "dec [rax+0x30]", which neither a reader nor an assembler can size.
+	ZydisFormatterSetProperty(&formatter, ZYDIS_FORMATTER_PROP_FORCE_SIZE, ZYAN_TRUE);
 
 	uint32_t offset = 0;
 	uint32_t count = 0;

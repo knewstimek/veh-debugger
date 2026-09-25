@@ -1,0 +1,5 @@
+asmjit 0bd5787 (2026-03-26, last commit before the 2026-09 ABI rework that asmtk does not follow yet)
+asmtk 1261a46 (2025-12-28)
+Vendored: asmjit core/, x86/, support/, the umbrella headers, and arm/armglobals.h + arm/armutils.h
+(core/codewriter.cpp includes them unconditionally). The build compiles only the x86 back end;
+see the asmtk target in the root CMakeLists.txt. Licenses: Zlib (LICENSE.md in each source dir).

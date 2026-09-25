@@ -23,6 +23,19 @@ set(ZYDIS_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(ZYDIS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/zydis/zydis-src)
 
+# asmjit + asmtk text assembler (vendored, x86 back end only; see third_party/asmjit/VENDORED.txt)
+file(GLOB ASMTK_SOURCES
+    ${CMAKE_SOURCE_DIR}/third_party/asmjit/asmjit-src/asmjit/core/*.cpp
+    ${CMAKE_SOURCE_DIR}/third_party/asmjit/asmjit-src/asmjit/x86/*.cpp
+    ${CMAKE_SOURCE_DIR}/third_party/asmjit/asmjit-src/asmjit/support/*.cpp
+    ${CMAKE_SOURCE_DIR}/third_party/asmtk/asmtk-src/src/asmtk/*.cpp)
+add_library(asmtk STATIC ${ASMTK_SOURCES})
+target_include_directories(asmtk PUBLIC
+    ${CMAKE_SOURCE_DIR}/third_party/asmjit/asmjit-src
+    ${CMAKE_SOURCE_DIR}/third_party/asmtk/asmtk-src/src)
+target_compile_definitions(asmtk PUBLIC ASMJIT_STATIC ASMTK_STATIC ASMJIT_NO_AARCH64 ASMJIT_NO_JIT
+    ASMJIT_NO_BUILDER ASMJIT_NO_COMPILER ASMJIT_NO_UJIT ASMJIT_NO_LOGGING)
+
 # nlohmann/json (header-only)
 add_library(nlohmann_json INTERFACE)
 target_include_directories(nlohmann_json INTERFACE ${CMAKE_SOURCE_DIR}/third_party)

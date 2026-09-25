@@ -1,6 +1,8 @@
 #include "mcp_server.h"
 #include "batch_executor.h"
 #include "trace_basic_blocks_tool.h"
+#include "assembler.h"
+#include "adapter/disassembler.h"
 #include "common/logger.h"
 #include <sstream>
 #include <iomanip>
@@ -3125,6 +3127,56 @@ json McpServer::ToolModules(const json& args) {
 	return {{"modules", arr}, {"count", arr.size()}};
 }
 
+json McpServer::ToolAssemble(const json& args) {
+	std::string code = args.value("code", "");
+	if (code.empty()) return {{"error", "code is required (e.g. \"mov esi, eax; jmp 0x401000\")"}};
+	uint64_t address = 0;
+	std::string addrStr = args.value("address", "");
+	if (!addrStr.empty() && !ParseAddress(addrStr, address)) return {{"error", "invalid address format"}};
+	bool write = JsonBool(args, "write", false);
+	if (write && (!session_.IsAttached() || addrStr.empty()))
+		return {{"error", "write=true needs an attached target and an address"}};
+
+	// Bitness: explicit arch, else the attached target, else x64.
+	bool x64 = true;
+	std::string arch = args.value("arch", "");
+	if (arch == "x86") x64 = false;
+	else if (!arch.empty() && arch != "x64") return {{"error", "arch must be x86 or x64"}};
+	else if (arch.empty() && session_.IsAttached()) {
+		BOOL isWow64 = FALSE;
+		if (HANDLE hProc = session_.GetTargetProcess()) IsWow64Process(hProc, &isWow64);
+		x64 = !isWow64;
+	}
+
+	auto assembled = AssembleText(code, address, x64);
+	if (!assembled.ok) {
+		json error = {{"error", "assemble failed: " + assembled.error}};
+		if (assembled.errorLine) error["line"] = assembled.errorLine;
+		return error;
+	}
+
+	std::string hex;
+	for (uint8_t b : assembled.bytes) {
+		char buf[4];
+		snprintf(buf, sizeof(buf), hex.empty() ? "%02X" : " %02X", b);
+		hex += buf;
+	}
+	// Decode the result back so the caller sees exactly what was produced.
+	json listing = json::array();
+	ZydisDisassembler decoder(x64);
+	for (auto& insn : decoder.Disassemble(assembled.bytes.data(), static_cast<uint32_t>(assembled.bytes.size()), address, 256))
+		listing.push_back({{"address", HexAddr(insn.address)}, {"bytes", insn.bytes}, {"text", insn.mnemonic}});
+
+	json result = {{"address", HexAddr(address)}, {"arch", x64 ? "x64" : "x86"}, {"size", assembled.bytes.size()},
+	               {"bytes", hex}, {"listing", listing}};
+	if (write) {
+		if (!session_.WriteMemory(address, assembled.bytes.data(), static_cast<uint32_t>(assembled.bytes.size())))
+			return {{"error", "assembled but the write failed"}, {"bytes", hex}};
+		result["written"] = true;
+	}
+	return result;
+}
+
 json McpServer::ToolDisassemble(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
@@ -4054,6 +4106,15 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"address", {{"type", "string"}, {"description", "One address (hex, or module+RVA)"}}},
 			{"addresses", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Several addresses (max 256)"}}}
 		 }}}}}),
+
+		Tool(&McpServer::ToolAssemble, "memory", 0, true,
+			{{"name", "veh_assemble"}, {"description", "Assemble Intel-syntax x86/x64 text (asmjit/asmtk) at an address so relative jmp/call/jcc and rip-relative operands are computed for that location. Instructions separated by ';' or newlines; labels allowed. Returns bytes plus a decoded listing. write=true patches the bytes into the target at address. Works without a target (arch defaults to x64)."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"code", {{"type", "string"}, {"description", "e.g. \"mov esi, eax; jmp 0x140001000\""}}},
+			{"address", {{"type", "string"}, {"description", "Where the code will live (hex or module+RVA); default 0"}}},
+			{"arch", {{"type", "string"}, {"enum", json::array({"x64", "x86"})}, {"description", "Default: the attached target's bitness, else x64"}}},
+			{"write", {{"type", "boolean"}, {"description", "Write the bytes into the target at address (default false)"}}}
+		 }}, {"required", json::array({"code"})}}}}),
 
 		Tool(&McpServer::ToolDisplayType, "inspect", 0, true,
 			{{"name", "veh_display_type"}, {"description", "Show a PDB struct/class/union layout like WinDbg dt: member offsets, types, sizes, bitfields, base classes, and nested members up to depth. With address, also reads scalar, pointer, enum and bitfield values from that address. Needs PDB type info for the module (\"module!Type\" to pick one)."},

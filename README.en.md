@@ -440,6 +440,7 @@ Supported injection methods (auto-selected):
 |---------|-------|---------|
 | [nlohmann/json](https://github.com/nlohmann/json) | JSON parsing (header-only) | MIT |
 | [Zydis v4.1](https://github.com/zyantific/zydis) | x86/x64 disassembly (vendored in third_party/) | MIT |
+| [AsmJit](https://github.com/asmjit/asmjit) + [AsmTK](https://github.com/asmjit/asmtk) | `veh_assemble` text assembler (x86 back end vendored in third_party/) | Zlib |
 
 ## License
 

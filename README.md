@@ -491,6 +491,7 @@ Windows 디버거의 "실행하며 디버깅" 기능과 동일. DAP(`launch` 요
 |-----------|------|---------|
 | [nlohmann/json](https://github.com/nlohmann/json) | JSON 파싱 (header-only) | MIT |
 | [Zydis v4.1](https://github.com/zyantific/zydis) | x86/x64 디스어셈블리 (third_party에 포함) | MIT |
+| [AsmJit](https://github.com/asmjit/asmjit) + [AsmTK](https://github.com/asmjit/asmtk) | `veh_assemble` 텍스트 어셈블러 (x86 백엔드만 third_party에 포함) | Zlib |
 
 ## 라이선스
 
