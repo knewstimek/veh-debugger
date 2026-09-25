@@ -87,6 +87,7 @@ enum class IpcCommand : uint32_t {
 	ExecuteShellcode       = 0x0062,
 	QueryMemoryMap         = 0x0063,
 	SearchMemory           = 0x0064,
+	ProtectMemory          = 0x0065,
 	ValueScan              = 0x0066,
 
 	// Dynamic tracing
@@ -1193,6 +1194,24 @@ struct AllocateMemoryResponse {
 struct FreeMemoryRequest {
 	uint64_t address;
 	uint32_t size;
+};
+
+enum class ProtectMemoryMethod : uint8_t { Api = 0, Nt = 1, Syscall = 2 };
+
+struct ProtectMemoryRequest {
+	uint64_t            address;
+	uint64_t            size;
+	uint32_t            protection;
+	ProtectMemoryMethod method;
+	uint8_t             reserved[3];
+};
+
+struct ProtectMemoryResponse {
+	IpcStatus           status;
+	uint32_t            oldProtection;
+	uint32_t            errorCode;
+	ProtectMemoryMethod method;
+	uint8_t             reserved[3];
 };
 
 // --- Memory map / search ---

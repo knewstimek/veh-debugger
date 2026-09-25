@@ -36,6 +36,7 @@ public:
 	bool Initialize();
 	void Shutdown();
 	bool IsInitialized() const { return initialized_; }
+	bool HasProtectVirtualMemorySyscall() const { return pfnProtectVM_ != nullptr; }
 
 	// --- VirtualProtect 대체 ---
 	NTSTATUS ProtectVirtualMemory(

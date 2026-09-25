@@ -23,6 +23,9 @@ public:
 	// Allocate/free memory pages
 	uint64_t Allocate(uint32_t size, uint32_t protection);
 	bool Free(uint64_t address, uint32_t size);
+	bool Protect(uint64_t address, uint64_t size, uint32_t protection,
+		ProtectMemoryMethod requestedMethod, uint32_t& oldProtection,
+		ProtectMemoryMethod& appliedMethod, uint32_t& errorCode);
 
 	// Region list from VirtualQuery. Returns the resume address when maxRegions was hit, else 0.
 	uint64_t QueryMap(uint64_t start, uint64_t end, uint32_t maxRegions, bool includeFree,

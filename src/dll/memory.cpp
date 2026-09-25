@@ -2,7 +2,9 @@
 #include "memory.h"
 #include "veh_handler.h"
 #include "breakpoint.h"
+#include "syscall_resolver.h"
 #include <cstring>
+#include <limits>
 
 namespace veh {
 
@@ -73,6 +75,58 @@ uint64_t MemoryManager::Allocate(uint32_t size, uint32_t protection) {
 bool MemoryManager::Free(uint64_t address, uint32_t /*size*/) {
 	auto* ptr = reinterpret_cast<LPVOID>(address);
 	return VirtualFree(ptr, 0, MEM_RELEASE) != FALSE;
+}
+
+bool MemoryManager::Protect(uint64_t address, uint64_t size, uint32_t protection,
+	ProtectMemoryMethod requestedMethod, uint32_t& oldProtection,
+	ProtectMemoryMethod& appliedMethod, uint32_t& errorCode) {
+	oldProtection = 0;
+	errorCode = 0;
+	appliedMethod = requestedMethod;
+	if (address == 0 || size == 0
+		|| address > (std::numeric_limits<uintptr_t>::max)()
+		|| size > (std::numeric_limits<SIZE_T>::max)()
+		|| size > (std::numeric_limits<uintptr_t>::max)() - address) {
+		errorCode = ERROR_INVALID_PARAMETER;
+		return false;
+	}
+
+	auto* base = reinterpret_cast<PVOID>(static_cast<uintptr_t>(address));
+	SIZE_T regionSize = static_cast<SIZE_T>(size);
+	ULONG old = 0;
+	if (requestedMethod == ProtectMemoryMethod::Api) {
+		DWORD apiOld = 0;
+		if (!VirtualProtect(base, regionSize, protection, &apiOld)) {
+			errorCode = GetLastError();
+			return false;
+		}
+		oldProtection = apiOld;
+		return true;
+	}
+
+	NTSTATUS status = STATUS_UNSUCCESSFUL;
+	auto& resolver = SyscallResolver::Instance();
+	if (requestedMethod == ProtectMemoryMethod::Syscall
+		&& resolver.HasProtectVirtualMemorySyscall()) {
+		status = resolver.ProtectVirtualMemory(&base, &regionSize, protection, &old);
+	} else {
+		appliedMethod = ProtectMemoryMethod::Nt;
+		using NtProtectVirtualMemoryFn = NTSTATUS(NTAPI*)(HANDLE, PVOID*, PSIZE_T, ULONG, PULONG);
+		static auto ntProtectVirtualMemory = reinterpret_cast<NtProtectVirtualMemoryFn>(
+			GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtProtectVirtualMemory"));
+		if (ntProtectVirtualMemory) {
+			status = ntProtectVirtualMemory(GetCurrentProcess(), &base, &regionSize, protection, &old);
+		} else {
+			status = static_cast<NTSTATUS>(0xC0000139L);
+		}
+	}
+
+	if (!NT_SUCCESS(status)) {
+		errorCode = static_cast<uint32_t>(status);
+		return false;
+	}
+	oldProtection = old;
+	return true;
 }
 
 // SEH wrapper context -- passed to shellcode thread

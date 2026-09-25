@@ -1675,6 +1675,70 @@ json McpServer::ToolDumpMemory(const json& args) {
 	return ret;
 }
 
+struct ProtectionName {
+	const char* name;
+	uint32_t value;
+};
+
+static constexpr ProtectionName kProtectionNames[] = {
+	{"none", PAGE_NOACCESS},
+	{"r", PAGE_READONLY},
+	{"rw", PAGE_READWRITE},
+	{"rc", PAGE_WRITECOPY},
+	{"x", PAGE_EXECUTE},
+	{"rx", PAGE_EXECUTE_READ},
+	{"rwx", PAGE_EXECUTE_READWRITE},
+	{"rxc", PAGE_EXECUTE_WRITECOPY},
+};
+
+static bool ParseProtectText(const std::string& text, uint32_t& protect) {
+	const size_t suffix = text.find('+');
+	const std::string base = text.substr(0, suffix);
+	protect = 0;
+	for (const auto& entry : kProtectionNames) {
+		if (base == entry.name) {
+			protect = entry.value;
+			break;
+		}
+	}
+	if (protect == 0) return false;
+	if (suffix == std::string::npos) return true;
+
+	bool guard = false;
+	bool nocache = false;
+	size_t pos = suffix + 1;
+	while (pos <= text.size()) {
+		const size_t next = text.find('+', pos);
+		const std::string flag = text.substr(pos, next - pos);
+		if (flag == "guard" && !guard) {
+			protect |= PAGE_GUARD;
+			guard = true;
+		} else if (flag == "nocache" && !nocache) {
+			protect |= PAGE_NOCACHE;
+			nocache = true;
+		} else {
+			return false;
+		}
+		if (next == std::string::npos) break;
+		pos = next + 1;
+	}
+	return true;
+}
+
+static std::string ProtectText(uint32_t protect) {
+	std::string text;
+	for (const auto& entry : kProtectionNames) {
+		if ((protect & 0xFF) == entry.value) {
+			text = entry.name;
+			break;
+		}
+	}
+	if (text.empty()) text = protect ? "?" : "";
+	if (protect & PAGE_GUARD) text += "+guard";
+	if (protect & PAGE_NOCACHE) text += "+nocache";
+	return text;
+}
+
 json McpServer::ToolAllocateMemory(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
@@ -1682,10 +1746,8 @@ json McpServer::ToolAllocateMemory(const json& args) {
 	std::string protStr = args.value("protection", "rwx");
 	if (size <= 0 || size > 64 * 1024 * 1024) return {{"error", "size must be 1-67108864"}};
 
-	uint32_t protection = PAGE_EXECUTE_READWRITE;
-	if (protStr == "rw") protection = PAGE_READWRITE;
-	else if (protStr == "rx") protection = PAGE_EXECUTE_READ;
-	else if (protStr == "r") protection = PAGE_READONLY;
+	uint32_t protection = 0;
+	if (!ParseProtectText(protStr, protection)) return {{"error", "invalid protection"}};
 
 	uint64_t addr = session_.AllocateMemory(static_cast<uint32_t>(size), protection);
 	if (addr == 0) {
@@ -1694,7 +1756,8 @@ json McpServer::ToolAllocateMemory(const json& args) {
 
 	char buf[20];
 	snprintf(buf, sizeof(buf), "0x%llX", addr);
-	return {{"success", true}, {"address", buf}, {"size", size}, {"protection", protStr}};
+	return {{"success", true}, {"address", buf}, {"size", size},
+		{"protection", ProtectText(protection)}};
 }
 
 static std::string HexAddr(uint64_t value) {
@@ -1703,22 +1766,55 @@ static std::string HexAddr(uint64_t value) {
 	return buf;
 }
 
-static std::string ProtectText(uint32_t protect) {
-	std::string text;
-	switch (protect & 0xFF) {
-	case PAGE_NOACCESS: text = "none"; break;
-	case PAGE_READONLY: text = "r"; break;
-	case PAGE_READWRITE: text = "rw"; break;
-	case PAGE_WRITECOPY: text = "rc"; break;
-	case PAGE_EXECUTE: text = "x"; break;
-	case PAGE_EXECUTE_READ: text = "rx"; break;
-	case PAGE_EXECUTE_READWRITE: text = "rwx"; break;
-	case PAGE_EXECUTE_WRITECOPY: text = "rxc"; break;
-	default: text = protect ? "?" : ""; break;
+json McpServer::ToolProtectMemory(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+
+	uint64_t address = 0;
+	if (!ParseAddress(args.value("address", ""), address))
+		return {{"error", "invalid address format"}};
+	if (!args.contains("size") || !args["size"].is_number_integer())
+		return {{"error", "size must be a positive integer"}};
+	uint64_t size = 0;
+	if (args["size"].is_number_unsigned()) {
+		size = args["size"].get<uint64_t>();
+	} else {
+		const int64_t signedSize = args["size"].get<int64_t>();
+		if (signedSize > 0) size = static_cast<uint64_t>(signedSize);
 	}
-	if (protect & PAGE_GUARD) text += "+guard";
-	if (protect & PAGE_NOCACHE) text += "+nocache";
-	return text;
+	if (size == 0) return {{"error", "size must be a positive integer"}};
+
+	const std::string protectionText = args.value("protection", "");
+	uint32_t protection = 0;
+	if (!ParseProtectText(protectionText, protection))
+		return {{"error", "invalid protection"}};
+
+	const std::string methodText = args.value("method", "api");
+	ProtectMemoryMethod method;
+	if (methodText == "api") method = ProtectMemoryMethod::Api;
+	else if (methodText == "nt") method = ProtectMemoryMethod::Nt;
+	else if (methodText == "syscall") method = ProtectMemoryMethod::Syscall;
+	else return {{"error", "method must be api, nt, or syscall"}};
+
+	auto result = session_.ProtectMemory(address, size, protection, method);
+	auto methodName = [](ProtectMemoryMethod value) {
+		switch (value) {
+		case ProtectMemoryMethod::Api: return "api";
+		case ProtectMemoryMethod::Nt: return "nt";
+		case ProtectMemoryMethod::Syscall: return "syscall";
+		default: return "unknown";
+		}
+	};
+	if (!result.ok) {
+		char code[16];
+		snprintf(code, sizeof(code), "0x%08X", result.errorCode);
+		const std::string kind = result.method == ProtectMemoryMethod::Api ? "Win32" : "NTSTATUS";
+		return {{"error", std::string("memory protection failed (") + kind + " " + code + ")"},
+			{"code", code}, {"method", methodName(result.method)}};
+	}
+
+	return {{"address", HexAddr(address)}, {"size", size},
+		{"protection", ProtectText(protection)}, {"old_protection", ProtectText(result.oldProtection)},
+		{"method", methodName(result.method)}};
 }
 
 // Shared range arguments: start/end addresses or a module name (whole image range).
@@ -4251,10 +4347,19 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 
 		Tool(&McpServer::ToolAllocateMemory, "memory", 0, true,
 			{{"name", "veh_allocate_memory"}, {"description", "Allocate memory pages in the target process via VirtualAlloc."},
-		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"size", {{"type", "integer"}, {"description", "Allocation size in bytes (default: 4096)"}}},
-			{"protection", {{"type", "string"}, {"enum", json::array({"rwx", "rw", "rx", "r"})}, {"description", "Memory protection (default: rwx = PAGE_EXECUTE_READWRITE)"}}}
-		 }}}}}),
+			 {"inputSchema", {{"type", "object"}, {"properties", {
+				{"size", {{"type", "integer"}, {"description", "Allocation size in bytes (default: 4096)"}}},
+				{"protection", {{"type", "string"}, {"enum", json::array({"rwx", "rw", "rx", "r"})}, {"description", "Memory protection (default: rwx = PAGE_EXECUTE_READWRITE)"}}}
+			 }}}}}),
+
+		Tool(&McpServer::ToolProtectMemory, "memory", 0, true,
+			{{"name", "veh_protect_memory"}, {"description", "Change page protection inside the target and return the previous protection. Select VirtualProtect, ntdll NtProtectVirtualMemory, or the copied direct-syscall stub; syscall falls back to nt when unavailable."},
+			 {"inputSchema", {{"type", "object"}, {"properties", {
+				{"address", {{"type", "string"}, {"description", "Start address. Accepts hex, decimal, or module+RVA."}}},
+				{"size", {{"type", "integer"}, {"minimum", 1}, {"description", "Region size in bytes"}}},
+				{"protection", {{"type", "string"}, {"description", "Protection: none, r, rw, rc, x, rx, rwx, or rxc; append +guard and/or +nocache"}}},
+				{"method", {{"type", "string"}, {"enum", json::array({"api", "nt", "syscall"})}, {"description", "Protection mechanism (default: api)"}}}
+			 }}, {"required", json::array({"address", "size", "protection"})}}}}),
 
 		Tool(&McpServer::ToolMemoryMap, "memory", 0, true,
 			{{"name", "veh_memory_map"}, {"description", "List virtual memory regions (VirtualQuery) with state, protection (r/rw/rx/rwx, +guard), type (image/private/mapped) and owning module. Limited by max_regions; when truncated, pass next_start as start to continue."},
