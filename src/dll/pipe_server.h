@@ -30,6 +30,13 @@ private:
 
 	void ServerThread();
 	void HandleCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize);
+	void HandleBreakpointCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize);
+	void HandleExecutionCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize);
+	void HandleThreadCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize);
+	void HandleMemoryCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize);
+	void HandleSymbolCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize);
+	void HandleTraceCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize);
+	void HandleLifecycleCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize);
 
 	// Overlapped I/O helpers
 	bool AsyncReadExact(void* buf, DWORD size, DWORD timeoutMs = 5000);
