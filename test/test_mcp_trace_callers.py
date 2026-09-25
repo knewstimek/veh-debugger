@@ -10,6 +10,7 @@ import time
 import sys
 import os
 from bounded_pipe import bound
+from own_targets import note_launch, kill_launched
 
 MCP_EXE = os.path.join(RELEASE, "veh-mcp-server.exe")
 TARGET = os.path.join(RELEASE, "test_target.exe")
@@ -50,7 +51,10 @@ class McpClient:
 
     def call_tool(self, name, args=None, timeout=30):
         self.send("tools/call", {"name": name, "arguments": args or {}})
-        return self.recv(timeout=timeout)
+        response = self.recv(timeout=timeout)
+        if name == "veh_launch":
+            note_launch(response)
+        return response
 
     def close(self):
         try: self.proc.stdin.close()
@@ -159,7 +163,7 @@ def main():
         except: pass
         c.close()
         # Kill any remaining test_target
-        os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+        kill_launched()
 
 if __name__ == "__main__":
     main()

@@ -68,3 +68,5 @@ CLAUDE.md
 private/
 .github/
 .mcp.json
+
+test/.test_durations.json

@@ -17,6 +17,7 @@ import time
 import sys
 import os
 from bounded_pipe import bound
+from own_targets import note_launch, kill_launched
 
 MCP_EXE = os.path.join(RELEASE, "veh-mcp-server.exe")
 TARGET = os.path.join(RELEASE, "test_target.exe")
@@ -70,7 +71,10 @@ class McpClient:
 
     def call_tool(self, name, args=None, timeout=15):
         self.send("tools/call", {"name": name, "arguments": args or {}})
-        return self.recv(timeout=timeout)
+        response = self.recv(timeout=timeout)
+        if name == "veh_launch":
+            note_launch(response)
+        return response
 
     def initialize(self):
         self.send("initialize", {
@@ -162,7 +166,7 @@ def test_function_breakpoint():
         c.call_tool("veh_detach")
     finally:
         c.close()
-        os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+        kill_launched()
 
 
 # ========================================
@@ -206,7 +210,7 @@ def test_source_breakpoint():
         c.call_tool("veh_detach")
     finally:
         c.close()
-        os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+        kill_launched()
 
 
 # ========================================
@@ -255,7 +259,7 @@ def test_list_breakpoints():
         c.call_tool("veh_detach")
     finally:
         c.close()
-        os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+        kill_launched()
 
 
 # ========================================
@@ -316,7 +320,7 @@ def test_evaluate():
         c.call_tool("veh_detach")
     finally:
         c.close()
-        os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+        kill_launched()
 
 
 # ========================================
@@ -376,7 +380,7 @@ def test_set_register():
         c.call_tool("veh_detach")
     finally:
         c.close()
-        os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+        kill_launched()
 
 
 # ========================================
@@ -401,7 +405,7 @@ def test_exception_info():
         c.call_tool("veh_detach")
     finally:
         c.close()
-        os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+        kill_launched()
 
 
 # ========================================
@@ -455,7 +459,7 @@ def test_conditional_breakpoint():
         c.call_tool("veh_detach")
     finally:
         c.close()
-        os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+        kill_launched()
 
 
 # ========================================
@@ -505,7 +509,7 @@ def test_logpoint():
         c.call_tool("veh_detach")
     finally:
         c.close()
-        os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+        kill_launched()
 
 
 # ========================================
@@ -563,7 +567,7 @@ def test_trace_callers_with_existing_bp():
         c.call_tool("veh_detach")
     finally:
         c.close()
-        os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+        kill_launched()
 
 
 # ========================================
@@ -614,7 +618,7 @@ def test_hit_condition():
         c.call_tool("veh_detach")
     finally:
         c.close()
-        os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+        kill_launched()
 
 
 # ========================================
@@ -646,7 +650,7 @@ if __name__ == "__main__":
             msg = f"  EXCEPTION in {test_fn.__name__}: {e}"
             print(msg)
             errors.append(msg)
-            os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+            kill_launched()
 
     print(f"\n{'='*50}")
     print(f"Results: {passed} passed, {failed} failed")

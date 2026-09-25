@@ -392,14 +392,19 @@ A few critical paths also use `OutputDebugStringW` - view with DebugView (Sysint
 
 ## Test
 
-Run the whole suite with `tools/run_tests.py` (per-file timeout, duration table, and
-cleanup of processes a test left behind):
+Run the whole suite with `tools/run_tests.py` (files run in parallel, longest first;
+per-file timeout, duration table, and cleanup of exactly the processes each file
+started). About 40s per architecture:
 
 ```bash
 py -3 tools/run_tests.py                          # x64 build (build/)
 py -3 tools/run_tests.py --build-dir build32      # x86 build; files marked "# requires: x64" are skipped
-py -3 tools/run_tests.py "test_mcp_*.py" --timeout 60
+py -3 tools/run_tests.py --quick                  # skip files marked "# slow" (the 36s heartbeat test)
+py -3 tools/run_tests.py "test_mcp_*.py" --timeout 60 --jobs 1
 ```
+
+Tests run concurrently, so a test must never kill processes by image name; use
+`test/own_targets.py` to kill only the targets it launched.
 
 Tests resolve binaries through `test/build_paths.py` (`VEH_TEST_BUILD_DIR`). Legacy clients
 that read child pipes directly wrap them with `test/bounded_pipe.py` (`bound()` for idle-bounded

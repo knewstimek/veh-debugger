@@ -1,3 +1,4 @@
+# slow: the trace deliberately outlives the 30s heartbeat window
 """Regression: a synchronous trace may legitimately outlive the heartbeat window."""
 import ctypes
 import os

@@ -15,6 +15,12 @@ MCP_EXE = os.path.join(RELEASE, "veh-mcp-server.exe")
 TARGET  = os.path.join(RELEASE, "test_target.exe")
 
 passed = failed = 0
+LAUNCHED = set()  # targets this file started; other test files may run concurrently
+
+def kill_launched():
+    for pid in list(LAUNCHED):
+        os.system(f"taskkill /PID {pid} /F >nul 2>&1")
+    LAUNCHED.clear()
 errors = []
 
 class McpClient:
@@ -43,7 +49,10 @@ class McpClient:
         return None
     def call(self, name, args=None, timeout=15):
         self.send("tools/call", {"name": name, "arguments": args or {}})
-        return get_content(self.recv(timeout=timeout))
+        result = get_content(self.recv(timeout=timeout))
+        if name == "veh_launch" and isinstance(result, dict) and result.get("pid"):
+            LAUNCHED.add(result["pid"])
+        return result
     def initialize(self):
         self.send("initialize", {"protocolVersion": "2024-11-05",
                                  "clientInfo": {"name": "t", "version": "1"}, "capabilities": {}})
@@ -94,7 +103,7 @@ def test_env():
         check("launch with env array succeeds", r.get("success") and r.get("pid"), str(r))
         c.call("veh_detach")
     finally:
-        c.close(); os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+        c.close(); kill_launched()
 
 
 # ---------------- #2 pointer chain ----------------
@@ -139,7 +148,7 @@ def test_pointer_chain():
 
         c.call("veh_detach")
     finally:
-        c.close(); os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+        c.close(); kill_launched()
 
 
 # ---------------- #4 data bp condition ----------------
@@ -197,7 +206,7 @@ def test_data_bp_condition():
         c.call("veh_continue", {"threadId": 0})
         c.call("veh_detach")
     finally:
-        c.close(); os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+        c.close(); kill_launched()
 
 
 if __name__ == "__main__":
@@ -207,7 +216,7 @@ if __name__ == "__main__":
         except Exception as e:
             failed += 1; errors.append(f"EXCEPTION {fn.__name__}: {e}")
             print(f"  EXCEPTION in {fn.__name__}: {e}")
-            os.system("taskkill /IM test_target.exe /F >nul 2>&1")
+            kill_launched()
     print(f"\n{'='*50}\nResults: {passed} passed, {failed} failed")
     for e in errors: print(" ", e)
     sys.exit(0 if failed == 0 else 1)
