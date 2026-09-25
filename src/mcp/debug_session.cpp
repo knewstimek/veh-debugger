@@ -672,6 +672,23 @@ void DebugSession::SignalStop(const std::string& reason, uint64_t addr, uint32_t
 
 // --- State queries ---
 
+bool DebugSession::FreezeThread(FreezeOp op, uint32_t threadId, std::vector<uint32_t>& frozen) {
+	FreezeThreadRequest req{};
+	req.threadId = threadId;
+	req.op = op;
+	std::vector<uint8_t> respData;
+	frozen.clear();
+	if (!pipeClient_.SendAndReceive(IpcCommand::FreezeThread, &req, sizeof(req), respData))
+		return false;
+	if (respData.size() < sizeof(FreezeThreadResponse)) return false;
+	auto* resp = reinterpret_cast<const FreezeThreadResponse*>(respData.data());
+	size_t count = (std::min)(static_cast<size_t>(resp->count),
+		(respData.size() - sizeof(FreezeThreadResponse)) / sizeof(uint32_t));
+	auto* ids = reinterpret_cast<const uint32_t*>(respData.data() + sizeof(FreezeThreadResponse));
+	frozen.assign(ids, ids + count);
+	return resp->status == IpcStatus::Ok;
+}
+
 std::vector<ThreadEntry> DebugSession::GetThreads() {
 	std::vector<ThreadEntry> result;
 	std::vector<uint8_t> respData;

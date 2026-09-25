@@ -25,6 +25,13 @@ public:
 	void ResumeAll();
 	std::vector<uint32_t> GetSuspendedThreadIds();
 
+	// User freeze: an extra OS suspend count tracked apart from Pause, so
+	// ResumeAll (Continue) does not release it. Thaw on detach/cleanup.
+	bool FreezeThread(uint32_t threadId);
+	bool ThawThread(uint32_t threadId);
+	void ThawAll();
+	std::vector<uint32_t> GetFrozenThreadIds();
+
 	bool GetContext(uint32_t threadId, CONTEXT& ctx);
 	bool SetContext(uint32_t threadId, const CONTEXT& ctx);
 
@@ -44,6 +51,8 @@ private:
 	std::mutex internalMutex_;
 	std::set<uint32_t> suspendedThreads_;
 	std::mutex suspendedMutex_;
+	std::set<uint32_t> frozenThreads_;
+	std::mutex frozenMutex_;
 };
 
 } // namespace veh

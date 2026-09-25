@@ -163,6 +163,44 @@ std::vector<uint32_t> ThreadManager::GetSuspendedThreadIds() {
 	return {suspendedThreads_.begin(), suspendedThreads_.end()};
 }
 
+bool ThreadManager::FreezeThread(uint32_t threadId) {
+	if (IsInternalThread(threadId) || threadId == GetCurrentThreadId()) {
+		LOG_WARN("FreezeThread(%u) rejected: internal DLL thread", threadId);
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(frozenMutex_);
+	if (frozenThreads_.count(threadId)) return true;  // one freeze count per thread
+	HANDLE h = OpenThread(threadId);
+	if (!h) return false;
+	DWORD prev = ::SuspendThread(h);
+	CloseHandle(h);
+	if (prev == static_cast<DWORD>(-1)) {
+		LOG_ERROR("FreezeThread(%u) failed: %lu", threadId, GetLastError());
+		return false;
+	}
+	frozenThreads_.insert(threadId);
+	return true;
+}
+
+bool ThreadManager::ThawThread(uint32_t threadId) {
+	std::lock_guard<std::mutex> lock(frozenMutex_);
+	if (!frozenThreads_.erase(threadId)) return false;
+	HANDLE h = OpenThread(threadId);
+	if (!h) return true;  // the thread exited while frozen
+	::ResumeThread(h);
+	CloseHandle(h);
+	return true;
+}
+
+void ThreadManager::ThawAll() {
+	for (uint32_t threadId : GetFrozenThreadIds()) ThawThread(threadId);
+}
+
+std::vector<uint32_t> ThreadManager::GetFrozenThreadIds() {
+	std::lock_guard<std::mutex> lock(frozenMutex_);
+	return {frozenThreads_.begin(), frozenThreads_.end()};
+}
+
 bool ThreadManager::GetContext(uint32_t threadId, CONTEXT& ctx) {
 	// Prevent deadlock: never suspend DLL internal threads (pipe server, etc.)
 	if (IsInternalThread(threadId)) {

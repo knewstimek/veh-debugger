@@ -637,6 +637,7 @@ void PipeServer::EmergencyCleanup() {
 	HwBreakpointManager::Instance().RemoveAll();
 	VehHandler::Instance().Uninstall();
 	ThreadManager::Instance().ResumeAll();
+	ThreadManager::Instance().ThawAll();
 	LOG_INFO("Emergency cleanup done: VEH uninstalled, all BPs removed, threads resumed");
 }
 
@@ -1153,6 +1154,34 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 		IpcStatus status = IpcStatus::Ok;
 		SendResponse(command, &status, sizeof(status));
+		break;
+	}
+
+	case IpcCommand::FreezeThread: {
+		if (payloadSize < sizeof(FreezeThreadRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const FreezeThreadRequest*>(payload);
+		auto& threads = ThreadManager::Instance();
+		bool ok = true;
+		switch (req->op) {
+		case FreezeOp::List: break;
+		case FreezeOp::Freeze: ok = req->threadId != 0 && threads.FreezeThread(req->threadId); break;
+		case FreezeOp::Thaw:
+			if (req->threadId == 0) threads.ThawAll();
+			else ok = threads.ThawThread(req->threadId);
+			break;
+		default: ok = false; break;
+		}
+		auto frozen = threads.GetFrozenThreadIds();
+		std::vector<uint8_t> buf(sizeof(FreezeThreadResponse) + frozen.size() * sizeof(uint32_t));
+		auto* resp = reinterpret_cast<FreezeThreadResponse*>(buf.data());
+		resp->status = ok ? IpcStatus::Ok : IpcStatus::Error;
+		resp->count = static_cast<uint32_t>(frozen.size());
+		if (!frozen.empty()) memcpy(buf.data() + sizeof(FreezeThreadResponse), frozen.data(), frozen.size() * sizeof(uint32_t));
+		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
 		break;
 	}
 
@@ -2834,6 +2863,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		VehHandler::Instance().ResumeAllStoppedThreads(true);  // forDetach=true
 		VehHandler::Instance().Uninstall();
 		ThreadManager::Instance().ResumeAll();
+		ThreadManager::Instance().ThawAll();
 		IpcStatus status = IpcStatus::Ok;
 		SendResponse(command, &status, sizeof(status));
 		connected_ = false;
@@ -2866,6 +2896,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		BreakpointManager::Instance().RemoveAll();
 		HwBreakpointManager::Instance().RemoveAll();
 		VehHandler::Instance().Uninstall();
+		ThreadManager::Instance().ThawAll();
 		IpcStatus status = IpcStatus::Ok;
 		SendResponse(command, &status, sizeof(status));
 		running_ = false;

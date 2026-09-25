@@ -59,6 +59,7 @@ enum class IpcCommand : uint32_t {
 	SetRegister            = 0x0024,
 	SetRegisters           = 0x0025,
 	IsThreadStopped        = 0x0026,
+	FreezeThread           = 0x0027,  // user freeze/thaw that survives continue
 
 	// Memory
 	ReadMemory             = 0x0030,
@@ -192,6 +193,21 @@ struct StepRequest {
 
 struct PauseRequest {
 	uint32_t threadId;   // 0 = all threads
+};
+
+// A frozen thread holds its own OS suspend count, separate from Pause, so
+// Continue (which resumes paused threads) leaves it frozen until thawed.
+enum class FreezeOp : uint8_t { List = 0, Freeze = 1, Thaw = 2 };
+
+struct FreezeThreadRequest {
+	uint32_t threadId;   // Thaw: 0 = all frozen threads
+	FreezeOp op;
+	uint8_t  reserved[3];
+};
+
+struct FreezeThreadResponse {
+	IpcStatus status;
+	uint32_t  count;     // followed by uint32_t frozenThreadIds[count]
 };
 
 struct TerminateThreadRequest {

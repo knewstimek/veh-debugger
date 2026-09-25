@@ -1104,11 +1104,33 @@ json McpServer::ToolThreads(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
 	auto threads = session_.GetThreads();
+	std::vector<uint32_t> frozen;
+	session_.FreezeThread(FreezeOp::List, 0, frozen);
 	json arr = json::array();
 	for (auto& t : threads) {
-		arr.push_back({{"id", t.id}, {"name", t.name}});
+		json entry = {{"id", t.id}, {"name", t.name}};
+		if (std::find(frozen.begin(), frozen.end(), t.id) != frozen.end()) entry["frozen"] = true;
+		arr.push_back(std::move(entry));
 	}
 	return {{"threads", arr}, {"count", threads.size()}};
+}
+
+json McpServer::ToolFreezeThread(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+	uint32_t threadId = JsonUint32(args, "threadId");
+	bool freeze = JsonBool(args, "frozen", true);
+	if (freeze && threadId == 0) return {{"error", "threadId is required to freeze (use veh_pause to stop all threads)"}};
+	std::vector<uint32_t> frozen;
+	bool ok = session_.FreezeThread(freeze ? FreezeOp::Freeze : FreezeOp::Thaw, threadId, frozen);
+	json result = {{"frozenThreads", frozen}};
+	if (!ok) {
+		result["error"] = freeze
+			? "freeze failed (thread not found or a debugger-internal thread)"
+			: "thread is not frozen";
+		return result;
+	}
+	result["success"] = true;
+	return result;
 }
 
 json McpServer::ToolStackTrace(const json& args) {
@@ -3660,6 +3682,13 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		Tool(&McpServer::ToolThreads, "session", 0, true,
 			{{"name", "veh_threads"}, {"description", "List all threads in the target process."},
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
+
+		Tool(&McpServer::ToolFreezeThread, "session", 0, true,
+			{{"name", "veh_freeze_thread"}, {"description", "Freeze or thaw one thread. A frozen thread stays suspended across veh_continue until thawed (or detach), e.g. to hold a watchdog or worker thread while the rest runs. frozen=false with threadId 0 thaws all. veh_threads marks frozen threads. Caution: freezing a thread that holds a heap or loader lock can stall other threads."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}},
+			{"frozen", {{"type", "boolean"}, {"description", "true freezes (default), false thaws"}}}
+		 }}}}}),
 
 		Tool(&McpServer::ToolStackTrace, "trace", 0, true,
 			{{"name", "veh_stack_trace"}, {"description", "Get stack trace for a thread."},
