@@ -166,7 +166,68 @@ std::string ResolveNearestExport(uint64_t moduleBase, uint64_t address, uint64_t
 	return std::string(bestName, nameLen);
 }
 
+// Module, function (+displacement) and source line for one address. Caller holds the dbghelp lock.
+void ResolveAddressSymbol(HANDLE hProcess, uint64_t address, SYMBOL_INFO* symInfo, AddressSymbol& out) {
+	// Module first: the export fallback needs moduleBase.
+	HMODULE hModule = nullptr;
+	if (GetModuleHandleExA(
+			GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			reinterpret_cast<LPCSTR>(static_cast<uintptr_t>(address)),
+			&hModule)) {
+		out.moduleBase = reinterpret_cast<uint64_t>(hModule);
+		char modPath[MAX_PATH] = {};
+		if (GetModuleFileNameA(hModule, modPath, MAX_PATH)) {
+			const char* slash = strrchr(modPath, '\\');
+			out.moduleName = slash ? (slash + 1) : modPath;
+		}
+	}
+
+	DWORD64 displacement64 = 0;
+	bool gotSymName = SymFromAddr(hProcess, address, &displacement64, symInfo) != FALSE;
+	if (gotSymName) {
+		out.functionName = symInfo->Name;
+		out.displacement = displacement64;
+	}
+
+	// DbgHelp 결과가 없거나, ordinal 전용 가짜 이름이거나, displacement가 비정상적으로 큰 경우
+	// (PDB 없는 모듈에서 DbgHelp의 nearest-export 휴리스틱이 부정확한 이름을 붙이는 문제) ->
+	// PE export table을 직접 파싱해 정확한 이름으로 교체 시도
+	if (out.functionName.empty() ||
+		IsOrdinalLikeName(out.functionName.c_str()) ||
+		(gotSymName && displacement64 >= 0x10000)) {
+		uint64_t exportDisp = 0;
+		std::string exportName = ResolveNearestExport(out.moduleBase, address, exportDisp);
+		if (!exportName.empty()) {
+			out.functionName = exportName;
+			out.displacement = exportDisp;
+		}
+	}
+
+	IMAGEHLP_LINE64 lineInfo = {};
+	lineInfo.SizeOfStruct = sizeof(lineInfo);
+	DWORD displacement32 = 0;
+	if (SymGetLineFromAddr64(hProcess, address, &displacement32, &lineInfo)) {
+		out.line = lineInfo.LineNumber;
+		if (lineInfo.FileName) out.sourceFile = lineInfo.FileName;
+	}
+}
+
 } // anonymous namespace
+
+std::vector<AddressSymbol> StackWalker::Symbolize(const std::vector<uint64_t>& addresses) {
+	std::vector<AddressSymbol> result(addresses.size());
+	if (!initialized_) return result;
+	std::lock_guard<std::mutex> lock(dbghelpMutex_);
+	constexpr size_t kSymBufSize = sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(TCHAR);
+	uint8_t symBuf[kSymBufSize];
+	auto* symInfo = reinterpret_cast<SYMBOL_INFO*>(symBuf);
+	for (size_t i = 0; i < addresses.size(); ++i) {
+		symInfo->SizeOfStruct = sizeof(SYMBOL_INFO);
+		symInfo->MaxNameLen = MAX_SYM_NAME;
+		ResolveAddressSymbol(GetCurrentProcess(), addresses[i], symInfo, result[i]);
+	}
+	return result;
+}
 
 std::vector<StackFrame> StackWalker::Walk(uint32_t threadId, uint32_t startFrame, uint32_t maxFrames) {
 	std::vector<StackFrame> frames;
@@ -253,50 +314,13 @@ std::vector<StackFrame> StackWalker::Walk(uint32_t threadId, uint32_t startFrame
 		frame.frameBase     = sf.AddrFrame.Offset;
 		frame.line          = 0;
 
-		// 모듈명 해석: AddrPC로 모듈 핸들 → 파일명 (export fallback이 moduleBase를 필요로 하므로 함수명 해석보다 먼저 수행)
-		HMODULE hModule = nullptr;
-		if (GetModuleHandleExA(
-				GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-				reinterpret_cast<LPCSTR>(static_cast<uintptr_t>(sf.AddrPC.Offset)),
-				&hModule)) {
-			frame.moduleBase = reinterpret_cast<uint64_t>(hModule);
-			char modPath[MAX_PATH] = {};
-			if (GetModuleFileNameA(hModule, modPath, MAX_PATH)) {
-				const char* slash = strrchr(modPath, '\\');
-				frame.moduleName = slash ? (slash + 1) : modPath;
-			}
-		}
-
-		// 함수명 해석
-		DWORD64 displacement64 = 0;
-		bool gotSymName = SymFromAddr(hProcess, sf.AddrPC.Offset, &displacement64, symInfo) != FALSE;
-		if (gotSymName) {
-			frame.functionName = symInfo->Name;
-		}
-
-		// DbgHelp 결과가 없거나, ordinal 전용 가짜 이름이거나, displacement가 비정상적으로 큰 경우
-		// (PDB 없는 모듈에서 DbgHelp의 nearest-export 휴리스틱이 부정확한 이름을 붙이는 문제) ->
-		// PE export table을 직접 파싱해 정확한 이름으로 교체 시도
-		if (frame.functionName.empty() ||
-			IsOrdinalLikeName(frame.functionName.c_str()) ||
-			(gotSymName && displacement64 >= 0x10000)) {
-			uint64_t exportDisp = 0;
-			std::string exportName = ResolveNearestExport(frame.moduleBase, sf.AddrPC.Offset, exportDisp);
-			if (!exportName.empty()) {
-				frame.functionName = exportName;
-			}
-		}
-
-		// 줄 번호 해석
-		IMAGEHLP_LINE64 lineInfo = {};
-		lineInfo.SizeOfStruct = sizeof(lineInfo);
-		DWORD displacement32 = 0;
-		if (SymGetLineFromAddr64(hProcess, sf.AddrPC.Offset, &displacement32, &lineInfo)) {
-			frame.line = lineInfo.LineNumber;
-			if (lineInfo.FileName) {
-				frame.sourceFile = lineInfo.FileName;
-			}
-		}
+		AddressSymbol symbol;
+		ResolveAddressSymbol(hProcess, sf.AddrPC.Offset, symInfo, symbol);
+		frame.moduleBase   = symbol.moduleBase;
+		frame.moduleName   = std::move(symbol.moduleName);
+		frame.functionName = std::move(symbol.functionName);
+		frame.sourceFile   = std::move(symbol.sourceFile);
+		frame.line         = symbol.line;
 
 		frames.push_back(std::move(frame));
 	}

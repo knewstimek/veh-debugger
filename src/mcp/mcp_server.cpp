@@ -68,6 +68,8 @@ static bool JsonBool(const json& args, const char* key, bool defaultVal = false)
 	return defaultVal;
 }
 
+static std::string HexAddr(uint64_t value);
+
 // Eager-profile bits for McpServer::ToolDef::profiles
 constexpr unsigned kLite = 1, kInteractive = 2, kCapture = 4, kFullProfile = ~0u;
 
@@ -1137,6 +1139,53 @@ json McpServer::ToolStackTrace(const json& args) {
 	}
 
 	return {{"frames", arr}, {"count", arr.size()}, {"totalFrames", arr.size()}};
+}
+
+json McpServer::ToolSymbolize(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+
+	json inputs = json::array();
+	if (args.contains("addresses") && args["addresses"].is_array()) inputs = args["addresses"];
+	if (args.contains("address")) inputs.push_back(args["address"]);
+	if (inputs.empty()) return {{"error", "address or addresses is required"}};
+	if (inputs.size() > kSymbolizeMaxAddresses)
+		return {{"error", "at most " + std::to_string(kSymbolizeMaxAddresses) + " addresses per call"}};
+
+	std::vector<uint64_t> addresses;
+	for (auto& input : inputs) {
+		uint64_t value = 0;
+		if (input.is_number_unsigned()) value = input.get<uint64_t>();
+		else if (!input.is_string() || !ParseAddress(input.get<std::string>(), value))
+			return {{"error", "invalid address: " + input.dump()}};
+		addresses.push_back(value);
+	}
+
+	auto entries = session_.Symbolize(addresses);
+	if (entries.size() != addresses.size()) return {{"error", "symbolize failed in target"}};
+
+	json symbols = json::array();
+	for (auto& e : entries) {
+		char buf[32];
+		json item = {{"address", HexAddr(e.address)}};
+		std::string module = e.moduleName;
+		std::string function = e.functionName;
+		if (!function.empty()) {
+			snprintf(buf, sizeof(buf), "+0x%llX", static_cast<unsigned long long>(e.displacement));
+			item["symbol"] = (module.empty() ? "" : module + "!") + function + (e.displacement ? buf : "");
+			item["function"] = function;
+			item["offset"] = HexAddr(e.displacement);
+		} else if (e.moduleBase) {
+			snprintf(buf, sizeof(buf), "+0x%llX", static_cast<unsigned long long>(e.address - e.moduleBase));
+			item["symbol"] = module + buf;
+		}
+		if (!module.empty()) item["module"] = module;
+		if (e.line) {
+			item["file"] = e.sourceFile;
+			item["line"] = e.line;
+		}
+		symbols.push_back(std::move(item));
+	}
+	return {{"symbols", symbols}, {"count", symbols.size()}};
 }
 
 json McpServer::ToolEnumLocals(const json& args) {
@@ -3668,6 +3717,13 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"instructionAddress", {{"type", "string"}, {"description", "RIP/EIP hex address of the frame (auto-detected from top frame if omitted)"}}},
 			{"frameBase", {{"type", "string"}, {"description", "RBP/EBP hex address (auto-detected from top frame if omitted)"}}}
 		 }}, {"required", json::array({"threadId"})}}}}),
+
+		Tool(&McpServer::ToolSymbolize, "inspect", 0, true,
+			{{"name", "veh_symbolize"}, {"description", "Resolve addresses to module!function+offset (PDB symbol, else nearest export, else module+RVA) plus source file/line when available. Works while the target runs. Up to 256 addresses per call, e.g. trace targets or stack values."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"address", {{"type", "string"}, {"description", "One address (hex, or module+RVA)"}}},
+			{"addresses", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Several addresses (max 256)"}}}
+		 }}}}}),
 
 		Tool(&McpServer::ToolEvaluate, "inspect", 0, true,
 			{{"name", "veh_evaluate"}, {"description", "Evaluate an expression. Supports: register names (RAX, RBX, etc.), hex addresses (0x...), pointer dereference (*addr, [addr], [RAX+0x10], [RAX-8], [RAX+RBX]), and segment registers (gs:[0x60] for PEB, fs:[0x30] for TEB on x86)."},

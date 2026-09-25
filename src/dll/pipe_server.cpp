@@ -1443,6 +1443,37 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		break;
 	}
 
+	case IpcCommand::Symbolize: {
+		auto* req = reinterpret_cast<const SymbolizeRequest*>(payload);
+		if (payloadSize < sizeof(SymbolizeRequest) || req->count == 0 || req->count > kSymbolizeMaxAddresses
+			|| payloadSize != sizeof(SymbolizeRequest) + req->count * sizeof(uint64_t)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		std::vector<uint64_t> addresses(req->count);
+		memcpy(addresses.data(), payload + sizeof(SymbolizeRequest), req->count * sizeof(uint64_t));
+		auto symbols = StackWalker::Instance().Symbolize(addresses);
+
+		std::vector<uint8_t> respBuf(sizeof(SymbolizeResponse) + symbols.size() * sizeof(SymbolizeEntry), 0);
+		auto* resp = reinterpret_cast<SymbolizeResponse*>(respBuf.data());
+		resp->status = IpcStatus::Ok;
+		resp->count = static_cast<uint32_t>(symbols.size());
+		auto* entries = reinterpret_cast<SymbolizeEntry*>(respBuf.data() + sizeof(SymbolizeResponse));
+		for (size_t i = 0; i < symbols.size(); ++i) {
+			auto& e = entries[i];
+			e.address = addresses[i];
+			e.moduleBase = symbols[i].moduleBase;
+			e.displacement = symbols[i].displacement;
+			e.line = symbols[i].line;
+			strncpy_s(e.moduleName, symbols[i].moduleName.c_str(), _TRUNCATE);
+			strncpy_s(e.functionName, symbols[i].functionName.c_str(), _TRUNCATE);
+			strncpy_s(e.sourceFile, symbols[i].sourceFile.c_str(), _TRUNCATE);
+		}
+		SendResponse(command, respBuf.data(), static_cast<uint32_t>(respBuf.size()));
+		break;
+	}
+
 	case IpcCommand::GetModules: {
 		HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, targetPid_);
 		if (snap == INVALID_HANDLE_VALUE) {

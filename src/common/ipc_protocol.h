@@ -68,6 +68,7 @@ enum class IpcCommand : uint32_t {
 	ResolveSourceLine      = 0x0040,
 	ResolveFunction        = 0x0041,
 	EnumLocals             = 0x0042,
+	Symbolize              = 0x0043,  // addresses -> module!function+offset, source line
 
 	// Tracing
 	TraceCallers           = 0x0050,
@@ -369,6 +370,27 @@ struct ResolveFunctionRequest {
 struct ResolveFunctionResponse {
 	IpcStatus status;
 	uint64_t  address;
+};
+
+static constexpr uint32_t kSymbolizeMaxAddresses = 256;
+
+struct SymbolizeRequest {
+	uint32_t count;              // followed by uint64_t addresses[count]
+};
+
+struct SymbolizeEntry {
+	uint64_t address;
+	uint64_t moduleBase;         // 0 when the address is in no module
+	uint64_t displacement;       // from functionName's start
+	uint32_t line;               // 0 when no source line
+	char     moduleName[64];
+	char     functionName[256];  // PDB symbol, else nearest export, else empty
+	char     sourceFile[260];
+};
+
+struct SymbolizeResponse {
+	IpcStatus status;
+	uint32_t  count;             // followed by SymbolizeEntry[count]
 };
 
 // Local variable enumeration (via PDB symbols)

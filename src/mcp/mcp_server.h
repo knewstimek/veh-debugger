@@ -69,6 +69,7 @@ private:
 	json ToolModules(const json& args);
 	json ToolDisassemble(const json& args);
 	json ToolEnumLocals(const json& args);
+	json ToolSymbolize(const json& args);
 	json ToolEvaluate(const json& args);
 	json ToolSetRegister(const json& args);
 	json ToolExceptionInfo(const json& args);

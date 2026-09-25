@@ -803,6 +803,30 @@ std::vector<ModuleEntry> DebugSession::GetModules() {
 	return result;
 }
 
+std::vector<SymbolizeEntry> DebugSession::Symbolize(const std::vector<uint64_t>& addresses) {
+	std::vector<SymbolizeEntry> result;
+	if (addresses.empty() || addresses.size() > kSymbolizeMaxAddresses) return result;
+	std::vector<uint8_t> payload(sizeof(SymbolizeRequest) + addresses.size() * sizeof(uint64_t));
+	SymbolizeRequest req{};
+	req.count = static_cast<uint32_t>(addresses.size());
+	memcpy(payload.data(), &req, sizeof(req));
+	memcpy(payload.data() + sizeof(req), addresses.data(), addresses.size() * sizeof(uint64_t));
+
+	std::vector<uint8_t> respData;
+	// The first lookup in a module may load its PDB.
+	if (!pipeClient_.SendAndReceive(IpcCommand::Symbolize, payload.data(),
+			static_cast<uint32_t>(payload.size()), respData, 30000))
+		return result;
+	if (respData.size() < sizeof(SymbolizeResponse)) return result;
+	auto* resp = reinterpret_cast<const SymbolizeResponse*>(respData.data());
+	if (resp->status != IpcStatus::Ok) return result;
+	size_t count = (std::min)(static_cast<size_t>(resp->count),
+		(respData.size() - sizeof(SymbolizeResponse)) / sizeof(SymbolizeEntry));
+	auto* entries = reinterpret_cast<const SymbolizeEntry*>(respData.data() + sizeof(SymbolizeResponse));
+	result.assign(entries, entries + count);
+	return result;
+}
+
 std::vector<LocalVarEntry> DebugSession::EnumLocals(uint32_t threadId, uint64_t instrAddr, uint64_t frameBase) {
 	std::vector<LocalVarEntry> result;
 

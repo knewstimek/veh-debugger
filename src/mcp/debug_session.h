@@ -212,6 +212,8 @@ public:
 	bool IsThreadStopped(uint32_t threadId);
 	std::vector<ModuleEntry> GetModules();
 	std::vector<LocalVarEntry> EnumLocals(uint32_t threadId, uint64_t instrAddr, uint64_t frameBase);
+	// At most kSymbolizeMaxAddresses; empty on failure
+	std::vector<SymbolizeEntry> Symbolize(const std::vector<uint64_t>& addresses);
 
 	// --- Memory ---
 	std::vector<uint8_t> ReadMemory(uint64_t address, uint32_t size);
