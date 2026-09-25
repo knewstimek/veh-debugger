@@ -221,8 +221,6 @@ private:
 	void ResolveStepRange(uint32_t threadId);
 	// 현재 스레드의 top frame 소스 라인 조회
 	bool GetTopFrameSourceLine(uint32_t threadId, std::string& file, uint32_t& line);
-	bool ReadTargetPointer(uint64_t address, uint64_t& value, uint32_t& size);
-	static std::string FormatTargetPointer(uint64_t value, uint32_t size);
 	bool IsSameStepLine(uint64_t address, uint64_t startAddr, uint64_t nextLineAddr,
 		const std::string& file, uint32_t line);
 	// 현재 RIP의 명령어가 CALL인지 판별 + 리턴주소 계산

@@ -9,6 +9,7 @@ add_executable(veh-mcp-server
 	trace_output_file.cpp
 	assembler.cpp
 	installer.cpp
+	../adapter/expr_eval.cpp
 	../adapter/transport.cpp
 	../adapter/pipe_client.cpp
 	../adapter/injector.cpp

@@ -1,4 +1,5 @@
 #include "dap_server.h"
+#include "expr_eval.h"
 #include "pipe_client.h"
 #include "logger.h"
 #include <filesystem>
@@ -1777,15 +1778,6 @@ void DapServer::OnEvaluate(const Request& req) {
 	resp.request_seq = req.seq;
 	resp.command = "evaluate";
 
-	// 표현식 앞뒤 공백 제거
-	auto trim = [](std::string s) {
-		while (!s.empty() && s.front() == ' ') s.erase(s.begin());
-		while (!s.empty() && s.back() == ' ') s.pop_back();
-		return s;
-	};
-	expression = trim(expression);
-
-	// threadId 결정: frameMap_에서 복원, 없으면 lastStoppedThreadId_
 	uint32_t threadId = 0;
 	if (frameId != 0) {
 		std::lock_guard<std::mutex> lock(frameMutex_);
@@ -1795,192 +1787,18 @@ void DapServer::OnEvaluate(const Request& req) {
 	if (threadId == 0) threadId = lastStoppedThreadId_.load();
 	if (threadId == 0) threadId = launchedMainThreadId_;
 
-	// 1) 레지스터 이름 인식 (hover에서 레지스터 값 표시)
-	if (TryParseRegisterName(expression)) {
-		GetRegistersRequest regReq{};
-		regReq.threadId = threadId;
-
-		std::vector<uint8_t> respData;
-		if (ipcTransport_->SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
-			if (respData.size() >= sizeof(GetRegistersResponse)) {
-				auto* regResp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
-				uint64_t val = ResolveRegisterByName(expression, regResp->regs);
-				char buf[32];
-				if (regResp->regs.is32bit) {
-					snprintf(buf, sizeof(buf), "0x%08X", (uint32_t)val);
-				} else {
-					snprintf(buf, sizeof(buf), "0x%016llX", val);
-				}
-				resp.success = true;
-				resp.body = {
-					{"result", buf},
-					{"type", regResp->regs.is32bit ? "uint32" : "uint64"},
-					{"variablesReference", 0},
-				};
-				SendResponse(resp);
-				return;
-			}
-		}
+	auto evaluated = EvaluateExpression(*ipcTransport_, targetProcess_, expression, threadId,
+		ExprEvalFrontend::Dap);
+	resp.success = evaluated.ok;
+	if (evaluated.ok) {
+		resp.body = {
+			{"result", evaluated.value},
+			{"type", evaluated.type},
+			{"variablesReference", 0},
+		};
+	} else {
+		resp.message = evaluated.error;
 	}
-
-	// 2) 순수 hex 주소 (0x...) — 메모리 미리보기
-	if (expression.size() > 2 && expression[0] == '0' && (expression[1] == 'x' || expression[1] == 'X')) {
-		try {
-			uint64_t addr = std::stoull(expression, nullptr, 16);
-			uint64_t val = 0;
-			uint32_t valSize = 0;
-			if (ReadTargetPointer(addr, val, valSize)) {
-				{
-					char buf[32];
-					snprintf(buf, sizeof(buf), "[0x%llX] = ", addr);
-					resp.success = true;
-					resp.body = {
-						{"result", buf + FormatTargetPointer(val, valSize)},
-						{"type", "memory"},
-						{"variablesReference", 0},
-					};
-					SendResponse(resp);
-					return;
-				}
-			}
-		} catch (...) {}
-	}
-
-	// 3) gs:[offset] / fs:[offset] — segment register base + offset dereference
-	{
-		std::string upper = expression;
-		std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
-		bool isGs = (upper.substr(0, 4) == "GS:[");
-		bool isFs = (upper.substr(0, 4) == "FS:[");
-		if (isGs || isFs) {
-			std::string offsetStr = expression.substr(4);
-			if (!offsetStr.empty() && offsetStr.back() == ']') offsetStr.pop_back();
-			while (!offsetStr.empty() && offsetStr.front() == ' ') offsetStr.erase(offsetStr.begin());
-			try {
-				uint64_t offset = std::stoull(offsetStr, nullptr, 0);
-				HANDLE hThread = OpenThread(THREAD_QUERY_INFORMATION, FALSE, threadId);
-				if (hThread) {
-					typedef struct {
-						LONG ExitStatus;
-						PVOID TebBaseAddress;
-						struct { HANDLE UniqueProcess; HANDLE UniqueThread; } ClientId;
-						ULONG_PTR AffinityMask;
-						LONG Priority;
-						LONG BasePriority;
-					} THREAD_BASIC_INFORMATION;
-					typedef LONG(NTAPI* NtQueryInformationThread_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
-					auto NtQueryInformationThread = reinterpret_cast<NtQueryInformationThread_t>(
-						GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
-					if (!NtQueryInformationThread) { CloseHandle(hThread); throw std::runtime_error("NtQueryInformationThread not found"); }
-					// x64: gs=TEB, x86: fs=TEB. Reject wrong combination.
-					BOOL isWow64 = FALSE;
-					IsWow64Process(targetProcess_ ? targetProcess_ : GetCurrentProcess(), &isWow64);
-					if ((!isWow64 && isFs) || (isWow64 && isGs)) { CloseHandle(hThread); throw std::runtime_error(isFs ? "fs:[] is x86 only" : "gs:[] is x64 only"); }
-					THREAD_BASIC_INFORMATION tbi = {};
-					LONG ntStatus = NtQueryInformationThread(hThread, 0, &tbi, sizeof(tbi), nullptr);
-					CloseHandle(hThread);
-					if (ntStatus == 0) {
-						uint64_t tebAddr = reinterpret_cast<uint64_t>(tbi.TebBaseAddress);
-						uint64_t targetAddr = tebAddr + offset;
-						uint64_t val = 0;
-						uint32_t valSize = 0;
-						if (ReadTargetPointer(targetAddr, val, valSize)) {
-							char buf[64];
-							snprintf(buf, sizeof(buf), " (TEB=0x%llX + 0x%llX)", tebAddr, offset);
-							resp.success = true;
-							resp.body = {{"result", FormatTargetPointer(val, valSize) + buf}, {"type", "segment"}, {"variablesReference", 0}};
-							SendResponse(resp);
-							return;
-						}
-					}
-				}
-			} catch (...) {}
-		}
-	}
-
-	// 4) *expr / [expr] — pointer dereference with register+offset support
-	//    Supports: *0x1234, [0x1234], [RAX], [RAX+0x10], [RAX-8], [RAX+RBX]
-	if (!expression.empty() && (expression[0] == '*' || expression[0] == '[')) {
-		std::string inner = expression.substr(1);
-		if (!inner.empty() && inner.back() == ']') inner.pop_back();
-		while (!inner.empty() && inner.front() == ' ') inner.erase(inner.begin());
-		while (!inner.empty() && inner.back() == ' ') inner.pop_back();
-
-		uint64_t addr = 0;
-		bool resolved = false;
-		try {
-			addr = std::stoull(inner, nullptr, 0);
-			resolved = true;
-		} catch (...) {}
-
-		if (!resolved && threadId != 0) {
-			GetRegistersRequest regReq{};
-			regReq.threadId = threadId;
-			std::vector<uint8_t> regResp;
-			if (ipcTransport_->SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), regResp)
-				&& regResp.size() >= sizeof(GetRegistersResponse)) {
-				auto* rr = reinterpret_cast<const GetRegistersResponse*>(regResp.data());
-
-				size_t opPos = std::string::npos;
-				char opChar = 0;
-				for (size_t i = 1; i < inner.size(); i++) {
-					if (inner[i] == '+' || inner[i] == '-') {
-						opPos = i;
-						opChar = inner[i];
-						break;
-					}
-				}
-
-				if (opPos != std::string::npos) {
-					std::string lhs = inner.substr(0, opPos);
-					std::string rhs = inner.substr(opPos + 1);
-					while (!lhs.empty() && lhs.back() == ' ') lhs.pop_back();
-					while (!rhs.empty() && rhs.front() == ' ') rhs.erase(rhs.begin());
-
-					uint64_t lhsVal = 0, rhsVal = 0;
-					bool lhsOk = false, rhsOk = false;
-
-					if (TryParseRegisterName(lhs)) {
-						lhsVal = ResolveRegisterByName(lhs, rr->regs);
-						lhsOk = true;
-					} else {
-						try { lhsVal = std::stoull(lhs, nullptr, 0); lhsOk = true; } catch (...) {}
-					}
-					if (TryParseRegisterName(rhs)) {
-						rhsVal = ResolveRegisterByName(rhs, rr->regs);
-						rhsOk = true;
-					} else {
-						try { rhsVal = std::stoull(rhs, nullptr, 0); rhsOk = true; } catch (...) {}
-					}
-
-					if (lhsOk && rhsOk) {
-						addr = (opChar == '+') ? (lhsVal + rhsVal) : (lhsVal - rhsVal);
-						resolved = true;
-					}
-				} else {
-					if (TryParseRegisterName(inner)) {
-						addr = ResolveRegisterByName(inner, rr->regs);
-						resolved = true;
-					}
-				}
-			}
-		}
-
-		if (resolved) {
-			uint64_t val = 0;
-			uint32_t valSize = 0;
-			if (ReadTargetPointer(addr, val, valSize)) {
-				resp.success = true;
-				resp.body = {{"result", FormatTargetPointer(val, valSize)},
-					{"type", valSize == 4 ? "uint32" : "uint64"}, {"variablesReference", 0}};
-				SendResponse(resp);
-				return;
-			}
-		}
-	}
-
-	resp.success = false;
-	resp.message = "Supported: register (RAX), 0x<addr>, [addr], [reg+offset], gs:[offset], fs:[offset]";
 	SendResponse(resp);
 }
 
@@ -3197,48 +3015,11 @@ std::string DapServer::GetDllPath() {
 }
 
 bool DapServer::TryParseRegisterName(const std::string& name) {
-	std::string upper = name;
-	// $rax, $RAX 등 $ 접두어 허용 (GDB/LLDB 문법 호환)
-	if (!upper.empty() && upper[0] == '$') upper = upper.substr(1);
-	std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
-
-	static const char* regNames[] = {
-		"RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP",
-		"R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15",
-		"RIP", "RFLAGS",
-		"EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP",
-		"EIP", "EFLAGS",
-	};
-	for (auto* rn : regNames) {
-		if (upper == rn) return true;
-	}
-	return false;
+	return TryParseExpressionRegister(name);
 }
 
 uint64_t DapServer::ResolveRegisterByName(const std::string& name, const RegisterSet& regs) {
-	std::string upper = name;
-	if (!upper.empty() && upper[0] == '$') upper = upper.substr(1);
-	std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
-
-	if (upper == "RAX" || upper == "EAX") return regs.rax;
-	if (upper == "RBX" || upper == "EBX") return regs.rbx;
-	if (upper == "RCX" || upper == "ECX") return regs.rcx;
-	if (upper == "RDX" || upper == "EDX") return regs.rdx;
-	if (upper == "RSI" || upper == "ESI") return regs.rsi;
-	if (upper == "RDI" || upper == "EDI") return regs.rdi;
-	if (upper == "RBP" || upper == "EBP") return regs.rbp;
-	if (upper == "RSP" || upper == "ESP") return regs.rsp;
-	if (upper == "R8")  return regs.r8;
-	if (upper == "R9")  return regs.r9;
-	if (upper == "R10") return regs.r10;
-	if (upper == "R11") return regs.r11;
-	if (upper == "R12") return regs.r12;
-	if (upper == "R13") return regs.r13;
-	if (upper == "R14") return regs.r14;
-	if (upper == "R15") return regs.r15;
-	if (upper == "RIP" || upper == "EIP") return regs.rip;
-	if (upper == "RFLAGS" || upper == "EFLAGS") return regs.rflags;
-	return 0;
+	return ResolveExpressionRegister(name, regs, ExprEvalFrontend::Dap);
 }
 
 bool DapServer::EvaluateCondition(const std::string& condition, uint32_t threadId, const RegisterSet* cachedRegs) {
@@ -3569,30 +3350,6 @@ void DapServer::CleanupStaleTempBp() {
 		stepOverTempBpId_ = 0;
 		stepOverTempBpAddr_ = 0;
 	}
-}
-
-// Evaluate reads pointer-sized values: 4 bytes on a WoW64 target, 8 otherwise.
-bool DapServer::ReadTargetPointer(uint64_t address, uint64_t& value, uint32_t& size) {
-	BOOL wow64 = FALSE;
-	if (targetProcess_) IsWow64Process(targetProcess_, &wow64);
-	size = wow64 ? 4 : 8;
-	ReadMemoryRequest readReq{};
-	readReq.address = address;
-	readReq.size = size;
-	std::vector<uint8_t> respData;
-	if (!ipcTransport_->SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)
-		|| respData.size() < sizeof(IpcStatus) + size
-		|| *reinterpret_cast<const IpcStatus*>(respData.data()) != IpcStatus::Ok)
-		return false;
-	value = 0;
-	memcpy(&value, respData.data() + sizeof(IpcStatus), size);
-	return true;
-}
-
-std::string DapServer::FormatTargetPointer(uint64_t value, uint32_t size) {
-	char buf[24];
-	snprintf(buf, sizeof(buf), size == 4 ? "0x%08llX" : "0x%016llX", value);
-	return buf;
 }
 
 // Step-over line test. [startAddr, nextLineAddr) is empty when the next source line has

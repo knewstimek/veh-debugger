@@ -1,6 +1,7 @@
 add_executable(veh-debug-adapter
     main.cpp
     dap_server.cpp
+    expr_eval.cpp
     transport.cpp
     injector.cpp
     pipe_client.cpp
