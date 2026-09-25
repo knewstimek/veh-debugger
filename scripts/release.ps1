@@ -82,7 +82,9 @@ function Set-ReleaseMetadata {
     $changelogPath = Join-Path $repoRoot 'extension\CHANGELOG.md'
     $changelog = Read-Utf8File $changelogPath
     $releaseHeading = "## $Version - $ReleaseDate"
-    if ($changelog -notmatch "(?m)^## $([regex]::Escape($Version)) - \d{4}-\d{2}-\d{2}$") {
+    # \r?: in a CRLF checkout .NET's multiline $ does not match before \r, which
+    # re-inserted the heading on every run and dirtied the tree before -Publish.
+    if ($changelog -notmatch "(?m)^## $([regex]::Escape($Version)) - \d{4}-\d{2}-\d{2}\r?$") {
         $newline = if ($changelog.Contains("`r`n")) { "`r`n" } else { "`n" }
         $unreleasedHeader = "## Unreleased$newline$newline"
         if (-not $changelog.Contains($unreleasedHeader)) {
