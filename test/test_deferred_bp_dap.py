@@ -6,22 +6,25 @@
   4. host late-loads the DLL -> ModuleLoaded -> worker re-resolves -> sends
      'breakpoint' event (reason=changed, verified=true), then BP hits -> 'stopped'
 """
+# requires: x64 (deferred_host.exe is only built for x64)
 import subprocess, json, sys, time, os
+from build_paths import RELEASE
+from bounded_pipe import bound
 
-BASE = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release")
+BASE = RELEASE
 ADAPTER = os.path.join(BASE, "veh-debug-adapter.exe")
 HOST = os.path.join(BASE, "deferred_host.exe")
-SCRATCH = os.path.join(os.environ.get("TEMP", ""), "claude",
-                       "D--News-Hack-Engine-VEHDebugger-for-VSCode-Extension")
-# deferred_dll.cpp absolute path (as embedded in the PDB at compile time)
+# Source breakpoints only need the path embedded in the DLL's PDB, not the file itself.
 SOURCE = None
-for root, _dirs, files in os.walk(SCRATCH):
-    if "deferred_dll.cpp" in files:
-        SOURCE = os.path.join(root, "deferred_dll.cpp")
-        break
+PDB = os.path.join(BASE, "deferred_dll.pdb")
+if os.path.exists(PDB):
+    import re
+    match = re.search(rb"[A-Za-z]:[^\x00]*?deferred_dll\.cpp", open(PDB, "rb").read(), re.I)
+    SOURCE = match.group(0).decode() if match else None
 
 proc = subprocess.Popen([ADAPTER], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE, bufsize=0)
+bound(proc)
 seq = [0]
 
 def send(cmd, args=None):

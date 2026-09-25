@@ -391,6 +391,23 @@ Injected DLL file/stderr logging is disabled by default, so it does not create
 A few critical paths also use `OutputDebugStringW` - view with DebugView (Sysinternals).
 
 ## Test
+
+Run the whole suite with `tools/run_tests.py` (per-file timeout, duration table, and
+cleanup of processes a test left behind):
+
+```bash
+py -3 tools/run_tests.py                          # x64 build (build/)
+py -3 tools/run_tests.py --build-dir build32      # x86 build; files marked "# requires: x64" are skipped
+py -3 tools/run_tests.py "test_mcp_*.py" --timeout 60
+```
+
+Tests resolve binaries through `test/build_paths.py` (`VEH_TEST_BUILD_DIR`). Legacy clients
+that read child pipes directly wrap them with `test/bounded_pipe.py` (`bound()` for idle-bounded
+stdout reads, `drain_stderr()` so a chatty child never blocks on a full stderr pipe); new
+tests should use `test/mcp_test_client.py` / `test/dap_test_client.py`.
+
+Individual files:
+
 ```bash
 py -3 test/test_step.py        # F10 (StepOver) - 10 consecutive steps
 py -3 test/test_stepin.py      # F11 (StepIn) - step into function

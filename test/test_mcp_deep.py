@@ -2,14 +2,16 @@
 
 Each test verifies actual correctness of returned data against known ground truth.
 """
+# requires: x64 (asserts x64 register names (RSP/RCX))
 import time
+from build_paths import RELEASE
 import sys
 import os
 
 from mcp_test_client import McpClient as SharedMcpClient
 
-MCP_EXE = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe")
-TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
+MCP_EXE = os.path.join(RELEASE, "veh-mcp-server.exe")
+TARGET = os.path.join(RELEASE, "test_target.exe")
 SOURCE_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "test_target", "main.cpp"))
 
 passed = 0
@@ -34,6 +36,10 @@ class McpClient:
             if "test_target" in m.get("name", "").lower():
                 return int(m["baseAddress"], 16)
         return None
+
+    def wait_stop(self, timeout=5):
+        """Wait for the next breakpoint stop instead of sleeping a fixed time."""
+        return self.call("veh_continue", {"threadId": 0, "wait": True, "timeout": timeout}, timeout + 5)
 
     def get_first_thread(self):
         threads = self.call("veh_threads")
@@ -74,7 +80,7 @@ def test_function_bp_rip_accuracy():
         func_addr = bp.get("address", "")
         bp_id = bp.get("id")
         print(f"    WorkFunction resolved to {func_addr}")
-        time.sleep(2)
+        c.wait_stop()
 
         tid = c.get_first_thread()
         check("thread found", tid is not None)
@@ -112,7 +118,7 @@ def test_source_bp_line_accuracy():
         print(f"    Source BP resolved: line {bp_line} -> {bp_addr}")
         check("line resolved", bp_addr.startswith("0x"), str(bp))
 
-        time.sleep(2)
+        c.wait_stop()
         tid = c.get_first_thread()
         check("thread found", tid is not None)
         if not tid: return
@@ -144,7 +150,7 @@ def test_evaluate_correctness():
         bp = c.call("veh_set_function_breakpoint", {"name": "WorkFunction"})
         bp_id = bp.get("id")
         func_addr = int(bp["address"], 16)
-        time.sleep(2)
+        c.wait_stop()
 
         tid = c.get_first_thread()
         if not tid: check("thread found", False); return
@@ -197,7 +203,7 @@ def test_set_register_verify():
 
         bp = c.call("veh_set_function_breakpoint", {"name": "WorkFunction"})
         bp_id = bp.get("id")
-        time.sleep(2)
+        c.wait_stop()
 
         tid = c.get_first_thread()
         if not tid: check("thread found", False); return
@@ -240,14 +246,18 @@ def test_logpoint_notification():
         })
         bp_id = bp.get("id")
         work_func = int(bp.get("address", "0x0"), 16)
-        time.sleep(3)
 
-        # Trigger a response to flush notifications
+        # Notifications are collected while a request waits for its response, so poll
+        # with a cheap request until the first logpoint arrives (WorkFunction runs ~1/s).
         c.notifications.clear()
-        c.call("veh_threads")
-
-        logpoint_msgs = [n for n in c.notifications
-                        if n.get("params", {}).get("logger") == "logpoint"]
+        logpoint_msgs = []
+        deadline = time.monotonic() + 5
+        while not logpoint_msgs and time.monotonic() < deadline:
+            c.call("veh_threads")
+            logpoint_msgs = [n for n in c.notifications
+                             if n.get("params", {}).get("logger") == "logpoint"]
+            if not logpoint_msgs:
+                time.sleep(0.2)
         print(f"    Logpoint notifications: {len(logpoint_msgs)}")
         if logpoint_msgs:
             msg_data = logpoint_msgs[0].get("params", {}).get("data", "")
@@ -289,7 +299,7 @@ def test_conditional_bp_value_check():
             "condition": "RSP!=0"
         })
         bp_id = bp.get("id")
-        time.sleep(2)
+        c.wait_stop()
 
         tid = c.get_first_thread()
         if tid:

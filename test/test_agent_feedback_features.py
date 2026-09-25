@@ -8,9 +8,11 @@ Covers the 3 MCP-side additions:
 Run: py -3 test/test_agent_feedback_features.py
 """
 import subprocess, json, time, sys, os, re
+from build_paths import RELEASE
+from bounded_pipe import bound
 
-MCP_EXE = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe")
-TARGET  = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
+MCP_EXE = os.path.join(RELEASE, "veh-mcp-server.exe")
+TARGET  = os.path.join(RELEASE, "test_target.exe")
 
 passed = failed = 0
 errors = []
@@ -19,6 +21,7 @@ class McpClient:
     def __init__(self):
         self.proc = subprocess.Popen([MCP_EXE], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        bound(self.proc)
         self.seq = 0
     def send(self, method, params=None):
         self.seq += 1
@@ -166,31 +169,31 @@ def test_data_bp_condition():
         c.initialize()
         r = c.call("veh_launch", {"program": TARGET, "stopOnEntry": True})
         check("launch", r.get("success"), str(r))
-        base = module_base(c, "test_target")
-        work_func = base + 0x1000
+        # Resolve WorkFunction by symbol; its RVA moves between builds.
+        probe = c.call("veh_set_function_breakpoint", {"name": "WorkFunction"})
+        check("WorkFunction resolved", probe.get("success"), str(probe))
+        c.call("veh_remove_breakpoint", {"id": probe.get("id")})
+        work_func = int(probe.get("address", "0"), 16)
         g = find_g_counter(c, work_func)
         print(f"  g_counter @ 0x{g:X}" if g else "  g_counter NOT FOUND")
         if not g:
             check("g_counter resolved", False, "could not extract address from disasm")
             c.call("veh_detach"); return
 
-        # data write BP: stop only when the stored value == 5
-        bp = c.call("veh_set_data_breakpoint",
-                    {"address": f"0x{g:X}", "type": "write", "size": 4, "condition": "value == 5"})
-        print(f"  data bp: {bp}")
-        check("data bp set", bp.get("success"), str(bp))
+        # g_counter is rewritten several times per loop iteration with trace-target
+        # values, so gate on conditions whose truth does not depend on those values.
+        never = c.call("veh_set_data_breakpoint", {"address": f"0x{g:X}", "type": "write", "size": 4,
+                                                   "condition": "value == 0x7FFFFFF1"})
+        check("data bp set", never.get("success"), str(never))
+        r = c.call("veh_continue", {"threadId": 0, "wait": True, "timeout": 3})
+        check("false condition never stops", r.get("timeout") is True, str(r))
+        c.call("veh_remove_data_breakpoint", {"id": never.get("id")})
 
-        # resume; counter increments ~1/sec, must stop at value 5 (~5s)
-        c.call("veh_continue", {"threadId": 0})
-        time.sleep(8)
-
-        val = c.call("veh_read_memory", {"address": f"0x{g:X}", "size": 4})
-        raw = val.get("hex", "").split()
-        cur = int("".join(reversed(raw[:4])), 16) if len(raw) >= 4 else -1
-        print(f"  g_counter after condition stop = {cur}")
-        check("condition 'value==5' stopped at 5", cur == 5, f"got {cur} (expected 5)")
-
-        c.call("veh_remove_data_breakpoint", {"id": bp.get("id")})
+        always = c.call("veh_set_data_breakpoint", {"address": f"0x{g:X}", "type": "write", "size": 4,
+                                                    "condition": "value != 0x7FFFFFF1"})
+        r = c.call("veh_continue", {"threadId": 0, "wait": True, "timeout": 5})
+        check("true condition stops on the write", r.get("stopped") is True, str(r))
+        c.call("veh_remove_data_breakpoint", {"id": always.get("id")})
         c.call("veh_continue", {"threadId": 0})
         c.call("veh_detach")
     finally:

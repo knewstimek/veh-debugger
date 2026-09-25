@@ -14,15 +14,17 @@ Covers:
 10. Rapid launch/detach cycle x5 -> stability
 """
 import subprocess
+from build_paths import RELEASE
 import json
 import threading
 import time
 import sys
 import os
 import tempfile
+from bounded_pipe import drain_stderr
 
-MCP_SERVER = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe")
-TEST_TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
+MCP_SERVER = os.path.join(RELEASE, "veh-mcp-server.exe")
+TEST_TARGET = os.path.join(RELEASE, "test_target.exe")
 
 class McpClient:
     def __init__(self):
@@ -33,6 +35,7 @@ class McpClient:
             stderr=subprocess.PIPE,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
         )
+        drain_stderr(self.proc)
         self.req_id = 0
         self.lock = threading.Lock()
         self.responses = {}

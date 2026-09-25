@@ -6,6 +6,7 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 
 | Tool | Purpose |
 |---|---|
+| `tools/run_tests.py` | Runs every `test/test_*.py` file with a per-file timeout, prints durations, flags exit-0 runs that report FAIL, skips `# requires: x64` files on an x86 build, and cleans up processes a file left behind. |
 | `test/mcp_test_client.py` | Shared timeout-aware MCP stdio client. It bounds captured diagnostics and terminates only processes it started. |
 | `tools/run_mcp_scenario.py` | Runs 1-500 calls from a JSON scenario, supports named result references, stops on errors by default, and optionally writes a new report without overwriting. |
 | `tools/validate_trace_output.py` | Validates exported trace JSON/JSONL ordering, thread ownership, counts, hashes, and optional `.vtc` code-version references. |

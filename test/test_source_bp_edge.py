@@ -1,7 +1,9 @@
 """Test edge cases for setBreakpoints on PDB-less binary."""
 import subprocess, json, sys, time, os
+from build_paths import RELEASE
+from bounded_pipe import bound
 
-ADAPTER = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-debug-adapter.exe")
+ADAPTER = os.path.join(RELEASE, "veh-debug-adapter.exe")
 TARGET = os.path.join(os.path.dirname(__file__), "challenges", "crackme", "crackme_x64.exe")
 
 proc = subprocess.Popen(
@@ -9,6 +11,7 @@ proc = subprocess.Popen(
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     bufsize=0
 )
+bound(proc)
 
 seq = [0]
 
@@ -73,6 +76,7 @@ tests = [
     ("many breakpoints", {"source": {"path": "C:\\test.cpp"}, "breakpoints": [{"line": i} for i in range(1, 51)]}),
 ]
 
+failures = 0
 for name, args in tests:
     print(f"\n--- Test: {name} ---")
     send("setBreakpoints", args)
@@ -82,6 +86,7 @@ for name, args in tests:
     )
     if bp_resp is None:
         print(f"   FAIL: No response!")
+        failures += 1
         if proc.poll() is not None:
             print(f"   ADAPTER CRASHED! Exit code: {proc.returncode}")
             stderr = proc.stderr.read().decode(errors='replace')
@@ -105,8 +110,10 @@ if t and t.get("success"):
     print("OK: Adapter still functional")
 else:
     print(f"FAIL: threads: {t}")
+    failures += 1
 
 send("disconnect", {"terminateDebuggee": True})
 time.sleep(1)
 if proc.poll() is None: proc.kill()
 print("\n=== Edge Case Test Complete ===")
+sys.exit(1 if failures else 0)

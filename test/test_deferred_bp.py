@@ -11,13 +11,16 @@ Scenario:
 Requires build_deferred.bat to have produced deferred_host.exe + deferred_dll.dll
 in build/bin/Release/.
 """
+# requires: x64 (deferred_host.exe is only built for x64)
 import subprocess
+from build_paths import RELEASE
 import json
 import time
 import sys
 import os
+from bounded_pipe import bound
 
-BASE = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release")
+BASE = RELEASE
 MCP_EXE = os.path.join(BASE, "veh-mcp-server.exe")
 HOST = os.path.join(BASE, "deferred_host.exe")
 
@@ -26,6 +29,7 @@ class McpClient:
     def __init__(self):
         self.proc = subprocess.Popen(
             [MCP_EXE], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        bound(self.proc)
         self.seq = 0
 
     def send(self, method, params=None):
@@ -42,7 +46,7 @@ class McpClient:
         while time.time() - start < timeout:
             line = self.proc.stdout.readline()
             if not line:
-                break
+                continue
             line = line.decode(errors="replace").strip()
             if not line:
                 continue

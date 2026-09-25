@@ -4,6 +4,7 @@ list_breakpoints, conditional BP, logpoint, exception_info.
 Uses test_target.exe (must be built with PDB).
 """
 import subprocess
+from build_paths import RELEASE
 import json
 import time
 import sys
@@ -11,8 +12,8 @@ import os
 import queue
 import threading
 
-MCP_EXE = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe")
-TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
+MCP_EXE = os.path.join(RELEASE, "veh-mcp-server.exe")
+TARGET = os.path.join(RELEASE, "test_target.exe")
 
 
 class McpClient:

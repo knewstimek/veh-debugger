@@ -10,15 +10,18 @@ Tests:
 7. Rapid detach->launch restart (10 cycles)
 8. Thread management stress (pause/continue per-thread)
 """
+# requires: x64 (asserts x64 gs: segment access)
 import subprocess
+from build_paths import RELEASE
 import json
 import time
 import sys
 import os
 import tempfile
+from bounded_pipe import bound
 
-MCP_EXE = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe")
-TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
+MCP_EXE = os.path.join(RELEASE, "veh-mcp-server.exe")
+TARGET = os.path.join(RELEASE, "test_target.exe")
 
 class McpClient:
     def __init__(self):
@@ -28,6 +31,7 @@ class McpClient:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        bound(self.proc)
         self.seq = 0
         # Initialize
         self.send("initialize", {"protocolVersion": "2024-11-05",

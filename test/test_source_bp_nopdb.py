@@ -1,8 +1,11 @@
 """Test: setBreakpoints with source path on a PDB-less binary.
 Should gracefully return verified=false, NOT crash."""
+# requires: x64 (launches crackme_x64.exe)
 import subprocess, json, sys, time, os
+from build_paths import RELEASE
+from bounded_pipe import bound
 
-ADAPTER = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-debug-adapter.exe")
+ADAPTER = os.path.join(RELEASE, "veh-debug-adapter.exe")
 TARGET = os.path.join(os.path.dirname(__file__), "challenges", "crackme", "crackme_x64.exe")
 FAKE_SOURCE = r"C:\nonexistent\main.cpp"
 
@@ -11,6 +14,7 @@ proc = subprocess.Popen(
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     bufsize=0
 )
+bound(proc)
 
 seq = [0]
 

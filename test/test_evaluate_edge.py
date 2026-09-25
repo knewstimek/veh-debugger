@@ -15,19 +15,23 @@ Tests:
 12. gs:[abc] - non-numeric offset
 13. *RSP - star with register (should resolve)
 """
+# requires: x64 (asserts x64 gs:/fs: segment semantics)
 import subprocess
+from build_paths import RELEASE
 import json
 import time
 import sys
 import os
+from bounded_pipe import bound
 
-MCP_EXE = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe")
-TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
+MCP_EXE = os.path.join(RELEASE, "veh-mcp-server.exe")
+TARGET = os.path.join(RELEASE, "test_target.exe")
 
 class McpClient:
     def __init__(self):
         self.proc = subprocess.Popen(
             [MCP_EXE], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        bound(self.proc)
         self.seq = 0
         self.send("initialize", {"protocolVersion": "2024-11-05",
                                   "capabilities": {},

@@ -7,14 +7,17 @@ Strategy:
 4. Continue -> BP hit on first loop iteration
 5. Step-over the CALL -> verify we skip over it
 """
+# requires: x64 (reads the x64 rip register)
 import subprocess
+from build_paths import RELEASE
 import json
 import time
 import sys
 import os
+from bounded_pipe import bound
 
-MCP_EXE = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe")
-TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
+MCP_EXE = os.path.join(RELEASE, "veh-mcp-server.exe")
+TARGET = os.path.join(RELEASE, "test_target.exe")
 
 
 class McpClient:
@@ -25,6 +28,7 @@ class McpClient:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        bound(self.proc)
         self.seq = 0
 
     def send(self, method, params=None):

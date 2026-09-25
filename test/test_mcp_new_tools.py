@@ -11,13 +11,15 @@ Tests all tools added in the DAP feature parity update:
 8. veh_trace_callers (extended: with existing BP overlap)
 """
 import subprocess
+from build_paths import RELEASE
 import json
 import time
 import sys
 import os
+from bounded_pipe import bound
 
-MCP_EXE = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe")
-TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
+MCP_EXE = os.path.join(RELEASE, "veh-mcp-server.exe")
+TARGET = os.path.join(RELEASE, "test_target.exe")
 # Source file path as stored in PDB (absolute build path)
 SOURCE_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "test_target", "main.cpp"))
 
@@ -33,6 +35,7 @@ class McpClient:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        bound(self.proc)
         self.seq = 0
         self.notifications = []
 
@@ -84,6 +87,11 @@ class McpClient:
         except: pass
         try: self.proc.wait(timeout=3)
         except: pass
+
+def wait_stop(c, timeout=5):
+    """Wait for the next breakpoint stop instead of sleeping a fixed time."""
+    return c.call_tool("veh_continue", {"threadId": 0, "wait": True, "timeout": timeout}, timeout + 5)
+
 
 def get_content(resp):
     try:
@@ -139,7 +147,7 @@ def test_function_breakpoint():
         check("function BP has address", bp_addr.startswith("0x"), bp_addr)
 
         # Wait for BP hit
-        time.sleep(2)
+        wait_stop(c)
 
         # Verify we can get threads (process should be stopped)
         r = c.call_tool("veh_threads")
@@ -184,7 +192,7 @@ def test_source_breakpoint():
         bp_id = data.get("id")
 
         # Wait for BP hit
-        time.sleep(2)
+        wait_stop(c)
 
         # Verify stopped
         r = c.call_tool("veh_threads")
@@ -268,7 +276,7 @@ def test_evaluate():
         r = c.call_tool("veh_set_function_breakpoint", {"name": "WorkFunction"})
         bp_data = get_content(r)
         bp_id = bp_data.get("id")
-        time.sleep(2)
+        wait_stop(c)
 
         # Get thread ID
         r = c.call_tool("veh_threads")
@@ -329,7 +337,7 @@ def test_set_register():
         r = c.call_tool("veh_set_function_breakpoint", {"name": "WorkFunction"})
         bp_data = get_content(r)
         bp_id = bp_data.get("id")
-        time.sleep(2)
+        wait_stop(c)
 
         # Get thread
         r = c.call_tool("veh_threads")

@@ -1,10 +1,11 @@
 """Test veh_batch tool - sequential execution, variable refs, control flow."""
 import time, sys, os
+from build_paths import RELEASE
 
 from mcp_test_client import McpClient as SharedMcpClient
 
-MCP_EXE = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe")
-TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
+MCP_EXE = os.path.join(RELEASE, "veh-mcp-server.exe")
+TARGET = os.path.join(RELEASE, "test_target.exe")
 
 class McpClient:
     def __init__(self):

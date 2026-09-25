@@ -75,12 +75,13 @@ def main():
         suspender.start()
         trace = client.tool("veh_trace_basic_blocks", {
             "threadId": thread_id, "start": hex(loop), "end": hex(loop + 2),
-            "max_steps": 2_000_000, "timeout_ms": 45_000, "stack_bytes": 0,
+            "max_steps": 5_000_000, "timeout_ms": 36_000, "stack_bytes": 0,
         }, timeout=60)
         suspender.join(timeout=40)
         assert not suspender.is_alive(), "target suspender did not finish"
         assert not suspend_errors, suspend_errors
-        assert trace.get("stop_reason") == "max_steps", trace
+        # The trace ends on its own timeout, independent of single-step speed (x86 is slower).
+        assert trace.get("stop_reason") == "timeout", trace
         assert trace.get("elapsed_ms", 0) >= 32_000, trace
         assert trace.get("steps_executed", 0) > 0, trace
         print({

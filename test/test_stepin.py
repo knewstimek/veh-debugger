@@ -1,12 +1,13 @@
 """DAP stepIn integration test with bounded I/O and cleanup."""
 import os
+from build_paths import RELEASE
 
 from dap_test_client import DapClient
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-ADAPTER = os.path.join(ROOT, "build", "bin", "Release", "veh-debug-adapter.exe")
-TARGET = os.path.join(ROOT, "build", "bin", "Release", "test_target.exe")
+ADAPTER = os.path.join(RELEASE, "veh-debug-adapter.exe")
+TARGET = os.path.join(RELEASE, "test_target.exe")
 SOURCE = os.path.join(ROOT, "test_target", "main.cpp")
 
 

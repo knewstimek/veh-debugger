@@ -1,5 +1,6 @@
 """Mixed-version smoke test for veh_trace_basic_blocks IPC compatibility."""
 import json
+from build_paths import RELEASE
 import os
 
 from mcp_test_client import McpClient
@@ -8,7 +9,7 @@ from mcp_test_client import McpClient
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 TARGET = os.environ.get(
     "VEH_TEST_TARGET",
-    os.path.join(ROOT, "build", "bin", "Release", "test_target.exe"),
+    os.path.join(RELEASE, "test_target.exe"),
 )
 
 

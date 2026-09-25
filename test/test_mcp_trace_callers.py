@@ -4,13 +4,15 @@ Sets a breakpoint on WorkFunction, collects callers for 3 seconds,
 verifies at least 1 unique caller with multiple hits.
 """
 import subprocess
+from build_paths import RELEASE
 import json
 import time
 import sys
 import os
+from bounded_pipe import bound
 
-MCP_EXE = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "veh-mcp-server.exe")
-TARGET = os.path.join(os.path.dirname(__file__), "..", "build", "bin", "Release", "test_target.exe")
+MCP_EXE = os.path.join(RELEASE, "veh-mcp-server.exe")
+TARGET = os.path.join(RELEASE, "test_target.exe")
 
 class McpClient:
     def __init__(self):
@@ -20,6 +22,7 @@ class McpClient:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        bound(self.proc)
         self.seq = 0
 
     def send(self, method, params=None):
