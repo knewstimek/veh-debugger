@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- **`veh_value_scan`** -- adds a target-side Cheat Engine style value scan session with exact/range/unknown first scans, change-aware next scans, bounded result paging, writable/executable/type filters, and explicit reset. Candidate lists and unknown-value snapshots remain inside the target DLL.
 - **`veh_search_memory`** -- scans readable committed memory inside the target for an AOB pattern (`??` byte and `4?` nibble wildcards), a string (ascii/utf8/utf16), or a numeric value (i8-u64, f32/f64, ptr). Filters: address range or module, writable, executable, region type, alignment. Breakpoint bytes compare as the original code, and the search request's own pattern is never reported. Results are capped by `max_results`; `next_start` resumes a truncated search.
 - **`veh_memory_map`** -- lists virtual memory regions with state, protection, type, and owning module, limited to a range or module; `next_start` pages through large maps.
 

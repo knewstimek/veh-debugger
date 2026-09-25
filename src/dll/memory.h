@@ -6,6 +6,9 @@
 
 namespace veh {
 
+// SEH-protected bulk copy used by target-side memory operations.
+bool SafeCopyMemory(void* dst, const void* src, size_t size);
+
 class MemoryManager {
 public:
 	static MemoryManager& Instance();

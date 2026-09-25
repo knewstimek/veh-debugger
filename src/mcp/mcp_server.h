@@ -78,6 +78,7 @@ private:
 	json ToolFreeMemory(const json& args);
 	json ToolMemoryMap(const json& args);
 	json ToolSearchMemory(const json& args);
+	json ToolValueScan(const json& args);
 	bool ParseRangeArgs(const json& args, uint64_t& start, uint64_t& end, std::string& error);
 	static std::string ModuleLocation(uint64_t address, const std::vector<ModuleEntry>& modules);
 	json ToolExecuteShellcode(const json& args);

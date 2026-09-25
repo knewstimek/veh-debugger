@@ -5,7 +5,10 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
+#include <limits>
+#include <stdexcept>
 #include <wincrypt.h>
 #pragma comment(lib, "advapi32.lib")
 
@@ -1755,9 +1758,14 @@ static bool BuildSearchPattern(const json& args, bool is64, std::vector<uint8_t>
 	return true;
 }
 
-static bool ParseRegionFilter(const json& args, const char* key, RegionFilter& out) {
-	out = RegionFilter::Any;
+static bool ParseRegionFilter(const json& args, const char* key, RegionFilter& out,
+	RegionFilter defaultFilter = RegionFilter::Any) {
+	out = defaultFilter;
 	if (!args.contains(key) || args[key].is_null()) return true;
+	if (args[key].is_string() && args[key].get<std::string>() == "any") {
+		out = RegionFilter::Any;
+		return true;
+	}
 	if (!args[key].is_boolean()) return false;
 	out = args[key].get<bool>() ? RegionFilter::Require : RegionFilter::Exclude;
 	return true;
@@ -1775,7 +1783,7 @@ json McpServer::ToolSearchMemory(const json& args) {
 	SearchMemoryRequest req{};
 	if (!ParseRangeArgs(args, req.startAddress, req.endAddress, error)) return {{"error", error}};
 	if (!ParseRegionFilter(args, "writable", req.writable) || !ParseRegionFilter(args, "executable", req.executable))
-		return {{"error", "writable/executable must be true or false"}};
+		return {{"error", "writable/executable must be true, false, or any"}};
 	if (args.contains("type")) {
 		json types = args["type"].is_array() ? args["type"] : json::array({args["type"]});
 		for (auto& t : types) {
@@ -1807,6 +1815,243 @@ json McpServer::ToolSearchMemory(const json& args) {
 	               {"scannedBytes", found.scannedBytes}};
 	if (found.nextAddress) result["next_start"] = HexAddr(found.nextAddress);
 	return result;
+}
+
+static const char* ValueScanTypeName(ValueScanType type) {
+	switch (type) {
+	case ValueScanType::I8: return "i8";
+	case ValueScanType::U8: return "u8";
+	case ValueScanType::I16: return "i16";
+	case ValueScanType::U16: return "u16";
+	case ValueScanType::I32: return "i32";
+	case ValueScanType::U32: return "u32";
+	case ValueScanType::I64: return "i64";
+	case ValueScanType::U64: return "u64";
+	case ValueScanType::F32: return "f32";
+	case ValueScanType::F64: return "f64";
+	default: return "none";
+	}
+}
+
+static bool ParseValueScanType(const std::string& name, ValueScanType& type, uint32_t& size) {
+	if (name == "i8") { type = ValueScanType::I8; size = 1; }
+	else if (name == "u8") { type = ValueScanType::U8; size = 1; }
+	else if (name == "i16") { type = ValueScanType::I16; size = 2; }
+	else if (name == "u16") { type = ValueScanType::U16; size = 2; }
+	else if (name == "i32") { type = ValueScanType::I32; size = 4; }
+	else if (name == "u32") { type = ValueScanType::U32; size = 4; }
+	else if (name == "i64") { type = ValueScanType::I64; size = 8; }
+	else if (name == "u64") { type = ValueScanType::U64; size = 8; }
+	else if (name == "f32") { type = ValueScanType::F32; size = 4; }
+	else if (name == "f64") { type = ValueScanType::F64; size = 8; }
+	else return false;
+	return true;
+}
+
+template <typename T>
+static uint64_t ScanRaw(T value) {
+	uint64_t raw = 0;
+	memcpy(&raw, &value, sizeof(value));
+	return raw;
+}
+
+static bool ParseScanRaw(const json& value, ValueScanType type, uint64_t& raw) {
+	try {
+		if (type == ValueScanType::F32 || type == ValueScanType::F64) {
+			double number = value.is_string() ? std::stod(value.get<std::string>()) : value.get<double>();
+			raw = type == ValueScanType::F32 ? ScanRaw(static_cast<float>(number)) : ScanRaw(number);
+			return true;
+		}
+		const bool isSigned = type == ValueScanType::I8 || type == ValueScanType::I16
+			|| type == ValueScanType::I32 || type == ValueScanType::I64;
+		if (isSigned) {
+			int64_t number = 0;
+			if (value.is_string()) {
+				size_t used = 0;
+				number = std::stoll(value.get<std::string>(), &used, 0);
+				if (used != value.get_ref<const std::string&>().size()) return false;
+			} else number = value.get<int64_t>();
+			int64_t low = (std::numeric_limits<int64_t>::min)();
+			int64_t high = (std::numeric_limits<int64_t>::max)();
+			if (type == ValueScanType::I8) { low = -128; high = 127; }
+			else if (type == ValueScanType::I16) { low = -32768; high = 32767; }
+			else if (type == ValueScanType::I32) {
+				low = (std::numeric_limits<int32_t>::min)();
+				high = (std::numeric_limits<int32_t>::max)();
+			}
+			if (number < low || number > high) return false;
+			switch (type) {
+			case ValueScanType::I8: raw = ScanRaw(static_cast<int8_t>(number)); break;
+			case ValueScanType::I16: raw = ScanRaw(static_cast<int16_t>(number)); break;
+			case ValueScanType::I32: raw = ScanRaw(static_cast<int32_t>(number)); break;
+			default: raw = ScanRaw(number); break;
+			}
+			return true;
+		}
+		uint64_t number = 0;
+		if (value.is_string()) {
+			const std::string& text = value.get_ref<const std::string&>();
+			if (!text.empty() && text[0] == '-') return false;
+			size_t used = 0;
+			number = std::stoull(text, &used, 0);
+			if (used != text.size()) return false;
+		} else {
+			if (value.is_number_integer() && !value.is_number_unsigned() && value.get<int64_t>() < 0) return false;
+			number = value.get<uint64_t>();
+		}
+		uint64_t high = (std::numeric_limits<uint64_t>::max)();
+		if (type == ValueScanType::U8) high = 0xFF;
+		else if (type == ValueScanType::U16) high = 0xFFFF;
+		else if (type == ValueScanType::U32) high = 0xFFFFFFFFull;
+		if (number > high) return false;
+		switch (type) {
+		case ValueScanType::U8: raw = ScanRaw(static_cast<uint8_t>(number)); break;
+		case ValueScanType::U16: raw = ScanRaw(static_cast<uint16_t>(number)); break;
+		case ValueScanType::U32: raw = ScanRaw(static_cast<uint32_t>(number)); break;
+		default: raw = number; break;
+		}
+		return true;
+	} catch (...) {
+		return false;
+	}
+}
+
+template <typename T>
+static T RawScanValue(uint64_t raw) {
+	T value{};
+	memcpy(&value, &raw, sizeof(value));
+	return value;
+}
+
+static json FormatScanValue(uint64_t raw, ValueScanType type) {
+	switch (type) {
+	case ValueScanType::I8: return RawScanValue<int8_t>(raw);
+	case ValueScanType::U8: return RawScanValue<uint8_t>(raw);
+	case ValueScanType::I16: return RawScanValue<int16_t>(raw);
+	case ValueScanType::U16: return RawScanValue<uint16_t>(raw);
+	case ValueScanType::I32: return RawScanValue<int32_t>(raw);
+	case ValueScanType::U32: return RawScanValue<uint32_t>(raw);
+	case ValueScanType::I64: return RawScanValue<int64_t>(raw);
+	case ValueScanType::U64: return raw;
+	case ValueScanType::F32: return RawScanValue<float>(raw);
+	case ValueScanType::F64: return RawScanValue<double>(raw);
+	default: return nullptr;
+	}
+}
+
+static std::string ValueScanFailureText(ValueScanFailure failure) {
+	switch (failure) {
+	case ValueScanFailure::NoSession: return "no active value scan; run operation=first";
+	case ValueScanFailure::InvalidRequest: return "invalid value scan request";
+	case ValueScanFailure::TypeMismatch: return "value_type does not match the active value scan";
+	case ValueScanFailure::TooManyResults:
+		return "TooManyResults: more than 16M candidates; narrow the range or value";
+	case ValueScanFailure::SnapshotTooLarge:
+		return "SnapshotTooLarge: snapshot exceeds 512MB; specify module, start, or end";
+	case ValueScanFailure::AllocationFailed: return "value scan storage allocation failed";
+	default: return "value scan failed (timeout or target error)";
+	}
+}
+
+json McpServer::ToolValueScan(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+	const std::string operationName = args.value("operation", "");
+	ValueScanRequest request{};
+	if (operationName == "first") request.operation = ValueScanOperation::First;
+	else if (operationName == "next") request.operation = ValueScanOperation::Next;
+	else if (operationName == "results") request.operation = ValueScanOperation::Results;
+	else if (operationName == "reset") request.operation = ValueScanOperation::Reset;
+	else return {{"error", "operation must be first, next, results, or reset"}};
+
+	request.maxResults = JsonUint32(args, "max_results", 20);
+	if (request.maxResults == 0 || request.maxResults > 1000)
+		return {{"error", "max_results must be 1-1000"}};
+	if (request.operation == ValueScanOperation::Results && args.contains("offset")) {
+		try {
+			if (args["offset"].is_string()) {
+				const std::string& text = args["offset"].get_ref<const std::string&>();
+				if (!text.empty() && text[0] == '-') throw std::invalid_argument("negative");
+				size_t used = 0;
+				request.offset = std::stoull(text, &used, 0);
+				if (used != text.size()) throw std::invalid_argument("trailing characters");
+			} else {
+				if (args["offset"].is_number_integer() && !args["offset"].is_number_unsigned()
+					&& args["offset"].get<int64_t>() < 0) throw std::invalid_argument("negative");
+				request.offset = args["offset"].get<uint64_t>();
+			}
+		} catch (...) { return {{"error", "offset must be a non-negative integer"}}; }
+	}
+
+	uint32_t valueSize = 4;
+	if (!ParseValueScanType(args.value("value_type", "i32"), request.valueType, valueSize))
+		return {{"error", "value_type must be i8/u8/i16/u16/i32/u32/i64/u64/f32/f64"}};
+
+	if (request.operation == ValueScanOperation::First || request.operation == ValueScanOperation::Next) {
+		const std::string compareName = args.value("compare", "exact");
+		if (compareName == "exact") request.compare = ValueScanCompare::Exact;
+		else if (compareName == "between") request.compare = ValueScanCompare::Between;
+		else if (compareName == "greater") request.compare = ValueScanCompare::Greater;
+		else if (compareName == "less") request.compare = ValueScanCompare::Less;
+		else if (compareName == "unknown") request.compare = ValueScanCompare::Unknown;
+		else if (compareName == "changed") request.compare = ValueScanCompare::Changed;
+		else if (compareName == "unchanged") request.compare = ValueScanCompare::Unchanged;
+		else if (compareName == "increased") request.compare = ValueScanCompare::Increased;
+		else if (compareName == "decreased") request.compare = ValueScanCompare::Decreased;
+		else if (compareName == "increased_by") request.compare = ValueScanCompare::IncreasedBy;
+		else if (compareName == "decreased_by") request.compare = ValueScanCompare::DecreasedBy;
+		else return {{"error", "invalid compare mode"}};
+
+		if (request.operation == ValueScanOperation::First && request.compare > ValueScanCompare::Unknown)
+			return {{"error", "changed/unchanged/increased/decreased/increased_by/decreased_by are only valid for next scans"}};
+		const bool needsValue = request.compare == ValueScanCompare::Exact
+			|| request.compare == ValueScanCompare::Between || request.compare == ValueScanCompare::Greater
+			|| request.compare == ValueScanCompare::Less || request.compare == ValueScanCompare::IncreasedBy
+			|| request.compare == ValueScanCompare::DecreasedBy;
+		if (needsValue && (!args.contains("value") || !ParseScanRaw(args["value"], request.valueType, request.value)))
+			return {{"error", "value is required and must fit value_type"}};
+		if (request.compare == ValueScanCompare::Between
+			&& (!args.contains("value2") || !ParseScanRaw(args["value2"], request.valueType, request.value2)))
+			return {{"error", "value2 is required and must fit value_type for between"}};
+	}
+
+	if (request.operation == ValueScanOperation::First) {
+		std::string error;
+		if (!ParseRangeArgs(args, request.startAddress, request.endAddress, error)) return {{"error", error}};
+		if (!ParseRegionFilter(args, "writable", request.writable, RegionFilter::Require)
+			|| !ParseRegionFilter(args, "executable", request.executable))
+			return {{"error", "writable/executable must be true, false, or any"}};
+		if (args.contains("type")) {
+			json types = args["type"].is_array() ? args["type"] : json::array({args["type"]});
+			for (auto& item : types) {
+				const std::string name = item.is_string() ? item.get<std::string>() : "";
+				if (name == "image") request.typeMask |= kRegionTypeImage;
+				else if (name == "private") request.typeMask |= kRegionTypePrivate;
+				else if (name == "mapped") request.typeMask |= kRegionTypeMapped;
+				else return {{"error", "type must be image, private, or mapped"}};
+			}
+		}
+		request.alignment = JsonUint32(args, "alignment", valueSize);
+		if (request.alignment == 0 || request.alignment > 4096)
+			return {{"error", "alignment must be 1-4096"}};
+	} else {
+		request.alignment = valueSize;
+	}
+
+	auto scan = session_.ValueScan(request);
+	if (!scan.ok) return {{"error", ValueScanFailureText(scan.failure)}};
+	auto modules = session_.GetModules();
+	json entries = json::array();
+	for (const auto& item : scan.entries) {
+		json entry = {{"address", HexAddr(item.address)}, {"value", FormatScanValue(item.value, scan.valueType)}};
+		auto location = ModuleLocation(item.address, modules);
+		if (!location.empty()) entry["location"] = location;
+		entries.push_back(std::move(entry));
+	}
+	const char* mode = scan.mode == ValueScanMode::List ? "list"
+		: scan.mode == ValueScanMode::Snapshot ? "snapshot" : "none";
+	return {{"candidates", scan.candidates}, {"results", entries},
+		{"scannedBytes", scan.scannedBytes}, {"mode", mode},
+		{"valueType", ValueScanTypeName(scan.valueType)}, {"offset", request.offset}};
 }
 
 json McpServer::ToolFreeMemory(const json& args) {
@@ -3818,12 +4063,31 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"start", {{"type", "string"}, {"description", "Start address (default: lowest user address). Accepts module+RVA."}}},
 			{"end", {{"type", "string"}, {"description", "End address, exclusive"}}},
 			{"module", {{"type", "string"}, {"description", "Limit to one module's image range"}}},
-			{"writable", {{"type", "boolean"}, {"description", "true: only writable regions, false: exclude them (default: any)"}}},
-			{"executable", {{"type", "boolean"}, {"description", "true: only executable regions, false: exclude them (default: any)"}}},
+			{"writable", {{"description", "true: only writable regions, false: exclude them, \"any\": no filter (default: any)"}}},
+			{"executable", {{"description", "true: only executable regions, false: exclude them, \"any\": no filter (default: any)"}}},
 			{"type", {{"description", "Region type filter: \"image\", \"private\", \"mapped\", or an array of them"}}},
 			{"alignment", {{"type", "integer"}, {"description", "Only report addresses that are multiples of this (default: 1)"}}},
 			{"max_results", {{"type", "integer"}, {"description", "Maximum matches (default: 100, max: 10000)"}}}
 		 }}}}}),
+
+		Tool(&McpServer::ToolValueScan, "memory", 0, true,
+			{{"name", "veh_value_scan"}, {"description", "Cheat Engine style target-side value scan session. Start with first, repeatedly filter with next, page candidates with results, and release all scan storage with reset. Candidate state and snapshots stay inside the target DLL."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"operation", {{"type", "string"}, {"enum", json::array({"first", "next", "results", "reset"})}}},
+			{"value_type", {{"type", "string"}, {"enum", json::array({"i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64"})}, {"description", "Stored value type (default: i32)"}}},
+			{"compare", {{"type", "string"}, {"enum", json::array({"exact", "between", "greater", "less", "unknown", "changed", "unchanged", "increased", "decreased", "increased_by", "decreased_by"})}, {"description", "Comparison (default: exact). Change comparisons are next-only."}}},
+			{"value", {{"description", "Comparison value, or delta for increased_by/decreased_by"}}},
+			{"value2", {{"description", "Inclusive upper bound for between"}}},
+			{"start", {{"type", "string"}, {"description", "First scan start address (default: lowest user address)"}}},
+			{"end", {{"type", "string"}, {"description", "First scan end address, exclusive"}}},
+			{"module", {{"type", "string"}, {"description", "Limit the first scan to one module image"}}},
+			{"writable", {{"description", "First scan filter: true, false, or \"any\" (default: true)"}}},
+			{"executable", {{"description", "First scan filter: true, false, or \"any\" (default: any)"}}},
+			{"type", {{"description", "First scan region type: image, private, mapped, or an array"}}},
+			{"alignment", {{"type", "integer"}, {"description", "First scan address alignment (default: value size, max: 4096)"}}},
+			{"offset", {{"type", "integer"}, {"description", "Candidate offset for results paging (default: 0)"}}},
+			{"max_results", {{"type", "integer"}, {"description", "Maximum returned entries (default: 20, max: 1000)"}}}
+		 }}, {"required", json::array({"operation"})}}}}),
 
 		Tool(&McpServer::ToolFreeMemory, "memory", 0, true,
 			{{"name", "veh_free_memory"}, {"description", "Free previously allocated memory pages in the target process via VirtualFree."},

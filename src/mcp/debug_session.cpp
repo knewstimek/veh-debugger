@@ -930,6 +930,26 @@ DebugSession::MemorySearchResult DebugSession::SearchMemory(const SearchMemoryRe
 	return result;
 }
 
+DebugSession::ValueScanResult DebugSession::ValueScan(const ValueScanRequest& request) {
+	ValueScanResult result;
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::ValueScan, &request, sizeof(request), respData, 120000))
+		return result;
+	if (respData.size() < sizeof(ValueScanResponse)) return result;
+	const auto* resp = reinterpret_cast<const ValueScanResponse*>(respData.data());
+	result.failure = resp->failure;
+	result.mode = resp->mode;
+	result.valueType = resp->valueType;
+	result.candidates = resp->candidates;
+	result.scannedBytes = resp->scannedBytes;
+	const size_t count = (std::min)(static_cast<size_t>(resp->count),
+		(respData.size() - sizeof(ValueScanResponse)) / sizeof(ValueScanEntry));
+	const auto* entries = reinterpret_cast<const ValueScanEntry*>(respData.data() + sizeof(ValueScanResponse));
+	result.entries.assign(entries, entries + count);
+	result.ok = resp->status == IpcStatus::Ok;
+	return result;
+}
+
 bool DebugSession::WriteMemory(uint64_t address, const uint8_t* data, uint32_t size) {
 	std::vector<uint8_t> payload(sizeof(WriteMemoryRequest) + size);
 	auto* req = reinterpret_cast<WriteMemoryRequest*>(payload.data());

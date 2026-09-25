@@ -7,6 +7,7 @@
 #include "threads.h"
 #include "stack_walk.h"
 #include "memory.h"
+#include "value_scan.h"
 #include "syscall_resolver.h"
 #include "../common/ipc_protocol.h"
 #include "../common/logger.h"
@@ -633,6 +634,7 @@ void PipeServer::Stop() {
 
 void PipeServer::EmergencyCleanup() {
 	LOG_WARN("Emergency cleanup: adapter presumed dead");
+	ValueScanner::Instance().Reset();
 	BreakpointManager::Instance().RemoveAll();
 	HwBreakpointManager::Instance().RemoveAll();
 	VehHandler::Instance().Uninstall();
@@ -1619,6 +1621,35 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		memcpy(buf.data(), &resp, sizeof(resp));
 		if (!result.hits.empty())
 			memcpy(buf.data() + sizeof(resp), result.hits.data(), result.hits.size() * sizeof(uint64_t));
+		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
+		break;
+	}
+
+	case IpcCommand::ValueScan: {
+		ValueScanResponse resp{};
+		if (payloadSize != sizeof(ValueScanRequest)) {
+			resp.status = IpcStatus::InvalidArgs;
+			resp.failure = ValueScanFailure::InvalidRequest;
+			SendResponse(command, &resp, sizeof(resp));
+			return;
+		}
+		auto* req = reinterpret_cast<const ValueScanRequest*>(payload);
+		if (req->operation > ValueScanOperation::Reset || req->valueType > ValueScanType::F64
+			|| req->compare > ValueScanCompare::DecreasedBy || req->maxResults == 0
+			|| req->maxResults > 1000 || req->alignment > 4096) {
+			resp.status = IpcStatus::InvalidArgs;
+			resp.failure = ValueScanFailure::InvalidRequest;
+			SendResponse(command, &resp, sizeof(resp));
+			return;
+		}
+		std::vector<ValueScanEntry> entries(req->maxResults);
+		const uint64_t payloadStart = reinterpret_cast<uint64_t>(payload);
+		ValueScanner::Instance().Scan(*req, resp, entries.data(),
+			payloadStart, payloadStart + payloadSize);
+		std::vector<uint8_t> buf(sizeof(resp) + static_cast<size_t>(resp.count) * sizeof(ValueScanEntry));
+		memcpy(buf.data(), &resp, sizeof(resp));
+		if (resp.count)
+			memcpy(buf.data() + sizeof(resp), entries.data(), static_cast<size_t>(resp.count) * sizeof(ValueScanEntry));
 		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
 		break;
 	}
@@ -2798,6 +2829,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		// connected_=false로 내부 커맨드 루프만 탈출 → 외부 루프에서 새 클라이언트 대기
 		// 이를 통해 어댑터가 다시 attach 할 때 DLL 재주입 없이 즉시 연결 가능
 		LOG_INFO("Detach requested");
+		ValueScanner::Instance().Reset();
 		BreakpointManager::Instance().RemoveAll();
 		HwBreakpointManager::Instance().RemoveAll();
 		VehHandler::Instance().ResumeAllStoppedThreads(true);  // forDetach=true
@@ -2832,6 +2864,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		// Shutdown: 완전 종료. running_=false로 ServerThread 자체가 종료된다.
 		// 프로세스 종료 또는 DLL 언로드 시 사용
 		LOG_INFO("Shutdown requested");
+		ValueScanner::Instance().Reset();
 		BreakpointManager::Instance().RemoveAll();
 		HwBreakpointManager::Instance().RemoveAll();
 		VehHandler::Instance().Uninstall();
