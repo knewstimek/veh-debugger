@@ -8,9 +8,10 @@
 #include <atomic>
 #include <thread>
 #include <condition_variable>
+#include <memory>
 #include "dap_types.h"
 #include "transport.h"
-#include "pipe_client.h"
+#include "ipc_transport.h"
 #include "injector.h"
 #include "disassembler.h"
 #include "symbol_engine.h"
@@ -86,7 +87,7 @@ private:
 	void Cleanup(bool detachOnly = false);
 
 	Transport* transport_ = nullptr;
-	PipeClient pipeClient_;
+	std::unique_ptr<IIpcTransport> ipcTransport_;
 	std::unique_ptr<veh::IDisassembler> disassembler_ = veh::CreateDisassembler();
 	veh::SymbolEngine symbolEngine_;
 	bool symbolEngineReady_ = false;

@@ -29,6 +29,7 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 | `src/adapter/dap_server.cpp/h` | Main DAP request/event handler (~2500 lines) |
 | `src/adapter/injector.cpp/h` | CreateProcess + DLL injection (CRT/NtCreate/Hijack/APC, WoW64) |
 | `src/adapter/symbol_engine.cpp/h` | Adapter-side PDB loader (O(1) StepOver via SymGetLineFromAddrW64) |
+| `src/adapter/ipc_transport.h` | Backend-neutral IPC transport interface shared by the adapter and MCP server |
 | `src/adapter/pipe_client.cpp/h` | Named Pipe IPC client (SendAndReceive, event callbacks) |
 | `src/adapter/transport.cpp/h` | DAP transport layer (stdin/stdout + TCP accept) |
 | `src/adapter/disassembler.h` | IDisassembler interface + Zydis/Simple backends |

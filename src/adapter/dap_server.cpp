@@ -1,4 +1,5 @@
 #include "dap_server.h"
+#include "pipe_client.h"
 #include "logger.h"
 #include <filesystem>
 #include <sstream>
@@ -56,7 +57,7 @@ std::vector<uint8_t> Base64Decode(const std::string& s) {
 
 namespace veh::dap {
 
-DapServer::DapServer() = default;
+DapServer::DapServer() : ipcTransport_(std::make_unique<PipeClient>()) {}
 
 void DapServer::SetTransport(Transport* transport) {
 	transport_ = transport;
@@ -293,7 +294,7 @@ void DapServer::OnLaunch(const Request& req) {
 	}
 
 	// VEH DLL과 파이프 연결
-	if (!pipeClient_.Connect(targetPid_, 10000)) {
+	if (!ipcTransport_->Connect(targetPid_, 10000)) {
 		resp.success = false;
 		resp.message = "Failed to connect to VEH DLL pipe";
 		SendResponse(resp);
@@ -301,14 +302,14 @@ void DapServer::OnLaunch(const Request& req) {
 	}
 
 	// 이벤트 리스너 + 하트비트 시작
-	pipeClient_.StartEventListener([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
+	ipcTransport_->StartEventListener([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
 		OnIpcEvent(eventId, payload, size);
 	});
 	// VEH 설치 완료(Ready) 대기 (reader 시작 후 -- condvar). 실패해도 진행(보수적).
-	if (!pipeClient_.WaitForReady(3000)) {
+	if (!ipcTransport_->WaitForReady(3000)) {
 		LOG_WARN("No Ready after connect (pid=%u); proceeding (VEH may not be installed yet)", targetPid_);
 	}
-	pipeClient_.StartHeartbeat();
+	ipcTransport_->StartHeartbeat();
 
 	// 타겟 비트니스에 맞게 디스어셈블러 재생성
 	{
@@ -368,21 +369,21 @@ void DapServer::OnAttach(const Request& req) {
 		}
 	}
 
-	if (!pipeClient_.Connect(targetPid_, 10000)) {
+	if (!ipcTransport_->Connect(targetPid_, 10000)) {
 		resp.success = false;
 		resp.message = "Failed to connect to VEH DLL pipe";
 		SendResponse(resp);
 		return;
 	}
 
-	pipeClient_.StartEventListener([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
+	ipcTransport_->StartEventListener([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
 		OnIpcEvent(eventId, payload, size);
 	});
 	// VEH 설치 완료(Ready) 대기 (reader 시작 후 -- condvar). 실패해도 진행(보수적).
-	if (!pipeClient_.WaitForReady(3000)) {
+	if (!ipcTransport_->WaitForReady(3000)) {
 		LOG_WARN("No Ready after connect (pid=%u); proceeding (VEH may not be installed yet)", targetPid_);
 	}
-	pipeClient_.StartHeartbeat();
+	ipcTransport_->StartHeartbeat();
 
 	// 타겟 비트니스에 맞게 디스어셈블러 재생성
 	{
@@ -472,7 +473,7 @@ void DapServer::OnConfigurationDone(const Request& req) {
 		mreq.action = 0;
 		strncpy_s(mreq.name, sizeof(mreq.name), pat.c_str(), _TRUNCATE);
 		std::vector<uint8_t> mresp;
-		bool ok = pipeClient_.SendAndReceive(IpcCommand::SetModuleLoadStop, &mreq, sizeof(mreq), mresp)
+		bool ok = ipcTransport_->SendAndReceive(IpcCommand::SetModuleLoadStop, &mreq, sizeof(mreq), mresp)
 			&& mresp.size() >= sizeof(SetModuleLoadStopResponse)
 			&& reinterpret_cast<const SetModuleLoadStopResponse*>(mresp.data())->status == IpcStatus::Ok;
 		if (ok) LOG_INFO("stopOnModuleLoad: registered pattern '%s'", pat.c_str());
@@ -540,7 +541,7 @@ void DapServer::OnSetBreakpoints(const Request& req) {
 				resolveReq.line = rb.line;
 
 				std::vector<uint8_t> resolveResp;
-				if (pipeClient_.SendAndReceive(IpcCommand::ResolveSourceLine, &resolveReq, sizeof(resolveReq), resolveResp)
+				if (ipcTransport_->SendAndReceive(IpcCommand::ResolveSourceLine, &resolveReq, sizeof(resolveReq), resolveResp)
 					&& resolveResp.size() >= sizeof(ResolveSourceLineResponse)) {
 					auto* resp2 = reinterpret_cast<const ResolveSourceLineResponse*>(resolveResp.data());
 					if (resp2->status == IpcStatus::Ok) {
@@ -576,7 +577,7 @@ void DapServer::OnSetBreakpoints(const Request& req) {
 				changedAddresses.push_back(it->address);
 				RemoveBreakpointRequest rmReq{};
 				rmReq.id = it->vehId;
-				pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
+				ipcTransport_->SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
 			}
 			it = breakpointMappings_.erase(it);
 		} else {
@@ -639,7 +640,7 @@ void DapServer::OnSetBreakpoints(const Request& req) {
 		setReq.address = rb.address;
 
 		std::vector<uint8_t> respData;
-		if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &setReq, sizeof(setReq), respData)) {
+		if (ipcTransport_->SendAndReceive(IpcCommand::SetBreakpoint, &setReq, sizeof(setReq), respData)) {
 			if (respData.size() >= sizeof(SetBreakpointResponse)) {
 				auto* setResp = reinterpret_cast<const SetBreakpointResponse*>(respData.data());
 				Breakpoint dbp;
@@ -690,7 +691,7 @@ void DapServer::OnSetFunctionBreakpoints(const Request& req) {
 			if (it->vehId != 0) {  // pending(vehId==0)은 실제 DLL BP가 없으므로 생략
 				RemoveBreakpointRequest rmReq{};
 				rmReq.id = it->vehId;
-				pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
+				ipcTransport_->SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
 			}
 			it = breakpointMappings_.erase(it);
 		} else {
@@ -715,7 +716,7 @@ void DapServer::OnSetFunctionBreakpoints(const Request& req) {
 
 		uint64_t address = 0;
 		std::vector<uint8_t> resolveResp;
-		if (pipeClient_.SendAndReceive(IpcCommand::ResolveFunction, &resolveReq, sizeof(resolveReq), resolveResp)) {
+		if (ipcTransport_->SendAndReceive(IpcCommand::ResolveFunction, &resolveReq, sizeof(resolveReq), resolveResp)) {
 			if (resolveResp.size() >= sizeof(ResolveFunctionResponse)) {
 				auto* resp2 = reinterpret_cast<const ResolveFunctionResponse*>(resolveResp.data());
 				if (resp2->status == IpcStatus::Ok) {
@@ -745,7 +746,7 @@ void DapServer::OnSetFunctionBreakpoints(const Request& req) {
 		setReq.address = address;
 
 		std::vector<uint8_t> respData;
-		if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &setReq, sizeof(setReq), respData)) {
+		if (ipcTransport_->SendAndReceive(IpcCommand::SetBreakpoint, &setReq, sizeof(setReq), respData)) {
 			if (respData.size() >= sizeof(SetBreakpointResponse)) {
 				auto* setResp = reinterpret_cast<const SetBreakpointResponse*>(respData.data());
 				Breakpoint dbp;
@@ -820,7 +821,7 @@ void DapServer::RetryThreadLoop() {
 void DapServer::RetryPendingBreakpointsOnce() {
 	// pending이 소진되거나 더 이상 해석되지 않을 때까지 반복.
 	for (;;) {
-		if (!running_ || !pipeClient_.IsConnected()) return;
+		if (!running_ || !ipcTransport_->IsConnected()) return;
 
 		struct Retry {
 			int dapId;
@@ -846,7 +847,7 @@ void DapServer::RetryPendingBreakpointsOnce() {
 				ResolveFunctionRequest rq = {};
 				strncpy_s(rq.functionName, r.functionName.c_str(), sizeof(rq.functionName) - 1);
 				std::vector<uint8_t> resp;
-				if (pipeClient_.SendAndReceive(IpcCommand::ResolveFunction, &rq, sizeof(rq), resp)
+				if (ipcTransport_->SendAndReceive(IpcCommand::ResolveFunction, &rq, sizeof(rq), resp)
 					&& resp.size() >= sizeof(ResolveFunctionResponse)) {
 					auto* r2 = reinterpret_cast<const ResolveFunctionResponse*>(resp.data());
 					if (r2->status == IpcStatus::Ok) addr = r2->address;
@@ -856,7 +857,7 @@ void DapServer::RetryPendingBreakpointsOnce() {
 				strncpy_s(rq.fileName, r.source.c_str(), sizeof(rq.fileName) - 1);
 				rq.line = r.line;
 				std::vector<uint8_t> resp;
-				if (pipeClient_.SendAndReceive(IpcCommand::ResolveSourceLine, &rq, sizeof(rq), resp)
+				if (ipcTransport_->SendAndReceive(IpcCommand::ResolveSourceLine, &rq, sizeof(rq), resp)
 					&& resp.size() >= sizeof(ResolveSourceLineResponse)) {
 					auto* r2 = reinterpret_cast<const ResolveSourceLineResponse*>(resp.data());
 					if (r2->status == IpcStatus::Ok) addr = r2->address;
@@ -870,7 +871,7 @@ void DapServer::RetryPendingBreakpointsOnce() {
 			std::vector<uint8_t> sresp;
 			uint32_t newVehId = 0;
 			bool ok = false;
-			if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &sreq, sizeof(sreq), sresp)
+			if (ipcTransport_->SendAndReceive(IpcCommand::SetBreakpoint, &sreq, sizeof(sreq), sresp)
 				&& sresp.size() >= sizeof(SetBreakpointResponse)) {
 				auto* s2 = reinterpret_cast<const SetBreakpointResponse*>(sresp.data());
 				if (s2->status == IpcStatus::Ok) { ok = true; newVehId = s2->id; }
@@ -906,7 +907,7 @@ void DapServer::RetryPendingBreakpointsOnce() {
 				// 매핑이 사라짐(동시 재설정) -> 방금 설정한 BP 정리
 				RemoveBreakpointRequest rmReq{};
 				rmReq.id = newVehId;
-				pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
+				ipcTransport_->SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
 			}
 		}
 		if (!anyResolved) return;  // 이번 라운드에 아무것도 못 풀면 종료
@@ -934,7 +935,7 @@ void DapServer::OnSetInstructionBreakpoints(const Request& req) {
 		if (it->type == BpType::Instruction) {
 			RemoveBreakpointRequest rmReq{};
 			rmReq.id = it->vehId;
-			pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
+			ipcTransport_->SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
 			it = breakpointMappings_.erase(it);
 		} else {
 			++it;
@@ -974,7 +975,7 @@ void DapServer::OnSetInstructionBreakpoints(const Request& req) {
 		setReq.address = address;
 
 		std::vector<uint8_t> respData;
-		if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &setReq, sizeof(setReq), respData)) {
+		if (ipcTransport_->SendAndReceive(IpcCommand::SetBreakpoint, &setReq, sizeof(setReq), respData)) {
 			if (respData.size() >= sizeof(SetBreakpointResponse)) {
 				auto* setResp = reinterpret_cast<const SetBreakpointResponse*>(respData.data());
 				Breakpoint dbp;
@@ -1033,7 +1034,7 @@ void DapServer::OnContinue(const Request& req) {
 	ContinueRequest contReq{};
 	contReq.threadId = threadId;
 	DAP_TRACE("Continue", "threadId=" + std::to_string(threadId));
-	pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+	ipcTransport_->SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 
 	Response resp;
 	resp.request_seq = req.seq;
@@ -1073,7 +1074,7 @@ void DapServer::OnNext(const Request& req) {
 			stReq.startFrame = 0;
 			stReq.maxFrames = 1;
 			std::vector<uint8_t> stResp;
-			if (pipeClient_.SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), stResp)
+			if (ipcTransport_->SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), stResp)
 				&& stResp.size() >= sizeof(GetStackTraceResponse) + sizeof(StackFrameInfo)) {
 				auto* hdr = reinterpret_cast<const GetStackTraceResponse*>(stResp.data());
 				if (hdr->status == IpcStatus::Ok && hdr->count > 0) {
@@ -1125,7 +1126,7 @@ void DapServer::OnNext(const Request& req) {
 				SetBreakpointRequest bpReq{};
 				bpReq.address = lineRange.nextLineAddress;
 				std::vector<uint8_t> bpResp;
-				if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq), bpResp)
+				if (ipcTransport_->SendAndReceive(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq), bpResp)
 					&& bpResp.size() >= sizeof(SetBreakpointResponse)) {
 					auto* r = reinterpret_cast<const SetBreakpointResponse*>(bpResp.data());
 					if (r->status == IpcStatus::Ok) {
@@ -1139,7 +1140,7 @@ void DapServer::OnNext(const Request& req) {
 						// Continue → temp BP에서 멈춤 (single-step 0회)
 						ContinueRequest contReq{};
 						contReq.threadId = threadId;
-						pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+						ipcTransport_->SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 						goto send_response;
 					}
 				}
@@ -1180,7 +1181,7 @@ void DapServer::OnNext(const Request& req) {
 			SetBreakpointRequest bpReq{};
 			bpReq.address = callAfterAddr;
 			std::vector<uint8_t> bpResp;
-			if (pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq), bpResp)
+			if (ipcTransport_->SendAndReceive(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq), bpResp)
 				&& bpResp.size() >= sizeof(SetBreakpointResponse)) {
 				auto* r = reinterpret_cast<const SetBreakpointResponse*>(bpResp.data());
 				if (r->status == IpcStatus::Ok) {
@@ -1191,7 +1192,7 @@ void DapServer::OnNext(const Request& req) {
 					}
 					ContinueRequest contReq{};
 					contReq.threadId = threadId;
-					pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+					ipcTransport_->SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 					callSkipped = true;
 				}
 			}
@@ -1199,7 +1200,7 @@ void DapServer::OnNext(const Request& req) {
 		if (!callSkipped) {
 			StepRequest stepReq{};
 			stepReq.threadId = threadId;
-			pipeClient_.SendCommand(IpcCommand::StepOver, &stepReq, sizeof(stepReq));
+			ipcTransport_->SendCommand(IpcCommand::StepOver, &stepReq, sizeof(stepReq));
 		}
 	}
 
@@ -1232,7 +1233,7 @@ void DapServer::OnStepIn(const Request& req) {
 
 	StepRequest stepReq{};
 	stepReq.threadId = threadId;
-	pipeClient_.SendCommand(IpcCommand::StepInto, &stepReq, sizeof(stepReq));
+	ipcTransport_->SendCommand(IpcCommand::StepInto, &stepReq, sizeof(stepReq));
 
 	Response resp;
 	resp.request_seq = req.seq;
@@ -1257,7 +1258,7 @@ void DapServer::OnStepOut(const Request& req) {
 
 	StepRequest stepReq{};
 	stepReq.threadId = threadId;
-	pipeClient_.SendCommand(IpcCommand::StepOut, &stepReq, sizeof(stepReq));
+	ipcTransport_->SendCommand(IpcCommand::StepOut, &stepReq, sizeof(stepReq));
 
 	Response resp;
 	resp.request_seq = req.seq;
@@ -1270,7 +1271,7 @@ void DapServer::OnPause(const Request& req) {
 	uint32_t threadId = req.arguments.value("threadId", 0);
 	PauseRequest pauseReq{};
 	pauseReq.threadId = threadId;
-	pipeClient_.SendCommand(IpcCommand::Pause, &pauseReq, sizeof(pauseReq));
+	ipcTransport_->SendCommand(IpcCommand::Pause, &pauseReq, sizeof(pauseReq));
 
 	Response resp;
 	resp.request_seq = req.seq;
@@ -1302,7 +1303,7 @@ void DapServer::OnThreads(const Request& req) {
 	std::vector<uint8_t> respData;
 	json threadsJson = json::array();
 
-	if (pipeClient_.SendAndReceive(IpcCommand::GetThreads, nullptr, 0, respData)) {
+	if (ipcTransport_->SendAndReceive(IpcCommand::GetThreads, nullptr, 0, respData)) {
 		if (respData.size() >= sizeof(GetThreadsResponse)) {
 			auto* hdr = reinterpret_cast<const GetThreadsResponse*>(respData.data());
 			auto* threads = reinterpret_cast<const ThreadInfo*>(respData.data() + sizeof(GetThreadsResponse));
@@ -1348,7 +1349,7 @@ void DapServer::OnStackTrace(const Request& req) {
 	// 여기서 clear하면 안 됨: VSCode가 여러 스레드의 stackTrace를 순차 요청하므로
 	// 앞 스레드의 프레임 매핑이 뒷 스레드 요청 시 삭제되어 scopes/variables가 깨짐
 
-	if (pipeClient_.SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), respData)) {
+	if (ipcTransport_->SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), respData)) {
 		if (respData.size() >= sizeof(GetStackTraceResponse)) {
 			auto* hdr = reinterpret_cast<const GetStackTraceResponse*>(respData.data());
 			auto* frames = reinterpret_cast<const StackFrameInfo*>(
@@ -1424,7 +1425,7 @@ void DapServer::OnStackTrace(const Request& req) {
 		GetRegistersRequest regReq{};
 		regReq.threadId = threadId;
 		std::vector<uint8_t> regData;
-		if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), regData)) {
+		if (ipcTransport_->SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), regData)) {
 			if (regData.size() >= sizeof(GetRegistersResponse)) {
 				auto* regResp = reinterpret_cast<const GetRegistersResponse*>(regData.data());
 				auto& r = regResp->regs;
@@ -1523,7 +1524,7 @@ void DapServer::OnVariables(const Request& req) {
 			threadId, frameId, frameFound ? 1 : 0);
 
 		std::vector<uint8_t> respData;
-		if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
+		if (ipcTransport_->SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
 			if (respData.size() >= sizeof(GetRegistersResponse)) {
 				auto* regResp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
 				auto& r = regResp->regs;
@@ -1612,7 +1613,7 @@ void DapServer::OnVariables(const Request& req) {
 			locReq.frameBase = fBase;
 
 			std::vector<uint8_t> locData;
-			if (pipeClient_.SendAndReceive(IpcCommand::EnumLocals, &locReq, sizeof(locReq), locData)
+			if (ipcTransport_->SendAndReceive(IpcCommand::EnumLocals, &locReq, sizeof(locReq), locData)
 				&& locData.size() >= sizeof(EnumLocalsResponse)) {
 				auto* locResp = reinterpret_cast<const EnumLocalsResponse*>(locData.data());
 				auto* locals = reinterpret_cast<const LocalVariableInfo*>(
@@ -1655,7 +1656,7 @@ void DapServer::OnVariables(const Request& req) {
 								rmReq.address = ptr;
 								rmReq.size = 128;
 								std::vector<uint8_t> rmData;
-								if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &rmReq, sizeof(rmReq), rmData)
+								if (ipcTransport_->SendAndReceive(IpcCommand::ReadMemory, &rmReq, sizeof(rmReq), rmData)
 									&& rmData.size() > sizeof(IpcStatus)) {
 									auto* rmStatus = reinterpret_cast<const IpcStatus*>(rmData.data());
 									if (*rmStatus == IpcStatus::Ok) {
@@ -1800,7 +1801,7 @@ void DapServer::OnEvaluate(const Request& req) {
 		regReq.threadId = threadId;
 
 		std::vector<uint8_t> respData;
-		if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
+		if (ipcTransport_->SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
 			if (respData.size() >= sizeof(GetRegistersResponse)) {
 				auto* regResp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
 				uint64_t val = ResolveRegisterByName(expression, regResp->regs);
@@ -1916,7 +1917,7 @@ void DapServer::OnEvaluate(const Request& req) {
 			GetRegistersRequest regReq{};
 			regReq.threadId = threadId;
 			std::vector<uint8_t> regResp;
-			if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), regResp)
+			if (ipcTransport_->SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), regResp)
 				&& regResp.size() >= sizeof(GetRegistersResponse)) {
 				auto* rr = reinterpret_cast<const GetRegistersResponse*>(regResp.data());
 
@@ -2061,7 +2062,7 @@ void DapServer::OnSetVariable(const Request& req) {
 	setReq.value = newVal;
 
 	std::vector<uint8_t> respData;
-	if (pipeClient_.SendAndReceive(IpcCommand::SetRegister, &setReq, sizeof(setReq), respData)) {
+	if (ipcTransport_->SendAndReceive(IpcCommand::SetRegister, &setReq, sizeof(setReq), respData)) {
 		if (respData.size() >= sizeof(SetRegisterResponse)) {
 			auto* setResp = reinterpret_cast<const SetRegisterResponse*>(respData.data());
 			if (setResp->status == IpcStatus::Ok) {
@@ -2098,7 +2099,7 @@ void DapServer::OnModules(const Request& req) {
 	std::vector<uint8_t> respData;
 	json modulesJson = json::array();
 
-	if (pipeClient_.SendAndReceive(IpcCommand::GetModules, nullptr, 0, respData)) {
+	if (ipcTransport_->SendAndReceive(IpcCommand::GetModules, nullptr, 0, respData)) {
 		if (respData.size() >= sizeof(GetModulesResponse)) {
 			auto* hdr = reinterpret_cast<const GetModulesResponse*>(respData.data());
 			auto* modules = reinterpret_cast<const ModuleInfo*>(
@@ -2202,7 +2203,7 @@ void DapServer::OnReadMemory(const Request& req) {
 	resp.command = "readMemory";
 
 	std::vector<uint8_t> respData;
-	if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData) &&
+	if (ipcTransport_->SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData) &&
 		respData.size() >= sizeof(IpcStatus) &&
 		*reinterpret_cast<const IpcStatus*>(respData.data()) == IpcStatus::Ok) {
 		const uint8_t* memData = respData.data() + sizeof(IpcStatus);
@@ -2260,7 +2261,7 @@ void DapServer::OnWriteMemory(const Request& req) {
 	resp.request_seq = req.seq;
 	resp.command = "writeMemory";
 
-	if (pipeClient_.SendCommand(IpcCommand::WriteMemory, payload.data(), (uint32_t)payload.size())) {
+	if (ipcTransport_->SendCommand(IpcCommand::WriteMemory, payload.data(), (uint32_t)payload.size())) {
 		resp.success = true;
 		resp.body = {{"bytesWritten", (int)bytes.size()}};
 	} else {
@@ -2321,7 +2322,7 @@ void DapServer::OnDisassemble(const Request& req) {
 	resp.command = "disassemble";
 
 	std::vector<uint8_t> memData;
-	if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), memData) &&
+	if (ipcTransport_->SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), memData) &&
 		memData.size() >= sizeof(IpcStatus) &&
 		*reinterpret_cast<const IpcStatus*>(memData.data()) == IpcStatus::Ok) {
 		const uint8_t* code = memData.data() + sizeof(IpcStatus);
@@ -2433,7 +2434,7 @@ void DapServer::OnSetDataBreakpoints(const Request& req) {
 	for (auto& m : dataBreakpointMappings_) {
 		RemoveHwBreakpointRequest rmReq{};
 		rmReq.id = m.vehId;
-		pipeClient_.SendCommand(IpcCommand::RemoveHwBreakpoint, &rmReq, sizeof(rmReq));
+		ipcTransport_->SendCommand(IpcCommand::RemoveHwBreakpoint, &rmReq, sizeof(rmReq));
 	}
 	dataBreakpointMappings_.clear();
 
@@ -2461,7 +2462,7 @@ void DapServer::OnSetDataBreakpoints(const Request& req) {
 		hwReq.size = 8; // 기본 8바이트 감시
 
 		std::vector<uint8_t> respData;
-		if (pipeClient_.SendAndReceive(IpcCommand::SetHwBreakpoint, &hwReq, sizeof(hwReq), respData)) {
+		if (ipcTransport_->SendAndReceive(IpcCommand::SetHwBreakpoint, &hwReq, sizeof(hwReq), respData)) {
 			if (respData.size() >= sizeof(SetHwBreakpointResponse)) {
 				auto* hwResp = reinterpret_cast<const SetHwBreakpointResponse*>(respData.data());
 				int dapId = nextDapBpId_++;
@@ -2511,21 +2512,21 @@ void DapServer::OnRestart(const Request& req) {
 			return;
 		}
 
-		if (!pipeClient_.Connect(targetPid_, 3000)) {
+		if (!ipcTransport_->Connect(targetPid_, 3000)) {
 			resp.success = false;
 			resp.message = "Failed to reconnect pipe";
 			SendResponse(resp);
 			return;
 		}
 
-		pipeClient_.StartEventListener([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
+		ipcTransport_->StartEventListener([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
 			OnIpcEvent(eventId, payload, size);
 		});
 		// VEH 설치 완료(Ready) 대기 (reader 시작 후 -- condvar). 실패해도 진행(보수적).
-		if (!pipeClient_.WaitForReady(3000)) {
+		if (!ipcTransport_->WaitForReady(3000)) {
 			LOG_WARN("No Ready after reconnect (pid=%u); proceeding", targetPid_);
 		}
-		pipeClient_.StartHeartbeat();
+		ipcTransport_->StartHeartbeat();
 
 		// targetProcess_ + symbolEngine_ 재초기화 (attach 모드)
 		if (targetProcess_) CloseHandle(targetProcess_);
@@ -2580,7 +2581,7 @@ void DapServer::OnRestart(const Request& req) {
 		launchedMainThreadId_ = relaunch.mainThreadId;
 		mainThreadResumed_ = false;
 
-		if (!pipeClient_.Connect(targetPid_, 3000)) {
+		if (!ipcTransport_->Connect(targetPid_, 3000)) {
 			// 새로 launch한 프로세스 종료 (고아 방지)
 			HANDLE proc = OpenProcess(PROCESS_TERMINATE, FALSE, targetPid_);
 			if (proc) {
@@ -2594,14 +2595,14 @@ void DapServer::OnRestart(const Request& req) {
 			return;
 		}
 
-		pipeClient_.StartEventListener([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
+		ipcTransport_->StartEventListener([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
 			OnIpcEvent(eventId, payload, size);
 		});
 		// VEH 설치 완료(Ready) 대기 (reader 시작 후 -- condvar). 실패해도 진행(보수적).
-		if (!pipeClient_.WaitForReady(3000)) {
+		if (!ipcTransport_->WaitForReady(3000)) {
 			LOG_WARN("No Ready after reconnect (pid=%u); proceeding", targetPid_);
 		}
-		pipeClient_.StartHeartbeat();
+		ipcTransport_->StartHeartbeat();
 
 		// targetProcess_ + symbolEngine_ 재초기화
 		targetProcess_ = OpenProcess(
@@ -2647,7 +2648,7 @@ void DapServer::OnTerminateThreads(const Request& req) {
 		termReq.threadId = tid.get<uint32_t>();
 
 		std::vector<uint8_t> respData;
-		if (pipeClient_.SendAndReceive(IpcCommand::TerminateThread, &termReq, sizeof(termReq), respData)) {
+		if (ipcTransport_->SendAndReceive(IpcCommand::TerminateThread, &termReq, sizeof(termReq), respData)) {
 			if (respData.size() >= sizeof(IpcStatus)) {
 				auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
 				if (status != IpcStatus::Ok) allOk = false;
@@ -2704,7 +2705,7 @@ void DapServer::OnGoto(const Request& req) {
 		ipReq.address = static_cast<uint64_t>(targetId);
 
 		std::vector<uint8_t> respData;
-		if (pipeClient_.SendAndReceive(IpcCommand::SetInstructionPointer, &ipReq, sizeof(ipReq), respData)) {
+		if (ipcTransport_->SendAndReceive(IpcCommand::SetInstructionPointer, &ipReq, sizeof(ipReq), respData)) {
 			resp.success = true;
 		} else {
 			resp.success = false;
@@ -2806,7 +2807,7 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				if (!isUserBp) {
 					RemoveBreakpointRequest rmReq{};
 					rmReq.id = e->breakpointId;
-					pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
+					ipcTransport_->SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
 				}
 				bool lineStep = false;
 				uint64_t startAddr = 0, nextLineAddr = 0;
@@ -2832,7 +2833,7 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 					LOG_DEBUG("Temp BP: still same line, auto-stepping");
 					StepRequest stepReq{};
 					stepReq.threadId = e->threadId;
-					pipeClient_.SendCommand(IpcCommand::StepOver, &stepReq, sizeof(stepReq));
+					ipcTransport_->SendCommand(IpcCommand::StepOver, &stepReq, sizeof(stepReq));
 					break;
 				}
 
@@ -2901,7 +2902,7 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				// 조건 불만족 or Log Point → 자동 Continue
 				ContinueRequest contReq{};
 				contReq.threadId = e->threadId;
-				pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+				ipcTransport_->SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 			}
 		}
 		break;
@@ -2952,14 +2953,14 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 								LOG_INFO("StepOver fallback: CALL at 0x%llX, temp BP at 0x%llX", e->address, retAddr);
 								SetBreakpointRequest bpReq{};
 								bpReq.address = retAddr;
-								pipeClient_.SendCommand(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq));
+								ipcTransport_->SendCommand(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq));
 								{
 									std::lock_guard<std::mutex> stepLock(steppingMutex_);
 									stepOverTempBpAddr_ = retAddr;
 								}
 								ContinueRequest contReq{};
 								contReq.threadId = e->threadId;
-								pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+								ipcTransport_->SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 								break;
 							}
 						}
@@ -2995,7 +2996,7 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 						// 임시 BP 설정 (fire-and-forget) + Continue
 						SetBreakpointRequest bpReq{};
 						bpReq.address = callRetAddr;
-						pipeClient_.SendCommand(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq));
+						ipcTransport_->SendCommand(IpcCommand::SetBreakpoint, &bpReq, sizeof(bpReq));
 						{
 							std::lock_guard<std::mutex> stepLock(steppingMutex_);
 							stepOverTempBpAddr_ = callRetAddr;
@@ -3003,11 +3004,11 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 
 						ContinueRequest contReq{};
 						contReq.threadId = e->threadId;
-						pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+						ipcTransport_->SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 					} else {
 						StepRequest stepReq{};
 						stepReq.threadId = e->threadId;
-						pipeClient_.SendCommand(IpcCommand::StepOver, &stepReq, sizeof(stepReq));
+						ipcTransport_->SendCommand(IpcCommand::StepOver, &stepReq, sizeof(stepReq));
 					}
 					break; // DAP stopped 이벤트 보내지 않음
 				}
@@ -3298,7 +3299,7 @@ bool DapServer::EvaluateCondition(const std::string& condition, uint32_t threadI
 			GetRegistersRequest regReq{};
 			regReq.threadId = threadId;
 			std::vector<uint8_t> respData;
-			if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
+			if (ipcTransport_->SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
 				if (respData.size() >= sizeof(GetRegistersResponse)) {
 					auto* regResp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
 					lhsVal = ResolveRegisterByName(lhs, regResp->regs);
@@ -3318,7 +3319,7 @@ bool DapServer::EvaluateCondition(const std::string& condition, uint32_t threadI
 			GetRegistersRequest regReq{};
 			regReq.threadId = threadId;
 			std::vector<uint8_t> respData;
-			if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
+			if (ipcTransport_->SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
 				if (respData.size() >= sizeof(GetRegistersResponse)) {
 					auto* regResp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
 					rhsVal = ResolveRegisterByName(rhs, regResp->regs);
@@ -3353,7 +3354,7 @@ std::string DapServer::ExpandLogMessage(const std::string& msg, uint32_t threadI
 			GetRegistersRequest regReq{};
 			regReq.threadId = threadId;
 			std::vector<uint8_t> respData;
-			if (pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
+			if (ipcTransport_->SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), respData)) {
 				if (respData.size() >= sizeof(GetRegistersResponse)) {
 					auto* regResp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
 					regs = regResp->regs;
@@ -3427,7 +3428,7 @@ bool DapServer::IsCallInstruction(uint32_t threadId, uint64_t& nextInsnAddr) {
 	stReq.maxFrames = 1;
 
 	std::vector<uint8_t> stResp;
-	if (!pipeClient_.SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), stResp))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), stResp))
 		return false;
 	if (stResp.size() < sizeof(GetStackTraceResponse) + sizeof(StackFrameInfo))
 		return false;
@@ -3476,7 +3477,7 @@ bool DapServer::IsNextInstructionCall(uint32_t threadId, uint64_t& addrAfterCall
 	stReq.maxFrames = 1;
 
 	std::vector<uint8_t> stResp;
-	if (!pipeClient_.SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), stResp))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), stResp))
 		return false;
 	if (stResp.size() < sizeof(GetStackTraceResponse) + sizeof(StackFrameInfo))
 		return false;
@@ -3549,7 +3550,7 @@ void DapServer::CleanupStaleTempBp() {
 			LOG_INFO("CleanupStaleTempBp: removing id=%u", tempId);
 			RemoveBreakpointRequest rmReq{};
 			rmReq.id = tempId;
-			pipeClient_.SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
+			ipcTransport_->SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
 		} else {
 			LOG_INFO("CleanupStaleTempBp: id=%u is user BP, skipping removal", tempId);
 		}
@@ -3558,7 +3559,7 @@ void DapServer::CleanupStaleTempBp() {
 			LOG_INFO("CleanupStaleTempBp: removing by addr=0x%llX", tempAddr);
 			RemoveBreakpointByAddrRequest rmReq{};
 			rmReq.address = tempAddr;
-			pipeClient_.SendCommand(IpcCommand::RemoveBreakpointByAddr, &rmReq, sizeof(rmReq));
+			ipcTransport_->SendCommand(IpcCommand::RemoveBreakpointByAddr, &rmReq, sizeof(rmReq));
 		} else {
 			LOG_INFO("CleanupStaleTempBp: addr=0x%llX is user BP, skipping removal", tempAddr);
 		}
@@ -3579,7 +3580,7 @@ bool DapServer::ReadTargetPointer(uint64_t address, uint64_t& value, uint32_t& s
 	readReq.address = address;
 	readReq.size = size;
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)
+	if (!ipcTransport_->SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)
 		|| respData.size() < sizeof(IpcStatus) + size
 		|| *reinterpret_cast<const IpcStatus*>(respData.data()) != IpcStatus::Ok)
 		return false;
@@ -3615,7 +3616,7 @@ bool DapServer::GetTopFrameSourceLine(uint32_t threadId, std::string& file, uint
 	stReq.maxFrames = 1;
 
 	std::vector<uint8_t> stResp;
-	if (!pipeClient_.SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), stResp))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), stResp))
 		return false;
 
 	if (stResp.size() < sizeof(GetStackTraceResponse))
@@ -3653,7 +3654,7 @@ void DapServer::ResolveStepRange(uint32_t threadId) {
 	resolveReq.line = line;
 
 	std::vector<uint8_t> respData;
-	if (pipeClient_.SendAndReceive(IpcCommand::ResolveSourceLine, &resolveReq, sizeof(resolveReq), respData)
+	if (ipcTransport_->SendAndReceive(IpcCommand::ResolveSourceLine, &resolveReq, sizeof(resolveReq), respData)
 		&& respData.size() >= sizeof(ResolveSourceLineResponse)) {
 		auto* r = reinterpret_cast<const ResolveSourceLineResponse*>(respData.data());
 		if (r->status == IpcStatus::Ok) {
@@ -3664,7 +3665,7 @@ void DapServer::ResolveStepRange(uint32_t threadId) {
 
 	// 다음 라인의 주소 = steppingNextLineAddr_
 	resolveReq.line = line + 1;
-	if (pipeClient_.SendAndReceive(IpcCommand::ResolveSourceLine, &resolveReq, sizeof(resolveReq), respData)
+	if (ipcTransport_->SendAndReceive(IpcCommand::ResolveSourceLine, &resolveReq, sizeof(resolveReq), respData)
 		&& respData.size() >= sizeof(ResolveSourceLineResponse)) {
 		auto* r = reinterpret_cast<const ResolveSourceLineResponse*>(respData.data());
 		if (r->status == IpcStatus::Ok) {
@@ -3708,19 +3709,19 @@ void DapServer::Cleanup(bool detachOnly) {
 	// 메인 스레드가 아직 suspended이면 resume (안 하면 프로세스가 좀비로 남음)
 	ResumeMainThread();
 
-	if (pipeClient_.IsConnected()) {
+	if (ipcTransport_->IsConnected()) {
 		// detachOnly=true: Detach 명령 → DLL 파이프 서버는 유지 (재연결 가능)
 		// detachOnly=false: Shutdown 명령 → DLL 파이프 서버도 종료
 		auto cmd = detachOnly ? IpcCommand::Detach : IpcCommand::Shutdown;
-		pipeClient_.SendCommand(cmd);
+		ipcTransport_->SendCommand(cmd);
 		LOG_INFO("Sent %s to DLL", detachOnly ? "Detach" : "Shutdown");
 	}
 	// Disconnect는 항상 호출 (파이프 닫기 + 스레드 정리)
-	pipeClient_.Disconnect();
+	ipcTransport_->Disconnect();
 
 	// 주: deferred 재시도 워커(retryThread_)는 Run() 생애 동안 유지되며 Run() 종료 시
 	// StopRetryThread()로 정리한다. Cleanup은 detach/restart에서도 불리므로 여기서 워커를
-	// 멈추지 않는다. 워커는 pipeClient_.IsConnected()를 확인하므로 Disconnect 후에도 안전.
+	// 멈추지 않는다. 워커는 ipcTransport_->IsConnected()를 확인하므로 Disconnect 후에도 안전.
 	{
 		std::lock_guard<std::mutex> lock(breakpointMutex_);
 		breakpointMappings_.clear();
@@ -3772,9 +3773,9 @@ void DapServer::StartProcessMonitor() {
 			LOG_INFO("DAP: Target process %u exited (code: %lu)", targetPid_, exitCode);
 
 			// Pipe cleanup
-			pipeClient_.StopHeartbeat();
-			pipeClient_.StopEventListener();
-			pipeClient_.Disconnect();
+			ipcTransport_->StopHeartbeat();
+			ipcTransport_->StopEventListener();
+			ipcTransport_->Disconnect();
 
 			// Notify VSCode (only once)
 			if (!terminated_.exchange(true)) {
