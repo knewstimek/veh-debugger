@@ -1826,20 +1826,15 @@ void DapServer::OnEvaluate(const Request& req) {
 	if (expression.size() > 2 && expression[0] == '0' && (expression[1] == 'x' || expression[1] == 'X')) {
 		try {
 			uint64_t addr = std::stoull(expression, nullptr, 16);
-			ReadMemoryRequest readReq{};
-			readReq.address = addr;
-			readReq.size = 8;
-
-			std::vector<uint8_t> respData;
-			if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)) {
-				if (respData.size() >= sizeof(IpcStatus) + 8 &&
-					*reinterpret_cast<const IpcStatus*>(respData.data()) == IpcStatus::Ok) {
-					uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
-					char buf[64];
-					snprintf(buf, sizeof(buf), "[0x%llX] = 0x%016llX", addr, val);
+			uint64_t val = 0;
+			uint32_t valSize = 0;
+			if (ReadTargetPointer(addr, val, valSize)) {
+				{
+					char buf[32];
+					snprintf(buf, sizeof(buf), "[0x%llX] = ", addr);
 					resp.success = true;
 					resp.body = {
-						{"result", buf},
+						{"result", buf + FormatTargetPointer(val, valSize)},
 						{"type", "memory"},
 						{"variablesReference", 0},
 					};
@@ -1886,18 +1881,13 @@ void DapServer::OnEvaluate(const Request& req) {
 					if (ntStatus == 0) {
 						uint64_t tebAddr = reinterpret_cast<uint64_t>(tbi.TebBaseAddress);
 						uint64_t targetAddr = tebAddr + offset;
-						ReadMemoryRequest readReq{};
-						readReq.address = targetAddr;
-						readReq.size = 8;
-						std::vector<uint8_t> respData;
-						if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)
-							&& respData.size() >= sizeof(IpcStatus) + 8
-							&& *reinterpret_cast<const IpcStatus*>(respData.data()) == IpcStatus::Ok) {
-							uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
-							char buf[80];
-							snprintf(buf, sizeof(buf), "0x%016llX (TEB=0x%llX + 0x%llX)", val, tebAddr, offset);
+						uint64_t val = 0;
+						uint32_t valSize = 0;
+						if (ReadTargetPointer(targetAddr, val, valSize)) {
+							char buf[64];
+							snprintf(buf, sizeof(buf), " (TEB=0x%llX + 0x%llX)", tebAddr, offset);
 							resp.success = true;
-							resp.body = {{"result", buf}, {"type", "segment"}, {"variablesReference", 0}};
+							resp.body = {{"result", FormatTargetPointer(val, valSize) + buf}, {"type", "segment"}, {"variablesReference", 0}};
 							SendResponse(resp);
 							return;
 						}
@@ -1976,18 +1966,12 @@ void DapServer::OnEvaluate(const Request& req) {
 		}
 
 		if (resolved) {
-			ReadMemoryRequest readReq{};
-			readReq.address = addr;
-			readReq.size = 8;
-			std::vector<uint8_t> respData;
-			if (pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)
-				&& respData.size() >= sizeof(IpcStatus) + 8
-				&& *reinterpret_cast<const IpcStatus*>(respData.data()) == IpcStatus::Ok) {
-				uint64_t val = *reinterpret_cast<const uint64_t*>(respData.data() + sizeof(IpcStatus));
-				char buf[32];
-				snprintf(buf, sizeof(buf), "0x%016llX", val);
+			uint64_t val = 0;
+			uint32_t valSize = 0;
+			if (ReadTargetPointer(addr, val, valSize)) {
 				resp.success = true;
-				resp.body = {{"result", buf}, {"type", "uint64"}, {"variablesReference", 0}};
+				resp.body = {{"result", FormatTargetPointer(val, valSize)},
+					{"type", valSize == 4 ? "uint32" : "uint64"}, {"variablesReference", 0}};
 				SendResponse(resp);
 				return;
 			}
@@ -3584,6 +3568,30 @@ void DapServer::CleanupStaleTempBp() {
 		stepOverTempBpId_ = 0;
 		stepOverTempBpAddr_ = 0;
 	}
+}
+
+// Evaluate reads pointer-sized values: 4 bytes on a WoW64 target, 8 otherwise.
+bool DapServer::ReadTargetPointer(uint64_t address, uint64_t& value, uint32_t& size) {
+	BOOL wow64 = FALSE;
+	if (targetProcess_) IsWow64Process(targetProcess_, &wow64);
+	size = wow64 ? 4 : 8;
+	ReadMemoryRequest readReq{};
+	readReq.address = address;
+	readReq.size = size;
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &readReq, sizeof(readReq), respData)
+		|| respData.size() < sizeof(IpcStatus) + size
+		|| *reinterpret_cast<const IpcStatus*>(respData.data()) != IpcStatus::Ok)
+		return false;
+	value = 0;
+	memcpy(&value, respData.data() + sizeof(IpcStatus), size);
+	return true;
+}
+
+std::string DapServer::FormatTargetPointer(uint64_t value, uint32_t size) {
+	char buf[24];
+	snprintf(buf, sizeof(buf), size == 4 ? "0x%08llX" : "0x%016llX", value);
+	return buf;
 }
 
 // Step-over line test. [startAddr, nextLineAddr) is empty when the next source line has

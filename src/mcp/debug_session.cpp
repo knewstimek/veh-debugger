@@ -1026,6 +1026,23 @@ bool DebugSession::ResolveAddrExpr(const std::string& innerIn, const RegisterSet
 EvalResult DebugSession::Evaluate(const std::string& expression, uint32_t threadId) {
 	EvalResult result;
 
+	// Memory reads below are pointer-sized for the target (4 bytes on a WoW64 process).
+	BOOL targetWow64 = FALSE;
+	if (targetProcess_) IsWow64Process(targetProcess_, &targetWow64);
+	const uint32_t ptrSize = targetWow64 ? 4 : 8;
+	auto readPointer = [&](uint64_t addr, uint64_t& value) {
+		auto mem = ReadMemory(addr, ptrSize);
+		if (mem.size() < ptrSize) return false;
+		value = 0;
+		memcpy(&value, mem.data(), ptrSize);
+		return true;
+	};
+	auto formatPointer = [&](uint64_t value) {
+		char buf[24];
+		snprintf(buf, sizeof(buf), ptrSize == 4 ? "0x%08llX" : "0x%016llX", value);
+		return std::string(buf);
+	};
+
 	std::string expr = expression;
 	// Trim
 	while (!expr.empty() && expr.front() == ' ') expr.erase(expr.begin());
@@ -1058,13 +1075,12 @@ EvalResult DebugSession::Evaluate(const std::string& expression, uint32_t thread
 	if (expr.size() > 2 && expr[0] == '0' && (expr[1] == 'x' || expr[1] == 'X')) {
 		try {
 			uint64_t addr = std::stoull(expr, nullptr, 16);
-			auto mem = ReadMemory(addr, 8);
-			if (mem.size() >= 8) {
-				uint64_t val = *reinterpret_cast<const uint64_t*>(mem.data());
-				char buf[64];
-				snprintf(buf, sizeof(buf), "[0x%llX] = 0x%016llX", addr, val);
+			uint64_t val = 0;
+			if (readPointer(addr, val)) {
+				char buf[32];
+				snprintf(buf, sizeof(buf), "[0x%llX] = ", addr);
 				result.ok = true;
-				result.value = buf;
+				result.value = buf + formatPointer(val);
 				result.type = "memory";
 				return result;
 			}
@@ -1133,13 +1149,12 @@ EvalResult DebugSession::Evaluate(const std::string& expression, uint32_t thread
 				uint64_t tebAddr = reinterpret_cast<uint64_t>(tbi.TebBaseAddress);
 				uint64_t targetAddr = tebAddr + offset;
 
-				auto mem = ReadMemory(targetAddr, 8);
-				if (mem.size() >= 8) {
-					uint64_t val = *reinterpret_cast<const uint64_t*>(mem.data());
-					char buf[80];
-					snprintf(buf, sizeof(buf), "0x%016llX (TEB=0x%llX + 0x%llX)", val, tebAddr, offset);
+				uint64_t val = 0;
+				if (readPointer(targetAddr, val)) {
+					char buf[64];
+					snprintf(buf, sizeof(buf), " (TEB=0x%llX + 0x%llX)", tebAddr, offset);
 					result.ok = true;
-					result.value = buf;
+					result.value = formatPointer(val) + buf;
 					result.type = "segment";
 					result.tebAddress = (std::ostringstream() << "0x" << std::hex << tebAddr).str();
 					return result;
@@ -1172,13 +1187,10 @@ EvalResult DebugSession::Evaluate(const std::string& expression, uint32_t thread
 		}
 
 		result.address = addr;
-		auto mem = ReadMemory(addr, 8);
-		if (mem.size() >= 8) {
-			uint64_t val = *reinterpret_cast<const uint64_t*>(mem.data());
-			char buf[64];
-			snprintf(buf, sizeof(buf), "0x%016llX", val);
+		uint64_t val = 0;
+		if (readPointer(addr, val)) {
 			result.ok = true;
-			result.value = buf;
+			result.value = formatPointer(val);
 			result.type = "pointer";
 			return result;
 		}

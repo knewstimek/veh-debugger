@@ -1,8 +1,8 @@
 """Edge case tests for evaluate extensions (gs:/fs:, [reg+offset]).
 
-Tests:
-1. gs:[0x60] - PEB access (x64 only, should work)
-2. fs:[0x30] - should fail on x64 with clear error
+Tests (segment names/offsets follow the target: x64 gs/0x60/0x30, x86 fs/0x30/0x18):
+1. <seg>:[PEB] - PEB access
+2. <other seg>:[0x30] - rejected with a clear error
 3. [RSP] - single register dereference
 4. [RSP+0x8] - reg + hex offset
 5. [RSP-8] - reg - decimal offset
@@ -15,14 +15,17 @@ Tests:
 12. gs:[abc] - non-numeric offset
 13. *RSP - star with register (should resolve)
 """
-# requires: x64 (asserts x64 gs:/fs: segment semantics)
 import subprocess
-from build_paths import RELEASE
+from build_paths import RELEASE, IS_X86
 import json
 import time
 import sys
 import os
 from bounded_pipe import bound
+
+# TEB segment, the rejected segment, and TEB offsets of the PEB pointer and TEB self-pointer
+SEG, WRONG_SEG = ("fs", "gs") if IS_X86 else ("gs", "fs")
+PEB_OFF, SELF_OFF = ("0x30", "0x18") if IS_X86 else ("0x60", "0x30")
 
 MCP_EXE = os.path.join(RELEASE, "veh-mcp-server.exe")
 TARGET = os.path.join(RELEASE, "test_target.exe")
@@ -111,9 +114,9 @@ def run_all():
         return client.parse(client.call_tool("veh_evaluate", {"expression": expr, "threadId": tid}))
 
     # === Positive cases ===
-    test("gs:[0x60] PEB access", lambda: (
-        (r := ev("gs:[0x60]")),
-        assert_no_error(r, "gs:[0x60]"),
+    test(f"{SEG}:[{PEB_OFF}] PEB access", lambda: (
+        (r := ev(f"{SEG}:[{PEB_OFF}]")),
+        assert_no_error(r, f"{SEG}:[{PEB_OFF}]"),
         assert_key(r, "tebAddress"),
     ))
 
@@ -134,9 +137,12 @@ def run_all():
         assert_no_error(r, "[RSP-8]"),
     ))
 
+    # RSP+RBP need not be a readable address (RBP is a frame pointer on x86); the
+    # expression must parse, so only a memory-read failure is acceptable.
     test("[RSP+RBP] reg+reg", lambda: (
         (r := ev("[RSP+RBP]")),
-        assert_no_error(r, "[RSP+RBP]"),
+        "error" not in r or "Failed to read memory" in r["error"] or (_ for _ in ()).throw(
+            AssertionError(f"[RSP+RBP] did not parse: {r['error']}")),
     ))
 
     test("*RSP star with register", lambda: (
@@ -145,15 +151,17 @@ def run_all():
         assert_no_error(r, "*RSP"),
     ))
 
-    test("gs:[0x30] TEB self-reference", lambda: (
-        (r := ev("gs:[0x30]")),
-        assert_no_error(r, "gs:[0x30]"),
+    # The self-pointer must read back exactly the TEB address (pointer-sized read).
+    test(f"{SEG}:[{SELF_OFF}] TEB self-reference", lambda: (
+        (r := ev(f"{SEG}:[{SELF_OFF}]")),
+        assert_no_error(r, f"{SEG}:[{SELF_OFF}]"),
+        assert_equal(int(r["value"].split()[0], 16), int(r["tebAddress"], 16), "TEB self-pointer"),
     ))
 
     # === Negative cases (should return error, not crash) ===
-    test("fs:[0x30] rejected on x64", lambda: (
-        (r := ev("fs:[0x30]")),
-        assert_has_error(r, "fs:[0x30]"),
+    test(f"{WRONG_SEG}:[0x30] rejected", lambda: (
+        (r := ev(f"{WRONG_SEG}:[0x30]")),
+        assert_has_error(r, f"{WRONG_SEG}:[0x30]"),
     ))
 
     test("[] empty brackets - no crash", lambda: (
@@ -176,14 +184,14 @@ def run_all():
         assert_has_error(r, "[RSP+]"),
     ))
 
-    test("gs:[] empty offset - no crash", lambda: (
-        (r := ev("gs:[]")),
-        assert_has_error(r, "gs:[]"),
+    test(f"{SEG}:[] empty offset - no crash", lambda: (
+        (r := ev(f"{SEG}:[]")),
+        assert_has_error(r, f"{SEG}:[]"),
     ))
 
-    test("gs:[abc] non-numeric - no crash", lambda: (
-        (r := ev("gs:[abc]")),
-        assert_has_error(r, "gs:[abc]"),
+    test(f"{SEG}:[abc] non-numeric - no crash", lambda: (
+        (r := ev(f"{SEG}:[abc]")),
+        assert_has_error(r, f"{SEG}:[abc]"),
     ))
 
     # Cleanup
@@ -198,6 +206,10 @@ def assert_no_error(r, label):
 def assert_has_error(r, label):
     if "error" not in r:
         raise AssertionError(f"{label} should have returned error but got: {r}")
+
+def assert_equal(actual, expected, label):
+    if actual != expected:
+        raise AssertionError(f"{label}: 0x{actual:X} != 0x{expected:X}")
 
 def assert_key(r, key):
     if key not in r:

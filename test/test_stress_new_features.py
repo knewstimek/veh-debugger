@@ -10,9 +10,8 @@ Tests:
 7. Rapid detach->launch restart (10 cycles)
 8. Thread management stress (pause/continue per-thread)
 """
-# requires: x64 (asserts x64 gs: segment access)
 import subprocess
-from build_paths import RELEASE
+from build_paths import RELEASE, IS_X86
 import json
 import time
 import sys
@@ -279,18 +278,19 @@ def test_evaluate_complex():
     assert "error" not in data, f"[RSP+0x8] failed: {data}"
     print(f"  [RSP+0x8] = {data.get('value')}")
 
-    # Test gs:[0x60] (PEB pointer)
-    resp = client.call_tool("veh_evaluate", {"expression": "gs:[0x60]", "threadId": tid})
+    # PEB pointer and TEB self-pointer: gs:[0x60]/[0x30] on x64, fs:[0x30]/[0x18] on x86
+    seg, peb_off, self_off = ("fs", "0x30", "0x18") if IS_X86 else ("gs", "0x60", "0x30")
+    resp = client.call_tool("veh_evaluate", {"expression": f"{seg}:[{peb_off}]", "threadId": tid})
     data = client.parse_result(resp)
-    assert "error" not in data, f"gs:[0x60] failed: {data}"
+    assert "error" not in data, f"{seg}:[{peb_off}] failed: {data}"
     assert "tebAddress" in data, f"Missing tebAddress: {data}"
-    print(f"  gs:[0x60] (PEB) = {data.get('value')}")
+    print(f"  {seg}:[{peb_off}] (PEB) = {data.get('value')}")
 
-    # Test gs:[0x30] (TEB self-reference)
-    resp = client.call_tool("veh_evaluate", {"expression": "gs:[0x30]", "threadId": tid})
+    resp = client.call_tool("veh_evaluate", {"expression": f"{seg}:[{self_off}]", "threadId": tid})
     data = client.parse_result(resp)
-    assert "error" not in data, f"gs:[0x30] failed: {data}"
-    print(f"  gs:[0x30] (TEB self) = {data.get('value')}")
+    assert "error" not in data, f"{seg}:[{self_off}] failed: {data}"
+    assert int(data["value"].split()[0], 16) == int(data["tebAddress"], 16), f"TEB self-pointer mismatch: {data}"
+    print(f"  {seg}:[{self_off}] (TEB self) = {data.get('value')}")
 
     client.detach()
     client.close()
