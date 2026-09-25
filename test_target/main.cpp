@@ -7,6 +7,10 @@
 
 volatile int g_counter = 0;
 volatile int g_trace_memory = 0;
+// Memory search/scan fixtures: a unique byte marker and a value that grows every loop.
+volatile unsigned char g_search_marker[16] = {
+	0x5A, 0x3C, 0x96, 0xE1, 0x7D, 0x42, 0xB8, 0x0F, 0xC6, 0x29, 0x73, 0xAE, 0x14, 0xD5, 0x68, 0x9B};
+volatile int g_scan_value = 1000;
 void* volatile g_trace_executable = nullptr;
 
 __declspec(noinline) int TraceCoverageTarget(volatile int value) {
@@ -113,6 +117,7 @@ int main(int argc, char* argv[]) {
 		TraceExecutableWriteTarget();
 		WorkFunction();
 		TraceOverlapTarget();
+		g_scan_value += 1 + (g_search_marker[0] >> 7);  // +1; the read keeps the marker alive
 		SleepEx(1000, TRUE);  // alertable wait — APC 인젝션 테스트 가능
 	}
 

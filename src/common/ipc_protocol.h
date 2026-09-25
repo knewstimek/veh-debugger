@@ -76,6 +76,8 @@ enum class IpcCommand : uint32_t {
 	AllocateMemory         = 0x0060,
 	FreeMemory             = 0x0061,
 	ExecuteShellcode       = 0x0062,
+	QueryMemoryMap         = 0x0063,
+	SearchMemory           = 0x0064,
 
 	// Dynamic tracing
 	TraceRegister          = 0x0070,
@@ -1000,6 +1002,60 @@ struct AllocateMemoryResponse {
 struct FreeMemoryRequest {
 	uint64_t address;
 	uint32_t size;
+};
+
+// --- Memory map / search ---
+struct QueryMemoryMapRequest {
+	uint64_t startAddress;
+	uint64_t endAddress;     // exclusive, 0 = end of user space
+	uint32_t maxRegions;
+	uint8_t  includeFree;
+	uint8_t  reserved[3];
+};
+
+struct MemoryRegionEntry {
+	uint64_t baseAddress;
+	uint64_t allocationBase;
+	uint64_t regionSize;
+	uint32_t state;              // MEM_COMMIT / MEM_RESERVE / MEM_FREE
+	uint32_t protect;
+	uint32_t allocationProtect;
+	uint32_t type;               // MEM_IMAGE / MEM_MAPPED / MEM_PRIVATE
+};
+
+struct QueryMemoryMapResponse {
+	IpcStatus status;
+	uint32_t  count;
+	uint8_t   truncated;
+	uint64_t  nextAddress;       // resume point when truncated
+	// followed by MemoryRegionEntry[count]
+};
+
+enum class RegionFilter : uint8_t { Any = 0, Require = 1, Exclude = 2 };
+
+constexpr uint8_t kRegionTypeImage = 1, kRegionTypePrivate = 2, kRegionTypeMapped = 4;
+
+struct SearchMemoryRequest {
+	uint64_t     startAddress;
+	uint64_t     endAddress;     // exclusive, 0 = end of user space
+	uint32_t     patternSize;
+	uint32_t     maxResults;
+	uint32_t     alignment;      // match addresses must be multiples of this (1 = any)
+	RegionFilter writable;
+	RegionFilter executable;
+	uint8_t      typeMask;       // kRegionType* bits, 0 = all
+	uint8_t      reserved;
+	// followed by pattern[patternSize], mask[patternSize] (mask bit 1 = compare)
+};
+
+struct SearchMemoryResponse {
+	IpcStatus status;
+	uint32_t  count;
+	uint8_t   truncated;
+	uint32_t  regionsScanned;
+	uint64_t  scannedBytes;
+	uint64_t  nextAddress;       // resume point when truncated
+	// followed by uint64_t addresses[count]
 };
 
 struct ExecuteShellcodeRequest {

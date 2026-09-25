@@ -1565,6 +1565,250 @@ json McpServer::ToolAllocateMemory(const json& args) {
 	return {{"success", true}, {"address", buf}, {"size", size}, {"protection", protStr}};
 }
 
+static std::string HexAddr(uint64_t value) {
+	char buf[24];
+	snprintf(buf, sizeof(buf), "0x%llX", static_cast<unsigned long long>(value));
+	return buf;
+}
+
+static std::string ProtectText(uint32_t protect) {
+	std::string text;
+	switch (protect & 0xFF) {
+	case PAGE_NOACCESS: text = "none"; break;
+	case PAGE_READONLY: text = "r"; break;
+	case PAGE_READWRITE: text = "rw"; break;
+	case PAGE_WRITECOPY: text = "rc"; break;
+	case PAGE_EXECUTE: text = "x"; break;
+	case PAGE_EXECUTE_READ: text = "rx"; break;
+	case PAGE_EXECUTE_READWRITE: text = "rwx"; break;
+	case PAGE_EXECUTE_WRITECOPY: text = "rxc"; break;
+	default: text = protect ? "?" : ""; break;
+	}
+	if (protect & PAGE_GUARD) text += "+guard";
+	if (protect & PAGE_NOCACHE) text += "+nocache";
+	return text;
+}
+
+// Shared range arguments: start/end addresses or a module name (whole image range).
+bool McpServer::ParseRangeArgs(const json& args, uint64_t& start, uint64_t& end, std::string& error) {
+	start = 0;
+	end = 0;
+	std::string module = args.value("module", "");
+	if (!module.empty()) {
+		std::string lower = module;
+		std::transform(lower.begin(), lower.end(), lower.begin(), [](char c) { return (char)::tolower((unsigned char)c); });
+		for (auto& m : session_.GetModules()) {
+			std::string name = m.name;
+			std::transform(name.begin(), name.end(), name.begin(), [](char c) { return (char)::tolower((unsigned char)c); });
+			if (name == lower) { start = m.baseAddress; end = m.baseAddress + m.size; break; }
+		}
+		if (!end) { error = "module not found: " + module; return false; }
+	}
+	std::string s = args.value("start", "");
+	std::string e = args.value("end", "");
+	if (!s.empty() && !ParseAddress(s, start)) { error = "invalid start address"; return false; }
+	if (!e.empty() && !ParseAddress(e, end)) { error = "invalid end address"; return false; }
+	if (end && end <= start) { error = "end must be greater than start"; return false; }
+	return true;
+}
+
+std::string McpServer::ModuleLocation(uint64_t address, const std::vector<ModuleEntry>& modules) {
+	for (auto& m : modules) {
+		if (address >= m.baseAddress && address < m.baseAddress + m.size) {
+			char buf[24];
+			snprintf(buf, sizeof(buf), "+0x%llX", static_cast<unsigned long long>(address - m.baseAddress));
+			return m.name + buf;
+		}
+	}
+	return {};
+}
+
+json McpServer::ToolMemoryMap(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+	uint64_t start, end;
+	std::string error;
+	if (!ParseRangeArgs(args, start, end, error)) return {{"error", error}};
+	uint32_t maxRegions = JsonUint32(args, "max_regions", 200);
+	if (maxRegions == 0 || maxRegions > 4096) maxRegions = 200;
+
+	auto map = session_.QueryMemoryMap(start, end, maxRegions, JsonBool(args, "include_free", false));
+	if (!map.ok) return {{"error", "memory map query failed"}};
+
+	auto modules = session_.GetModules();
+	json regions = json::array();
+	for (auto& r : map.regions) {
+		json entry = {{"base", HexAddr(r.baseAddress)}, {"size", HexAddr(r.regionSize)}};
+		entry["state"] = r.state == MEM_COMMIT ? "commit" : r.state == MEM_RESERVE ? "reserve" : "free";
+		if (r.state != MEM_FREE) {
+			if (r.state == MEM_COMMIT) entry["protect"] = ProtectText(r.protect);
+			entry["type"] = r.type == MEM_IMAGE ? "image" : r.type == MEM_MAPPED ? "mapped" : "private";
+			if (r.allocationBase != r.baseAddress) entry["allocationBase"] = HexAddr(r.allocationBase);
+			if (r.type == MEM_IMAGE) {
+				auto location = ModuleLocation(r.baseAddress, modules);
+				if (!location.empty()) entry["module"] = location;
+			}
+		}
+		regions.push_back(std::move(entry));
+	}
+	json result = {{"regions", regions}, {"count", regions.size()}, {"truncated", map.nextAddress != 0}};
+	if (map.nextAddress) result["next_start"] = HexAddr(map.nextAddress);
+	return result;
+}
+
+// Builds the byte pattern and compare mask from one of: pattern (AOB), string, value.
+static bool BuildSearchPattern(const json& args, bool is64, std::vector<uint8_t>& pattern,
+	std::vector<uint8_t>& mask, std::string& error) {
+	const int kinds = (args.contains("pattern") ? 1 : 0) + (args.contains("string") ? 1 : 0)
+		+ (args.contains("value") ? 1 : 0);
+	if (kinds != 1) { error = "provide exactly one of pattern, string, value"; return false; }
+
+	if (args.contains("pattern")) {
+		std::string text = args["pattern"].is_string() ? args["pattern"].get<std::string>() : "";
+		std::vector<std::string> tokens;
+		std::string cur;
+		for (char c : text) {
+			if (c == ' ' || c == ',' || c == '\t') {
+				if (!cur.empty()) { tokens.push_back(cur); cur.clear(); }
+			} else {
+				cur += c;
+			}
+		}
+		if (!cur.empty()) tokens.push_back(cur);
+		// "488B??C3" without separators: split into byte pairs.
+		if (tokens.size() == 1 && tokens[0].size() > 2 && tokens[0].size() % 2 == 0) {
+			std::string joined = tokens[0];
+			tokens.clear();
+			for (size_t i = 0; i < joined.size(); i += 2) tokens.push_back(joined.substr(i, 2));
+		}
+		auto nibble = [](char c, uint8_t& v) {
+			if (c >= '0' && c <= '9') { v = uint8_t(c - '0'); return true; }
+			c = (char)::tolower((unsigned char)c);
+			if (c >= 'a' && c <= 'f') { v = uint8_t(c - 'a' + 10); return true; }
+			return false;
+		};
+		for (auto& t : tokens) {
+			if (t == "?" || t == "??") { pattern.push_back(0); mask.push_back(0); continue; }
+			if (t.size() != 2) { error = "invalid pattern token: " + t; return false; }
+			uint8_t hi = 0, lo = 0, m = 0;
+			if (t[0] != '?') { if (!nibble(t[0], hi)) { error = "invalid pattern token: " + t; return false; } m |= 0xF0; }
+			if (t[1] != '?') { if (!nibble(t[1], lo)) { error = "invalid pattern token: " + t; return false; } m |= 0x0F; }
+			pattern.push_back(uint8_t((hi << 4) | lo));
+			mask.push_back(m);
+		}
+	} else if (args.contains("string")) {
+		std::string text = args["string"].is_string() ? args["string"].get<std::string>() : "";
+		std::string encoding = args.value("encoding", "ascii");
+		if (encoding == "utf16") {
+			int wlen = MultiByteToWideChar(CP_UTF8, 0, text.data(), (int)text.size(), nullptr, 0);
+			std::wstring wide(wlen, L'\0');
+			MultiByteToWideChar(CP_UTF8, 0, text.data(), (int)text.size(), wide.data(), wlen);
+			auto* bytes = reinterpret_cast<const uint8_t*>(wide.data());
+			pattern.assign(bytes, bytes + wide.size() * sizeof(wchar_t));
+		} else if (encoding == "ascii" || encoding == "utf8") {
+			pattern.assign(text.begin(), text.end());
+		} else {
+			error = "encoding must be ascii, utf8, or utf16";
+			return false;
+		}
+		mask.assign(pattern.size(), 0xFF);
+	} else {
+		std::string type = args.value("value_type", "i32");
+		const json& v = args["value"];
+		auto put = [&](const void* p, size_t size) {
+			auto* b = static_cast<const uint8_t*>(p);
+			pattern.assign(b, b + size);
+		};
+		try {
+			if (type == "f32" || type == "f64") {
+				double d = v.is_string() ? std::stod(v.get<std::string>()) : v.get<double>();
+				if (type == "f32") { float f = (float)d; put(&f, 4); } else put(&d, 8);
+			} else {
+				uint64_t raw = 0;
+				if (v.is_string()) {
+					std::string s = v.get<std::string>();
+					raw = (!s.empty() && s[0] == '-') ? (uint64_t)std::stoll(s, nullptr, 0) : std::stoull(s, nullptr, 0);
+				} else if (v.is_number_unsigned()) {
+					raw = v.get<uint64_t>();
+				} else {
+					raw = (uint64_t)v.get<int64_t>();
+				}
+				size_t size = 0;
+				if (type == "i8" || type == "u8") size = 1;
+				else if (type == "i16" || type == "u16") size = 2;
+				else if (type == "i32" || type == "u32") size = 4;
+				else if (type == "i64" || type == "u64") size = 8;
+				else if (type == "ptr") size = is64 ? 8 : 4;
+				else { error = "value_type must be i8/u8/i16/u16/i32/u32/i64/u64/f32/f64/ptr"; return false; }
+				put(&raw, size);  // little-endian low bytes
+			}
+		} catch (...) {
+			error = "invalid value";
+			return false;
+		}
+		mask.assign(pattern.size(), 0xFF);
+	}
+	if (pattern.empty()) { error = "empty pattern"; return false; }
+	if (pattern.size() > 4096) { error = "pattern longer than 4096 bytes"; return false; }
+	bool anyCompared = false;
+	for (auto m : mask) anyCompared |= m != 0;
+	if (!anyCompared) { error = "pattern is all wildcards"; return false; }
+	return true;
+}
+
+static bool ParseRegionFilter(const json& args, const char* key, RegionFilter& out) {
+	out = RegionFilter::Any;
+	if (!args.contains(key) || args[key].is_null()) return true;
+	if (!args[key].is_boolean()) return false;
+	out = args[key].get<bool>() ? RegionFilter::Require : RegionFilter::Exclude;
+	return true;
+}
+
+json McpServer::ToolSearchMemory(const json& args) {
+	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+
+	std::vector<uint8_t> pattern, mask;
+	std::string error;
+	BOOL isWow64 = FALSE;
+	if (HANDLE hProc = session_.GetTargetProcess()) IsWow64Process(hProc, &isWow64);
+	if (!BuildSearchPattern(args, !isWow64, pattern, mask, error)) return {{"error", error}};
+
+	SearchMemoryRequest req{};
+	if (!ParseRangeArgs(args, req.startAddress, req.endAddress, error)) return {{"error", error}};
+	if (!ParseRegionFilter(args, "writable", req.writable) || !ParseRegionFilter(args, "executable", req.executable))
+		return {{"error", "writable/executable must be true or false"}};
+	if (args.contains("type")) {
+		json types = args["type"].is_array() ? args["type"] : json::array({args["type"]});
+		for (auto& t : types) {
+			std::string name = t.is_string() ? t.get<std::string>() : "";
+			if (name == "image") req.typeMask |= kRegionTypeImage;
+			else if (name == "private") req.typeMask |= kRegionTypePrivate;
+			else if (name == "mapped") req.typeMask |= kRegionTypeMapped;
+			else return {{"error", "type must be image, private, or mapped"}};
+		}
+	}
+	req.alignment = JsonUint32(args, "alignment", 1);
+	if (req.alignment == 0 || req.alignment > 4096) return {{"error", "alignment must be 1-4096"}};
+	req.maxResults = JsonUint32(args, "max_results", 100);
+	if (req.maxResults == 0 || req.maxResults > 10000) return {{"error", "max_results must be 1-10000"}};
+
+	auto found = session_.SearchMemory(req, pattern, mask);
+	if (!found.ok) return {{"error", "memory search failed (timeout or target error)"}};
+
+	auto modules = session_.GetModules();
+	json matches = json::array();
+	for (uint64_t hit : found.matches) {
+		json entry = {{"address", HexAddr(hit)}};
+		auto location = ModuleLocation(hit, modules);
+		if (!location.empty()) entry["location"] = location;
+		matches.push_back(std::move(entry));
+	}
+	json result = {{"matches", matches}, {"count", matches.size()}, {"truncated", found.nextAddress != 0},
+	               {"patternSize", pattern.size()}, {"regionsScanned", found.regionsScanned},
+	               {"scannedBytes", found.scannedBytes}};
+	if (found.nextAddress) result["next_start"] = HexAddr(found.nextAddress);
+	return result;
+}
+
 json McpServer::ToolFreeMemory(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
@@ -3551,6 +3795,34 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"size", {{"type", "integer"}, {"description", "Allocation size in bytes (default: 4096)"}}},
 			{"protection", {{"type", "string"}, {"enum", json::array({"rwx", "rw", "rx", "r"})}, {"description", "Memory protection (default: rwx = PAGE_EXECUTE_READWRITE)"}}}
+		 }}}}}),
+
+		Tool(&McpServer::ToolMemoryMap, "memory", 0, true,
+			{{"name", "veh_memory_map"}, {"description", "List virtual memory regions (VirtualQuery) with state, protection (r/rw/rx/rwx, +guard), type (image/private/mapped) and owning module. Limited by max_regions; when truncated, pass next_start as start to continue."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"start", {{"type", "string"}, {"description", "Start address (default: lowest user address). Accepts module+RVA."}}},
+			{"end", {{"type", "string"}, {"description", "End address, exclusive (default: end of user space)"}}},
+			{"module", {{"type", "string"}, {"description", "Limit to one module's image range, e.g. \"kernel32.dll\""}}},
+			{"include_free", {{"type", "boolean"}, {"description", "Include free (unallocated) ranges (default: false)"}}},
+			{"max_regions", {{"type", "integer"}, {"description", "Maximum regions returned (default: 200, max: 4096)"}}}
+		 }}}}}),
+
+		Tool(&McpServer::ToolSearchMemory, "memory", 0, true,
+			{{"name", "veh_search_memory"}, {"description", "Search readable committed memory inside the target. Give exactly one of: pattern (AOB, e.g. \"48 8B ?? ?? E8\", nibble wildcards like \"4?\" allowed), string (with encoding), or value (with value_type). Breakpoint bytes are compared as the original code. Results are capped by max_results; when truncated, pass next_start as start to continue."},
+		 {"inputSchema", {{"type", "object"}, {"properties", {
+			{"pattern", {{"type", "string"}, {"description", "Hex byte pattern; ?? or ? is a wildcard byte"}}},
+			{"string", {{"type", "string"}, {"description", "Text to find"}}},
+			{"encoding", {{"type", "string"}, {"enum", json::array({"ascii", "utf8", "utf16"})}, {"description", "Encoding for string (default: ascii)"}}},
+			{"value", {{"description", "Number to find (JSON number or string, hex allowed)"}}},
+			{"value_type", {{"type", "string"}, {"enum", json::array({"i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64", "ptr"})}, {"description", "Encoding for value (default: i32). Floats match exact bit patterns."}}},
+			{"start", {{"type", "string"}, {"description", "Start address (default: lowest user address). Accepts module+RVA."}}},
+			{"end", {{"type", "string"}, {"description", "End address, exclusive"}}},
+			{"module", {{"type", "string"}, {"description", "Limit to one module's image range"}}},
+			{"writable", {{"type", "boolean"}, {"description", "true: only writable regions, false: exclude them (default: any)"}}},
+			{"executable", {{"type", "boolean"}, {"description", "true: only executable regions, false: exclude them (default: any)"}}},
+			{"type", {{"description", "Region type filter: \"image\", \"private\", \"mapped\", or an array of them"}}},
+			{"alignment", {{"type", "integer"}, {"description", "Only report addresses that are multiples of this (default: 1)"}}},
+			{"max_results", {{"type", "integer"}, {"description", "Maximum matches (default: 100, max: 10000)"}}}
 		 }}}}}),
 
 		Tool(&McpServer::ToolFreeMemory, "memory", 0, true,

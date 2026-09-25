@@ -1,6 +1,7 @@
 #include <windows.h>
 #include "memory.h"
 #include "veh_handler.h"
+#include "breakpoint.h"
 #include <cstring>
 
 namespace veh {
@@ -173,5 +174,134 @@ bool MemoryManager::ExecuteShellcode(const uint8_t* code, uint32_t size, uint32_
 
 // Accessors for crash info from last ExecuteShellcode
 // (pipe_server reads ShellcodeContext via response struct)
+
+static void UserSpaceBounds(uint64_t start, uint64_t end, uint64_t& lo, uint64_t& hi) {
+	SYSTEM_INFO si{};
+	GetSystemInfo(&si);
+	const uint64_t minApp = reinterpret_cast<uint64_t>(si.lpMinimumApplicationAddress);
+	const uint64_t maxApp = reinterpret_cast<uint64_t>(si.lpMaximumApplicationAddress) + 1;
+	lo = start > minApp ? start : minApp;
+	hi = (end == 0 || end > maxApp) ? maxApp : end;
+}
+
+static bool IsReadable(DWORD protect) {
+	return (protect & (PAGE_GUARD | PAGE_NOACCESS)) == 0 && (protect & 0xFF) != 0;
+}
+
+static bool MatchesFilter(RegionFilter filter, bool value) {
+	return filter == RegionFilter::Any || (filter == RegionFilter::Require) == value;
+}
+
+static uint8_t RegionTypeBit(DWORD type) {
+	switch (type) {
+	case MEM_IMAGE: return kRegionTypeImage;
+	case MEM_MAPPED: return kRegionTypeMapped;
+	default: return kRegionTypePrivate;
+	}
+}
+
+uint64_t MemoryManager::QueryMap(uint64_t start, uint64_t end, uint32_t maxRegions, bool includeFree,
+                                 std::vector<MemoryRegionEntry>& out) {
+	uint64_t addr, hi;
+	UserSpaceBounds(start, end, addr, hi);
+	while (addr < hi) {
+		MEMORY_BASIC_INFORMATION mbi{};
+		if (!VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi))) break;
+		const uint64_t base = reinterpret_cast<uint64_t>(mbi.BaseAddress);
+		const uint64_t next = base + mbi.RegionSize;
+		if (next <= addr) break;
+		if (includeFree || mbi.State != MEM_FREE) {
+			if (out.size() >= maxRegions) return addr;
+			out.push_back({base, reinterpret_cast<uint64_t>(mbi.AllocationBase), mbi.RegionSize,
+			               mbi.State, mbi.Protect, mbi.AllocationProtect, mbi.Type});
+		}
+		addr = next;
+	}
+	return 0;
+}
+
+bool MemoryManager::Search(const SearchMemoryRequest& req, const uint8_t* pattern, const uint8_t* mask,
+                           uint64_t excludeStart, uint64_t excludeEnd, SearchResult& result) {
+	const size_t n = req.patternSize;
+	const uint32_t align = req.alignment ? req.alignment : 1;
+	constexpr size_t kChunk = 1 << 20;
+
+	// The scan buffer and the masked pattern live in one private allocation that is
+	// skipped by AllocationBase, so the scanner never finds its own copies.
+	const size_t scratchSize = kChunk + n;
+	auto* scratch = static_cast<uint8_t*>(VirtualAlloc(nullptr, scratchSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+	if (!scratch) return false;
+	uint8_t* buf = scratch;
+	uint8_t* pat = scratch + kChunk;
+	size_t anchor = n;
+	for (size_t k = 0; k < n; ++k) {
+		pat[k] = pattern[k] & mask[k];
+		if (anchor == n && mask[k] == 0xFF) anchor = k;
+	}
+
+	auto matchesAt = [&](const uint8_t* p) {
+		for (size_t k = 0; k < n; ++k)
+			if ((p[k] & mask[k]) != pat[k]) return false;
+		return true;
+	};
+
+	uint64_t addr, hi;
+	UserSpaceBounds(req.startAddress, req.endAddress, addr, hi);
+	bool full = false;
+	while (addr < hi && !full) {
+		MEMORY_BASIC_INFORMATION mbi{};
+		if (!VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi))) break;
+		const uint64_t base = reinterpret_cast<uint64_t>(mbi.BaseAddress);
+		const uint64_t next = base + mbi.RegionSize;
+		if (next <= addr) break;
+		const uint64_t regionEnd = next < hi ? next : hi;
+		const bool eligible = mbi.State == MEM_COMMIT && IsReadable(mbi.Protect)
+			&& mbi.AllocationBase != scratch
+			&& MatchesFilter(req.writable, (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY
+				| PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0)
+			&& MatchesFilter(req.executable, (mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ
+				| PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0)
+			&& (req.typeMask == 0 || (req.typeMask & RegionTypeBit(mbi.Type)) != 0);
+		if (eligible && regionEnd - addr >= n) {
+			result.regionsScanned++;
+			for (uint64_t pos = addr; pos + n <= regionEnd && !full;) {
+				const size_t len = static_cast<size_t>((regionEnd - pos) < kChunk ? (regionEnd - pos) : kChunk);
+				if (!SafeMemcpy(buf, reinterpret_cast<const void*>(pos), len)) break;
+				BreakpointManager::Instance().MaskBreakpointsInBuffer(pos, buf, len);
+				result.scannedBytes += len;
+				const size_t last = len - n;
+				auto consider = [&](size_t i) {
+					const uint64_t hit = pos + i;
+					if (hit % align != 0 || (hit >= excludeStart && hit < excludeEnd) || !matchesAt(buf + i))
+						return;
+					if (result.hits.size() >= req.maxResults) {
+						result.nextAddress = hit;
+						full = true;
+						return;
+					}
+					result.hits.push_back(hit);
+				};
+				if (anchor < n) {
+					const uint8_t* p = buf + anchor;
+					const uint8_t* stop = buf + last + anchor + 1;
+					while (!full && p < stop) {
+						p = static_cast<const uint8_t*>(memchr(p, pat[anchor], stop - p));
+						if (!p) break;
+						consider(static_cast<size_t>(p - buf) - anchor);
+						++p;
+					}
+				} else {
+					for (size_t i = 0; i <= last && !full; ++i) consider(i);
+				}
+				if (pos + len >= regionEnd) break;
+				pos += len - (n - 1);
+			}
+		}
+		addr = next;
+	}
+
+	VirtualFree(scratch, 0, MEM_RELEASE);
+	return true;
+}
 
 } // namespace veh

@@ -220,6 +220,24 @@ public:
 	bool FreeMemory(uint64_t address);
 	ShellcodeResult ExecuteShellcode(const uint8_t* code, uint32_t size, uint32_t timeoutMs);
 
+	struct MemoryMapResult {
+		bool ok = false;
+		std::vector<MemoryRegionEntry> regions;
+		uint64_t nextAddress = 0;  // non-zero when truncated
+	};
+	MemoryMapResult QueryMemoryMap(uint64_t start, uint64_t end, uint32_t maxRegions, bool includeFree);
+
+	struct MemorySearchResult {
+		bool ok = false;
+		std::vector<uint64_t> matches;
+		uint64_t nextAddress = 0;  // non-zero when truncated
+		uint64_t scannedBytes = 0;
+		uint32_t regionsScanned = 0;
+	};
+	// pattern and mask have the same length; mask bits set to 1 are compared
+	MemorySearchResult SearchMemory(const SearchMemoryRequest& request,
+		const std::vector<uint8_t>& pattern, const std::vector<uint8_t>& mask);
+
 	// --- Analysis ---
 	std::vector<DisasmInsn> Disassemble(uint64_t address, uint32_t count);
 	EvalResult Evaluate(const std::string& expression, uint32_t threadId);

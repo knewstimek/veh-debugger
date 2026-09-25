@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+- **`veh_search_memory`** -- scans readable committed memory inside the target for an AOB pattern (`??` byte and `4?` nibble wildcards), a string (ascii/utf8/utf16), or a numeric value (i8-u64, f32/f64, ptr). Filters: address range or module, writable, executable, region type, alignment. Breakpoint bytes compare as the original code, and the search request's own pattern is never reported. Results are capped by `max_results`; `next_start` resumes a truncated search.
+- **`veh_memory_map`** -- lists virtual memory regions with state, protection, type, and owning module, limited to a range or module; `next_start` pages through large maps.
+
+### Fixed
+- **Long IPC commands could trip the DLL's idle heartbeat timeout** -- the idle timer was measured from when a command arrived, so a command running longer than the timeout was followed by an emergency cleanup. The timer now restarts when the command finishes.
+
 ## 1.1.18 - 2026-09-25
 
 ### Changed

@@ -755,6 +755,9 @@ void PipeServer::ServerThread() {
 
 			LOG_DEBUG("IPC cmd=0x%04X size=%u", hdr.command, hdr.payloadSize);
 			HandleCommand(hdr.command, payload.data(), hdr.payloadSize);
+			// A long command (memory search, trace) is activity too; do not let its
+			// duration count toward the idle heartbeat timeout.
+			lastCommandTime_ = GetTickCount64();
 		}
 
 		// Detach 후: 파이프 연결만 끊고 외부 루프에서 새 클라이언트 대기
@@ -1560,6 +1563,63 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		bool ok = MemoryManager::Instance().Free(req->address, req->size);
 		IpcStatus status = ok ? IpcStatus::Ok : IpcStatus::Error;
 		SendResponse(command, &status, sizeof(status));
+		break;
+	}
+
+	case IpcCommand::QueryMemoryMap: {
+		if (payloadSize < sizeof(QueryMemoryMapRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const QueryMemoryMapRequest*>(payload);
+		const uint32_t maxRegions = (req->maxRegions == 0 || req->maxRegions > 65536) ? 65536 : req->maxRegions;
+		std::vector<MemoryRegionEntry> regions;
+		QueryMemoryMapResponse resp{};
+		resp.nextAddress = MemoryManager::Instance().QueryMap(
+			req->startAddress, req->endAddress, maxRegions, req->includeFree != 0, regions);
+		resp.status = IpcStatus::Ok;
+		resp.count = static_cast<uint32_t>(regions.size());
+		resp.truncated = resp.nextAddress ? 1 : 0;
+		std::vector<uint8_t> buf(sizeof(resp) + regions.size() * sizeof(MemoryRegionEntry));
+		memcpy(buf.data(), &resp, sizeof(resp));
+		if (!regions.empty())
+			memcpy(buf.data() + sizeof(resp), regions.data(), regions.size() * sizeof(MemoryRegionEntry));
+		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
+		break;
+	}
+
+	case IpcCommand::SearchMemory: {
+		auto* req = reinterpret_cast<const SearchMemoryRequest*>(payload);
+		if (payloadSize < sizeof(SearchMemoryRequest) || req->patternSize == 0 || req->patternSize > 4096
+			|| payloadSize != sizeof(SearchMemoryRequest) + 2ull * req->patternSize
+			|| req->maxResults == 0 || req->maxResults > 100000 || req->alignment > 4096) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		const uint8_t* pattern = payload + sizeof(SearchMemoryRequest);
+		const uint8_t* mask = pattern + req->patternSize;
+		MemoryManager::SearchResult result;
+		const uint64_t payloadStart = reinterpret_cast<uint64_t>(payload);
+		bool ok = MemoryManager::Instance().Search(*req, pattern, mask,
+			payloadStart, payloadStart + payloadSize, result);
+		// The request buffer is freed after this handler; wipe it so a later
+		// search cannot find the stale pattern in freed heap memory.
+		SecureZeroMemory(const_cast<uint8_t*>(payload), payloadSize);
+
+		SearchMemoryResponse resp{};
+		resp.status = ok ? IpcStatus::Ok : IpcStatus::Error;
+		resp.count = static_cast<uint32_t>(result.hits.size());
+		resp.truncated = result.nextAddress ? 1 : 0;
+		resp.regionsScanned = result.regionsScanned;
+		resp.scannedBytes = result.scannedBytes;
+		resp.nextAddress = result.nextAddress;
+		std::vector<uint8_t> buf(sizeof(resp) + result.hits.size() * sizeof(uint64_t));
+		memcpy(buf.data(), &resp, sizeof(resp));
+		if (!result.hits.empty())
+			memcpy(buf.data() + sizeof(resp), result.hits.data(), result.hits.size() * sizeof(uint64_t));
+		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
 		break;
 	}
 

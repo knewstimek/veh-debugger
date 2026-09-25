@@ -877,6 +877,59 @@ std::vector<uint8_t> DebugSession::ReadMemory(uint64_t address, uint32_t size) {
 	return std::vector<uint8_t>(data, data + dataLen);
 }
 
+DebugSession::MemoryMapResult DebugSession::QueryMemoryMap(uint64_t start, uint64_t end,
+	uint32_t maxRegions, bool includeFree) {
+	QueryMemoryMapRequest req{};
+	req.startAddress = start;
+	req.endAddress = end;
+	req.maxRegions = maxRegions;
+	req.includeFree = includeFree ? 1 : 0;
+
+	MemoryMapResult result;
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::QueryMemoryMap, &req, sizeof(req), respData, 10000))
+		return result;
+	if (respData.size() < sizeof(QueryMemoryMapResponse)) return result;
+	auto* resp = reinterpret_cast<const QueryMemoryMapResponse*>(respData.data());
+	if (resp->status != IpcStatus::Ok) return result;
+	size_t count = (std::min)(static_cast<size_t>(resp->count),
+		(respData.size() - sizeof(QueryMemoryMapResponse)) / sizeof(MemoryRegionEntry));
+	auto* entries = reinterpret_cast<const MemoryRegionEntry*>(respData.data() + sizeof(QueryMemoryMapResponse));
+	result.regions.assign(entries, entries + count);
+	result.nextAddress = resp->truncated ? resp->nextAddress : 0;
+	result.ok = true;
+	return result;
+}
+
+DebugSession::MemorySearchResult DebugSession::SearchMemory(const SearchMemoryRequest& request,
+	const std::vector<uint8_t>& pattern, const std::vector<uint8_t>& mask) {
+	MemorySearchResult result;
+	if (pattern.empty() || pattern.size() != mask.size()) return result;
+	std::vector<uint8_t> payload(sizeof(SearchMemoryRequest) + pattern.size() * 2);
+	SearchMemoryRequest req = request;
+	req.patternSize = static_cast<uint32_t>(pattern.size());
+	memcpy(payload.data(), &req, sizeof(req));
+	memcpy(payload.data() + sizeof(req), pattern.data(), pattern.size());
+	memcpy(payload.data() + sizeof(req) + pattern.size(), mask.data(), mask.size());
+
+	std::vector<uint8_t> respData;
+	if (!pipeClient_.SendAndReceive(IpcCommand::SearchMemory, payload.data(),
+			static_cast<uint32_t>(payload.size()), respData, 120000))
+		return result;
+	if (respData.size() < sizeof(SearchMemoryResponse)) return result;
+	auto* resp = reinterpret_cast<const SearchMemoryResponse*>(respData.data());
+	if (resp->status != IpcStatus::Ok) return result;
+	size_t count = (std::min)(static_cast<size_t>(resp->count),
+		(respData.size() - sizeof(SearchMemoryResponse)) / sizeof(uint64_t));
+	auto* hits = reinterpret_cast<const uint64_t*>(respData.data() + sizeof(SearchMemoryResponse));
+	result.matches.assign(hits, hits + count);
+	result.nextAddress = resp->truncated ? resp->nextAddress : 0;
+	result.scannedBytes = resp->scannedBytes;
+	result.regionsScanned = resp->regionsScanned;
+	result.ok = true;
+	return result;
+}
+
 bool DebugSession::WriteMemory(uint64_t address, const uint8_t* data, uint32_t size) {
 	std::vector<uint8_t> payload(sizeof(WriteMemoryRequest) + size);
 	auto* req = reinterpret_cast<WriteMemoryRequest*>(payload.data());
