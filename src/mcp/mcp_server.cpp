@@ -4063,6 +4063,9 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			,{"code_output", {{"type", "string"}, {"enum", {"inline", "file"}}, {"description", "Return bytes inline (default) or stream a portable artifact to a file"}}}
 			,{"code_output_path", {{"type", "string"}, {"description", "Optional new artifact path on the MCP host for code_output=file; an existing file is never overwritten"}}}
 			,{"code_chunk_bytes", {{"type", "integer"}, {"description", "File-stream chunk size, 262144-8388608 in 65536-byte multiples (default 4194304)"}}}
+			,{"events_output", {{"type", "string"}, {"enum", {"inline", "file"}}, {"description", "Return ordered events inline (default) or stream them in execution order to a portable artifact"}}}
+			,{"events_output_path", {{"type", "string"}, {"description", "Optional new artifact path on the MCP host for events_output=file; an existing file is never overwritten"}}}
+			,{"max_event_file_bytes", {{"type", "integer"}, {"minimum", sizeof(TraceEventArtifactHeader)}, {"maximum", kTraceEventMaxFileBytes}, {"description", "Total event artifact size limit including its header (default and max 4294967296)"}}}
 			,{"dependency_sources", {{"type", "array"}, {"maxItems", 32}, {"description", "Conservative dependency sources: register names or {address,size,label?} memory ranges"}}}
 			,{"start_condition", {{"type", "string"}, {"description", "Begin collection when a register/memory comparison becomes true; supports up to four && or || clauses"}}}
 			,{"stop_condition", {{"type", "string"}, {"description", "Stop trace when a register/memory comparison becomes true"}}}
@@ -4077,7 +4080,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 				{"occurrence", {{"type", "integer"}, {"minimum", 1}, {"description", "One-based trigger occurrence"}}},
 				{"before_steps", {{"type", "integer"}, {"minimum", 0}, {"maximum", 100000}, {"description", "Completed instruction steps retained before the trigger"}}},
 				{"after_steps", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100000}, {"description", "Completed instruction steps retained after the trigger"}}}
-			}}, {"required", json::array({"address", "occurrence", "before_steps", "after_steps"})}, {"description", "Bounded pre-trigger ring plus post-trigger capture; incompatible with occurrence_window, conditions, stop_on_return, and code_output=file"}}}
+			}}, {"required", json::array({"address", "occurrence", "before_steps", "after_steps"})}, {"description", "Bounded pre-trigger ring plus post-trigger capture; incompatible with occurrence_window, conditions, stop_on_return, code_output=file, and events_output=file"}}}
 			,{"output_file", {{"type", "string"}, {"description", "Write the complete trace result to a new MCP-host file and return compact path/hash/count metadata"}}}
 			,{"output_format", {{"type", "string"}, {"enum", {"json", "jsonl"}}, {"description", "output_file encoding (default json); JSONL uses a manifest plus section-item records"}}}
 		 }}, {"required", json::array({"threadId", "start", "end"})}}}}),

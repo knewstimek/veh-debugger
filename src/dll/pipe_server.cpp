@@ -2381,7 +2381,9 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 		TraceBasicBlocksRequest req{};
 		memcpy(&req, payload, std::min<size_t>(payloadSize, sizeof(req)));
-		const bool explicitV9Wire = req.wireVersion >= kTraceBasicBlocksWireVersion &&
+		const bool explicitV10Wire = req.wireVersion >= kTraceBasicBlocksWireVersion &&
+			req.requestSize >= kTraceBasicBlocksRequestV10Size && req.requestSize <= payloadSize;
+		const bool explicitV9Wire = req.wireVersion == 9 &&
 			req.requestSize >= kTraceBasicBlocksRequestV9Size && req.requestSize <= payloadSize;
 		const bool explicitV8Wire = req.wireVersion == 8 &&
 			req.requestSize >= kTraceBasicBlocksRequestV8Size && req.requestSize <= payloadSize;
@@ -2391,8 +2393,9 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			req.requestSize >= kTraceBasicBlocksRequestV6Size && req.requestSize <= payloadSize;
 		const bool explicitV5Wire = req.wireVersion == kTraceBasicBlocksMinimumExplicitWireVersion &&
 			req.requestSize >= kTraceBasicBlocksRequestV4Size && req.requestSize <= payloadSize;
-		const bool explicitKnownWire = explicitV9Wire || explicitV8Wire || explicitV7Wire || explicitV6Wire || explicitV5Wire;
-		const uint16_t responseHeaderSize = explicitV9Wire ? kTraceBasicBlocksResponseV8Size :
+		const bool explicitKnownWire = explicitV10Wire || explicitV9Wire || explicitV8Wire ||
+			explicitV7Wire || explicitV6Wire || explicitV5Wire;
+		const uint16_t responseHeaderSize = (explicitV10Wire || explicitV9Wire) ? kTraceBasicBlocksResponseV8Size :
 			(explicitV8Wire ? kTraceBasicBlocksResponseV7Size :
 			(explicitV7Wire ? kTraceBasicBlocksResponseV6Size :
 			(explicitKnownWire ? kTraceBasicBlocksResponseV5Size :
@@ -2433,15 +2436,22 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			sendTraceFailure(IpcStatus::InvalidArgs, TraceBasicBlocksStartFailure::InvalidArguments, false, 0);
 			return;
 		}
-		if (!explicitV6Wire && !explicitV7Wire && !explicitV8Wire && !explicitV9Wire) {
+		if (!explicitV6Wire && !explicitV7Wire && !explicitV8Wire && !explicitV9Wire && !explicitV10Wire) {
 			req.codeOutputMode = static_cast<uint8_t>(TraceCodeOutputMode::Inline);
 			req.codeChunkBytes = 0;
 			req.codeStreamOwnerPid = 0;
 			req.codeStreamToken = 0;
 		}
-		if (!explicitV7Wire && !explicitV8Wire && !explicitV9Wire) req.occurrenceWindow = {};
-		if (!explicitV8Wire && !explicitV9Wire) req.stopOnReturn = 0;
-		if (!explicitV9Wire) req.targetWindow = {};
+		if (!explicitV7Wire && !explicitV8Wire && !explicitV9Wire && !explicitV10Wire) req.occurrenceWindow = {};
+		if (!explicitV8Wire && !explicitV9Wire && !explicitV10Wire) req.stopOnReturn = 0;
+		if (!explicitV9Wire && !explicitV10Wire) req.targetWindow = {};
+		if (!explicitV10Wire) {
+			req.eventOutputMode = static_cast<uint8_t>(TraceEventOutputMode::Inline);
+			req.eventChunkBytes = 0;
+			req.eventStreamOwnerPid = 0;
+			req.eventStreamToken = 0;
+			req.maxEventFileBytes = 0;
+		}
 		if (req.threadId == 0 || req.rangeStart >= req.rangeEnd ||
 			req.rangeEnd - req.rangeStart > 4ULL * 1024 * 1024) {
 			sendTraceFailure(IpcStatus::InvalidArgs, TraceBasicBlocksStartFailure::InvalidArguments, false, 0);
@@ -2461,20 +2471,26 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		if (req.collectCode && req.maxCodeVersions == 0) req.maxCodeVersions = 4096;
 		if (req.collectCode || req.collectMemoryEvents || req.collectRegisterEvents) req.collectEvents = 1;
 		const bool fileCodeOutput = req.codeOutputMode == static_cast<uint8_t>(TraceCodeOutputMode::File);
+		const bool fileEventOutput = req.eventOutputMode == static_cast<uint8_t>(TraceEventOutputMode::File);
 		const uint32_t maxCodeBytes = fileCodeOutput ?
 			kTraceBasicBlockMaxFileCodeBytes : kTraceBasicBlockMaxCodeBytes;
 		if (req.maxBlocks > 16384 || req.maxEdges > 32768 || req.maxSteps > 5000000 ||
 			(req.collectMemoryWrites && req.maxMemoryWrites > 16384) ||
 			(req.collectMemoryReads && req.maxMemoryReads > 16384) ||
-			(req.collectEvents && req.maxEvents > 32768) ||
-			(req.collectMemoryEvents && req.maxMemoryEvents > 65536) ||
-			(req.collectRegisterEvents && req.maxRegisterEvents > 65536) ||
+			(req.collectEvents && !fileEventOutput && req.maxEvents > 32768) ||
+			(req.collectMemoryEvents && !fileEventOutput && req.maxMemoryEvents > 65536) ||
+			(req.collectRegisterEvents && !fileEventOutput && req.maxRegisterEvents > 65536) ||
 			(req.collectCode && (req.maxCodeBytes > maxCodeBytes ||
 				req.maxCodeVersions > 16384 || req.maxCodeBytes == 0 || req.maxCodeVersions == 0)) ||
 			(req.codeOutputMode > static_cast<uint8_t>(TraceCodeOutputMode::File)) ||
 			(fileCodeOutput && (!req.collectCode || !req.codeStreamOwnerPid || !req.codeStreamToken ||
 				req.codeChunkBytes < kTraceCodeMinChunkBytes || req.codeChunkBytes > kTraceCodeMaxChunkBytes ||
 				req.codeChunkBytes % kTraceCodeChunkAlignment != 0)) ||
+			(req.eventOutputMode > static_cast<uint8_t>(TraceEventOutputMode::File)) ||
+			(fileEventOutput && (!req.collectEvents || !req.eventStreamOwnerPid || !req.eventStreamToken ||
+				req.eventChunkBytes != kTraceEventDefaultChunkBytes ||
+				req.maxEventFileBytes < sizeof(TraceEventArtifactHeader) ||
+				req.maxEventFileBytes > kTraceEventMaxFileBytes)) ||
 			(req.occurrenceWindow.enabled && (!req.occurrenceWindow.address ||
 				req.occurrenceWindow.from == 0 ||
 				(req.occurrenceWindow.to && req.occurrenceWindow.to < req.occurrenceWindow.from) ||
@@ -2484,7 +2500,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				req.targetWindow.occurrence == 0 || req.targetWindow.afterSteps == 0 ||
 				req.targetWindow.beforeSteps > 100000 || req.targetWindow.afterSteps > 100000 ||
 				req.targetWindow.address < req.rangeStart || req.targetWindow.address >= req.rangeEnd ||
-				req.occurrenceWindow.enabled || req.stopOnReturn || fileCodeOutput ||
+				req.occurrenceWindow.enabled || req.stopOnReturn || fileCodeOutput || fileEventOutput ||
 				req.startCondition.clauseCount || req.stopCondition.clauseCount ||
 				req.collectCondition.clauseCount)) ||
 			req.dependencySourceCount > kTraceDependencyMaxSources ||
@@ -2538,6 +2554,24 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				break;
 			}
 		}
+		HANDLE eventStreamPipe = INVALID_HANDLE_VALUE;
+		if (fileEventOutput) {
+			std::wstring eventPipeName = GetTraceEventPipeName(req.eventStreamOwnerPid, req.eventStreamToken);
+			if (!WaitNamedPipeW(eventPipeName.c_str(), 3000)) {
+				if (codeStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(codeStreamPipe);
+				sendTraceFailure(IpcStatus::Error, TraceBasicBlocksStartFailure::EventStreamUnavailable,
+					true, decodedInstructionCount);
+				break;
+			}
+			eventStreamPipe = CreateFileW(eventPipeName.c_str(), GENERIC_WRITE, 0, nullptr,
+				OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+			if (eventStreamPipe == INVALID_HANDLE_VALUE) {
+				if (codeStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(codeStreamPipe);
+				sendTraceFailure(IpcStatus::Error, TraceBasicBlocksStartFailure::EventStreamUnavailable,
+					true, decodedInstructionCount);
+				break;
+			}
+		}
 
 		auto startTick = GetTickCount64();
 		if (!VehHandler::Instance().StartTraceBasicBlocks(req.threadId, req.rangeStart, req.rangeEnd,
@@ -2548,6 +2582,8 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 				req.collectCode != 0, req.maxCodeBytes, req.maxCodeVersions,
 				static_cast<TraceCodeOutputMode>(req.codeOutputMode), req.codeChunkBytes,
 				req.codeStreamToken, codeStreamPipe,
+				static_cast<TraceEventOutputMode>(req.eventOutputMode), req.eventChunkBytes,
+				req.maxEventFileBytes, req.eventStreamToken, eventStreamPipe,
 				req.collectMemoryEvents != 0, req.maxMemoryEvents,
 				req.collectRegisterEvents != 0, req.maxRegisterEvents,
 				req.dependencySources, req.dependencySourceCount,
@@ -2574,7 +2610,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		}
 		if (!tb.done.load(std::memory_order_acquire)) {
 			tb.active.store(false, std::memory_order_release);
-			VehHandler::Instance().FinalizeTraceBasicBlocksCodeStream();
+			VehHandler::Instance().FinalizeTraceBasicBlocksStreams();
 			std::vector<uint8_t> response(responseHeaderSize);
 			auto* header = reinterpret_cast<TraceBasicBlocksResponse*>(response.data());
 			memset(header, 0, responseHeaderSize);
@@ -2590,7 +2626,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		uint64_t parkTick = GetTickCount64();
 		while (!VehHandler::Instance().IsThreadStopped(req.threadId) && GetTickCount64() - parkTick < 2000)
 			Sleep(1);
-		VehHandler::Instance().FinalizeTraceBasicBlocksCodeStream();
+		VehHandler::Instance().FinalizeTraceBasicBlocksStreams();
 
 		struct ResultBlock {
 			TraceBasicBlockEntry entry{};
@@ -2739,7 +2775,10 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		});
 
 		const uint32_t responseRegisterEventCount =
-			responseHeaderSize >= kTraceBasicBlocksResponseV4Size ? tb.registerEventCount : 0;
+			responseHeaderSize >= kTraceBasicBlocksResponseV4Size && !fileEventOutput ?
+				tb.registerEventCount : 0;
+		const uint32_t responseEventCount = fileEventOutput ? 0 : tb.eventCount;
+		const uint32_t responseMemoryEventCount = fileEventOutput ? 0 : tb.memoryEventCount;
 		size_t responseSize = responseHeaderSize +
 			blocks.size() * sizeof(TraceBasicBlockEntry) +
 			edges.size() * sizeof(TraceBasicBlockEdgeEntry) +
@@ -2747,8 +2786,8 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			memoryWrites.size() * sizeof(TraceBasicBlockMemoryWriteEntry) +
 			memoryReads.size() * sizeof(TraceBasicBlockMemoryReadEntry) +
 			exceptionEvents.size() * sizeof(TraceBasicBlockExceptionEntry);
-		responseSize += static_cast<size_t>(tb.eventCount) * sizeof(TraceBasicBlockEventEntry);
-		responseSize += static_cast<size_t>(tb.memoryEventCount) * sizeof(TraceBasicBlockMemoryEventEntry);
+		responseSize += static_cast<size_t>(responseEventCount) * sizeof(TraceBasicBlockEventEntry);
+		responseSize += static_cast<size_t>(responseMemoryEventCount) * sizeof(TraceBasicBlockMemoryEventEntry);
 		responseSize += static_cast<size_t>(responseRegisterEventCount) * sizeof(TraceBasicBlockRegisterEventEntry);
 		const uint32_t inlineCodeVersionCount = fileCodeOutput ? 0 : tb.codeVersionCount;
 		const uint32_t inlineCodeByteCount = fileCodeOutput ? 0 : tb.codeByteCount;
@@ -2782,24 +2821,26 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		header->stepsExecuted = tb.stepsExecuted;
 		header->finalAddress = tb.finalAddress;
 		header->threadId = req.threadId;
-		header->eventCount = tb.eventCount;
+		header->eventCount = responseEventCount;
 		header->eventCollectionEnabled = req.collectEvents ? 1 : 0;
-		header->eventsTruncated = tb.eventsTruncated ? 1 : 0;
+		header->eventsTruncated = (tb.eventsTruncated || tb.eventStreamTruncated) ? 1 : 0;
 		header->eventSchemaVersion = 1;
 		header->codeVersionCount = inlineCodeVersionCount;
 		header->codeByteCount = inlineCodeByteCount;
 		header->codeCollectionEnabled = req.collectCode ? 1 : 0;
 		header->codeTruncated = tb.codeTruncated ? 1 : 0;
 		header->codeSchemaVersion = 1;
-		header->memoryEventCount = tb.memoryEventCount;
+		header->memoryEventCount = responseMemoryEventCount;
 		header->memoryEventCollectionEnabled = req.collectMemoryEvents ? 1 : 0;
-		header->memoryEventsTruncated = tb.memoryEventsTruncated ? 1 : 0;
+		header->memoryEventsTruncated = (tb.memoryEventsTruncated ||
+			(req.collectMemoryEvents && tb.eventStreamTruncated)) ? 1 : 0;
 		header->memoryEventSchemaVersion = req.collectMemoryEvents ? 1 : 0;
 		header->memoryEventsDropped = tb.memoryEventsDropped;
 		if (responseHeaderSize >= kTraceBasicBlocksResponseV4Size) {
 			header->registerEventCount = responseRegisterEventCount;
 			header->registerEventCollectionEnabled = req.collectRegisterEvents ? 1 : 0;
-			header->registerEventsTruncated = tb.registerEventsTruncated ? 1 : 0;
+			header->registerEventsTruncated = (tb.registerEventsTruncated ||
+				(req.collectRegisterEvents && tb.eventStreamTruncated)) ? 1 : 0;
 			header->registerEventSchemaVersion = req.collectRegisterEvents ? 1 : 0;
 			header->registerEventsDropped = tb.registerEventsDropped;
 		}
@@ -2861,11 +2902,11 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 			memcpy(out, exceptionEvents.data(), exceptionEvents.size() * sizeof(exceptionEvents[0]));
 			out += exceptionEvents.size() * sizeof(exceptionEvents[0]);
 		}
-		for (uint32_t i = 0; i < tb.eventCount; ++i) {
+		for (uint32_t i = 0; i < responseEventCount; ++i) {
 			const auto& event = tb.events[(tb.eventHead + i) % tb.events.size()];
 			memcpy(out, &event, sizeof(event)); out += sizeof(event);
 		}
-		for (uint32_t i = 0; i < tb.memoryEventCount; ++i) {
+		for (uint32_t i = 0; i < responseMemoryEventCount; ++i) {
 			const auto& event = tb.memoryEvents[(tb.memoryEventHead + i) % tb.memoryEvents.size()];
 			memcpy(out, &event, sizeof(event)); out += sizeof(event);
 		}

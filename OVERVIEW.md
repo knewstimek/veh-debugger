@@ -161,11 +161,12 @@ serializes the matching legacy response header, keeping the following variable
 arrays at the offset expected by each caller. Current start failures return a typed
 reason together with stopped/context availability, normalized IP/range, and decode
 status/count; legacy peers retain their original result shape.
-Optional `collect_events` preallocates a bounded array before resume and appends
-event-schema-v1 records for the initial block entry and every observed block
-transition. Each record carries the trace-step sequence and thread ID. Exhausting
-`max_events` marks the ordered stream incomplete without stopping aggregate
-collection; this is block-transition ordering rather than instruction-level history.
+Optional `collect_events` appends event-schema-v1 records for the initial block
+entry and every observed block transition. Each record carries the trace-step
+sequence and thread ID. The default inline mode preallocates a bounded array;
+exhausting `max_events` marks that ordered stream incomplete without stopping
+aggregate collection. This is block-transition ordering rather than
+instruction-level history.
 
 Optional `collect_memory_events` implies ordered block events and preallocates an
 independent per-occurrence memory-event array. Each successful modeled read/write
@@ -183,6 +184,20 @@ and flags. An empty delta still records an occurrence. Faulting instructions are
 left to the exception stream because they have no normal post-instruction state.
 Exhausting `max_register_events` increments an exact dropped count while aggregate
 collection continues and marks the ordered register stream incomplete.
+
+Wire v10 adds opt-in `events_output="file"` streaming for all three ordered event
+kinds. In this mode the DLL omits the inline arrays and writes typed records in
+emission order through four fixed buffers allocated at trace start. A dedicated
+writer thread frames and hashes chunks over a private pipe; when all buffers are
+full, the traced thread waits for the writer rather than dropping an event. The
+result reports that wait time. The portable schema-1 `.vte` file has an 88-byte
+header with entry sizes and per-kind counts followed by typed, length-prefixed
+records. Its only capture bound is `max_event_file_bytes` (4 GiB default and
+maximum); a limit ends event capture before the next record, leaving a valid file
+and an explicit `size_limit` truncation reason. Existing inline wire responses and
+per-kind caps are unchanged when file mode is absent. The target-window pre-trigger
+ring stays inline because it intentionally evicts older records; occurrence windows
+remain compatible with file streaming.
 
 Wire v9 adds an opt-in `target_window` containing an address, one-based occurrence,
 and bounded pre/post instruction counts. Before the match, ordered block, memory,
@@ -207,9 +222,9 @@ artifact records to a preallocated SPSC ring; a dedicated writer sends 256 KiBâ€
 frames over a tokenized one-shot data pipe while MCP writes a delete-on-close partial
 file. Successful completion publishes a hard link (or a copy on filesystems without
 hard links), verifies SHA-256, and returns only artifact metadata. A killed MCP drops
-the partial link automatically. Slow/broken consumers never cause unbounded growth:
-ring exhaustion or transfer failure marks code capture incomplete while aggregate
-trace collection continues. Artifact schema 1 uses a fixed 64-byte little-endian
+the partial link automatically. Slow consumers never cause unbounded growth: ring
+exhaustion waits for the writer, while transfer failure marks code capture incomplete
+and aggregate trace collection continues. Artifact schema 1 uses a fixed 64-byte little-endian
 header, 48-byte version records, and 64-bit byte/record offsets so analysis is not
 tied to Windows or target pointer width.
 

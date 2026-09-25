@@ -800,6 +800,21 @@ void VehHandler::RecordBasicTraceMemoryEvent(
 	auto& tb = traceBasicBlocks_;
 	if (!tb.collectMemoryEvents) return;
 	EvictBasicTraceTargetEvents(sequence);
+	TraceBasicBlockMemoryEventEntry streamed{};
+	streamed.sequence = sequence;
+	streamed.instruction = pending.instruction;
+	streamed.address = pending.address;
+	streamed.threadId = tb.threadId;
+	streamed.dependencyMask = pending.dependencyMask;
+	streamed.size = pending.size;
+	streamed.kind = TraceMemoryAccessKind::Read;
+	streamed.accessIndex = pending.accessIndex;
+	streamed.flags = kTraceMemoryValueValid;
+	memcpy(streamed.value, pending.value, pending.size);
+	if (tb.eventFileOutput) {
+		AppendBasicTraceEventStreamRecord(TraceEventRecordType::Memory, &streamed, sizeof(streamed));
+		return;
+	}
 	if (tb.memoryEventCount >= tb.memoryEvents.size()) {
 		tb.memoryEventsTruncated = true;
 		tb.memoryEventsDropped++;
@@ -808,18 +823,7 @@ void VehHandler::RecordBasicTraceMemoryEvent(
 	uint32_t index = (tb.memoryEventHead + tb.memoryEventCount) %
 		static_cast<uint32_t>(tb.memoryEvents.size());
 	++tb.memoryEventCount;
-	auto& event = tb.memoryEvents[index];
-	event = {};
-	event.sequence = sequence;
-	event.instruction = pending.instruction;
-	event.address = pending.address;
-	event.threadId = tb.threadId;
-	event.dependencyMask = pending.dependencyMask;
-	event.size = pending.size;
-	event.kind = TraceMemoryAccessKind::Read;
-	event.accessIndex = pending.accessIndex;
-	event.flags = kTraceMemoryValueValid;
-	memcpy(event.value, pending.value, pending.size);
+	tb.memoryEvents[index] = streamed;
 }
 
 void VehHandler::RecordBasicTraceMemoryEvent(
@@ -827,6 +831,22 @@ void VehHandler::RecordBasicTraceMemoryEvent(
 	auto& tb = traceBasicBlocks_;
 	if (!tb.collectMemoryEvents) return;
 	EvictBasicTraceTargetEvents(sequence);
+	TraceBasicBlockMemoryEventEntry streamed{};
+	streamed.sequence = sequence;
+	streamed.instruction = pending.instruction;
+	streamed.address = pending.address;
+	streamed.threadId = tb.threadId;
+	streamed.dependencyMask = pending.dependencyMask;
+	streamed.size = pending.size;
+	streamed.kind = TraceMemoryAccessKind::Write;
+	streamed.accessIndex = pending.accessIndex;
+	streamed.flags = kTraceMemoryValueValid;
+	memcpy(streamed.before, pending.before, pending.size);
+	memcpy(streamed.after, after, pending.size);
+	if (tb.eventFileOutput) {
+		AppendBasicTraceEventStreamRecord(TraceEventRecordType::Memory, &streamed, sizeof(streamed));
+		return;
+	}
 	if (tb.memoryEventCount >= tb.memoryEvents.size()) {
 		tb.memoryEventsTruncated = true;
 		tb.memoryEventsDropped++;
@@ -835,19 +855,7 @@ void VehHandler::RecordBasicTraceMemoryEvent(
 	uint32_t index = (tb.memoryEventHead + tb.memoryEventCount) %
 		static_cast<uint32_t>(tb.memoryEvents.size());
 	++tb.memoryEventCount;
-	auto& event = tb.memoryEvents[index];
-	event = {};
-	event.sequence = sequence;
-	event.instruction = pending.instruction;
-	event.address = pending.address;
-	event.threadId = tb.threadId;
-	event.dependencyMask = pending.dependencyMask;
-	event.size = pending.size;
-	event.kind = TraceMemoryAccessKind::Write;
-	event.accessIndex = pending.accessIndex;
-	event.flags = kTraceMemoryValueValid;
-	memcpy(event.before, pending.before, pending.size);
-	memcpy(event.after, after, pending.size);
+	tb.memoryEvents[index] = streamed;
 }
 
 void VehHandler::RecordBasicTraceEvent(TraceBasicBlockEventType type, uint64_t sequence,
@@ -856,6 +864,21 @@ void VehHandler::RecordBasicTraceEvent(TraceBasicBlockEventType type, uint64_t s
 	auto& tb = traceBasicBlocks_;
 	if (!tb.collectEvents) return;
 	EvictBasicTraceTargetEvents(sequence);
+	TraceBasicBlockEventEntry streamed{};
+	streamed.sequence = sequence;
+	streamed.source = source;
+	streamed.sourceInstruction = sourceInstruction;
+	streamed.target = target;
+	streamed.threadId = tb.threadId;
+	streamed.exceptionCode = exceptionCode;
+	streamed.codeVersion = codeVersion;
+	streamed.type = type;
+	streamed.edgeKind = edgeKind;
+	streamed.indirect = indirect ? 1 : 0;
+	if (tb.eventFileOutput) {
+		AppendBasicTraceEventStreamRecord(TraceEventRecordType::BasicBlock, &streamed, sizeof(streamed));
+		return;
+	}
 	if (tb.eventCount >= tb.events.size()) {
 		tb.eventsTruncated = true;
 		++tb.eventsDropped;
@@ -863,17 +886,7 @@ void VehHandler::RecordBasicTraceEvent(TraceBasicBlockEventType type, uint64_t s
 	}
 	uint32_t index = (tb.eventHead + tb.eventCount) % static_cast<uint32_t>(tb.events.size());
 	++tb.eventCount;
-	auto& event = tb.events[index];
-	event.sequence = sequence;
-	event.source = source;
-	event.sourceInstruction = sourceInstruction;
-	event.target = target;
-	event.threadId = tb.threadId;
-	event.exceptionCode = exceptionCode;
-	event.codeVersion = codeVersion;
-	event.type = type;
-	event.edgeKind = edgeKind;
-	event.indirect = indirect ? 1 : 0;
+	tb.events[index] = streamed;
 }
 
 bool VehHandler::CompactBasicTraceTargetCode() {
@@ -1033,7 +1046,19 @@ bool VehHandler::AppendBasicTraceCodeStream(const void* data, size_t size) {
 	const auto* input = static_cast<const uint8_t*>(data);
 	while (size) {
 		auto& buffer = tb.codeStreamBuffers[tb.codeStreamProducerIndex];
-		if (buffer.state.load(std::memory_order_acquire) != 1) return false;
+		if (buffer.state.load(std::memory_order_acquire) != 1) {
+			uint32_t next = (tb.codeStreamProducerIndex + 1) % tb.codeStreamBufferCount;
+			auto& nextBuffer = tb.codeStreamBuffers[next];
+			while (true) {
+				uint8_t expected = 0;
+				if (nextBuffer.state.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) break;
+				if (tb.codeStreamTransferFailed.load(std::memory_order_acquire)) return false;
+				SyscallResolver::Instance().WaitForSingleObject(tb.codeStreamSpaceEvent, nullptr);
+			}
+			nextBuffer.size = 0;
+			tb.codeStreamProducerIndex = next;
+			continue;
+		}
 		size_t available = tb.codeChunkBytes - buffer.size;
 		size_t copied = std::min(size, available);
 		memcpy(buffer.bytes.data() + buffer.size, input, copied);
@@ -1043,21 +1068,12 @@ bool VehHandler::AppendBasicTraceCodeStream(const void* data, size_t size) {
 		size -= copied;
 		if (buffer.size == tb.codeChunkBytes) {
 			PublishBasicTraceCodeStreamBuffer();
-			uint32_t next = (tb.codeStreamProducerIndex + 1) % tb.codeStreamBufferCount;
-			auto& nextBuffer = tb.codeStreamBuffers[next];
-			uint8_t expected = 0;
-			if (!nextBuffer.state.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
-				tb.codeStreamAccepting = false;
-				return size == 0;
-			}
-			nextBuffer.size = 0;
-			tb.codeStreamProducerIndex = next;
 		}
 	}
 	return true;
 }
 
-static bool WriteTraceCodeStreamExact(HANDLE pipe, const void* data, DWORD size) {
+static bool WriteTraceStreamExact(HANDLE pipe, const void* data, DWORD size) {
 	const auto* cursor = static_cast<const uint8_t*>(data);
 	DWORD total = 0;
 	while (total < size) {
@@ -1099,14 +1115,15 @@ void VehHandler::RunBasicTraceCodeStreamWriter() {
 					frame.streamOffset = static_cast<uint64_t>(buffer.index) * tb.codeChunkBytes;
 					frame.payloadSize = buffer.size;
 					frame.payloadHash = TraceCodePayloadHash(buffer.bytes.data(), buffer.size);
-					if (!WriteTraceCodeStreamExact(tb.codeStreamPipe, &frame, sizeof(frame)) ||
-						!WriteTraceCodeStreamExact(tb.codeStreamPipe, buffer.bytes.data(), buffer.size))
+					if (!WriteTraceStreamExact(tb.codeStreamPipe, &frame, sizeof(frame)) ||
+						!WriteTraceStreamExact(tb.codeStreamPipe, buffer.bytes.data(), buffer.size))
 						tb.codeStreamTransferFailed.store(true, std::memory_order_release);
 					else
 						++chunksWritten;
 				}
 				buffer.size = 0;
 				buffer.state.store(0, std::memory_order_release);
+				SyscallResolver::Instance().SetEvent(tb.codeStreamSpaceEvent);
 				consumer = (consumer + 1) % tb.codeStreamBufferCount;
 			}
 		}
@@ -1134,8 +1151,8 @@ void VehHandler::RunBasicTraceCodeStreamWriter() {
 		frame.streamOffset = tb.codeStreamCommittedBytes;
 		frame.payloadSize = sizeof(complete);
 		frame.payloadHash = TraceCodePayloadHash(&complete, sizeof(complete));
-		if (!WriteTraceCodeStreamExact(tb.codeStreamPipe, &frame, sizeof(frame)) ||
-			!WriteTraceCodeStreamExact(tb.codeStreamPipe, &complete, sizeof(complete)))
+		if (!WriteTraceStreamExact(tb.codeStreamPipe, &frame, sizeof(frame)) ||
+			!WriteTraceStreamExact(tb.codeStreamPipe, &complete, sizeof(complete)))
 			tb.codeStreamTransferFailed.store(true, std::memory_order_release);
 	}
 }
@@ -1157,10 +1174,193 @@ void VehHandler::StopBasicTraceCodeStream(bool abort) {
 		SyscallResolver::Instance().Close(tb.codeStreamReadyEvent);
 		tb.codeStreamReadyEvent = nullptr;
 	}
+	if (tb.codeStreamSpaceEvent) {
+		SyscallResolver::Instance().Close(tb.codeStreamSpaceEvent);
+		tb.codeStreamSpaceEvent = nullptr;
+	}
 }
 
-void VehHandler::FinalizeTraceBasicBlocksCodeStream() {
+bool VehHandler::PublishBasicTraceEventStreamBuffer() {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.eventFileOutput) return false;
+	auto& buffer = tb.eventStreamBuffers[tb.eventStreamProducerIndex];
+	if (buffer.state.load(std::memory_order_acquire) != 1 || buffer.size == 0) return true;
+	buffer.index = tb.eventStreamNextChunk++;
+	buffer.state.store(2, std::memory_order_release);
+	SyscallResolver::Instance().SetEvent(tb.eventStreamReadyEvent);
+	return true;
+}
+
+bool VehHandler::AppendBasicTraceEventStream(const void* data, size_t size) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.eventFileOutput || !tb.eventStreamAccepting || !data) return false;
+	const auto* input = static_cast<const uint8_t*>(data);
+	while (size) {
+		auto& buffer = tb.eventStreamBuffers[tb.eventStreamProducerIndex];
+		if (buffer.state.load(std::memory_order_acquire) != 1) {
+			uint32_t next = (tb.eventStreamProducerIndex + 1) %
+				TraceBasicBlocksState::kEventStreamBufferCount;
+			auto& nextBuffer = tb.eventStreamBuffers[next];
+			LARGE_INTEGER waitStart{}, waitEnd{};
+			bool waited = false;
+			while (true) {
+				uint8_t expected = 0;
+				if (nextBuffer.state.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) break;
+				if (tb.eventStreamTransferFailed.load(std::memory_order_acquire)) return false;
+				if (!waited) { QueryPerformanceCounter(&waitStart); waited = true; }
+				SyscallResolver::Instance().WaitForSingleObject(tb.eventStreamSpaceEvent, nullptr);
+			}
+			if (waited) {
+				QueryPerformanceCounter(&waitEnd);
+				if (waitEnd.QuadPart > waitStart.QuadPart)
+					tb.eventStreamWaitTicks += static_cast<uint64_t>(waitEnd.QuadPart - waitStart.QuadPart);
+			}
+			nextBuffer.size = 0;
+			tb.eventStreamProducerIndex = next;
+			continue;
+		}
+		size_t available = tb.eventChunkBytes - buffer.size;
+		size_t copied = std::min(size, available);
+		memcpy(buffer.bytes.data() + buffer.size, input, copied);
+		buffer.size += static_cast<uint32_t>(copied);
+		tb.eventStreamProducedBytes += copied;
+		input += copied;
+		size -= copied;
+		if (buffer.size == tb.eventChunkBytes) PublishBasicTraceEventStreamBuffer();
+	}
+	return true;
+}
+
+bool VehHandler::AppendBasicTraceEventStreamRecord(
+		TraceEventRecordType type, const void* data, uint32_t size) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.eventStreamAccepting) return false;
+	const uint64_t recordSize = sizeof(TraceEventArtifactRecordHeader) + size;
+	if (sizeof(TraceEventArtifactHeader) + tb.eventStreamProducedBytes + recordSize >
+		tb.maxEventFileBytes) {
+		tb.eventStreamAccepting = false;
+		tb.eventStreamTruncated = true;
+		tb.eventStreamTruncationReason = TraceEventTruncationReason::SizeLimit;
+		return false;
+	}
+	TraceEventArtifactRecordHeader header{};
+	header.type = static_cast<uint16_t>(type);
+	header.payloadSize = size;
+	if (!AppendBasicTraceEventStream(&header, sizeof(header)) ||
+		!AppendBasicTraceEventStream(data, size)) {
+		tb.eventStreamAccepting = false;
+		tb.eventStreamTruncated = true;
+		tb.eventStreamTruncationReason = TraceEventTruncationReason::TransferFailure;
+		return false;
+	}
+	tb.eventStreamCommittedBytes = tb.eventStreamProducedBytes;
+	switch (type) {
+	case TraceEventRecordType::BasicBlock: ++tb.streamedEventCount; break;
+	case TraceEventRecordType::Memory: ++tb.streamedMemoryEventCount; break;
+	case TraceEventRecordType::Register: ++tb.streamedRegisterEventCount; break;
+	}
+	return true;
+}
+
+void VehHandler::RunBasicTraceEventStreamWriter() {
+	auto& tb = traceBasicBlocks_;
+	uint32_t consumer = 0;
+	uint32_t chunksWritten = 0;
+	while (true) {
+		bool handled = false;
+		auto& buffer = tb.eventStreamBuffers[consumer];
+		uint8_t expected = 2;
+		if (buffer.state.compare_exchange_strong(expected, 3, std::memory_order_acq_rel)) {
+			handled = true;
+			if (!tb.eventStreamTransferFailed.load(std::memory_order_acquire)) {
+				TraceEventStreamFrameHeader frame{};
+				frame.magic = kTraceEventStreamMagic;
+				frame.schemaVersion = kTraceEventArtifactSchemaVersion;
+				frame.type = static_cast<uint16_t>(TraceEventStreamFrameType::Data);
+				frame.token = tb.eventStreamToken;
+				frame.chunkIndex = buffer.index;
+				frame.streamOffset = static_cast<uint64_t>(buffer.index) * tb.eventChunkBytes;
+				frame.payloadSize = buffer.size;
+				frame.payloadHash = TraceEventPayloadHash(buffer.bytes.data(), buffer.size);
+				if (!WriteTraceStreamExact(tb.eventStreamPipe, &frame, sizeof(frame)) ||
+					!WriteTraceStreamExact(tb.eventStreamPipe, buffer.bytes.data(), buffer.size))
+					tb.eventStreamTransferFailed.store(true, std::memory_order_release);
+				else
+					++chunksWritten;
+			}
+			buffer.size = 0;
+			buffer.state.store(0, std::memory_order_release);
+			SyscallResolver::Instance().SetEvent(tb.eventStreamSpaceEvent);
+			consumer = (consumer + 1) % TraceBasicBlocksState::kEventStreamBufferCount;
+		}
+		if (tb.eventStreamProducerDone.load(std::memory_order_acquire)) {
+			bool ready = false;
+			for (const auto& item : tb.eventStreamBuffers)
+				if (item.state.load(std::memory_order_acquire) == 2) { ready = true; break; }
+			if (!ready) break;
+		}
+		if (!handled) WaitForSingleObject(tb.eventStreamReadyEvent, 100);
+	}
+	if (!tb.eventStreamTransferFailed.load(std::memory_order_acquire)) {
+		TraceEventStreamComplete complete{};
+		complete.committedRecordBytes = tb.eventStreamCommittedBytes;
+		complete.basicBlockEventCount = tb.streamedEventCount;
+		complete.memoryEventCount = tb.streamedMemoryEventCount;
+		complete.registerEventCount = tb.streamedRegisterEventCount;
+		if (tb.eventStreamPerformanceFrequency)
+			complete.waitTimeNs = static_cast<uint64_t>(static_cast<long double>(tb.eventStreamWaitTicks) *
+				1000000000.0L / tb.eventStreamPerformanceFrequency);
+		complete.chunkCount = chunksWritten;
+		complete.truncationReason = static_cast<uint32_t>(tb.eventStreamTruncationReason);
+		complete.truncated = tb.eventStreamTruncated ? 1 : 0;
+		TraceEventStreamFrameHeader frame{};
+		frame.magic = kTraceEventStreamMagic;
+		frame.schemaVersion = kTraceEventArtifactSchemaVersion;
+		frame.type = static_cast<uint16_t>(TraceEventStreamFrameType::Complete);
+		frame.token = tb.eventStreamToken;
+		frame.chunkIndex = chunksWritten;
+		frame.streamOffset = tb.eventStreamCommittedBytes;
+		frame.payloadSize = sizeof(complete);
+		frame.payloadHash = TraceEventPayloadHash(&complete, sizeof(complete));
+		if (!WriteTraceStreamExact(tb.eventStreamPipe, &frame, sizeof(frame)) ||
+			!WriteTraceStreamExact(tb.eventStreamPipe, &complete, sizeof(complete)))
+			tb.eventStreamTransferFailed.store(true, std::memory_order_release);
+	}
+}
+
+void VehHandler::StopBasicTraceEventStream(bool abort) {
+	auto& tb = traceBasicBlocks_;
+	if (!tb.eventFileOutput) return;
+	if (abort) {
+		tb.eventStreamTruncated = true;
+		if (tb.eventStreamTruncationReason == TraceEventTruncationReason::None)
+			tb.eventStreamTruncationReason = TraceEventTruncationReason::TransferFailure;
+	}
+	PublishBasicTraceEventStreamBuffer();
+	tb.eventStreamProducerDone.store(true, std::memory_order_release);
+	SyscallResolver::Instance().SetEvent(tb.eventStreamReadyEvent);
+	if (tb.eventStreamThread.joinable()) tb.eventStreamThread.join();
+	if (tb.eventStreamTransferFailed.load(std::memory_order_acquire)) {
+		tb.eventStreamTruncated = true;
+		tb.eventStreamTruncationReason = TraceEventTruncationReason::TransferFailure;
+	}
+	if (tb.eventStreamPipe != INVALID_HANDLE_VALUE) {
+		CloseHandle(tb.eventStreamPipe);
+		tb.eventStreamPipe = INVALID_HANDLE_VALUE;
+	}
+	if (tb.eventStreamReadyEvent) {
+		SyscallResolver::Instance().Close(tb.eventStreamReadyEvent);
+		tb.eventStreamReadyEvent = nullptr;
+	}
+	if (tb.eventStreamSpaceEvent) {
+		SyscallResolver::Instance().Close(tb.eventStreamSpaceEvent);
+		tb.eventStreamSpaceEvent = nullptr;
+	}
+}
+
+void VehHandler::FinalizeTraceBasicBlocksStreams() {
 	StopBasicTraceCodeStream(false);
+	StopBasicTraceEventStream(false);
 }
 
 void VehHandler::CompleteBasicTraceMemoryWrites() {
@@ -1226,6 +1426,10 @@ void VehHandler::CompleteBasicTraceRegisterEvent(const CONTEXT* ctx) {
 	for (uint32_t i = 0; i < registerCount; ++i)
 		if (event.before[i] != event.after[i]) event.changedMask |= 1u << i;
 	if (event.before[17] != event.after[17]) event.changedMask |= 1u << 17;
+	if (tb.eventFileOutput) {
+		AppendBasicTraceEventStreamRecord(TraceEventRecordType::Register, &event, sizeof(event));
+		return;
+	}
 	if (tb.registerEventCount >= tb.registerEvents.size()) {
 		tb.registerEventsTruncated = true;
 		tb.registerEventsDropped++;
@@ -1334,6 +1538,8 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		bool collectCode, uint32_t maxCodeBytes, uint32_t maxCodeVersions,
 		TraceCodeOutputMode codeOutputMode, uint32_t codeChunkBytes,
 		uint64_t codeStreamToken, HANDLE codeStreamPipe,
+		TraceEventOutputMode eventOutputMode, uint32_t eventChunkBytes,
+		uint64_t maxEventFileBytes, uint64_t eventStreamToken, HANDLE eventStreamPipe,
 		bool collectMemoryEvents, uint32_t maxMemoryEvents,
 		bool collectRegisterEvents, uint32_t maxRegisterEvents,
 		const TraceDependencySource* dependencySources, uint8_t dependencySourceCount,
@@ -1347,12 +1553,14 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		traceCalls_.active.load(std::memory_order_acquire) ||
 		traceBasicBlocks_.active.load(std::memory_order_acquire)) {
 		if (codeStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(codeStreamPipe);
+		if (eventStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(eventStreamPipe);
 		return false;
 	}
 
 	CONTEXT ctx{};
 	if (!GetStoppedContext(threadId, ctx)) {
 		if (codeStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(codeStreamPipe);
+		if (eventStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(eventStreamPipe);
 		return false;
 	}
 #ifdef _WIN64
@@ -1364,6 +1572,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 #endif
 	if (ip < rangeStart || ip >= rangeEnd || instructions.empty()) {
 		if (codeStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(codeStreamPipe);
+		if (eventStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(eventStreamPipe);
 		return false;
 	}
 	uint64_t returnAddress = 0;
@@ -1377,6 +1586,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 				static_cast<uint8_t>(sizeof(returnAddress32))) || !returnAddress32) {
 #endif
 			if (codeStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(codeStreamPipe);
+			if (eventStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(eventStreamPipe);
 			return false;
 		}
 #ifndef _WIN64
@@ -1415,6 +1625,11 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.codeChunkBytes = tb.codeFileOutput ? codeChunkBytes : 0;
 	tb.codeStreamToken = tb.codeFileOutput ? codeStreamToken : 0;
 	tb.codeStreamPipe = tb.codeFileOutput ? codeStreamPipe : INVALID_HANDLE_VALUE;
+	tb.eventFileOutput = eventOutputMode == TraceEventOutputMode::File;
+	tb.eventChunkBytes = tb.eventFileOutput ? eventChunkBytes : 0;
+	tb.maxEventFileBytes = tb.eventFileOutput ? maxEventFileBytes : 0;
+	tb.eventStreamToken = tb.eventFileOutput ? eventStreamToken : 0;
+	tb.eventStreamPipe = tb.eventFileOutput ? eventStreamPipe : INVALID_HANDLE_VALUE;
 	tb.collectMemoryEvents = collectMemoryEvents;
 	tb.maxMemoryEvents = maxMemoryEvents;
 	tb.collectRegisterEvents = collectRegisterEvents;
@@ -1450,12 +1665,60 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	else
 		tb.memoryTaintTable.clear();
 	tb.snapshots.assign(static_cast<size_t>(maxEdges) * 2 + 1, {});
-	if (collectEvents) tb.events.assign(maxEvents, {});
+	if (collectEvents && !tb.eventFileOutput) tb.events.assign(maxEvents, {});
 	else tb.events.clear();
-	if (collectMemoryEvents) tb.memoryEvents.assign(maxMemoryEvents, {});
+	if (collectMemoryEvents && !tb.eventFileOutput) tb.memoryEvents.assign(maxMemoryEvents, {});
 	else tb.memoryEvents.clear();
-	if (collectRegisterEvents) tb.registerEvents.assign(maxRegisterEvents, {});
+	if (collectRegisterEvents && !tb.eventFileOutput) tb.registerEvents.assign(maxRegisterEvents, {});
 	else tb.registerEvents.clear();
+	if (tb.eventFileOutput) {
+		for (auto& buffer : tb.eventStreamBuffers) {
+			buffer.bytes.assign(eventChunkBytes, 0);
+			buffer.size = 0;
+			buffer.index = 0;
+			buffer.state.store(0, std::memory_order_relaxed);
+		}
+		tb.eventStreamProducerIndex = 0;
+		tb.eventStreamNextChunk = 0;
+		tb.eventStreamProducedBytes = 0;
+		tb.eventStreamCommittedBytes = 0;
+		tb.eventStreamWaitTicks = 0;
+		tb.streamedEventCount = 0;
+		tb.streamedMemoryEventCount = 0;
+		tb.streamedRegisterEventCount = 0;
+		tb.eventStreamAccepting = true;
+		tb.eventStreamTruncated = false;
+		tb.eventStreamTruncationReason = TraceEventTruncationReason::None;
+		tb.eventStreamProducerDone.store(false, std::memory_order_relaxed);
+		tb.eventStreamTransferFailed.store(false, std::memory_order_relaxed);
+		LARGE_INTEGER frequency{};
+		QueryPerformanceFrequency(&frequency);
+		tb.eventStreamPerformanceFrequency = frequency.QuadPart > 0 ?
+			static_cast<uint64_t>(frequency.QuadPart) : 0;
+		auto& resolver = SyscallResolver::Instance();
+		if (!NT_SUCCESS(resolver.CreateEvent(&tb.eventStreamReadyEvent)) ||
+			!NT_SUCCESS(resolver.CreateEvent(&tb.eventStreamSpaceEvent))) {
+			if (tb.eventStreamReadyEvent) resolver.Close(tb.eventStreamReadyEvent);
+			if (tb.eventStreamSpaceEvent) resolver.Close(tb.eventStreamSpaceEvent);
+			tb.eventStreamReadyEvent = tb.eventStreamSpaceEvent = nullptr;
+			CloseHandle(tb.eventStreamPipe); tb.eventStreamPipe = INVALID_HANDLE_VALUE;
+			if (tb.codeStreamPipe != INVALID_HANDLE_VALUE) {
+				CloseHandle(tb.codeStreamPipe); tb.codeStreamPipe = INVALID_HANDLE_VALUE;
+			}
+			return false;
+		}
+		tb.eventStreamBuffers[0].state.store(1, std::memory_order_relaxed);
+		try { tb.eventStreamThread = std::thread(&VehHandler::RunBasicTraceEventStreamWriter, this); }
+		catch (...) {
+			resolver.Close(tb.eventStreamReadyEvent); tb.eventStreamReadyEvent = nullptr;
+			resolver.Close(tb.eventStreamSpaceEvent); tb.eventStreamSpaceEvent = nullptr;
+			CloseHandle(tb.eventStreamPipe); tb.eventStreamPipe = INVALID_HANDLE_VALUE;
+			if (tb.codeStreamPipe != INVALID_HANDLE_VALUE) {
+				CloseHandle(tb.codeStreamPipe); tb.codeStreamPipe = INVALID_HANDLE_VALUE;
+			}
+			return false;
+		}
+	}
 	if (collectCode) {
 		tb.codeVersionTable.assign(nextPowerOfTwo(static_cast<size_t>(maxCodeVersions) * 2), {});
 		tb.codeVersions.assign(maxCodeVersions, {});
@@ -1484,15 +1747,22 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 			tb.codeStreamAccepting = true;
 			tb.codeStreamProducerDone.store(false, std::memory_order_relaxed);
 			tb.codeStreamTransferFailed.store(false, std::memory_order_relaxed);
-			if (!NT_SUCCESS(SyscallResolver::Instance().CreateEvent(&tb.codeStreamReadyEvent))) {
+			if (!NT_SUCCESS(SyscallResolver::Instance().CreateEvent(&tb.codeStreamReadyEvent)) ||
+				!NT_SUCCESS(SyscallResolver::Instance().CreateEvent(&tb.codeStreamSpaceEvent))) {
+				if (tb.codeStreamReadyEvent) SyscallResolver::Instance().Close(tb.codeStreamReadyEvent);
+				if (tb.codeStreamSpaceEvent) SyscallResolver::Instance().Close(tb.codeStreamSpaceEvent);
+				tb.codeStreamReadyEvent = tb.codeStreamSpaceEvent = nullptr;
 				CloseHandle(tb.codeStreamPipe); tb.codeStreamPipe = INVALID_HANDLE_VALUE;
+				StopBasicTraceEventStream(true);
 				return false;
 			}
 			tb.codeStreamBuffers[0].state.store(1, std::memory_order_relaxed);
 			try { tb.codeStreamThread = std::thread(&VehHandler::RunBasicTraceCodeStreamWriter, this); }
 			catch (...) {
 				SyscallResolver::Instance().Close(tb.codeStreamReadyEvent); tb.codeStreamReadyEvent = nullptr;
+				SyscallResolver::Instance().Close(tb.codeStreamSpaceEvent); tb.codeStreamSpaceEvent = nullptr;
 				CloseHandle(tb.codeStreamPipe); tb.codeStreamPipe = INVALID_HANDLE_VALUE;
+				StopBasicTraceEventStream(true);
 				return false;
 			}
 		} else {
@@ -1578,7 +1848,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	if (tb.collectWindowActive) {
 		uint32_t initialSnapshot = CaptureBasicTraceSnapshot(&ctx);
 		if (!RecordBasicTraceBlock(ip, &ctx, initialSnapshot)) {
-			StopBasicTraceCodeStream(true); return false;
+			StopBasicTraceCodeStream(true); StopBasicTraceEventStream(true); return false;
 		}
 		uint32_t version = CaptureBasicTraceCodeVersion(ip, 0);
 		RecordBasicTraceEvent(TraceBasicBlockEventType::BlockEntry, 0, 0, 0, ip,
@@ -1592,7 +1862,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	if (auto entryBreakpoint = BreakpointManager::Instance().FindByAddress(ip);
 		entryBreakpoint && entryBreakpoint->enabled) {
 		if (!BreakpointManager::Instance().Disable(entryBreakpoint->id)) {
-			StopBasicTraceCodeStream(true); return false;
+			StopBasicTraceCodeStream(true); StopBasicTraceEventStream(true); return false;
 		}
 		tb.entryBreakpointAddress = ip;
 		tb.entryBreakpointNeedsRearm = true;
@@ -1604,7 +1874,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		if (tb.entryBreakpointNeedsRearm)
 			BreakpointManager::Instance().RearmBreakpoint(tb.entryBreakpointAddress);
 		tb.entryBreakpointNeedsRearm = false;
-		StopBasicTraceCodeStream(true); return false;
+		StopBasicTraceCodeStream(true); StopBasicTraceEventStream(true); return false;
 	}
 	if (tb.collectWindowActive) {
 		PrepareBasicTraceMemoryWrites(EnsureBasicTraceInstruction(ip), &ctx);

@@ -119,6 +119,27 @@ static uint32_t TraceJsonUint32(const json& args, const char* key, uint32_t defa
 	return defaultValue;
 }
 
+static bool TraceJsonUint64(const json& args, const char* key, uint64_t& result) {
+	if (!args.contains(key)) return false;
+	const auto& value = args[key];
+	if (value.is_number_unsigned()) { result = value.get<uint64_t>(); return true; }
+	if (value.is_number_integer()) {
+		auto number = value.get<int64_t>();
+		if (number >= 0) { result = static_cast<uint64_t>(number); return true; }
+		return false;
+	}
+	if (value.is_string()) {
+		const auto& text = value.get_ref<const std::string&>();
+		if (text.empty() || text.front() == '-') return false;
+		try {
+			size_t consumed = 0;
+			auto number = std::stoull(text, &consumed, 0);
+			if (consumed == text.size()) { result = number; return true; }
+		} catch (...) {}
+	}
+	return false;
+}
+
 static bool TraceJsonBool(const json& args, const char* key, bool defaultValue) {
 	if (!args.contains(key)) return defaultValue;
 	const auto& value = args[key];
@@ -292,6 +313,33 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	std::string codeOutputPath = args.value("code_output_path", "");
 	if (!fileCodeOutput && !codeOutputPath.empty())
 		return {{"error", "code_output_path requires code_output=file"}};
+	if (args.contains("events_output") && !args["events_output"].is_string())
+		return {{"error", "events_output must be a string"}};
+	if (args.contains("events_output_path") && !args["events_output_path"].is_string())
+		return {{"error", "events_output_path must be a string"}};
+	std::string eventsOutput = args.value("events_output", "inline");
+	std::transform(eventsOutput.begin(), eventsOutput.end(), eventsOutput.begin(),
+		[](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+	if (eventsOutput != "inline" && eventsOutput != "file")
+		return {{"error", "events_output must be inline or file"}};
+	const bool fileEventOutput = eventsOutput == "file";
+	const bool anyOrderedEvents = collectEvents || collectCode ||
+		TraceJsonBool(args, "collect_memory_events", false) ||
+		TraceJsonBool(args, "collect_register_events", false);
+	if (fileEventOutput && !anyOrderedEvents)
+		return {{"error", "events_output=file requires an ordered event collector"}};
+	std::string eventOutputPath = args.value("events_output_path", "");
+	if (!fileEventOutput && !eventOutputPath.empty())
+		return {{"error", "events_output_path requires events_output=file"}};
+	uint64_t maxEventFileBytes = kTraceEventMaxFileBytes;
+	if (args.contains("max_event_file_bytes") &&
+		!TraceJsonUint64(args, "max_event_file_bytes", maxEventFileBytes))
+		return {{"error", "max_event_file_bytes must be an unsigned integer"}};
+	if (fileEventOutput && (maxEventFileBytes < sizeof(TraceEventArtifactHeader) ||
+		maxEventFileBytes > kTraceEventMaxFileBytes))
+		return {{"error", "max_event_file_bytes must be 88-4294967296 for events_output=file"}};
+	if (!fileEventOutput && args.contains("max_event_file_bytes"))
+		return {{"error", "max_event_file_bytes requires events_output=file"}};
 	if (args.contains("output_file") && !args["output_file"].is_string())
 		return {{"error", "output_file must be a string"}};
 	if (args.contains("output_format") && !args["output_format"].is_string())
@@ -323,8 +371,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		return {{"error", "max_memory_writes must be 1-16384"}};
 	if (maxMemoryReads < 1 || maxMemoryReads > 16384)
 		return {{"error", "max_memory_reads must be 1-16384"}};
-	if (maxEvents < 1 || maxEvents > 32768)
-		return {{"error", "max_events must be 1-32768"}};
+	if (maxEvents < 1 || (!fileEventOutput && maxEvents > 32768))
+		return {{"error", fileEventOutput ? "max_events must be positive" : "max_events must be 1-32768"}};
 	const uint32_t maxAllowedCodeBytes = fileCodeOutput ?
 		kTraceBasicBlockMaxFileCodeBytes : kTraceBasicBlockMaxCodeBytes;
 	if (maxCodeBytes < 1 || static_cast<uint32_t>(maxCodeBytes) > maxAllowedCodeBytes)
@@ -339,10 +387,12 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		return {{"error", "code_chunk_bytes must be 262144-8388608 and a multiple of 65536"}};
 	if (!fileCodeOutput && args.contains("code_chunk_bytes"))
 		return {{"error", "code_chunk_bytes requires code_output=file"}};
-	if (maxMemoryEvents < 1 || maxMemoryEvents > 65536)
-		return {{"error", "max_memory_events must be 1-65536"}};
-	if (maxRegisterEvents < 1 || maxRegisterEvents > 65536)
-		return {{"error", "max_register_events must be 1-65536"}};
+	if (maxMemoryEvents < 1 || (!fileEventOutput && maxMemoryEvents > 65536))
+		return {{"error", fileEventOutput ? "max_memory_events must be positive" :
+			"max_memory_events must be 1-65536"}};
+	if (maxRegisterEvents < 1 || (!fileEventOutput && maxRegisterEvents > 65536))
+		return {{"error", fileEventOutput ? "max_register_events must be positive" :
+			"max_register_events must be 1-65536"}};
 	std::vector<TraceDependencySource> dependencySources;
 	std::vector<std::string> dependencyLabels;
 	if (args.contains("dependency_sources")) {
@@ -424,9 +474,9 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 			return {{"error", "target_window requires occurrence >= 1, after_steps 1-100000, and before_steps 0-100000"}};
 		if (targetWindow.address < start || targetWindow.address >= end)
 			return {{"error", "target_window.address must be inside the trace range"}};
-		if (occurrenceWindow.enabled || stopOnReturn || fileCodeOutput ||
+		if (occurrenceWindow.enabled || stopOnReturn || fileCodeOutput || fileEventOutput ||
 			startCondition.clauseCount || stopCondition.clauseCount || collectCondition.clauseCount)
-			return {{"error", "target_window cannot be combined with occurrence_window, stop_on_return, conditions, or code_output=file"}};
+			return {{"error", "target_window cannot be combined with occurrence_window, stop_on_return, conditions, code_output=file, or events_output=file"}};
 		targetWindow.enabled = 1;
 	}
 
@@ -440,6 +490,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		collectCode, static_cast<uint32_t>(maxCodeBytes), static_cast<uint32_t>(maxCodeVersions),
 		fileCodeOutput ? TraceCodeOutputMode::File : TraceCodeOutputMode::Inline,
 		static_cast<uint32_t>(codeChunkBytes), codeOutputPath,
+		fileEventOutput ? TraceEventOutputMode::File : TraceEventOutputMode::Inline,
+		maxEventFileBytes, eventOutputPath,
 		collectMemoryEvents, static_cast<uint32_t>(maxMemoryEvents),
 		collectRegisterEvents, static_cast<uint32_t>(maxRegisterEvents),
 		dependencySources, startCondition, stopCondition, collectCondition, occurrenceWindow,
@@ -467,6 +519,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	if (!result.ok) {
 		if (fileCodeOutput && !result.codeArtifact.error.empty())
 			return {{"error", result.codeArtifact.error}};
+		if (fileEventOutput && !result.eventArtifact.error.empty())
+			return {{"error", result.eventArtifact.error}};
 		auto failureName = [](TraceBasicBlocksStartFailure reason) {
 			switch (reason) {
 			case TraceBasicBlocksStartFailure::InvalidArguments: return "invalid_arguments";
@@ -477,6 +531,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 			case TraceBasicBlocksStartFailure::StartRejected: return "start_rejected";
 			case TraceBasicBlocksStartFailure::CodeStreamUnavailable: return "code_stream_unavailable";
 			case TraceBasicBlocksStartFailure::ReturnAddressUnavailable: return "return_address_unavailable";
+			case TraceBasicBlocksStartFailure::EventStreamUnavailable: return "event_stream_unavailable";
 			default: return "";
 			}
 		};
@@ -517,6 +572,9 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		return {{"error", std::string("TraceBasicBlocks failed: ") + reason},
 			{"failure", std::move(failure)}};
 	}
+	if (fileEventOutput && !result.eventArtifact.success)
+		return {{"error", result.eventArtifact.error.empty() ?
+			"event artifact stream failed" : result.eventArtifact.error}};
 	if (occurrenceWindow.enabled && !result.occurrenceSupported)
 		return {{"error", "injected DLL does not support occurrence_window"}};
 	if (stopOnReturn && !result.functionScopeSupported)
@@ -794,11 +852,46 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		}
 		events.push_back(std::move(value));
 	}
+	json eventFile;
+	uint64_t capturedEvents = result.events.size();
+	uint64_t capturedMemoryEvents = result.memoryEvents.size();
+	uint64_t capturedRegisterEvents = result.registerEvents.size();
+	bool eventsTruncated = result.eventsTruncated;
+	bool memoryEventsTruncated = result.memoryEventsTruncated;
+	bool registerEventsTruncated = result.registerEventsTruncated;
+	if (fileEventOutput) {
+		const auto& artifact = result.eventArtifact;
+		auto truncationReason = [](TraceEventTruncationReason reason) {
+			switch (reason) {
+			case TraceEventTruncationReason::SizeLimit: return "size_limit";
+			case TraceEventTruncationReason::TransferFailure: return "transfer_failure";
+			default: return "none";
+			}
+		};
+		capturedEvents = artifact.basicBlockEvents;
+		capturedMemoryEvents = artifact.memoryEvents;
+		capturedRegisterEvents = artifact.registerEvents;
+		eventsTruncated = artifact.captureTruncated;
+		memoryEventsTruncated = collectMemoryEvents && artifact.captureTruncated;
+		registerEventsTruncated = collectRegisterEvents && artifact.captureTruncated;
+		eventFile = {{"path", artifact.path}, {"size", artifact.fileSize},
+			{"sha256", artifact.sha256}, {"schema_version", artifact.schemaVersion},
+			{"record_bytes", artifact.recordBytes}, {"chunk_bytes", artifact.chunkBytes},
+			{"chunk_count", artifact.chunks},
+			{"counts", {{"events", artifact.basicBlockEvents},
+				{"memory_events", artifact.memoryEvents},
+				{"register_events", artifact.registerEvents}}},
+			{"truncated", artifact.captureTruncated},
+			{"limit_reason", truncationReason(artifact.truncationReason)},
+			{"wait_time_ns", artifact.waitTimeNs},
+			{"wait_time_ms", static_cast<double>(artifact.waitTimeNs) / 1000000.0}};
+	}
 	json ordering = {{"available", result.eventCollectionEnabled},
 		{"granularity", "basic_block_transitions"},
 		{"event_schema_version", result.eventSchemaVersion},
-		{"complete", result.eventCollectionEnabled && !result.eventsTruncated},
-		{"events_captured", result.events.size()}, {"events_dropped", result.eventsDropped}};
+		{"complete", result.eventCollectionEnabled && !eventsTruncated},
+		{"events_captured", capturedEvents}, {"events_dropped", result.eventsDropped}};
+	if (fileEventOutput) ordering["storage"] = "file";
 	json memoryEvents = json::array();
 	for (const auto& event : result.memoryEvents) {
 		json value = {{"sequence", event.sequence}, {"thread_id", event.threadId},
@@ -818,9 +911,10 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	json memoryOrdering = {{"available", result.memoryEventCollectionEnabled},
 		{"granularity", "instruction_memory_accesses"},
 		{"event_schema_version", result.memoryEventSchemaVersion},
-		{"complete", result.memoryEventCollectionEnabled && !result.memoryEventsTruncated},
-		{"events_captured", result.memoryEvents.size()},
+		{"complete", result.memoryEventCollectionEnabled && !memoryEventsTruncated},
+		{"events_captured", capturedMemoryEvents},
 		{"events_dropped", result.memoryEventsDropped}};
+	if (fileEventOutput) memoryOrdering["storage"] = "file";
 	json registerEvents = json::array();
 	for (const auto& event : result.registerEvents) {
 		json changes = json::object();
@@ -839,9 +933,10 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		{"granularity", "instruction_register_deltas"},
 		{"event_schema_version", result.registerEventSchemaVersion},
 		{"scope", "completed_instruction_occurrences_in_collection_window"},
-		{"complete", result.registerEventCollectionEnabled && !result.registerEventsTruncated},
-		{"events_captured", result.registerEvents.size()},
+		{"complete", result.registerEventCollectionEnabled && !registerEventsTruncated},
+		{"events_captured", capturedRegisterEvents},
 		{"events_dropped", result.registerEventsDropped}};
+	if (fileEventOutput) registerOrdering["storage"] = "file";
 	json codeVersions = json::array();
 	for (const auto& version : result.codeVersions) {
 		if (static_cast<size_t>(version.dataOffset) + version.size > result.codeBytes.size()) continue;
@@ -895,15 +990,15 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		{"function_scope", std::move(functionScope)},
 		{"target_window", std::move(targeted)},
 		{"occurrence_window", std::move(occurrence)},
-		{"events", std::move(events)}, {"events_truncated", result.eventsTruncated},
+		{"events", std::move(events)}, {"events_truncated", eventsTruncated},
 		{"events_dropped", result.eventsDropped},
 		{"memory_ordering", std::move(memoryOrdering)},
 		{"memory_events", std::move(memoryEvents)},
-		{"memory_events_truncated", result.memoryEventsTruncated},
+		{"memory_events_truncated", memoryEventsTruncated},
 		{"memory_events_dropped", result.memoryEventsDropped},
 		{"register_ordering", std::move(registerOrdering)},
 		{"register_events", std::move(registerEvents)},
-		{"register_events_truncated", result.registerEventsTruncated},
+		{"register_events_truncated", registerEventsTruncated},
 		{"register_events_dropped", result.registerEventsDropped},
 		{"code_capture", std::move(codeCapture)}, {"code_versions", std::move(codeVersions)},
 		{"code_truncated", codeTruncated},
@@ -931,6 +1026,12 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		fullResult["aggregate_scope"] = "trigger_and_post_trigger";
 		fullResult["ordered_scope"] = "bounded_pre_and_post_trigger";
 	}
+	if (fileEventOutput) {
+		fullResult.erase("events");
+		fullResult.erase("memory_events");
+		fullResult.erase("register_events");
+		fullResult["event_file"] = eventFile;
+	}
 	if (!artifactMetadata.empty()) fullResult["capture_environment"] = artifactMetadata;
 	if (outputFile.empty()) return fullResult;
 
@@ -940,8 +1041,12 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 			{"format", outputFormat}, {"complete", false}}}};
 	json counts = json::object();
 	for (const char* name : {"blocks", "edges", "events", "memory_events", "register_events",
-			"code_versions", "memory_writes", "memory_reads", "exceptions", "snapshots"})
-		counts[name] = fullResult[name].size();
+			"code_versions", "memory_writes", "memory_reads", "exceptions", "snapshots"}) {
+		if (fileEventOutput && std::string(name) == "events") counts[name] = capturedEvents;
+		else if (fileEventOutput && std::string(name) == "memory_events") counts[name] = capturedMemoryEvents;
+		else if (fileEventOutput && std::string(name) == "register_events") counts[name] = capturedRegisterEvents;
+		else counts[name] = fullResult[name].size();
+	}
 	json truncation = {{"trace", fullResult["truncated"]},
 		{"events", fullResult["events_truncated"]},
 		{"memory_events", fullResult["memory_events_truncated"]},
@@ -964,6 +1069,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		{"output_file", {{"path", exported.path}, {"format", exported.format},
 			{"size", exported.size}, {"sha256", exported.sha256}, {"complete", complete}}}};
 	if (fileCodeOutput) compact["code_artifact"] = fullResult["code_capture"];
+	if (fileEventOutput) compact["event_file"] = eventFile;
 	return compact;
 }
 
