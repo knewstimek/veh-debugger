@@ -4,6 +4,7 @@ set(DLL_SOURCES
     breakpoint.cpp
     hw_breakpoint.cpp
     memory.cpp
+    value_scan.cpp
     threads.cpp
     stack_walk.cpp
     pipe_server.cpp

@@ -80,6 +80,7 @@ enum class IpcCommand : uint32_t {
 	ExecuteShellcode       = 0x0062,
 	QueryMemoryMap         = 0x0063,
 	SearchMemory           = 0x0064,
+	ValueScan              = 0x0066,
 
 	// Dynamic tracing
 	TraceRegister          = 0x0070,
@@ -1094,6 +1095,61 @@ struct SearchMemoryResponse {
 	uint64_t  scannedBytes;
 	uint64_t  nextAddress;       // resume point when truncated
 	// followed by uint64_t addresses[count]
+};
+
+enum class ValueScanOperation : uint8_t { First = 0, Next = 1, Results = 2, Reset = 3 };
+enum class ValueScanType : uint8_t {
+	None = 0, I8 = 1, U8 = 2, I16 = 3, U16 = 4, I32 = 5, U32 = 6,
+	I64 = 7, U64 = 8, F32 = 9, F64 = 10
+};
+enum class ValueScanCompare : uint8_t {
+	Exact = 0, Between = 1, Greater = 2, Less = 3, Unknown = 4,
+	Changed = 5, Unchanged = 6, Increased = 7, Decreased = 8,
+	IncreasedBy = 9, DecreasedBy = 10
+};
+enum class ValueScanMode : uint8_t { None = 0, List = 1, Snapshot = 2 };
+enum class ValueScanFailure : uint8_t {
+	None = 0,
+	NoSession = 1,
+	InvalidRequest = 2,
+	TypeMismatch = 3,
+	TooManyResults = 4,
+	SnapshotTooLarge = 5,
+	AllocationFailed = 6
+};
+
+struct ValueScanRequest {
+	uint64_t           startAddress;
+	uint64_t           endAddress;       // exclusive, 0 = end of user space
+	uint64_t           value;            // raw little-endian value bits
+	uint64_t           value2;           // upper bound for between
+	uint64_t           offset;           // candidate offset for results
+	uint32_t           alignment;
+	uint32_t           maxResults;       // response page size, max 1000
+	ValueScanOperation operation;
+	ValueScanType      valueType;
+	ValueScanCompare   compare;
+	RegionFilter       writable;
+	RegionFilter       executable;
+	uint8_t            typeMask;         // kRegionType* bits, 0 = all
+	uint8_t            reserved[2];
+};
+
+struct ValueScanEntry {
+	uint64_t address;
+	uint64_t value;                    // raw bits interpreted using valueType
+};
+
+struct ValueScanResponse {
+	IpcStatus       status;
+	ValueScanFailure failure;
+	ValueScanMode    mode;
+	ValueScanType    valueType;
+	uint8_t          reserved;
+	uint64_t         candidates;
+	uint64_t         scannedBytes;
+	uint32_t         count;
+	// followed by ValueScanEntry[count]
 };
 
 struct ExecuteShellcodeRequest {

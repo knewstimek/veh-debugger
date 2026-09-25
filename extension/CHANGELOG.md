@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- **`veh_value_scan`** -- adds a target-side Cheat Engine style value scan session with exact/range/unknown first scans, change-aware next scans, bounded result paging, writable/executable/type filters, and explicit reset. Candidate lists and unknown-value snapshots remain inside the target DLL.
 - **`veh_search_memory`** -- scans readable committed memory inside the target for an AOB pattern (`??` byte and `4?` nibble wildcards), a string (ascii/utf8/utf16), or a numeric value (i8-u64, f32/f64, ptr). Filters: address range or module, writable, executable, region type, alignment. Breakpoint bytes compare as the original code, and the search request's own pattern is never reported. Results are capped by `max_results`; `next_start` resumes a truncated search.
 - **`veh_symbolize`** -- resolves up to 256 addresses to `module!function+offset` (PDB symbol, else nearest export, else `module+RVA`) with source file and line when available, using the same resolution as stack frames. Works while the target runs; accepts `module+RVA` input.
 - **`veh_freeze_thread`** -- freezes or thaws one thread. A frozen thread holds its own suspend count, separate from `veh_pause`, so it stays suspended across `veh_continue` until thawed; detach and cleanup thaw every frozen thread. `veh_threads` marks frozen threads.

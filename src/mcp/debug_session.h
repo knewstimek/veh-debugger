@@ -242,6 +242,17 @@ public:
 	MemorySearchResult SearchMemory(const SearchMemoryRequest& request,
 		const std::vector<uint8_t>& pattern, const std::vector<uint8_t>& mask);
 
+	struct ValueScanResult {
+		bool ok = false;
+		ValueScanFailure failure = ValueScanFailure::None;
+		ValueScanMode mode = ValueScanMode::None;
+		ValueScanType valueType = ValueScanType::None;
+		uint64_t candidates = 0;
+		uint64_t scannedBytes = 0;
+		std::vector<ValueScanEntry> entries;
+	};
+	ValueScanResult ValueScan(const ValueScanRequest& request);
+
 	// --- Analysis ---
 	std::vector<DisasmInsn> Disassemble(uint64_t address, uint32_t count);
 	EvalResult Evaluate(const std::string& expression, uint32_t threadId);

@@ -12,7 +12,7 @@ MemoryManager& MemoryManager::Instance() {
 }
 
 // SEH를 사용하는 raw memcpy (C++ 객체 없는 함수에서만 사용)
-static bool SafeMemcpy(void* dst, const void* src, size_t size) {
+bool SafeCopyMemory(void* dst, const void* src, size_t size) {
 	__try {
 		memcpy(dst, src, size);
 		return true;
@@ -28,7 +28,7 @@ std::vector<uint8_t> MemoryManager::Read(uint64_t address, uint32_t size) {
 	std::vector<uint8_t> buffer(size);
 	auto* src = reinterpret_cast<const void*>(address);
 
-	if (!SafeMemcpy(buffer.data(), src, size)) {
+	if (!SafeCopyMemory(buffer.data(), src, size)) {
 		buffer.clear();
 	}
 
@@ -43,7 +43,7 @@ bool MemoryManager::Write(uint64_t address, const uint8_t* data, uint32_t size) 
 	}
 
 	auto* dst = reinterpret_cast<void*>(address);
-	bool success = SafeMemcpy(dst, data, size);
+	bool success = SafeCopyMemory(dst, data, size);
 
 	RestoreProtection(address, size, oldProtect);
 
@@ -266,7 +266,7 @@ bool MemoryManager::Search(const SearchMemoryRequest& req, const uint8_t* patter
 			result.regionsScanned++;
 			for (uint64_t pos = addr; pos + n <= regionEnd && !full;) {
 				const size_t len = static_cast<size_t>((regionEnd - pos) < kChunk ? (regionEnd - pos) : kChunk);
-				if (!SafeMemcpy(buf, reinterpret_cast<const void*>(pos), len)) break;
+				if (!SafeCopyMemory(buf, reinterpret_cast<const void*>(pos), len)) break;
 				BreakpointManager::Instance().MaskBreakpointsInBuffer(pos, buf, len);
 				result.scannedBytes += len;
 				const size_t last = len - n;
