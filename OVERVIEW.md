@@ -38,7 +38,11 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 | `src/dll/hw_breakpoint.cpp/h` | Hardware breakpoint (DR0-DR3) management |
 | `src/dll/pipe_server.cpp/h` | Named Pipe IPC server (DLL side) |
 | `src/dll/dllmain.cpp` | DLL entry, LdrRegisterDllNotification for module events |
-| `src/dll/stack_walk.cpp/h` | StackWalk64 + DIA SDK local variable enumeration |
+| `src/dll/stack_walk.cpp/h` | StackWalk64, local variables, address symbolization, and PDB type layout (DisplayType) |
+| `src/dll/memory.cpp/h` | Memory read/write/alloc, memory map, masked pattern search |
+| `src/dll/value_scan.cpp/h` | Value scan sessions (candidate lists or region snapshots kept in the target) |
+| `src/dll/threads.cpp/h` | Thread enumeration, pause/resume, freeze/thaw |
+| `src/mcp/assembler.cpp/h` | Text assembler for `veh_assemble` (AsmJit + AsmTK, x86 back end) |
 | `src/common/ipc_protocol.h` | All IPC command/event/struct definitions (shared) |
 | `src/common/logger.h` | Logging utility |
 | `src/mcp/debug_session.cpp/h` | DebugSession class - pure C++ IPC wrapper, no JSON dependency |
@@ -57,6 +61,10 @@ Named Pipe (`\\.\pipe\dotnet-diagnostic-{pid}`), binary framed:
 
 - **Commands** (Adapter -> DLL): `0x0001`-`0x00FF` - request/response, synchronous
 - **Events** (DLL -> Adapter): `0x1000`+ - async push, dispatched via callbacks
+- **Backend rule**: anything that depends on target state (memory search/map/scan,
+  symbols, thread freeze) is an IPC command served inside the target, never a
+  client-side loop over `ReadMemory`, so another backend (driver/hypervisor) can
+  implement the same command. Pure computation (`veh_assemble`) stays client-side.
 - **Response format**: Most commands return `reinterpret_cast<T*>(data)` directly
   - Exception: `ReadMemory` returns `IpcStatus(4 bytes) + raw data` (offset required!)
 
@@ -65,11 +73,11 @@ Named Pipe (`\\.\pipe\dotnet-diagnostic-{pid}`), binary framed:
 |-------|----------|
 | 0x0001-0x0005 | Breakpoint set/remove (SW + HW) |
 | 0x0010-0x0016 | Execution control (Continue, StepOver/Into/Out, Pause) |
-| 0x0020-0x0026 | State queries and restore (Threads, StackTrace, Registers, atomic SetRegisters, stopped-context query) |
+| 0x0020-0x0027 | State queries and restore (Threads, StackTrace, Registers, atomic SetRegisters, stopped-context query, FreezeThread) |
 | 0x0030-0x0031 | Memory read/write |
-| 0x0040-0x0042 | PDB symbol resolution (SourceLine, Function, EnumLocals) |
+| 0x0040-0x0044 | PDB symbol resolution (SourceLine, Function, EnumLocals, Symbolize, DisplayType) |
 | 0x0050 | TraceCallers (lock-free ring buffer collection) |
-| 0x0060-0x0062 | Memory management (AllocateMemory, FreeMemory, ExecuteShellcode) |
+| 0x0060-0x0066 | Memory management (AllocateMemory, FreeMemory, ExecuteShellcode, QueryMemoryMap, SearchMemory, ValueScan) |
 | 0x0070-0x0074 | Dynamic tracing (TraceRegister, TraceMemory, ResolveImport, TraceCalls, TraceBasicBlocks) |
 | 0x00F0/0x00FF | Lifecycle (Detach, Shutdown) |
 

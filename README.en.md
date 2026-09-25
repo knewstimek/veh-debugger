@@ -318,9 +318,12 @@ The table below documents the complete public tool surface. Treat the running se
 | `veh_step_over` | `threadId` | Step Over |
 | `veh_step_out` | `threadId` | Step Out |
 | `veh_pause` | `threadId?` | Pause |
-| `veh_threads` | - | List threads |
+| `veh_threads` | - | List threads (frozen threads are marked `frozen`) |
+| `veh_freeze_thread` | `threadId, frozen?` | Freeze or thaw one thread. A frozen thread stays suspended across `veh_continue` (separate from pause) and is thawed on detach. `threadId:0, frozen:false` thaws all |
 | `veh_stack_trace` | `threadId, maxFrames?` | Stack trace. For PDB-less modules, parses the PE export table directly for accurate function names (instead of DbgHelp's inaccurate `OrdinalNNNNN` labels) |
 | `veh_enum_locals` | `threadId, instructionAddress?, frameBase?` | Enumerate locals/parameters in a stopped thread's stack frame (name/type/address/value). Auto-detects the top frame if omitted (PDB required) |
+| `veh_display_type` | `type, address?, depth?, max_members?` | PDB struct layout like WinDbg `dt` (offsets, types, sizes, bitfields, base classes, nested members); with `address`, also scalar/pointer/enum/bitfield values. Accepts `module!Type` (PDB required) |
+| `veh_symbolize` | `address` or `addresses` | Addresses to `module!function+offset` (PDB symbol, else export, else module+RVA) plus source file/line. Up to 256 |
 | `veh_registers` | `threadId` | Read registers |
 | `veh_set_register` | `threadId, name, value` | Modify register value |
 | `veh_evaluate` | `expression, threadId` | Evaluate register/memory/pointer/segment (`[reg+offset]`, `gs:[0x60]`, etc.) |
@@ -328,6 +331,10 @@ The table below documents the complete public tool surface. Treat the running se
 | `veh_read_pointer_chain` | `base, offsets[], derefFinal?, size?` | Follow a multi-level pointer chain in one call (no per-hop round-trips). Dereferences `*(cur+offset)` at each hop (auto-detects 4/8-byte pointers for x86/x64), returns every hop and the final resolved address. `derefFinal:false` returns the final address without the last deref; `size>0` also reads bytes at the resolved address |
 | `veh_write_memory` | `address, data` or `patches` | Write memory. Batch: `patches=[{address,data},...]` |
 | `veh_dump_memory` | `address, size, output_path` | Dump memory to binary file (up to 64MB) |
+| `veh_memory_map` | `start?, end?, module?, include_free?, max_regions?` | Virtual memory regions (state/protection/type/owning module); `next_start` continues a truncated map |
+| `veh_search_memory` | `pattern` or `string` or `value`, `start?, end?, module?, writable?, executable?, type?, alignment?, max_results?` | Memory search inside the target: AOB (`??`, `4?` wildcards), string (ascii/utf8/utf16), numeric value. Breakpoint bytes compare as original code |
+| `veh_value_scan` | `operation, value_type?, compare?, value?, value2?, ...` | Cheat Engine style value scan session (`first`/`next`/`results`/`reset`): exact/between/greater/less/unknown first scans, changed/unchanged/increased/decreased next scans. Candidates stay inside the target DLL |
+| `veh_assemble` | `code, address?, arch?, write?` | Assemble Intel-syntax x86/x64 (AsmJit+AsmTK) at an address: relative jmp/call/rip offsets computed, `;`/newline separated, labels, decoded listing. `write:true` patches the target. Works without a target |
 | `veh_allocate_memory` | `size?, protection?` | Allocate memory in target (VirtualAlloc) |
 | `veh_free_memory` | `address` | Free allocated memory (VirtualFree) |
 | `veh_execute_shellcode` | `shellcode, timeout_ms?` | Execute shellcode (alloc RWX + copy + CreateThread + wait + free) |
@@ -347,7 +354,7 @@ The table below documents the complete public tool surface. Treat the running se
 | `veh_checkpoint_diff` | `id, other_id?` | Compare a checkpoint with current state or another checkpoint and return register and changed-memory spans. |
 | `veh_checkpoint_delete` | `id` | Delete a checkpoint and release its server-side memory budget. |
 
-> **Non-stop inspection (no target stop required)**: `veh_read_memory` / `veh_read_pointer_chain` / `veh_write_memory` / `veh_dump_memory` / `veh_disassemble` / `veh_modules` work while the target is **running** (serviced by a dedicated pipe thread inside the DLL -- other threads are never frozen). You don't need a breakpoint or a detach/attach round-trip to read live values during GUI interaction. In contrast, `veh_registers` / `veh_stack_trace` / `veh_enum_locals` / `veh_step_*` need a thread context, so they only work when stopped at a breakpoint or after `veh_pause`.
+> **Non-stop inspection (no target stop required)**: `veh_read_memory` / `veh_read_pointer_chain` / `veh_write_memory` / `veh_dump_memory` / `veh_disassemble` / `veh_modules` / `veh_memory_map` / `veh_search_memory` / `veh_value_scan` / `veh_symbolize` / `veh_display_type` work while the target is **running** (serviced by a dedicated pipe thread inside the DLL -- other threads are never frozen). You don't need a breakpoint or a detach/attach round-trip to read live values during GUI interaction. In contrast, `veh_registers` / `veh_stack_trace` / `veh_enum_locals` / `veh_step_*` need a thread context, so they only work when stopped at a breakpoint or after `veh_pause`.
 
 > **Tip**: Address arguments accept hex (`"0x401000"`), decimal (`4198400`), or **module+RVA** (`"crackme.exe+0x1000"`). Module+RVA eliminates manual ASLR base calculation.
 

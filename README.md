@@ -335,9 +335,12 @@ enabled = true
 | `veh_step_over` | `threadId` | Step Over |
 | `veh_step_out` | `threadId` | Step Out |
 | `veh_pause` | `threadId?` | 일시정지 |
-| `veh_threads` | - | 스레드 목록 |
+| `veh_threads` | - | 스레드 목록 (얼린 스레드는 `frozen` 표시) |
+| `veh_freeze_thread` | `threadId, frozen?` | 스레드 하나를 얼리거나 푼다. 얼린 스레드는 `veh_continue` 후에도 멈춰 있고(일시정지와 별도 카운트), detach 시 자동으로 풀린다. `threadId:0, frozen:false`는 전체 해제 |
 | `veh_stack_trace` | `threadId, maxFrames?` | 스택 트레이스. PDB 없는 모듈은 PE export 테이블을 직접 파싱해 정확한 함수명 제공 (DbgHelp의 부정확한 `OrdinalNNNNN` 라벨 대신) |
 | `veh_enum_locals` | `threadId, instructionAddress?, frameBase?` | 정지된 스레드의 스택 프레임에서 지역변수/파라미터 열거 (이름/타입/주소/값). 생략 시 최상위 프레임 자동 감지 (PDB 필요) |
+| `veh_display_type` | `type, address?, depth?, max_members?` | WinDbg `dt`처럼 PDB 구조체 레이아웃 표시 (오프셋/타입/크기/비트필드/기본 클래스/중첩 멤버). `address`를 주면 스칼라/포인터/enum/비트필드 값까지 읽음. `module!Type` 형식 지원 (PDB 필요) |
+| `veh_symbolize` | `address` 또는 `addresses` | 주소를 `module!function+offset`으로 변환 (PDB 심볼, 없으면 export, 없으면 module+RVA) + 소스 파일/줄. 최대 256개 |
 | `veh_registers` | `threadId` | 레지스터 조회 |
 | `veh_set_register` | `threadId, name, value` | 레지스터 값 변경 |
 | `veh_evaluate` | `expression, threadId` | 레지스터/메모리/포인터/세그먼트 평가 (`[reg+offset]`, `gs:[0x60]` 등) |
@@ -345,6 +348,10 @@ enabled = true
 | `veh_read_pointer_chain` | `base, offsets[], derefFinal?, size?` | 다단계 포인터 체인을 1콜로 추적 (N번 왕복 대신). 각 홉마다 `*(cur+offset)` 역참조 (x86/x64 포인터 크기 자동 판정), 각 홉과 최종 주소 반환. `derefFinal:false`면 마지막 오프셋은 역참조 없이 주소만 반환, `size>0`이면 최종 주소에서 바이트도 읽음 |
 | `veh_write_memory` | `address, data` 또는 `patches` | 메모리 쓰기. 배치: `patches=[{address,data},...]` |
 | `veh_dump_memory` | `address, size, output_path` | 메모리를 바이너리 파일로 덤프 (최대 64MB) |
+| `veh_memory_map` | `start?, end?, module?, include_free?, max_regions?` | 가상 메모리 영역 목록 (상태/보호/타입/소유 모듈). 잘리면 `next_start`로 이어서 조회 |
+| `veh_search_memory` | `pattern` 또는 `string` 또는 `value`, `start?, end?, module?, writable?, executable?, type?, alignment?, max_results?` | 타겟 내부에서 메모리 검색. AOB(`??`, `4?` 와일드카드), 문자열(ascii/utf8/utf16), 숫자 값. BP 바이트는 원본으로 비교 |
+| `veh_value_scan` | `operation, value_type?, compare?, value?, value2?, ...` | 치트엔진식 값 스캔 세션 (`first`/`next`/`results`/`reset`). exact/between/greater/less/unknown 첫 스캔, changed/unchanged/increased/decreased 다음 스캔. 후보는 타겟 DLL 안에 유지 |
+| `veh_assemble` | `code, address?, arch?, write?` | Intel 문법 x86/x64 어셈블 (AsmJit+AsmTK). 주소 기준으로 상대 jmp/call/rip 오프셋 계산, `;`/줄바꿈 구분, 레이블 지원, 디코딩 목록 반환. `write:true`로 타겟에 패치. 타겟 없이도 동작 |
 | `veh_allocate_memory` | `size?, protection?` | 타겟 프로세스에 메모리 할당 (VirtualAlloc) |
 | `veh_free_memory` | `address` | 할당된 메모리 해제 (VirtualFree) |
 | `veh_execute_shellcode` | `shellcode, timeout_ms?` | 셸코드 실행 (RWX 할당+복사+스레드 생성+대기+해제) |
@@ -364,7 +371,7 @@ enabled = true
 | `veh_checkpoint_diff` | `id, other_id?` | checkpoint와 현재 상태 또는 다른 checkpoint의 register 및 변경 메모리 구간을 비교한다. |
 | `veh_checkpoint_delete` | `id` | checkpoint를 삭제하고 서버 메모리 예산을 반환한다. |
 
-> **Non-stop 조회 (타겟 정지 불필요)**: `veh_read_memory` / `veh_read_pointer_chain` / `veh_write_memory` / `veh_dump_memory` / `veh_disassemble` / `veh_modules` 는 타겟이 **실행 중에도** 동작합니다 (DLL 내 전용 파이프 스레드가 처리 -- 다른 스레드를 멈추지 않음). GUI를 조작하면서 라이브 값을 읽을 때 BP를 걸거나 detach/attach를 왕복할 필요가 없습니다. 반대로 `veh_registers` / `veh_stack_trace` / `veh_enum_locals` / `veh_step_*` 는 스레드 컨텍스트가 필요하므로 BP 히트나 `veh_pause`로 정지된 상태에서만 동작합니다.
+> **Non-stop 조회 (타겟 정지 불필요)**: `veh_read_memory` / `veh_read_pointer_chain` / `veh_write_memory` / `veh_dump_memory` / `veh_disassemble` / `veh_modules` / `veh_memory_map` / `veh_search_memory` / `veh_value_scan` / `veh_symbolize` / `veh_display_type` 는 타겟이 **실행 중에도** 동작합니다 (DLL 내 전용 파이프 스레드가 처리 -- 다른 스레드를 멈추지 않음). GUI를 조작하면서 라이브 값을 읽을 때 BP를 걸거나 detach/attach를 왕복할 필요가 없습니다. 반대로 `veh_registers` / `veh_stack_trace` / `veh_enum_locals` / `veh_step_*` 는 스레드 컨텍스트가 필요하므로 BP 히트나 `veh_pause`로 정지된 상태에서만 동작합니다.
 
 > **Tip**: 주소 인자는 hex (`"0x401000"`), 10진수 (`4198400`), **모듈+RVA** (`"crackme.exe+0x1000"`) 모두 허용합니다. 모듈+RVA는 ASLR 계산 없이 사용 가능합니다.
 
