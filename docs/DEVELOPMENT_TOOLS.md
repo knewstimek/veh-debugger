@@ -31,7 +31,7 @@ The server defaults to `--profile=lite`. Keep each eager surface at ten tools or
 
 | Profile | Eager tools | Intended workflow |
 |---|---:|---|
-| `lite` | 5 | Start/continue/batch/terminate plus lazy discovery |
+| `lite` | 7 | Launch/attach/continue/batch/terminate/registers plus lazy discovery |
 | `interactive` | 10 | Attach, breakpoints, registers, disassembly, and memory inspection |
 | `capture` | 10 | VM trace, targeted input capture, and checkpoint restore loops |
 | `full` | 46 | Compatibility with clients that require the complete eager inventory |

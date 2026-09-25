@@ -2,7 +2,11 @@
 
 ## Unreleased
 
+### Changed
+- **`lite` MCP profile adds `veh_attach` and `veh_registers`** -- attach-first sessions and the most common stopped-state inspection no longer need a `veh_toolbox` describe/call round-trip. Server instructions now note that `veh_batch` steps call most tools by name. The tool catalog is built once per server instead of on every `tools/list`/`veh_toolbox` request.
+
 ### Fixed
+- **MCP tool failures set `isError`** -- results with a top-level `error` (including failures returned through `veh_toolbox` `call`, which now hoists the inner `error`) are flagged `isError: true` instead of appearing successful to MCP clients.
 - **Marketplace publication verification tolerates propagation delay** -- the guarded release script now polls the Marketplace's public extension metadata for up to fifteen minutes after a successful publish instead of treating the first stale response as a failed publication. The v1.1.17 release took roughly eight minutes to become visible after `vsce publish` returned success.
 
 ## 1.1.17 - 2026-09-16

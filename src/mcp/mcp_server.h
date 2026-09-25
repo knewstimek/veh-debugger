@@ -89,8 +89,8 @@ private:
 	json ToolToolbox(const json& args);
 
 	// Tool list definition
-	json GetToolsList();
-	json GetAllToolsList();
+	json GetToolsList() const;
+	static json BuildAllToolsList();
 	json DispatchTool(const std::string& name, const json& args, bool* known = nullptr);
 
 	// IPC event handler (breakpoint hit, etc.)
@@ -116,6 +116,7 @@ private:
 	dap::Transport* transport_ = nullptr;
 	DebugSession session_;
 	std::string toolProfile_;
+	const json allTools_ = BuildAllToolsList();	// 정적 카탈로그: toolbox/tools/list 호출마다 재생성하지 않음
 	std::atomic<bool> running_{false};
 
 	// Last exception info (cached from ExceptionOccurred event)

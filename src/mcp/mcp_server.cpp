@@ -227,7 +227,7 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 			{"version", "1.1.17"}
 		}},
 		{"instructions",
-			"Windows x86/x64 in-process debugger. The default lite profile keeps common session tools eager; use veh_toolbox to discover, describe, and call all other tools. Inspection requires a stopped target."
+			"Windows x86/x64 in-process debugger. The default lite profile keeps common session tools eager; use veh_toolbox to discover, describe, and call all other tools. veh_batch steps call most tools by name without describe. Inspection requires a stopped target."
 		}
 	};
 	SendResult(id, result);
@@ -252,12 +252,14 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 				return;
 			}
 
-		// MCP tool result format
-		SendResult(id, {
+		// MCP tool result format -- top-level "error" means the tool failed
+		json response = {
 			{"content", json::array({
 				{{"type", "text"}, {"text", result.dump(2)}}
 			})}
-		});
+		};
+		if (result.is_object() && result.contains("error")) response["isError"] = true;
+		SendResult(id, response);
 		} catch (const std::exception& e) {
 			SendResult(id, {
 				{"content", json::array({
@@ -3254,7 +3256,7 @@ bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
 
 // --- Tool List Definition ---
 
-json McpServer::GetAllToolsList() {
+json McpServer::BuildAllToolsList() {
 	json tools = json::array({
 		{{"name", "veh_attach"}, {"description", "Attach to a running process by PID. Injects VEH debugger DLL. Auto-detaches if already attached. Target process must be running (not CREATE_SUSPENDED)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
@@ -3622,7 +3624,8 @@ json McpServer::GetAllToolsList() {
 
 static const std::vector<std::string>& ToolProfileNames(const std::string& profile) {
 	static const std::vector<std::string> lite = {
-		"veh_toolbox", "veh_launch", "veh_continue", "veh_batch", "veh_terminate"
+		"veh_toolbox", "veh_attach", "veh_launch", "veh_continue", "veh_batch",
+		"veh_terminate", "veh_registers"
 	};
 	static const std::vector<std::string> interactive = {
 		"veh_toolbox", "veh_attach", "veh_launch", "veh_terminate", "veh_continue",
@@ -3677,10 +3680,10 @@ static std::string ToolSchemaHandle(const json& definition) {
 	return buffer;
 }
 
-json McpServer::GetToolsList() {
+json McpServer::GetToolsList() const {
 	json exposed = json::array();
-	for (auto& tool : GetAllToolsList()) {
-		if (ToolInProfile(tool.value("name", ""), toolProfile_)) exposed.push_back(std::move(tool));
+	for (const auto& tool : allTools_) {
+		if (ToolInProfile(tool.value("name", ""), toolProfile_)) exposed.push_back(tool);
 	}
 	return exposed;
 }
@@ -3744,11 +3747,11 @@ json McpServer::ToolToolbox(const json& args) {
 			json{{"name", "lite"}, {"eager_tools", ToolProfileNames("lite").size()}},
 			json{{"name", "interactive"}, {"eager_tools", ToolProfileNames("interactive").size()}},
 			json{{"name", "capture"}, {"eager_tools", ToolProfileNames("capture").size()}},
-			json{{"name", "full"}, {"eager_tools", GetAllToolsList().size()}}
+			json{{"name", "full"}, {"eager_tools", allTools_.size()}}
 		})}};
 	}
 
-	const json all = GetAllToolsList();
+	const json& all = allTools_;
 	if (operation == "list") {
 		std::string profile = args.value("profile", "full");
 		if (profile != "lite" && profile != "interactive" && profile != "capture" && profile != "full")
@@ -3792,7 +3795,10 @@ json McpServer::ToolToolbox(const json& args) {
 		bool known = false;
 		json result = DispatchTool(name, args.value("arguments", json::object()), &known);
 		if (!known) return {{"error", "Unknown tool: " + name}};
-		return {{"tool", name}, {"result", std::move(result)}};
+		json wrapped = {{"tool", name}};
+		if (result.is_object() && result.contains("error")) wrapped["error"] = result["error"];
+		wrapped["result"] = std::move(result);
+		return wrapped;
 	}
 	return {{"error", "operation must be list, describe, call, or profiles"}};
 }

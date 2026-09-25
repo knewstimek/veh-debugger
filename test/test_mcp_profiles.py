@@ -26,7 +26,8 @@ def test_default_lite_profile_is_bounded():
     initialized, tools = _inventory()
     names = {tool["name"] for tool in tools}
     assert names == {
-        "veh_toolbox", "veh_launch", "veh_continue", "veh_batch", "veh_terminate",
+        "veh_toolbox", "veh_attach", "veh_launch", "veh_continue", "veh_batch",
+        "veh_terminate", "veh_registers",
     }
     assert _serialized_size(tools) < 8000
     assert len(initialized["instructions"].encode("utf-8")) < 300
@@ -77,3 +78,18 @@ def test_toolbox_describe_handle_and_hidden_call():
         })
         assert called["tool"] == "veh_modules"
         assert "error" in called["result"]
+        assert called["error"] == called["result"]["error"]
+
+
+def test_error_results_set_is_error():
+    with McpClient(executable=_executable()) as client:
+        client.initialize("is-error-test")
+        failed = client.call("tools/call", {
+            "name": "veh_toolbox",
+            "arguments": {"operation": "call", "tool": "veh_modules", "arguments": {}},
+        })["result"]
+        assert failed.get("isError") is True
+        listed = client.call("tools/call", {
+            "name": "veh_toolbox", "arguments": {"operation": "list"},
+        })["result"]
+        assert "isError" not in listed

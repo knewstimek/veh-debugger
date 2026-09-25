@@ -292,7 +292,7 @@ enabled = true
 
 Restart the agent/IDE after configuring to activate.
 
-The default `lite` profile eagerly exposes only `veh_toolbox` plus launch/continue/batch/terminate, reducing the tool-schema cost on each request. Use `veh_toolbox` to search, describe, then call other tools; automation that already knows a hidden tool name can still call it directly. Select `--profile=interactive` for breakpoint/inspection work, `--profile=capture` for VM trace/checkpoint work, or `--profile=full` for the legacy complete inventory.
+The default `lite` profile eagerly exposes only `veh_toolbox` plus launch/attach/continue/batch/terminate/registers, reducing the tool-schema cost on each request. Use `veh_toolbox` to search, describe, then call other tools; automation that already knows a hidden tool name can still call it directly. Select `--profile=interactive` for breakpoint/inspection work, `--profile=capture` for VM trace/checkpoint work, or `--profile=full` for the legacy complete inventory.
 
 **MCP Tools**
 

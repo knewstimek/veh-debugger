@@ -309,7 +309,7 @@ enabled = true
 
 설정 후 에이전트/IDE를 재시작하면 활성화됩니다.
 
-기본 `lite` 프로필은 `veh_toolbox`, launch/continue/batch/terminate만 먼저 노출하여 매 요청의 도구 스키마 비용을 줄입니다. 나머지는 `veh_toolbox`로 검색 → schema 확인 → 호출하며, 이름을 아는 자동화는 숨겨진 도구도 기존처럼 직접 호출할 수 있습니다. BP/inspection 중심은 `--profile=interactive`, VM trace/checkpoint 중심은 `--profile=capture`, 기존 전체 목록은 `--profile=full`을 사용하세요.
+기본 `lite` 프로필은 `veh_toolbox`, launch/attach/continue/batch/terminate/registers만 먼저 노출하여 매 요청의 도구 스키마 비용을 줄입니다. 나머지는 `veh_toolbox`로 검색 → schema 확인 → 호출하며, 이름을 아는 자동화는 숨겨진 도구도 기존처럼 직접 호출할 수 있습니다. BP/inspection 중심은 `--profile=interactive`, VM trace/checkpoint 중심은 `--profile=capture`, 기존 전체 목록은 `--profile=full`을 사용하세요.
 
 **MCP 도구 목록**
 
