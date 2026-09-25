@@ -781,11 +781,84 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 
 	switch (cmd) {
 
-	case IpcCommand::Heartbeat: {
-		// 하트비트 응답 — HeartbeatAck 이벤트 전송
-		SendEvent(static_cast<uint32_t>(IpcEvent::HeartbeatAck));
+	case IpcCommand::SetBreakpoint:
+	case IpcCommand::SetModuleLoadStop:
+	case IpcCommand::RemoveBreakpoint:
+	case IpcCommand::RemoveBreakpointByAddr:
+	case IpcCommand::SetHwBreakpoint:
+	case IpcCommand::RemoveHwBreakpoint:
+		HandleBreakpointCommand(command, payload, payloadSize);
+		break;
+
+	case IpcCommand::Continue:
+	case IpcCommand::StepOver:
+	case IpcCommand::StepInto:
+	case IpcCommand::StepOut:
+	case IpcCommand::TerminateThread:
+	case IpcCommand::SetInstructionPointer:
+	case IpcCommand::Pause:
+		HandleExecutionCommand(command, payload, payloadSize);
+		break;
+
+	case IpcCommand::SetRegister:
+	case IpcCommand::SetRegisters:
+	case IpcCommand::IsThreadStopped:
+	case IpcCommand::FreezeThread:
+	case IpcCommand::GetThreads:
+	case IpcCommand::GetStackTrace:
+	case IpcCommand::GetRegisters:
+	case IpcCommand::GetModules:
+		HandleThreadCommand(command, payload, payloadSize);
+		break;
+
+	case IpcCommand::ReadMemory:
+	case IpcCommand::WriteMemory:
+	case IpcCommand::AllocateMemory:
+	case IpcCommand::FreeMemory:
+	case IpcCommand::ProtectMemory:
+	case IpcCommand::QueryMemoryMap:
+	case IpcCommand::SearchMemory:
+	case IpcCommand::ValueScan:
+	case IpcCommand::ExecuteShellcode:
+		HandleMemoryCommand(command, payload, payloadSize);
+		break;
+
+	case IpcCommand::ResolveSourceLine:
+	case IpcCommand::ResolveFunction:
+	case IpcCommand::EnumLocals:
+	case IpcCommand::Symbolize:
+	case IpcCommand::DisplayType:
+		HandleSymbolCommand(command, payload, payloadSize);
+		break;
+
+	case IpcCommand::TraceCallers:
+	case IpcCommand::TraceRegister:
+	case IpcCommand::TraceMemory:
+	case IpcCommand::ResolveImport:
+	case IpcCommand::TraceCalls:
+	case IpcCommand::TraceBasicBlocks:
+		HandleTraceCommand(command, payload, payloadSize);
+		break;
+
+	case IpcCommand::Heartbeat:
+	case IpcCommand::Detach:
+	case IpcCommand::Terminate:
+	case IpcCommand::Shutdown:
+		HandleLifecycleCommand(command, payload, payloadSize);
+		break;
+
+	default:
+		LOG_WARN("Unknown command: 0x%04X", command);
+		IpcStatus status = IpcStatus::InvalidArgs;
+		SendResponse(command, &status, sizeof(status));
 		break;
 	}
+}
+
+void PipeServer::HandleBreakpointCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize) {
+	auto cmd = static_cast<IpcCommand>(command);
+
+	switch (cmd) {
 
 	case IpcCommand::SetBreakpoint: {
 		if (payloadSize < sizeof(SetBreakpointRequest)) {
@@ -804,7 +877,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		LOG_INFO("SetBreakpoint: addr=0x%llX -> id=%u status=%d", req->address, id, (int)resp.status);
 		break;
 	}
-
 	case IpcCommand::SetModuleLoadStop: {
 		if (payloadSize < sizeof(SetModuleLoadStopRequest)) {
 			SetModuleLoadStopResponse resp{IpcStatus::InvalidArgs};
@@ -826,7 +898,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}
-
 	case IpcCommand::RemoveBreakpoint: {
 		if (payloadSize < sizeof(RemoveBreakpointRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -839,7 +910,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &status, sizeof(status));
 		break;
 	}
-
 	case IpcCommand::RemoveBreakpointByAddr: {
 		if (payloadSize < sizeof(RemoveBreakpointByAddrRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -852,7 +922,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &status, sizeof(status));
 		break;
 	}
-
 	case IpcCommand::SetHwBreakpoint: {
 		if (payloadSize < sizeof(SetHwBreakpointRequest)) {
 			SetHwBreakpointResponse resp{IpcStatus::InvalidArgs, 0, 0};
@@ -888,7 +957,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}
-
 	case IpcCommand::RemoveHwBreakpoint: {
 		if (payloadSize < sizeof(RemoveHwBreakpointRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -905,6 +973,15 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &status, sizeof(status));
 		break;
 	}
+	default:
+		break;
+	}
+}
+
+void PipeServer::HandleExecutionCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize) {
+	auto cmd = static_cast<IpcCommand>(command);
+
+	switch (cmd) {
 
 	case IpcCommand::Continue: {
 		if (payloadSize < sizeof(uint32_t)) {  // backward compat: at least threadId
@@ -962,7 +1039,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, response.data(), static_cast<uint32_t>(response.size()));
 		break;
 	}
-
 	case IpcCommand::StepOver:
 	case IpcCommand::StepInto: {
 		if (payloadSize < sizeof(StepRequest)) {
@@ -982,7 +1058,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &status, sizeof(status));
 		break;
 	}
-
 	case IpcCommand::StepOut: {
 		if (payloadSize < sizeof(StepRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -1001,7 +1076,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &status, sizeof(status));
 		break;
 	}
-
 	case IpcCommand::TerminateThread: {
 		if (payloadSize < sizeof(TerminateThreadRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -1018,7 +1092,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &status, sizeof(status));
 		break;
 	}
-
 	case IpcCommand::SetInstructionPointer: {
 		if (payloadSize < sizeof(SetInstructionPointerRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -1041,6 +1114,31 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &status, sizeof(status));
 		break;
 	}
+	case IpcCommand::Pause: {
+		if (payloadSize < sizeof(PauseRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const PauseRequest*>(payload);
+		if (req->threadId == 0) {
+			ThreadManager::Instance().SuspendAllExcept(GetCurrentThreadId());
+		} else {
+			ThreadManager::Instance().SuspendThread(req->threadId);
+		}
+		IpcStatus status = IpcStatus::Ok;
+		SendResponse(command, &status, sizeof(status));
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+void PipeServer::HandleThreadCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize) {
+	auto cmd = static_cast<IpcCommand>(command);
+
+	switch (cmd) {
 
 	case IpcCommand::SetRegister: {
 		if (payloadSize < sizeof(SetRegisterRequest)) {
@@ -1094,7 +1192,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}
-
 	case IpcCommand::SetRegisters: {
 		SetRegistersResponse resp{IpcStatus::InvalidArgs};
 		if (payloadSize < sizeof(SetRegistersRequest)) {
@@ -1130,7 +1227,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}
-
 	case IpcCommand::IsThreadStopped: {
 		IsThreadStoppedResponse resp{IpcStatus::InvalidArgs, 0};
 		if (payloadSize >= sizeof(IsThreadStoppedRequest)) {
@@ -1141,24 +1237,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}
-
-	case IpcCommand::Pause: {
-		if (payloadSize < sizeof(PauseRequest)) {
-			IpcStatus status = IpcStatus::InvalidArgs;
-			SendResponse(command, &status, sizeof(status));
-			return;
-		}
-		auto* req = reinterpret_cast<const PauseRequest*>(payload);
-		if (req->threadId == 0) {
-			ThreadManager::Instance().SuspendAllExcept(GetCurrentThreadId());
-		} else {
-			ThreadManager::Instance().SuspendThread(req->threadId);
-		}
-		IpcStatus status = IpcStatus::Ok;
-		SendResponse(command, &status, sizeof(status));
-		break;
-	}
-
 	case IpcCommand::FreezeThread: {
 		if (payloadSize < sizeof(FreezeThreadRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -1186,7 +1264,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
 		break;
 	}
-
 	case IpcCommand::GetThreads: {
 		auto threads = ThreadManager::Instance().EnumerateThreads();
 		GetThreadsResponse resp;
@@ -1204,7 +1281,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
 		break;
 	}
-
 	case IpcCommand::GetStackTrace: {
 		if (payloadSize < sizeof(GetStackTraceRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -1242,7 +1318,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
 		break;
 	}
-
 	case IpcCommand::GetRegisters: {
 		if (payloadSize < sizeof(GetRegistersRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -1309,6 +1384,48 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}
+	case IpcCommand::GetModules: {
+		HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, targetPid_);
+		if (snap == INVALID_HANDLE_VALUE) {
+			GetModulesResponse resp{IpcStatus::Error, 0};
+			SendResponse(command, &resp, sizeof(resp));
+			break;
+		}
+		std::vector<ModuleInfo> modules;
+		MODULEENTRY32W me;
+		me.dwSize = sizeof(me);
+		if (Module32FirstW(snap, &me)) {
+			do {
+				ModuleInfo mi = {};
+				mi.baseAddress = reinterpret_cast<uint64_t>(me.modBaseAddr);
+				mi.size = me.modBaseSize;
+				WideCharToMultiByte(CP_UTF8, 0, me.szModule, -1, mi.name, sizeof(mi.name), NULL, NULL);
+				mi.name[sizeof(mi.name) - 1] = '\0';
+				WideCharToMultiByte(CP_UTF8, 0, me.szExePath, -1, mi.path, sizeof(mi.path), NULL, NULL);
+				mi.path[sizeof(mi.path) - 1] = '\0';
+				modules.push_back(mi);
+			} while (Module32NextW(snap, &me));
+		}
+		CloseHandle(snap);
+
+		GetModulesResponse resp;
+		resp.status = IpcStatus::Ok;
+		resp.count = static_cast<uint32_t>(modules.size());
+		std::vector<uint8_t> buf(sizeof(resp) + modules.size() * sizeof(ModuleInfo));
+		memcpy(buf.data(), &resp, sizeof(resp));
+		if (!modules.empty()) memcpy(buf.data() + sizeof(resp), modules.data(), modules.size() * sizeof(ModuleInfo));
+		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+void PipeServer::HandleMemoryCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize) {
+	auto cmd = static_cast<IpcCommand>(command);
+
+	switch (cmd) {
 
 	case IpcCommand::ReadMemory: {
 		if (payloadSize < sizeof(ReadMemoryRequest)) {
@@ -1337,7 +1454,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
 		break;
 	}
-
 	case IpcCommand::WriteMemory: {
 		if (payloadSize < sizeof(WriteMemoryRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -1357,6 +1473,173 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &status, sizeof(status));
 		break;
 	}
+	case IpcCommand::AllocateMemory: {
+		if (payloadSize < sizeof(AllocateMemoryRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const AllocateMemoryRequest*>(payload);
+		AllocateMemoryResponse resp;
+		resp.address = MemoryManager::Instance().Allocate(req->size, req->protection);
+		resp.status = resp.address ? IpcStatus::Ok : IpcStatus::Error;
+		SendResponse(command, &resp, sizeof(resp));
+		break;
+	}
+	case IpcCommand::FreeMemory: {
+		if (payloadSize < sizeof(FreeMemoryRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const FreeMemoryRequest*>(payload);
+		bool ok = MemoryManager::Instance().Free(req->address, req->size);
+		IpcStatus status = ok ? IpcStatus::Ok : IpcStatus::Error;
+		SendResponse(command, &status, sizeof(status));
+		break;
+	}
+	case IpcCommand::ProtectMemory: {
+		ProtectMemoryResponse resp{};
+		if (payloadSize != sizeof(ProtectMemoryRequest)) {
+			resp.status = IpcStatus::InvalidArgs;
+			resp.errorCode = ERROR_INVALID_PARAMETER;
+			SendResponse(command, &resp, sizeof(resp));
+			return;
+		}
+		auto* req = reinterpret_cast<const ProtectMemoryRequest*>(payload);
+		resp.method = req->method;
+		if (req->method > ProtectMemoryMethod::Syscall) {
+			resp.status = IpcStatus::InvalidArgs;
+			resp.errorCode = ERROR_INVALID_PARAMETER;
+			SendResponse(command, &resp, sizeof(resp));
+			return;
+		}
+		bool ok = MemoryManager::Instance().Protect(req->address, req->size, req->protection,
+			req->method, resp.oldProtection, resp.method, resp.errorCode);
+		resp.status = ok ? IpcStatus::Ok : IpcStatus::Error;
+		SendResponse(command, &resp, sizeof(resp));
+		break;
+	}
+	case IpcCommand::QueryMemoryMap: {
+		if (payloadSize < sizeof(QueryMemoryMapRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const QueryMemoryMapRequest*>(payload);
+		const uint32_t maxRegions = (req->maxRegions == 0 || req->maxRegions > 65536) ? 65536 : req->maxRegions;
+		std::vector<MemoryRegionEntry> regions;
+		QueryMemoryMapResponse resp{};
+		resp.nextAddress = MemoryManager::Instance().QueryMap(
+			req->startAddress, req->endAddress, maxRegions, req->includeFree != 0, regions);
+		resp.status = IpcStatus::Ok;
+		resp.count = static_cast<uint32_t>(regions.size());
+		resp.truncated = resp.nextAddress ? 1 : 0;
+		std::vector<uint8_t> buf(sizeof(resp) + regions.size() * sizeof(MemoryRegionEntry));
+		memcpy(buf.data(), &resp, sizeof(resp));
+		if (!regions.empty())
+			memcpy(buf.data() + sizeof(resp), regions.data(), regions.size() * sizeof(MemoryRegionEntry));
+		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
+		break;
+	}
+	case IpcCommand::SearchMemory: {
+		auto* req = reinterpret_cast<const SearchMemoryRequest*>(payload);
+		if (payloadSize < sizeof(SearchMemoryRequest) || req->patternSize == 0 || req->patternSize > 4096
+			|| payloadSize != sizeof(SearchMemoryRequest) + 2ull * req->patternSize
+			|| req->maxResults == 0 || req->maxResults > 100000 || req->alignment > 4096) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		const uint8_t* pattern = payload + sizeof(SearchMemoryRequest);
+		const uint8_t* mask = pattern + req->patternSize;
+		MemoryManager::SearchResult result;
+		const uint64_t payloadStart = reinterpret_cast<uint64_t>(payload);
+		bool ok = MemoryManager::Instance().Search(*req, pattern, mask,
+			payloadStart, payloadStart + payloadSize, result);
+		// The request buffer is freed after this handler; wipe it so a later
+		// search cannot find the stale pattern in freed heap memory.
+		SecureZeroMemory(const_cast<uint8_t*>(payload), payloadSize);
+
+		SearchMemoryResponse resp{};
+		resp.status = ok ? IpcStatus::Ok : IpcStatus::Error;
+		resp.count = static_cast<uint32_t>(result.hits.size());
+		resp.truncated = result.nextAddress ? 1 : 0;
+		resp.regionsScanned = result.regionsScanned;
+		resp.scannedBytes = result.scannedBytes;
+		resp.nextAddress = result.nextAddress;
+		std::vector<uint8_t> buf(sizeof(resp) + result.hits.size() * sizeof(uint64_t));
+		memcpy(buf.data(), &resp, sizeof(resp));
+		if (!result.hits.empty())
+			memcpy(buf.data() + sizeof(resp), result.hits.data(), result.hits.size() * sizeof(uint64_t));
+		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
+		break;
+	}
+	case IpcCommand::ValueScan: {
+		ValueScanResponse resp{};
+		if (payloadSize != sizeof(ValueScanRequest)) {
+			resp.status = IpcStatus::InvalidArgs;
+			resp.failure = ValueScanFailure::InvalidRequest;
+			SendResponse(command, &resp, sizeof(resp));
+			return;
+		}
+		auto* req = reinterpret_cast<const ValueScanRequest*>(payload);
+		if (req->operation > ValueScanOperation::Reset || req->valueType > ValueScanType::F64
+			|| req->compare > ValueScanCompare::DecreasedBy || req->maxResults == 0
+			|| req->maxResults > 1000 || req->alignment > 4096) {
+			resp.status = IpcStatus::InvalidArgs;
+			resp.failure = ValueScanFailure::InvalidRequest;
+			SendResponse(command, &resp, sizeof(resp));
+			return;
+		}
+		std::vector<ValueScanEntry> entries(req->maxResults);
+		const uint64_t payloadStart = reinterpret_cast<uint64_t>(payload);
+		ValueScanner::Instance().Scan(*req, resp, entries.data(),
+			payloadStart, payloadStart + payloadSize);
+		std::vector<uint8_t> buf(sizeof(resp) + static_cast<size_t>(resp.count) * sizeof(ValueScanEntry));
+		memcpy(buf.data(), &resp, sizeof(resp));
+		if (resp.count)
+			memcpy(buf.data() + sizeof(resp), entries.data(), static_cast<size_t>(resp.count) * sizeof(ValueScanEntry));
+		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
+		break;
+	}
+	case IpcCommand::ExecuteShellcode: {
+		if (payloadSize < sizeof(ExecuteShellcodeRequest)) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		auto* req = reinterpret_cast<const ExecuteShellcodeRequest*>(payload);
+		const uint8_t* code = payload + sizeof(ExecuteShellcodeRequest);
+		uint32_t codeSize = payloadSize - sizeof(ExecuteShellcodeRequest);
+		if (codeSize != req->size) {
+			IpcStatus status = IpcStatus::InvalidArgs;
+			SendResponse(command, &status, sizeof(status));
+			return;
+		}
+		ExecuteShellcodeResponse resp = {};
+		bool crashed = false;
+		uint32_t exCode = 0;
+		uint64_t exAddr = 0;
+		bool ok = MemoryManager::Instance().ExecuteShellcode(
+			code, codeSize, req->timeoutMs, resp.allocatedAddress, resp.exitCode,
+			crashed, exCode, exAddr);
+		resp.status = ok ? IpcStatus::Ok : IpcStatus::Error;
+		resp.crashed = crashed ? 1 : 0;
+		resp.exceptionCode = exCode;
+		resp.exceptionAddress = exAddr;
+		SendResponse(command, &resp, sizeof(resp));
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+void PipeServer::HandleSymbolCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize) {
+	auto cmd = static_cast<IpcCommand>(command);
+
+	switch (cmd) {
 
 	case IpcCommand::ResolveSourceLine: {
 		if (payloadSize < sizeof(ResolveSourceLineRequest)) {
@@ -1412,7 +1695,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}
-
 	case IpcCommand::ResolveFunction: {
 		if (payloadSize < sizeof(ResolveFunctionRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -1447,7 +1729,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}
-
 	case IpcCommand::EnumLocals: {
 		if (payloadSize < sizeof(EnumLocalsRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -1473,7 +1754,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, respBuf.data(), static_cast<uint32_t>(respSize));
 		break;
 	}
-
 	case IpcCommand::Symbolize: {
 		auto* req = reinterpret_cast<const SymbolizeRequest*>(payload);
 		if (payloadSize < sizeof(SymbolizeRequest) || req->count == 0 || req->count > kSymbolizeMaxAddresses
@@ -1504,7 +1784,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, respBuf.data(), static_cast<uint32_t>(respBuf.size()));
 		break;
 	}
-
 	case IpcCommand::DisplayType: {
 		if (payloadSize < sizeof(DisplayTypeRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -1526,40 +1805,15 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
 		break;
 	}
-
-	case IpcCommand::GetModules: {
-		HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, targetPid_);
-		if (snap == INVALID_HANDLE_VALUE) {
-			GetModulesResponse resp{IpcStatus::Error, 0};
-			SendResponse(command, &resp, sizeof(resp));
-			break;
-		}
-		std::vector<ModuleInfo> modules;
-		MODULEENTRY32W me;
-		me.dwSize = sizeof(me);
-		if (Module32FirstW(snap, &me)) {
-			do {
-				ModuleInfo mi = {};
-				mi.baseAddress = reinterpret_cast<uint64_t>(me.modBaseAddr);
-				mi.size = me.modBaseSize;
-				WideCharToMultiByte(CP_UTF8, 0, me.szModule, -1, mi.name, sizeof(mi.name), NULL, NULL);
-				mi.name[sizeof(mi.name) - 1] = '\0';
-				WideCharToMultiByte(CP_UTF8, 0, me.szExePath, -1, mi.path, sizeof(mi.path), NULL, NULL);
-				mi.path[sizeof(mi.path) - 1] = '\0';
-				modules.push_back(mi);
-			} while (Module32NextW(snap, &me));
-		}
-		CloseHandle(snap);
-
-		GetModulesResponse resp;
-		resp.status = IpcStatus::Ok;
-		resp.count = static_cast<uint32_t>(modules.size());
-		std::vector<uint8_t> buf(sizeof(resp) + modules.size() * sizeof(ModuleInfo));
-		memcpy(buf.data(), &resp, sizeof(resp));
-		if (!modules.empty()) memcpy(buf.data() + sizeof(resp), modules.data(), modules.size() * sizeof(ModuleInfo));
-		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
+	default:
 		break;
 	}
+}
+
+void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize) {
+	auto cmd = static_cast<IpcCommand>(command);
+
+	switch (cmd) {
 
 	case IpcCommand::TraceCallers: {
 		if (payloadSize < sizeof(TraceCallersRequest)) {
@@ -1622,172 +1876,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		LOG_INFO("TraceCallers: %u hits, %u unique callers", totalHits, resp.uniqueCallers);
 		break;
 	}
-
-	case IpcCommand::AllocateMemory: {
-		if (payloadSize < sizeof(AllocateMemoryRequest)) {
-			IpcStatus status = IpcStatus::InvalidArgs;
-			SendResponse(command, &status, sizeof(status));
-			return;
-		}
-		auto* req = reinterpret_cast<const AllocateMemoryRequest*>(payload);
-		AllocateMemoryResponse resp;
-		resp.address = MemoryManager::Instance().Allocate(req->size, req->protection);
-		resp.status = resp.address ? IpcStatus::Ok : IpcStatus::Error;
-		SendResponse(command, &resp, sizeof(resp));
-		break;
-	}
-
-	case IpcCommand::FreeMemory: {
-		if (payloadSize < sizeof(FreeMemoryRequest)) {
-			IpcStatus status = IpcStatus::InvalidArgs;
-			SendResponse(command, &status, sizeof(status));
-			return;
-		}
-		auto* req = reinterpret_cast<const FreeMemoryRequest*>(payload);
-		bool ok = MemoryManager::Instance().Free(req->address, req->size);
-		IpcStatus status = ok ? IpcStatus::Ok : IpcStatus::Error;
-		SendResponse(command, &status, sizeof(status));
-		break;
-	}
-
-	case IpcCommand::ProtectMemory: {
-		ProtectMemoryResponse resp{};
-		if (payloadSize != sizeof(ProtectMemoryRequest)) {
-			resp.status = IpcStatus::InvalidArgs;
-			resp.errorCode = ERROR_INVALID_PARAMETER;
-			SendResponse(command, &resp, sizeof(resp));
-			return;
-		}
-		auto* req = reinterpret_cast<const ProtectMemoryRequest*>(payload);
-		resp.method = req->method;
-		if (req->method > ProtectMemoryMethod::Syscall) {
-			resp.status = IpcStatus::InvalidArgs;
-			resp.errorCode = ERROR_INVALID_PARAMETER;
-			SendResponse(command, &resp, sizeof(resp));
-			return;
-		}
-		bool ok = MemoryManager::Instance().Protect(req->address, req->size, req->protection,
-			req->method, resp.oldProtection, resp.method, resp.errorCode);
-		resp.status = ok ? IpcStatus::Ok : IpcStatus::Error;
-		SendResponse(command, &resp, sizeof(resp));
-		break;
-	}
-
-	case IpcCommand::QueryMemoryMap: {
-		if (payloadSize < sizeof(QueryMemoryMapRequest)) {
-			IpcStatus status = IpcStatus::InvalidArgs;
-			SendResponse(command, &status, sizeof(status));
-			return;
-		}
-		auto* req = reinterpret_cast<const QueryMemoryMapRequest*>(payload);
-		const uint32_t maxRegions = (req->maxRegions == 0 || req->maxRegions > 65536) ? 65536 : req->maxRegions;
-		std::vector<MemoryRegionEntry> regions;
-		QueryMemoryMapResponse resp{};
-		resp.nextAddress = MemoryManager::Instance().QueryMap(
-			req->startAddress, req->endAddress, maxRegions, req->includeFree != 0, regions);
-		resp.status = IpcStatus::Ok;
-		resp.count = static_cast<uint32_t>(regions.size());
-		resp.truncated = resp.nextAddress ? 1 : 0;
-		std::vector<uint8_t> buf(sizeof(resp) + regions.size() * sizeof(MemoryRegionEntry));
-		memcpy(buf.data(), &resp, sizeof(resp));
-		if (!regions.empty())
-			memcpy(buf.data() + sizeof(resp), regions.data(), regions.size() * sizeof(MemoryRegionEntry));
-		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
-		break;
-	}
-
-	case IpcCommand::SearchMemory: {
-		auto* req = reinterpret_cast<const SearchMemoryRequest*>(payload);
-		if (payloadSize < sizeof(SearchMemoryRequest) || req->patternSize == 0 || req->patternSize > 4096
-			|| payloadSize != sizeof(SearchMemoryRequest) + 2ull * req->patternSize
-			|| req->maxResults == 0 || req->maxResults > 100000 || req->alignment > 4096) {
-			IpcStatus status = IpcStatus::InvalidArgs;
-			SendResponse(command, &status, sizeof(status));
-			return;
-		}
-		const uint8_t* pattern = payload + sizeof(SearchMemoryRequest);
-		const uint8_t* mask = pattern + req->patternSize;
-		MemoryManager::SearchResult result;
-		const uint64_t payloadStart = reinterpret_cast<uint64_t>(payload);
-		bool ok = MemoryManager::Instance().Search(*req, pattern, mask,
-			payloadStart, payloadStart + payloadSize, result);
-		// The request buffer is freed after this handler; wipe it so a later
-		// search cannot find the stale pattern in freed heap memory.
-		SecureZeroMemory(const_cast<uint8_t*>(payload), payloadSize);
-
-		SearchMemoryResponse resp{};
-		resp.status = ok ? IpcStatus::Ok : IpcStatus::Error;
-		resp.count = static_cast<uint32_t>(result.hits.size());
-		resp.truncated = result.nextAddress ? 1 : 0;
-		resp.regionsScanned = result.regionsScanned;
-		resp.scannedBytes = result.scannedBytes;
-		resp.nextAddress = result.nextAddress;
-		std::vector<uint8_t> buf(sizeof(resp) + result.hits.size() * sizeof(uint64_t));
-		memcpy(buf.data(), &resp, sizeof(resp));
-		if (!result.hits.empty())
-			memcpy(buf.data() + sizeof(resp), result.hits.data(), result.hits.size() * sizeof(uint64_t));
-		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
-		break;
-	}
-
-	case IpcCommand::ValueScan: {
-		ValueScanResponse resp{};
-		if (payloadSize != sizeof(ValueScanRequest)) {
-			resp.status = IpcStatus::InvalidArgs;
-			resp.failure = ValueScanFailure::InvalidRequest;
-			SendResponse(command, &resp, sizeof(resp));
-			return;
-		}
-		auto* req = reinterpret_cast<const ValueScanRequest*>(payload);
-		if (req->operation > ValueScanOperation::Reset || req->valueType > ValueScanType::F64
-			|| req->compare > ValueScanCompare::DecreasedBy || req->maxResults == 0
-			|| req->maxResults > 1000 || req->alignment > 4096) {
-			resp.status = IpcStatus::InvalidArgs;
-			resp.failure = ValueScanFailure::InvalidRequest;
-			SendResponse(command, &resp, sizeof(resp));
-			return;
-		}
-		std::vector<ValueScanEntry> entries(req->maxResults);
-		const uint64_t payloadStart = reinterpret_cast<uint64_t>(payload);
-		ValueScanner::Instance().Scan(*req, resp, entries.data(),
-			payloadStart, payloadStart + payloadSize);
-		std::vector<uint8_t> buf(sizeof(resp) + static_cast<size_t>(resp.count) * sizeof(ValueScanEntry));
-		memcpy(buf.data(), &resp, sizeof(resp));
-		if (resp.count)
-			memcpy(buf.data() + sizeof(resp), entries.data(), static_cast<size_t>(resp.count) * sizeof(ValueScanEntry));
-		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
-		break;
-	}
-
-	case IpcCommand::ExecuteShellcode: {
-		if (payloadSize < sizeof(ExecuteShellcodeRequest)) {
-			IpcStatus status = IpcStatus::InvalidArgs;
-			SendResponse(command, &status, sizeof(status));
-			return;
-		}
-		auto* req = reinterpret_cast<const ExecuteShellcodeRequest*>(payload);
-		const uint8_t* code = payload + sizeof(ExecuteShellcodeRequest);
-		uint32_t codeSize = payloadSize - sizeof(ExecuteShellcodeRequest);
-		if (codeSize != req->size) {
-			IpcStatus status = IpcStatus::InvalidArgs;
-			SendResponse(command, &status, sizeof(status));
-			return;
-		}
-		ExecuteShellcodeResponse resp = {};
-		bool crashed = false;
-		uint32_t exCode = 0;
-		uint64_t exAddr = 0;
-		bool ok = MemoryManager::Instance().ExecuteShellcode(
-			code, codeSize, req->timeoutMs, resp.allocatedAddress, resp.exitCode,
-			crashed, exCode, exAddr);
-		resp.status = ok ? IpcStatus::Ok : IpcStatus::Error;
-		resp.crashed = crashed ? 1 : 0;
-		resp.exceptionCode = exCode;
-		resp.exceptionAddress = exAddr;
-		SendResponse(command, &resp, sizeof(resp));
-		break;
-	}
-
 	case IpcCommand::TraceRegister: {
 		if (payloadSize < sizeof(TraceRegisterRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -1834,7 +1922,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}
-
 	case IpcCommand::TraceMemory: {
 		if (payloadSize < sizeof(TraceMemoryRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -1911,7 +1998,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}
-
 	case IpcCommand::ResolveImport: {
 		if (payloadSize < sizeof(ResolveImportRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -2274,7 +2360,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, respBuf.data(), static_cast<uint32_t>(respBuf.size()));
 		break;
 	}
-
 	case IpcCommand::TraceCalls: {
 		if (payloadSize < sizeof(TraceCallsRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -2418,7 +2503,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, respBuf.data(), static_cast<uint32_t>(respBuf.size()));
 		break;
 	}
-
 	case IpcCommand::TraceBasicBlocks: {
 		if (payloadSize < kTraceBasicBlocksRequestV3Size) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -2969,7 +3053,21 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		SendResponse(command, response.data(), static_cast<uint32_t>(response.size()));
 		break;
 	}
+	default:
+		break;
+	}
+}
 
+void PipeServer::HandleLifecycleCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize) {
+	auto cmd = static_cast<IpcCommand>(command);
+
+	switch (cmd) {
+
+	case IpcCommand::Heartbeat: {
+		// 하트비트 응답 — HeartbeatAck 이벤트 전송
+		SendEvent(static_cast<uint32_t>(IpcEvent::HeartbeatAck));
+		break;
+	}
 	case IpcCommand::Detach: {
 		// Detach: 디버깅 상태만 정리하고 파이프 서버는 유지한다.
 		// connected_=false로 내부 커맨드 루프만 탈출 → 외부 루프에서 새 클라이언트 대기
@@ -2987,7 +3085,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		connected_ = false;
 		break;
 	}
-
 	case IpcCommand::Terminate: {
 		// Terminate: 타겟 프로세스 자체를 내부에서 강제 종료한다.
 		// GetCurrentProcess() 의사 핸들은 타겟이 외부 OpenProcess 를 막으려 설정한 DACL 과
@@ -3006,7 +3103,6 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		TerminateProcess(GetCurrentProcess(), exitCode);
 		break;  // 도달하지 않음
 	}
-
 	case IpcCommand::Shutdown: {
 		// Shutdown: 완전 종료. running_=false로 ServerThread 자체가 종료된다.
 		// 프로세스 종료 또는 DLL 언로드 시 사용
@@ -3021,11 +3117,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 		running_ = false;
 		break;
 	}
-
 	default:
-		LOG_WARN("Unknown command: 0x%04X", command);
-		IpcStatus status = IpcStatus::InvalidArgs;
-		SendResponse(command, &status, sizeof(status));
 		break;
 	}
 }
