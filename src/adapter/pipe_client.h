@@ -7,61 +7,40 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
-#include "ipc_protocol.h"
+#include "ipc_transport.h"
 
 namespace veh {
 
-// 이벤트 ID 경계: 0x1000 이상이면 이벤트, 미만이면 명령 응답
-constexpr uint32_t IPC_EVENT_THRESHOLD = 0x1000;
-
-enum class PipeExchangeFailure : uint8_t {
-	None = 0,
-	NotRunning,
-	SendFailed,
-	HeaderReadFailed,
-	PayloadTooLarge,
-	PayloadReadFailed,
-	WaitTimeout,
-	ReaderAborted,
-};
-
-struct PipeExchangeDiagnostics {
-	PipeExchangeFailure failure = PipeExchangeFailure::None;
-	uint32_t advertisedPayloadSize = 0;
-	DWORD systemError = ERROR_SUCCESS;
-};
-
-class PipeClient {
+class PipeClient : public IIpcTransport {
 public:
-	~PipeClient() { Disconnect(); }
+	~PipeClient() override { Disconnect(); }
 
 	// Connect to VEH DLL's named pipe (overlapped)
-	bool Connect(uint32_t targetPid, int timeoutMs = 7000);
-	void Disconnect();
-	bool IsConnected() const { return connected_; }
+	bool Connect(uint32_t targetPid, int timeoutMs = 7000) override;
+	void Disconnect() override;
+	bool IsConnected() const override { return connected_; }
 
 	// Send command (fire-and-forget)
-	bool SendCommand(IpcCommand cmd, const void* payload = nullptr, uint32_t payloadSize = 0);
+	bool SendCommand(IpcCommand cmd, const void* payload = nullptr, uint32_t payloadSize = 0) override;
 
 	// Send command and receive response (blocks until response or timeout)
 	bool SendAndReceive(IpcCommand cmd,
 		const void* payload, uint32_t payloadSize,
 		std::vector<uint8_t>& response, int timeoutMs = 3000,
-		PipeExchangeDiagnostics* diagnostics = nullptr);
+		PipeExchangeDiagnostics* diagnostics = nullptr) override;
 
 	// Connect 직후, StartEventListener 전에 호출. DLL이 클라 연결 후 보내는 Ready
 	// 이벤트를 동기로 수신해 VEH 핸들러 설치 완료를 보장한다(attach race 방지).
 	// 성공 시 true, 타임아웃/오류 시 false (호출 측은 false여도 진행 가능 - 보수적).
-	bool WaitForReady(int timeoutMs = 3000);
+	bool WaitForReady(int timeoutMs = 3000) override;
 
 	// Start event listener thread (single reader thread)
-	using EventCallback = std::function<void(uint32_t eventId, const uint8_t* payload, uint32_t size)>;
-	void StartEventListener(EventCallback cb);
-	void StopEventListener();
+	void StartEventListener(EventCallback cb) override;
+	void StopEventListener() override;
 
 	// Heartbeat: 10초 간격 ping, 30초 무응답 시 연결 끊김 판정
-	void StartHeartbeat();
-	void StopHeartbeat();
+	void StartHeartbeat() override;
+	void StopHeartbeat() override;
 
 private:
 	void ReaderThread();

@@ -7,7 +7,8 @@
 #include <condition_variable>
 #include <functional>
 #include <thread>
-#include "adapter/pipe_client.h"
+#include <memory>
+#include "adapter/ipc_transport.h"
 #include "adapter/injector.h"
 #include "adapter/disassembler.h"
 #include "common/ipc_protocol.h"
@@ -447,7 +448,7 @@ public:
 	void StopProcessMonitor();
 
 	// Direct access (for advanced use / backward compat)
-	PipeClient& GetPipeClient() { return pipeClient_; }
+	IIpcTransport& GetPipeClient() { return *ipcTransport_; }
 	HANDLE GetTargetProcess() const { return targetProcess_; }
 	IDisassembler* GetDisassembler() { return disassembler_.get(); }
 
@@ -468,7 +469,7 @@ private:
 	std::string GetDllPath(uint32_t pid);
 	std::string GetDllPathForExe(const std::string& exePath);
 
-	PipeClient pipeClient_;
+	std::unique_ptr<IIpcTransport> ipcTransport_;
 	std::unique_ptr<IDisassembler> disassembler_ = CreateDisassembler();
 
 	// Session state

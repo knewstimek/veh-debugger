@@ -1,4 +1,5 @@
 #include "debug_session.h"
+#include "adapter/pipe_client.h"
 #include "common/logger.h"
 #include <sstream>
 #include <algorithm>
@@ -65,15 +66,15 @@ static bool IsPipeAvailable(uint32_t pid) {
 
 // --- DebugSession lifecycle ---
 
-DebugSession::DebugSession() {}
+DebugSession::DebugSession() : ipcTransport_(std::make_unique<PipeClient>()) {}
 
 DebugSession::~DebugSession() {
 	StopProcessMonitor();
 	if (attached_) {
 		try {
-			pipeClient_.SendCommand(IpcCommand::Detach);
+			ipcTransport_->SendCommand(IpcCommand::Detach);
 		} catch (...) {}
-		pipeClient_.Disconnect();
+		ipcTransport_->Disconnect();
 		attached_ = false;
 	}
 	if (launchedByUs_ && targetProcess_) {
@@ -142,7 +143,7 @@ bool DebugSession::Attach(uint32_t pid) {
 		}
 	}
 
-	if (!pipeClient_.Connect(pid, 3500)) {
+	if (!ipcTransport_->Connect(pid, 3500)) {
 		LOG_ERROR("Pipe connection failed (pid=%u)", pid);
 		lastAttachError_ = "Injected into PID " + std::to_string(pid) + " but the IPC pipe did not come up within 3.5s. "
 			"The DLL may have failed to initialize inside the target.";
@@ -243,7 +244,7 @@ DebugSession::LaunchResult DebugSession::Launch(const LaunchOptions& opts) {
 	}
 	launchedByUs_ = true;
 
-	if (!pipeClient_.Connect(lr.pid, 3500)) {
+	if (!ipcTransport_->Connect(lr.pid, 3500)) {
 		if (targetProcess_) {
 			TerminateProcess(targetProcess_, 1);
 			CloseHandle(targetProcess_);
@@ -282,12 +283,12 @@ bool DebugSession::Detach() {
 	ResumeMainThread();
 	StopProcessMonitor();
 
-	pipeClient_.StopHeartbeat();
-	pipeClient_.StopEventListener();
+	ipcTransport_->StopHeartbeat();
+	ipcTransport_->StopEventListener();
 	try {
-		pipeClient_.SendCommand(IpcCommand::Detach);
+		ipcTransport_->SendCommand(IpcCommand::Detach);
 	} catch (...) {}
-	pipeClient_.Disconnect();
+	ipcTransport_->Disconnect();
 
 	{
 		std::lock_guard<std::mutex> lock(bpMutex_);
@@ -314,7 +315,7 @@ bool DebugSession::Terminate(uint32_t exitCode) {
 	//    외부 OpenProcess(TERMINATE) 를 막는 자기보호 타겟도 확실히 죽는다.
 	//    프로세스가 곧 사라지므로 응답을 기다리지 않는 fire-and-forget.
 	TerminateRequest req{ exitCode };
-	try { pipeClient_.SendCommand(IpcCommand::Terminate, &req, sizeof(req)); } catch (...) {}
+	try { ipcTransport_->SendCommand(IpcCommand::Terminate, &req, sizeof(req)); } catch (...) {}
 
 	// 2) 우리가 띄운 프로세스면 TERMINATE 핸들을 이미 쥐고 있으니 백업으로 직접 종료(1 실패 대비).
 	if (launchedByUs_ && targetProcess_) {
@@ -324,9 +325,9 @@ bool DebugSession::Terminate(uint32_t exitCode) {
 	// 3) 세션 정리. Detach 명령은 보내지 않는다 -- 타겟이 사라지는 중이라 파이프도 곧 끊긴다.
 	attached_ = false;
 	StopProcessMonitor();
-	pipeClient_.StopHeartbeat();
-	pipeClient_.StopEventListener();
-	pipeClient_.Disconnect();
+	ipcTransport_->StopHeartbeat();
+	ipcTransport_->StopEventListener();
+	ipcTransport_->Disconnect();
 	{
 		std::lock_guard<std::mutex> lock(bpMutex_);
 		swBreakpoints_.clear();
@@ -358,7 +359,7 @@ BpResult DebugSession::SetBreakpoint(uint64_t address) {
 	req.address = address;
 
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::SetBreakpoint, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::SetBreakpoint, &req, sizeof(req), respData))
 		return result;
 
 	if (respData.size() >= sizeof(SetBreakpointResponse)) {
@@ -377,7 +378,7 @@ bool DebugSession::SetModuleLoadStop(const std::string& name, int action) {
 	strncpy_s(req.name, sizeof(req.name), name.c_str(), _TRUNCATE);
 
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::SetModuleLoadStop, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::SetModuleLoadStop, &req, sizeof(req), respData))
 		return false;
 
 	if (respData.size() >= sizeof(SetModuleLoadStopResponse)) {
@@ -391,7 +392,7 @@ bool DebugSession::RemoveBreakpoint(uint32_t id) {
 	RemoveBreakpointRequest req{};
 	req.id = id;
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::RemoveBreakpoint, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::RemoveBreakpoint, &req, sizeof(req), respData))
 		return false;
 
 	if (respData.size() >= sizeof(IpcStatus)) {
@@ -419,7 +420,7 @@ HwBpResult DebugSession::SetHwBreakpoint(uint64_t address, uint8_t type, uint8_t
 	req.size = size;
 
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::SetHwBreakpoint, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::SetHwBreakpoint, &req, sizeof(req), respData))
 		return result;
 
 	if (respData.size() >= sizeof(SetHwBreakpointResponse)) {
@@ -437,7 +438,7 @@ bool DebugSession::RemoveHwBreakpoint(uint32_t id) {
 	RemoveHwBreakpointRequest req{};
 	req.id = id;
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::RemoveHwBreakpoint, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::RemoveHwBreakpoint, &req, sizeof(req), respData))
 		return false;
 
 	if (respData.size() >= sizeof(IpcStatus)) {
@@ -457,7 +458,7 @@ bool DebugSession::Continue(uint32_t threadId, bool passException) {
 	req.wantDetails = 0;
 	// Keep this path fire-and-forget: exception auto-continue can run on the pipe
 	// reader thread, which cannot synchronously wait for a response it must read.
-	return pipeClient_.SendCommand(IpcCommand::Continue, &req, sizeof(req));
+	return ipcTransport_->SendCommand(IpcCommand::Continue, &req, sizeof(req));
 }
 
 ContinueResult DebugSession::ContinueWithDetails(uint32_t threadId, bool passException) {
@@ -468,7 +469,7 @@ ContinueResult DebugSession::ContinueWithDetails(uint32_t threadId, bool passExc
 	req.passException = passException ? 1 : 0;
 	req.wantDetails = 1;
 	std::vector<uint8_t> response;
-	if (!pipeClient_.SendAndReceive(IpcCommand::Continue, &req, sizeof(req), response)) {
+	if (!ipcTransport_->SendAndReceive(IpcCommand::Continue, &req, sizeof(req), response)) {
 		return result;
 	}
 	if (response.size() < sizeof(IpcStatus)) return result;
@@ -514,7 +515,7 @@ bool DebugSession::StepIn(uint32_t threadId) {
 	StepRequest req{};
 	req.threadId = threadId;
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::StepInto, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::StepInto, &req, sizeof(req), respData))
 		return false;
 	if (respData.size() >= sizeof(IpcStatus)) {
 		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
@@ -527,7 +528,7 @@ bool DebugSession::StepOver(uint32_t threadId) {
 	StepRequest req{};
 	req.threadId = threadId;
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::StepOver, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::StepOver, &req, sizeof(req), respData))
 		return false;
 	if (respData.size() >= sizeof(IpcStatus)) {
 		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
@@ -540,7 +541,7 @@ bool DebugSession::StepOut(uint32_t threadId) {
 	StepRequest req{};
 	req.threadId = threadId;
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::StepOut, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::StepOut, &req, sizeof(req), respData))
 		return false;
 	if (respData.size() >= sizeof(IpcStatus)) {
 		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
@@ -553,7 +554,7 @@ bool DebugSession::Pause(uint32_t threadId) {
 	PauseRequest req{};
 	req.threadId = threadId;
 	std::vector<uint8_t> respData;
-	return pipeClient_.SendAndReceive(IpcCommand::Pause, &req, sizeof(req), respData);
+	return ipcTransport_->SendAndReceive(IpcCommand::Pause, &req, sizeof(req), respData);
 }
 
 uint32_t DebugSession::ResumeMainThread(uint32_t requestedThreadId) {
@@ -678,7 +679,7 @@ bool DebugSession::FreezeThread(FreezeOp op, uint32_t threadId, std::vector<uint
 	req.op = op;
 	std::vector<uint8_t> respData;
 	frozen.clear();
-	if (!pipeClient_.SendAndReceive(IpcCommand::FreezeThread, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::FreezeThread, &req, sizeof(req), respData))
 		return false;
 	if (respData.size() < sizeof(FreezeThreadResponse)) return false;
 	auto* resp = reinterpret_cast<const FreezeThreadResponse*>(respData.data());
@@ -692,7 +693,7 @@ bool DebugSession::FreezeThread(FreezeOp op, uint32_t threadId, std::vector<uint
 std::vector<ThreadEntry> DebugSession::GetThreads() {
 	std::vector<ThreadEntry> result;
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::GetThreads, nullptr, 0, respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::GetThreads, nullptr, 0, respData))
 		return result;
 
 	if (respData.size() < sizeof(GetThreadsResponse)) return result;
@@ -720,7 +721,7 @@ std::vector<StackFrame> DebugSession::GetStackTrace(uint32_t threadId, uint32_t 
 	req.maxFrames = maxFrames;
 
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::GetStackTrace, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::GetStackTrace, &req, sizeof(req), respData))
 		return result;
 
 	if (respData.size() < sizeof(GetStackTraceResponse)) return result;
@@ -753,7 +754,7 @@ std::optional<RegisterSet> DebugSession::GetRegisters(uint32_t threadId) {
 	req.threadId = threadId;
 
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::GetRegisters, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::GetRegisters, &req, sizeof(req), respData))
 		return std::nullopt;
 
 	if (respData.size() < sizeof(GetRegistersResponse)) return std::nullopt;
@@ -770,7 +771,7 @@ bool DebugSession::SetRegister(uint32_t threadId, uint32_t regIndex, uint64_t va
 	req.value = value;
 
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::SetRegister, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::SetRegister, &req, sizeof(req), respData))
 		return false;
 	if (respData.size() >= sizeof(SetRegisterResponse)) {
 		auto* resp = reinterpret_cast<const SetRegisterResponse*>(respData.data());
@@ -784,7 +785,7 @@ bool DebugSession::SetRegisters(uint32_t threadId, const RegisterSet& regs) {
 	req.threadId = threadId;
 	req.regs = regs;
 	std::vector<uint8_t> response;
-	if (!pipeClient_.SendAndReceive(IpcCommand::SetRegisters, &req, sizeof(req), response)) return false;
+	if (!ipcTransport_->SendAndReceive(IpcCommand::SetRegisters, &req, sizeof(req), response)) return false;
 	if (response.size() < sizeof(SetRegistersResponse)) return false;
 	return reinterpret_cast<const SetRegistersResponse*>(response.data())->status == IpcStatus::Ok;
 }
@@ -792,7 +793,7 @@ bool DebugSession::SetRegisters(uint32_t threadId, const RegisterSet& regs) {
 bool DebugSession::IsThreadStopped(uint32_t threadId) {
 	IsThreadStoppedRequest req{threadId};
 	std::vector<uint8_t> response;
-	if (!pipeClient_.SendAndReceive(IpcCommand::IsThreadStopped, &req, sizeof(req), response)) return false;
+	if (!ipcTransport_->SendAndReceive(IpcCommand::IsThreadStopped, &req, sizeof(req), response)) return false;
 	if (response.size() < sizeof(IsThreadStoppedResponse)) return false;
 	auto* result = reinterpret_cast<const IsThreadStoppedResponse*>(response.data());
 	return result->status == IpcStatus::Ok && result->stopped != 0;
@@ -801,7 +802,7 @@ bool DebugSession::IsThreadStopped(uint32_t threadId) {
 std::vector<ModuleEntry> DebugSession::GetModules() {
 	std::vector<ModuleEntry> result;
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::GetModules, nullptr, 0, respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::GetModules, nullptr, 0, respData))
 		return result;
 
 	if (respData.size() < sizeof(GetModulesResponse)) return result;
@@ -831,7 +832,7 @@ std::vector<SymbolizeEntry> DebugSession::Symbolize(const std::vector<uint64_t>&
 
 	std::vector<uint8_t> respData;
 	// The first lookup in a module may load its PDB.
-	if (!pipeClient_.SendAndReceive(IpcCommand::Symbolize, payload.data(),
+	if (!ipcTransport_->SendAndReceive(IpcCommand::Symbolize, payload.data(),
 			static_cast<uint32_t>(payload.size()), respData, 30000))
 		return result;
 	if (respData.size() < sizeof(SymbolizeResponse)) return result;
@@ -849,7 +850,7 @@ bool DebugSession::DisplayType(const DisplayTypeRequest& request, DisplayTypeRes
 	members.clear();
 	std::vector<uint8_t> respData;
 	// The first lookup in a module may load its PDB.
-	if (!pipeClient_.SendAndReceive(IpcCommand::DisplayType, &request, sizeof(request), respData, 30000))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::DisplayType, &request, sizeof(request), respData, 30000))
 		return false;
 	if (respData.size() < sizeof(DisplayTypeResponse)) return false;
 	memcpy(&header, respData.data(), sizeof(header));
@@ -880,7 +881,7 @@ std::vector<LocalVarEntry> DebugSession::EnumLocals(uint32_t threadId, uint64_t 
 	req.frameBase = frameBase;
 
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::EnumLocals, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::EnumLocals, &req, sizeof(req), respData))
 		return result;
 
 	if (respData.size() < sizeof(EnumLocalsResponse)) return result;
@@ -923,7 +924,7 @@ std::vector<uint8_t> DebugSession::ReadMemory(uint64_t address, uint32_t size) {
 	req.size = size;
 
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::ReadMemory, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::ReadMemory, &req, sizeof(req), respData))
 		return {};
 
 	if (respData.size() < sizeof(IpcStatus)) return {};
@@ -945,7 +946,7 @@ DebugSession::MemoryMapResult DebugSession::QueryMemoryMap(uint64_t start, uint6
 
 	MemoryMapResult result;
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::QueryMemoryMap, &req, sizeof(req), respData, 10000))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::QueryMemoryMap, &req, sizeof(req), respData, 10000))
 		return result;
 	if (respData.size() < sizeof(QueryMemoryMapResponse)) return result;
 	auto* resp = reinterpret_cast<const QueryMemoryMapResponse*>(respData.data());
@@ -971,7 +972,7 @@ DebugSession::MemorySearchResult DebugSession::SearchMemory(const SearchMemoryRe
 	memcpy(payload.data() + sizeof(req) + pattern.size(), mask.data(), mask.size());
 
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::SearchMemory, payload.data(),
+	if (!ipcTransport_->SendAndReceive(IpcCommand::SearchMemory, payload.data(),
 			static_cast<uint32_t>(payload.size()), respData, 120000))
 		return result;
 	if (respData.size() < sizeof(SearchMemoryResponse)) return result;
@@ -991,7 +992,7 @@ DebugSession::MemorySearchResult DebugSession::SearchMemory(const SearchMemoryRe
 DebugSession::ValueScanResult DebugSession::ValueScan(const ValueScanRequest& request) {
 	ValueScanResult result;
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::ValueScan, &request, sizeof(request), respData, 120000))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::ValueScan, &request, sizeof(request), respData, 120000))
 		return result;
 	if (respData.size() < sizeof(ValueScanResponse)) return result;
 	const auto* resp = reinterpret_cast<const ValueScanResponse*>(respData.data());
@@ -1016,7 +1017,7 @@ bool DebugSession::WriteMemory(uint64_t address, const uint8_t* data, uint32_t s
 	memcpy(payload.data() + sizeof(WriteMemoryRequest), data, size);
 
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::WriteMemory, payload.data(),
+	if (!ipcTransport_->SendAndReceive(IpcCommand::WriteMemory, payload.data(),
 	                                 static_cast<uint32_t>(payload.size()), respData))
 		return false;
 
@@ -1033,7 +1034,7 @@ uint64_t DebugSession::AllocateMemory(uint32_t size, uint32_t protection) {
 	req.protection = protection;
 
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::AllocateMemory, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::AllocateMemory, &req, sizeof(req), respData))
 		return 0;
 	if (respData.size() < sizeof(AllocateMemoryResponse)) return 0;
 
@@ -1048,7 +1049,7 @@ bool DebugSession::FreeMemory(uint64_t address) {
 	req.size = 0;
 
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::FreeMemory, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::FreeMemory, &req, sizeof(req), respData))
 		return false;
 	if (respData.size() >= sizeof(IpcStatus)) {
 		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
@@ -1068,7 +1069,7 @@ DebugSession::ProtectMemoryResult DebugSession::ProtectMemory(uint64_t address, 
 	ProtectMemoryResult result;
 	result.method = method;
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::ProtectMemory, &req, sizeof(req), respData))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::ProtectMemory, &req, sizeof(req), respData))
 		return result;
 	if (respData.size() < sizeof(ProtectMemoryResponse)) return result;
 
@@ -1090,7 +1091,7 @@ ShellcodeResult DebugSession::ExecuteShellcode(const uint8_t* code, uint32_t siz
 	memcpy(payload.data() + sizeof(ExecuteShellcodeRequest), code, size);
 
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::ExecuteShellcode, payload.data(),
+	if (!ipcTransport_->SendAndReceive(IpcCommand::ExecuteShellcode, payload.data(),
 	                                 static_cast<uint32_t>(payload.size()), respData))
 		return result;
 	if (respData.size() < sizeof(ExecuteShellcodeResponse)) return result;
@@ -1363,7 +1364,7 @@ TraceResult DebugSession::TraceCallers(uint64_t address, uint32_t durationSec) {
 	ResumeMainThread();
 	ContinueRequest contReq = {};
 	contReq.threadId = 0;
-	pipeClient_.SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+	ipcTransport_->SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
 
 	TraceCallersRequest req{};
 	req.address = address;
@@ -1371,15 +1372,15 @@ TraceResult DebugSession::TraceCallers(uint64_t address, uint32_t durationSec) {
 
 	std::vector<uint8_t> respData;
 	int timeoutMs = (durationSec + 10) * 1000;
-	if (!pipeClient_.SendAndReceive(IpcCommand::TraceCallers, &req, sizeof(req), respData, timeoutMs)) {
+	if (!ipcTransport_->SendAndReceive(IpcCommand::TraceCallers, &req, sizeof(req), respData, timeoutMs)) {
 		PauseRequest pauseReq{}; pauseReq.threadId = 0;
-		pipeClient_.SendCommand(IpcCommand::Pause, &pauseReq, sizeof(pauseReq));
+		ipcTransport_->SendCommand(IpcCommand::Pause, &pauseReq, sizeof(pauseReq));
 		return result;
 	}
 
 	// Auto-pause after collection
 	PauseRequest pauseReq{}; pauseReq.threadId = 0;
-	pipeClient_.SendCommand(IpcCommand::Pause, &pauseReq, sizeof(pauseReq));
+	ipcTransport_->SendCommand(IpcCommand::Pause, &pauseReq, sizeof(pauseReq));
 
 	// Drain stale stop events
 	{
@@ -1420,7 +1421,7 @@ DebugSession::TraceRegResult DebugSession::TraceRegister(uint32_t threadId, uint
 
 	int timeoutMs = static_cast<int>(maxSteps) * 10 + 10000;
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::TraceRegister, &req, sizeof(req), respData, timeoutMs)) {
+	if (!ipcTransport_->SendAndReceive(IpcCommand::TraceRegister, &req, sizeof(req), respData, timeoutMs)) {
 		return result;
 	}
 	if (respData.size() < sizeof(TraceRegisterResponse)) return result;
@@ -1443,7 +1444,7 @@ DebugSession::TraceMemResult DebugSession::TraceMemoryWrite(uint64_t address, ui
 
 	int ipcTimeout = static_cast<int>(timeoutMs) + 10000;
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::TraceMemory, &req, sizeof(req), respData, ipcTimeout)) {
+	if (!ipcTransport_->SendAndReceive(IpcCommand::TraceMemory, &req, sizeof(req), respData, ipcTimeout)) {
 		return result;
 	}
 	if (respData.size() < sizeof(TraceMemoryResponse)) return result;
@@ -1486,7 +1487,7 @@ std::vector<DebugSession::ImportEntry> DebugSession::ResolveImports(
 
 	int timeoutMs = static_cast<int>(thunks.size()) * maxStepsPerThunk / 10 + 30000;
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::ResolveImport, payload.data(),
+	if (!ipcTransport_->SendAndReceive(IpcCommand::ResolveImport, payload.data(),
 	                                 static_cast<uint32_t>(payload.size()), respData, timeoutMs)) {
 		return result;
 	}
@@ -1540,7 +1541,7 @@ DebugSession::TraceCallsResult DebugSession::TraceCalls(
 
 	int timeoutMs = static_cast<int>(durationMs) + 30000;
 	std::vector<uint8_t> respData;
-	if (!pipeClient_.SendAndReceive(IpcCommand::TraceCalls, payload.data(),
+	if (!ipcTransport_->SendAndReceive(IpcCommand::TraceCalls, payload.data(),
 	                                static_cast<uint32_t>(payload.size()), respData, timeoutMs))
 		return result;
 
@@ -1646,7 +1647,7 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 
 	std::vector<uint8_t> data;
 	PipeExchangeDiagnostics exchangeDiagnostics;
-	const bool received = pipeClient_.SendAndReceive(IpcCommand::TraceBasicBlocks, &req, sizeof(req), data,
+	const bool received = ipcTransport_->SendAndReceive(IpcCommand::TraceBasicBlocks, &req, sizeof(req), data,
 		static_cast<int>(timeoutMs) + 15000, &exchangeDiagnostics);
 	result.controlResponseReceived = received;
 	result.controlResponseBytes = static_cast<uint32_t>(std::min<size_t>(data.size(), UINT32_MAX));
@@ -1854,7 +1855,7 @@ uint64_t DebugSession::ResolveSourceLine(const std::string& file, uint32_t line)
 	req.line = line;
 
 	std::vector<uint8_t> resp;
-	if (!pipeClient_.SendAndReceive(IpcCommand::ResolveSourceLine, &req, sizeof(req), resp))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::ResolveSourceLine, &req, sizeof(req), resp))
 		return 0;
 	if (resp.size() < sizeof(ResolveSourceLineResponse)) return 0;
 	auto* resolved = reinterpret_cast<const ResolveSourceLineResponse*>(resp.data());
@@ -1867,7 +1868,7 @@ uint64_t DebugSession::ResolveFunction(const std::string& name) {
 	strncpy_s(req.functionName, name.c_str(), sizeof(req.functionName) - 1);
 
 	std::vector<uint8_t> resp;
-	if (!pipeClient_.SendAndReceive(IpcCommand::ResolveFunction, &req, sizeof(req), resp))
+	if (!ipcTransport_->SendAndReceive(IpcCommand::ResolveFunction, &req, sizeof(req), resp))
 		return 0;
 	if (resp.size() < sizeof(ResolveFunctionResponse)) return 0;
 	auto* resolved = reinterpret_cast<const ResolveFunctionResponse*>(resp.data());
@@ -1878,10 +1879,10 @@ uint64_t DebugSession::ResolveFunction(const std::string& name) {
 // --- IPC event handling ---
 
 void DebugSession::SetEventCallback(EventCallback cb) {
-	pipeClient_.StartEventListener([this, cb](uint32_t eventId, const uint8_t* payload, uint32_t size) {
+	ipcTransport_->StartEventListener([this, cb](uint32_t eventId, const uint8_t* payload, uint32_t size) {
 		if (cb) cb(eventId, payload, size);
 	});
-	pipeClient_.StartHeartbeat();
+	ipcTransport_->StartHeartbeat();
 }
 
 // --- Process monitor ---
@@ -1917,9 +1918,9 @@ void DebugSession::StartProcessMonitor() {
 			SignalStop("exit", 0, 0, 0);
 
 			// Pipe cleanup
-			pipeClient_.StopHeartbeat();
-			pipeClient_.StopEventListener();
-			pipeClient_.Disconnect();
+			ipcTransport_->StopHeartbeat();
+			ipcTransport_->StopEventListener();
+			ipcTransport_->Disconnect();
 
 			{
 				std::lock_guard<std::mutex> lock(bpMutex_);
