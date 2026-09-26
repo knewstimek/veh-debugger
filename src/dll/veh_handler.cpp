@@ -653,6 +653,8 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
 	tb.pendingDependencyMask = 0;
 	tb.pendingWritesFlags = 0;
 	if (!instruction || !ctx) return;
+	if (tb.dependencySourceCount && (instruction->unsupportedReads || instruction->unsupportedWrites))
+		tb.dependencyIncomplete = true;
 	if (tb.collectMemoryWrites || tb.collectMemoryEvents)
 		tb.unsupportedMemoryWrites += instruction->unsupportedWrites;
 	if (tb.collectMemoryReads || tb.collectMemoryEvents)

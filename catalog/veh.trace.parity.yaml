@@ -17,7 +17,7 @@ execution:
     - {id: python.version, kind: executable, ref: py, requirement: required, argv: [-3, --version]}
     - {id: x64.mcp, kind: file, ref: build/bin/Release/veh-mcp-server.exe, requirement: required}
     - {id: x86.mcp, kind: file, ref: build32/bin/Release/veh-mcp-server.exe, requirement: required}
-inputs: [tools/run_trace_parity.py, test/test_trace_basic_blocks.py, test/mcp_test_client.py, build/bin/Release/**, build32/bin/Release/**]
+inputs: [tools/run_trace_parity.py, tools/run_tests.py, tools/read_trace_event_stream.py, test/test_trace_basic_blocks.py, test/test_trace_memory_access.py, test/build_paths.py, test/mcp_test_client.py, build/bin/Release/**, build32/bin/Release/**]
 checks: [veh.trace.direct-batch-action-parity, veh.trace.x64-x86-parity]
 docs: [docs/DEVELOPMENT_TOOLS.md, test/TEST_GUIDE.md]
 cache_policy: disabled

@@ -147,8 +147,11 @@ static uint8_t DecodeTraceInstruction(const ZydisDecoder& decoder, ZydisMachineM
 			if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER) {
 				uint8_t reg = BasicTraceRegisterIndex(machineMode, operand.reg.value);
 				if (reg < 16) {
-					if (operand.actions & ZYDIS_OPERAND_ACTION_READ) meta.readRegisterMask |= 1u << reg;
-					if (operand.actions & ZYDIS_OPERAND_ACTION_WRITE) meta.writeRegisterMask |= 1u << reg;
+					if (operand.actions & ZYDIS_OPERAND_ACTION_MASK_READ) meta.readRegisterMask |= 1u << reg;
+					if (operand.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) meta.writeRegisterMask |= 1u << reg;
+					// Dependency tracking is conservative: a conditional destination
+					// may retain its old value, even if its new value compares equal.
+					if (operand.actions & ZYDIS_OPERAND_ACTION_CONDWRITE) meta.readRegisterMask |= 1u << reg;
 				}
 				continue;
 			}
@@ -169,10 +172,38 @@ static uint8_t DecodeTraceInstruction(const ZydisDecoder& decoder, ZydisMachineM
 			// nor access memory. Treating NOP [reg] as a read creates a false
 			// unsupported access when the decorative register value is unmapped.
 			if (decoded.mnemonic == ZYDIS_MNEMONIC_NOP) continue;
-			bool readable = (operand.actions & ZYDIS_OPERAND_ACTION_READ) != 0;
-			bool writable = (operand.actions & ZYDIS_OPERAND_ACTION_WRITE) != 0;
+			bool readable = (operand.actions & ZYDIS_OPERAND_ACTION_MASK_READ) != 0;
+			bool writable = (operand.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) != 0;
+			// CMPXCHG writes the destination on both outcomes: the source on
+			// success, or the original destination on failure. Zydis describes
+			// this as CONDWRITE, so WRITE alone silently loses its writeback.
+			const bool compareExchange = decoded.mnemonic == ZYDIS_MNEMONIC_CMPXCHG ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_CMPXCHG8B ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_CMPXCHG16B;
+			if ((operand.actions & ZYDIS_OPERAND_ACTION_CONDWRITE) && !compareExchange) {
+				// Masked/conditional stores need per-lane execution metadata; do
+				// not invent a full-operand write when the instruction may skip it.
+				meta.unsupportedWrites++;
+				writable = false;
+			}
+			if ((operand.actions & ZYDIS_OPERAND_ACTION_CONDREAD) &&
+				decoded.meta.category != ZYDIS_CATEGORY_CMOV) {
+				meta.unsupportedReads++;
+				readable = false;
+			}
+			// CMOV loads a memory source regardless of the condition, then
+			// conditionally assigns the register. Other conditional reads need
+			// execution metadata before they can be reported as observations.
 			if (!readable && !writable) continue;
-			bool unsupported = repeated || operand.size == 0 ||
+			const bool maskedMemory = decoded.mnemonic == ZYDIS_MNEMONIC_MASKMOVQ ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_MASKMOVDQU ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_VMASKMOVDQU ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_VMASKMOVPS ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_VMASKMOVPD ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_VPMASKMOVD ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_VPMASKMOVQ ||
+				(decoded.avx.mask.reg != ZYDIS_REGISTER_NONE && decoded.avx.mask.reg != ZYDIS_REGISTER_K0);
+			bool unsupported = repeated || maskedMemory || operand.size == 0 ||
 				operand.size > veh::kTraceMemoryMaxValueBytes * 8 ||
 				operand.mem.segment == ZYDIS_REGISTER_FS || operand.mem.segment == ZYDIS_REGISTER_GS ||
 				(writable && meta.writeOperandCount >= veh::VehHandler::TraceBasicBlocksState::kMaxWriteOperands) ||

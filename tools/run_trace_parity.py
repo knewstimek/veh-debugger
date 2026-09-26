@@ -7,18 +7,20 @@ import sys
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-TEST = os.path.join(ROOT, "test", "test_trace_basic_blocks.py")
+TEST_RUNNER = os.path.join(ROOT, "tools", "run_tests.py")
 
 
 def run(build_dir, timeout):
     env = os.environ.copy()
     env["VEH_TEST_BUILD_DIR"] = os.path.abspath(build_dir)
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-    process = subprocess.Popen([sys.executable, TEST], cwd=ROOT, env=env,
+    process = subprocess.Popen([sys.executable, TEST_RUNNER, "test_trace_basic_blocks.py",
+                                "test_trace_memory_access.py", "--jobs", "1",
+                                "--timeout", str(timeout)], cwd=ROOT, env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, creationflags=creationflags)
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        stdout, stderr = process.communicate(timeout=2 * timeout + 30)
     except subprocess.TimeoutExpired:
         if os.name == "nt":
             subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
@@ -28,6 +30,15 @@ def run(build_dir, timeout):
         stdout, stderr = process.communicate(timeout=15)
         return {"build": os.path.abspath(build_dir), "status": "timeout",
                 "stderr_tail": stderr[-4000:]}
+    finally:
+        # Also clean up this runner and its descendants on interruption.
+        if process.poll() is None:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+            else:
+                process.kill()
+            process.wait(timeout=15)
     return {"build": os.path.abspath(build_dir),
             "status": "ok" if process.returncode == 0 else "failed",
             "exit_code": process.returncode,

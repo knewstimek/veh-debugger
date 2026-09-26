@@ -11,7 +11,7 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 | `tools/run_mcp_scenario.py` | Runs 1-500 calls from a JSON scenario, supports named result references, stops on errors by default, and optionally writes a new report without overwriting. |
 | `tools/validate_trace_output.py` | Validates exported trace JSON/JSONL ordering, thread ownership, counts, hashes, and optional `.vtc` code-version references. |
 | `tools/read_trace_event_stream.py` | Validates a portable `.vte` ordered-event artifact and converts its interleaved block/edge, memory, and register records to JSON Lines. |
-| `tools/run_trace_parity.py` | Runs the trace integration suite against one or more build roots to cover direct, `veh_batch`, and breakpoint-action semantics. |
+| `tools/run_trace_parity.py` | Runs the basic-block and synthetic memory-access integration suites against one or more build roots to cover direct, `veh_batch`, and breakpoint-action semantics, including inline/file compare-exchange writes and conditional dependencies. |
 | `tools/run_ipc_compat_matrix.py` | Stages old-MCP/new-DLL and new-MCP/old-DLL pairs in a temporary directory and runs bounded compatibility smoke tests. |
 | `tools/measure_mcp_schema.py` | Measures bounded initialize and `tools/list` bytes, input-schema bytes, output-schema count, and eager names for every exposure profile. |
 
