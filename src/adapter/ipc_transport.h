@@ -26,6 +26,10 @@ struct PipeExchangeDiagnostics {
 	DWORD systemError = ERROR_SUCCESS;
 };
 
+// Backend-agnostic IPC to the target. DAP and MCP talk to the target only
+// through this interface, so a new backend (e.g. a driver over DeviceIoControl,
+// or a hypervisor) is one new implementation, not a caller-wide change.
+// PipeClient is the named-pipe implementation.
 class IIpcTransport {
 public:
 	using EventCallback = std::function<void(uint32_t eventId, const uint8_t* payload, uint32_t size)>;
