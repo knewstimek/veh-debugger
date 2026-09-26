@@ -27,60 +27,6 @@ TEST_DIR = os.path.join(ROOT, "test")
 FAIL_PATTERN = re.compile(r"^\s*(\[?FAIL\]?[: ]|FAILED\b|.*\bTEST FAILED\b)", re.M)
 
 
-class _ProcessEntry(ctypes.Structure):
-    _fields_ = [
-        ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
-        ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
-        ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
-        ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", wintypes.LONG),
-        ("dwFlags", wintypes.DWORD), ("szExeFile", wintypes.WCHAR * 260),
-    ]
-
-
-def process_parents():
-    """Return {pid: parent_pid} from a Toolhelp snapshot (a WMI query costs seconds per call)."""
-    kernel32 = ctypes.windll.kernel32
-    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
-    if snapshot == wintypes.HANDLE(-1).value:
-        return {}
-    parents = {}
-    entry = _ProcessEntry()
-    entry.dwSize = ctypes.sizeof(entry)
-    try:
-        present = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
-        while present:
-            parents[entry.th32ProcessID] = entry.th32ParentProcessID
-            present = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
-    finally:
-        kernel32.CloseHandle(snapshot)
-    return parents
-
-
-def repo_processes(pids=None):
-    """Return {pid: exe_path} for running processes whose executable lives inside the repo."""
-    kernel32 = ctypes.windll.kernel32
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    if pids is None:
-        pids = process_parents().keys()
-    root = os.path.normcase(ROOT)
-    found = {}
-    buffer = ctypes.create_unicode_buffer(32768)
-    for pid in pids:
-        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            continue
-        try:
-            size = wintypes.DWORD(len(buffer))
-            if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
-                path = os.path.normcase(os.path.abspath(buffer.value))
-                if path.startswith(root):
-                    found[pid] = buffer.value
-        finally:
-            kernel32.CloseHandle(handle)
-    return found
-
-
 def kill_tree(pid):
     subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=30)
 
@@ -91,51 +37,18 @@ def is_x86_build(build_dir):
             not os.path.exists(os.path.join(release, "vcruntime_net.dll")))
 
 
-def creation_time(pid):
-    """Process creation FILETIME, or 0 when the process is gone. Identifies a pid across reuse."""
+def job_pids(job):
+    """Live pids currently assigned to the job object (best-effort)."""
     kernel32 = ctypes.windll.kernel32
-    kernel32.OpenProcess.restype = wintypes.HANDLE
-    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-    if not handle:
-        return 0
-    try:
-        times = [wintypes.FILETIME() for _ in range(4)]
-        if not kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
-            return 0
-        return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def track_descendants(root_pid, seen, done):
-    """Record {pid: creation_time} for every process whose parent chain reaches root_pid.
-
-    Polling keeps orphans too: a target outlives the MCP server that launched it,
-    but it was recorded while its parent was still alive. Windows reuses pids
-    quickly, so a parent only counts while it is still the recorded process and a
-    child must be newer than it; otherwise another test's processes get adopted.
-    """
-    root_time = creation_time(root_pid)
-    while True:
-        parents = process_parents()
-        grew = True
-        while grew:
-            grew = False
-            for pid, parent in parents.items():
-                if pid in seen or pid == parent:
-                    continue
-                if parent == root_pid:
-                    parent_time = root_time
-                elif parent in seen and creation_time(parent) == seen[parent]:
-                    parent_time = seen[parent]
-                else:
-                    continue
-                child_time = creation_time(pid)
-                if child_time and child_time >= parent_time:
-                    seen[pid] = child_time
-                    grew = True
-        if done.wait(0.25):
-            return
+    # JOBOBJECT_BASIC_PROCESS_ID_LIST with room for up to 1024 pids.
+    class _IdList(ctypes.Structure):
+        _fields_ = [("NumberOfAssignedProcesses", wintypes.DWORD),
+                    ("NumberOfProcessIdsInList", wintypes.DWORD),
+                    ("ProcessIdList", ctypes.c_size_t * 1024)]
+    info = _IdList()
+    if not kernel32.QueryInformationJobObject(job, 3, ctypes.byref(info), ctypes.sizeof(info), None):
+        return []
+    return [info.ProcessIdList[i] for i in range(min(info.NumberOfProcessIdsInList, 1024))]
 
 
 def run_file(name, env, timeout, x86, quick):
@@ -147,10 +60,16 @@ def run_file(name, env, timeout, x86, quick):
     use_pytest = "def test_" in source and "__main__" not in source
     cmd = [sys.executable, "-m", "pytest", "-q", name] if use_pytest else [sys.executable, name]
     started = time.monotonic()
+
+    # A per-file Job Object captures every descendant the test spawns (the MCP
+    # server, adapter, and test targets) with no polling race, and isolates this
+    # file from the others running in parallel. Killing the job kills exactly this
+    # file's process tree, including targets orphaned when their launcher exits.
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    job = kernel32.CreateJobObjectW(None, None)
     proc = subprocess.Popen(cmd, cwd=TEST_DIR, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    seen, done = {}, threading.Event()
-    tracker = threading.Thread(target=track_descendants, args=(proc.pid, seen, done), daemon=True)
-    tracker.start()
+    assigned = bool(job) and bool(kernel32.AssignProcessToJobObject(job, int(proc._handle)))
     try:
         output, _ = proc.communicate(timeout=timeout)
         status = "ok" if proc.returncode == 0 else f"fail({proc.returncode})"
@@ -158,18 +77,22 @@ def run_file(name, env, timeout, x86, quick):
         kill_tree(proc.pid)
         output, _ = proc.communicate()
         status = "TIMEOUT"
-    done.set()
-    tracker.join()
     elapsed = time.monotonic() - started
     text = output.decode(errors="replace")
     if status == "ok" and FAIL_PATTERN.search(text):
         status = "ok*"  # exit 0 but the output reports a failure
-    # Only still-identical repo processes: a recycled pid is someone else's now.
-    alive = [pid for pid, started_at in seen.items() if creation_time(pid) == started_at]
-    leaked = list(repo_processes(alive))
-    for pid in leaked:
-        kill_tree(pid)
-    return status, elapsed, text, len(leaked)
+
+    # Anything still alive in the job (minus the exited launcher) is a leak.
+    if assigned:
+        leaked = len([p for p in job_pids(job) if p and p != proc.pid])
+        kernel32.TerminateJobObject(job, 1)
+    else:
+        # Job assignment failed (rare): fall back to killing the launcher's tree.
+        kill_tree(proc.pid)
+        leaked = 0
+    if job:
+        kernel32.CloseHandle(job)
+    return status, elapsed, text, leaked
 
 
 def main():
