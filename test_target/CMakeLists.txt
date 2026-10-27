@@ -2,6 +2,10 @@ add_executable(guest_backend_fixture guest_backend_fixture.cpp)
 target_include_directories(guest_backend_fixture PRIVATE ../src/common)
 target_compile_definitions(guest_backend_fixture PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 
+add_executable(ipc_transport_regression ipc_transport_regression.cpp ../src/adapter/pipe_client.cpp)
+target_include_directories(ipc_transport_regression PRIVATE ../src ../src/common)
+target_compile_definitions(ipc_transport_regression PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+
 add_executable(test_target main.cpp)
 target_compile_definitions(test_target PRIVATE
     _CRT_SECURE_NO_WARNINGS

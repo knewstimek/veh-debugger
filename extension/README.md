@@ -146,6 +146,8 @@ inspection and writes, continue/pause, instruction steps, execution/data
 breakpoints, symbol-based source/function breakpoints and termination.
 Unsupported commands return errors. Stops identify the selected thread;
 guest launch, `stopOnEntry` and `stopOnModuleLoad` remain unsupported.
+DAP exception filtering currently supports only `all`. Empty, uncaught-only
+and advanced filters return an error rather than claiming they were applied.
 
 ## Requirements
 

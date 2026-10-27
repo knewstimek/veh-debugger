@@ -2,6 +2,7 @@
 #include "adapter/expr_eval.h"
 #include "adapter/pipe_client.h"
 #include "common/logger.h"
+#include "common/ipc_response_validation.h"
 #include <sstream>
 #include <algorithm>
 #include <cstring>
@@ -1047,7 +1048,7 @@ std::vector<ThreadEntry> DebugSession::GetThreads(std::string* error) {
 	return result;
 }
 
-std::vector<StackFrame> DebugSession::GetStackTrace(uint32_t threadId, uint32_t maxFrames) {
+std::vector<StackFrame> DebugSession::GetStackTrace(uint32_t threadId, uint32_t maxFrames, std::string* error) {
 	std::vector<StackFrame> result;
 	GetStackTraceRequest req{};
 	req.threadId = threadId;
@@ -1055,17 +1056,16 @@ std::vector<StackFrame> DebugSession::GetStackTrace(uint32_t threadId, uint32_t 
 	req.maxFrames = maxFrames;
 
 	std::vector<uint8_t> respData;
-	if (!ipcTransport_->SendAndReceive(IpcCommand::GetStackTrace, &req, sizeof(req), respData))
+	std::string detail;
+	if (error) error->clear();
+	GetStackTraceResponse header{};
+	if (!ReceiveBackendReply(IpcCommand::GetStackTrace, &req, sizeof(req), respData, "GetStackTrace", detail) ||
+		!ValidateStackTraceReply(respData, maxFrames, header, detail)) {
+		if (error) *error = detail;
 		return result;
-
-	if (respData.size() < sizeof(GetStackTraceResponse)) return result;
-	auto* resp = reinterpret_cast<const GetStackTraceResponse*>(respData.data());
-	auto* infos = reinterpret_cast<const StackFrameInfo*>(respData.data() + sizeof(GetStackTraceResponse));
-
-	uint32_t count = resp->count;
-	const size_t maxItems = (respData.size() > sizeof(GetStackTraceResponse))
-		? (respData.size() - sizeof(GetStackTraceResponse)) / sizeof(StackFrameInfo) : 0;
-	if (count > maxItems) count = static_cast<uint32_t>(maxItems);
+	}
+	auto* infos = reinterpret_cast<const StackFrameInfo*>(respData.data() + sizeof(header));
+	const uint32_t count = header.count;
 
 	result.reserve(count);
 	for (uint32_t i = 0; i < count; i++) {
@@ -1073,7 +1073,7 @@ std::vector<StackFrame> DebugSession::GetStackTrace(uint32_t threadId, uint32_t 
 		f.address = infos[i].address;
 		f.returnAddress = 0; // not in IPC struct
 		f.frameBase = infos[i].frameBase;
-		f.moduleBase = 0;
+		f.moduleBase = infos[i].moduleBase;
 		f.moduleName = infos[i].moduleName;
 		f.functionName = infos[i].functionName;
 		f.sourceFile = infos[i].sourceFile;

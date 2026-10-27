@@ -87,6 +87,11 @@ private:
 	void Cleanup(bool detachOnly = false, bool backendDetached = false);
 	bool AttachGuestAgent(const Request& req, std::string& error);
 	bool GuestSupports(IpcCommand command) const;
+	bool ReceiveBackendReply(IpcCommand command, const void* payload, uint32_t size,
+		std::vector<uint8_t>& response, std::string& error);
+	bool SendStatusCommand(IpcCommand command, const void* payload, uint32_t size, std::string& error);
+	bool ContinueBackend(uint32_t threadId, bool& allContinued, std::string& error);
+	void SendPauseStopped(uint32_t threadId);
 
 	Transport* transport_ = nullptr;
 	std::unique_ptr<IIpcTransport> ipcTransport_;

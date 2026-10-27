@@ -252,7 +252,7 @@ public:
 	std::vector<ThreadEntry> GetThreads(std::string* error = nullptr);
 	// List/freeze/thaw; frozen receives the frozen thread ids after the operation
 	bool FreezeThread(FreezeOp op, uint32_t threadId, std::vector<uint32_t>& frozen);
-	std::vector<StackFrame> GetStackTrace(uint32_t threadId, uint32_t maxFrames = 20);
+	std::vector<StackFrame> GetStackTrace(uint32_t threadId, uint32_t maxFrames = 20, std::string* error = nullptr);
 	std::optional<RegisterSet> GetRegisters(uint32_t threadId);
 	bool SetRegister(uint32_t threadId, uint32_t regIndex, uint64_t value);
 	bool SetRegisters(uint32_t threadId, const RegisterSet& regs);

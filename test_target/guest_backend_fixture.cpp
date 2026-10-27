@@ -51,7 +51,7 @@ int wmain(int argc, wchar_t** argv) {
     if (mode == L"early-exit") return 37;
     const bool machineMode=mode.rfind(L"machine",0)==0;
     const bool vmMode=mode.rfind(L"vm",0)==0||machineMode;uint32_t vmState=2,detachFailures=0;
-    uint32_t continueRequests = 0, pauseRequests = 0;
+    uint32_t continueRequests = 0, pauseRequests = 0, resolveRequests = 0;
     uint32_t fixtureBreakpointId = 0;
     if ((!pid&&!machineMode)||name.empty()||(machineMode&&pidProvided)) return 2;
     HANDLE pipe = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 65536, 65536, 0, nullptr);
@@ -81,6 +81,16 @@ int wmain(int argc, wchar_t** argv) {
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::ControlVirtualMachine);
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::TraceVirtualCpu);
             }
+            if(mode.rfind(L"control-",0)==0) {
+                for(auto op:{veh::IpcCommand::Continue,veh::IpcCommand::Pause,veh::IpcCommand::StepInto,
+                    veh::IpcCommand::StepOver,veh::IpcCommand::StepOut,veh::IpcCommand::WriteMemory,veh::IpcCommand::TerminateThread})
+                    veh::SetCommandSupported(caps.commands,op);
+            }
+            if(mode.rfind(L"stack-",0)==0 || mode.rfind(L"control-",0)==0) {
+                veh::SetCommandSupported(caps.commands,veh::IpcCommand::GetStackTrace);
+                veh::SetCommandSupported(caps.commands,veh::IpcCommand::GetRegisters);
+            }
+            if(mode==L"address-delay")veh::SetCommandSupported(caps.commands,veh::IpcCommand::ResolveAddressSpace);
             if (mode == L"trace") {
                 for (auto op : {veh::IpcCommand::Continue, veh::IpcCommand::Pause, veh::IpcCommand::TraceCallers})
                     veh::SetCommandSupported(caps.commands, op);
@@ -105,6 +115,61 @@ int wmain(int argc, wchar_t** argv) {
             if (mode == L"wrong-scope") info.scope = veh::IpcTargetScope::Host;
             if (mode == L"not-found") { info = {}; info.status = veh::IpcStatus::NotFound; }
             if (!send(pipe, header.command, &info, (mode == L"truncated"||mode==L"machine-truncated") ? 8 : sizeof(info))) break;
+        } else if (mode.rfind(L"control-",0)==0 &&
+            (command==veh::IpcCommand::Continue || command==veh::IpcCommand::Pause ||
+             command==veh::IpcCommand::StepInto || command==veh::IpcCommand::StepOver ||
+             command==veh::IpcCommand::StepOut || command==veh::IpcCommand::WriteMemory ||
+             command==veh::IpcCommand::TerminateThread)) {
+            if(mode==L"control-exit")break; // no reply: transport failure
+            if(mode==L"control-error"){if(!reply(pipe,header.command,veh::IpcStatus::Error))break;continue;}
+            if(mode==L"control-short"){const uint8_t shortReply=0;if(!reply(pipe,header.command,shortReply))break;continue;}
+            if(mode==L"control-long"){const uint64_t longReply=0;if(!reply(pipe,header.command,longReply))break;continue;}
+            if(command==veh::IpcCommand::Continue){
+                veh::ContinueRequest request{};
+                if(bytes.size()!=sizeof(request)){if(!reply(pipe,header.command,veh::IpcStatus::InvalidArgs))break;continue;}
+                std::memcpy(&request,bytes.data(),sizeof(request));
+                if(!request.wantDetails){if(!reply(pipe,header.command,veh::IpcStatus::Error))break;continue;}
+                struct {veh::ContinueResponse head;uint32_t ids[2];} response{};
+                response.head={veh::IpcStatus::Ok,mode==L"control-retained"?0u:1u,
+                    (mode==L"control-partial"||mode==L"control-retained")?1u:0u};
+                response.ids[0]=77;response.ids[1]=88;
+                if(!send(pipe,header.command,&response,sizeof(response.head)+4*(response.head.resumedCount+response.head.stillStoppedCount)))break;
+            }else{
+                if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
+                if(command==veh::IpcCommand::Pause){
+                    const uint32_t actualThread=88;
+                    if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::Paused),actualThread))break;
+                }else if(command==veh::IpcCommand::StepInto||command==veh::IpcCommand::StepOver||command==veh::IpcCommand::StepOut){
+                    const veh::StepCompletedEvent stopped{77,0x1234};
+                    if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::StepCompleted),stopped))break;
+                }
+            }
+        } else if ((mode.rfind(L"stack-",0)==0 || mode.rfind(L"control-",0)==0) &&
+                   command==veh::IpcCommand::GetStackTrace) {
+            if(mode==L"stack-exit")break;
+            if(mode==L"stack-error"){if(!reply(pipe,header.command,veh::IpcStatus::Error))break;continue;}
+            if(mode==L"stack-status-ok"){if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;continue;}
+            struct {veh::GetStackTraceResponse head;veh::StackFrameInfo frame;} response{};
+            response.head.status=veh::IpcStatus::Ok;
+            response.head.count=mode==L"stack-empty"?0u:mode==L"stack-short"?2u:1u;
+            response.head.totalFrames=response.head.count;
+            response.frame.address=0x1234;response.frame.frameBase=0x8000;
+            strcpy_s(response.frame.moduleName,"sample.dll");
+            strcpy_s(response.frame.functionName,"SampleFunction");
+            strcpy_s(response.frame.sourceFile,"sample.cpp");
+            if(mode==L"stack-name")std::memset(response.frame.functionName,'A',sizeof(response.frame.functionName));
+            if(!send(pipe,header.command,&response,mode==L"stack-empty"?sizeof(response.head):sizeof(response)))break;
+        } else if ((mode.rfind(L"stack-",0)==0 || mode.rfind(L"control-",0)==0) &&
+                   command==veh::IpcCommand::GetRegisters) {
+            veh::GetRegistersResponse response{};
+            response.status=veh::IpcStatus::Ok;response.regs.rip=0x1234;response.regs.is32bit=1;
+            if(!reply(pipe,header.command,response))break;
+        } else if(mode==L"address-delay" && command==veh::IpcCommand::ResolveAddressSpace){
+            if(resolveRequests++==0)Sleep(31000); // longer than the old 30s guest-pipe floor
+            struct {veh::ResolveAddressSpaceResponse head;veh::AddressSpaceCandidate candidate;} response{};
+            response.head.status=veh::IpcStatus::Ok;response.head.count=1;response.head.chosen=0;
+            response.head.inUse=0x22000;response.candidate={0x22000,veh::AddressSpaceMethod::Scan,1};
+            if(!reply(pipe,header.command,response))break;
         } else if (mode == L"bp-kinds" && command == veh::IpcCommand::SetHwBreakpoint) {
             fixtureBreakpointId = 1; // external backends need not reserve the DLL ID range
             const veh::SetHwBreakpointResponse response{veh::IpcStatus::Ok, fixtureBreakpointId, 0};

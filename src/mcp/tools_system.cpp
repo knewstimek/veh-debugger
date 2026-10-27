@@ -99,14 +99,14 @@ std::string EscapedProcessName(const char* bytes, size_t limit) {
 
 // Request/response exchange for one system command, with the backend check.
 bool McpServer::SystemExchange(IpcCommand cmd, const void* payload, uint32_t size, std::vector<uint8_t>& response,
-	json& error) {
+	json& error, int timeoutMs) {
 	if (!session_.IsAttached()) { error = {{"error", NotAttachedMessage()}}; return false; }
 	if (!session_.GetBackendInfo().Supports(cmd)) {
 		error = {{"error", "Unavailable: this tool needs a backend running below the OS (attach with a hypervisor "
 			"backend). The current backend does not serve system inspection."}};
 		return false;
 	}
-	if (!session_.GetPipeClient().SendAndReceive(cmd, payload, size, response, 10000) ||
+	if (!session_.GetPipeClient().SendAndReceive(cmd, payload, size, response, timeoutMs) ||
 		response.size() < sizeof(IpcStatus)) {
 		error = {{"error", "no response from the backend"}};
 		return false;
@@ -686,7 +686,11 @@ json McpServer::ToolAddressSpace(const json& args) {
 		JsonUint32(args, "probe_ms", 100), 0};
 	json error;
 	std::vector<uint8_t> resp;
-	if (!SystemExchange(IpcCommand::ResolveAddressSpace, &req, sizeof(req), resp, error)) return error;
+	// End-to-end budget: the backend may scan for 60s, plus target-page
+	// fault-ins, root validation and application. A frontend wait timeout is
+	// not cancellation of those effects.
+	constexpr int kResolveBudgetMs = 180000;
+	if (!SystemExchange(IpcCommand::ResolveAddressSpace, &req, sizeof(req), resp, error, kResolveBudgetMs)) return error;
 	if (resp.size() < sizeof(ResolveAddressSpaceResponse)) return {{"error", "short response"}};
 	const auto* head = reinterpret_cast<const ResolveAddressSpaceResponse*>(resp.data());
 	if (head->status != IpcStatus::Ok) return {{"error", StatusText(head->status)}};

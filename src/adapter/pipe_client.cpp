@@ -184,9 +184,21 @@ void PipeClient::Disconnect() {
 bool PipeClient::SendCommand(IpcCommand cmd, const void* payload, uint32_t payloadSize) {
 	if (!connected_) return false;
 	std::lock_guard<std::mutex> lock(sendMutex_);
-
+	{
+		std::lock_guard<std::mutex> stateLock(responseMutex_);
+		if (desynced_ && cmd != IpcCommand::Detach && cmd != IpcCommand::Shutdown) {
+			SetLastError(ERROR_INVALID_STATE);
+			return false;
+		}
+	}
 	auto msg = BuildIpcMessage(static_cast<uint32_t>(cmd), payload, payloadSize);
-	return AsyncWriteExact(msg.data(), static_cast<DWORD>(msg.size()), 3000);
+	if (AsyncWriteExact(msg.data(), static_cast<DWORD>(msg.size()), 3000)) return true;
+	// A failed/canceled write may already have delivered bytes or the entire
+	// request. Its late reply must never satisfy a subsequent request.
+	const DWORD error = GetLastError();
+	{ std::lock_guard<std::mutex> stateLock(responseMutex_); desynced_ = true; }
+	SetLastError(error);
+	return false;
 }
 
 bool PipeClient::SendAndReceive(IpcCommand cmd,

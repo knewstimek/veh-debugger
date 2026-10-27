@@ -63,8 +63,7 @@ inline json MakeCapabilities() {
 		{"supportsMemoryEvent", true},
 		{"supportsBreakpointLocationsRequest", false},
 		{"exceptionBreakpointFilters", json::array({
-			{{"filter", "all"}, {"label", "All Exceptions"}, {"default", false}},
-			{{"filter", "uncaught"}, {"label", "Uncaught Exceptions"}, {"default", true}},
+			{{"filter", "all"}, {"label", "All Exceptions"}, {"default", true}},
 		})},
 	};
 }

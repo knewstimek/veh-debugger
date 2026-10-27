@@ -8,6 +8,9 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 |---|---|
 | `tools/run_tests.py` | Runs every `test/test_*.py` file in parallel (`--jobs`, longest first from `test/.test_durations.json`) with a per-file timeout, prints durations, flags exit-0 runs that report FAIL, skips `# requires: x64` files on an x86 build and `# slow` files with `--quick`, and cleans up exactly the processes each file started (parent chain + creation time, so reused pids are never adopted). |
 | `test/test_remote_transport.py` | Exercises resident TCP/TLS authentication, IPC routing, late/missing detach replies, dead-agent recovery, startup exit/Win32 and structured common error diagnostics (including invalid-record fallback), launch width/initial-thread metadata and retry recovery, and real DLL lifecycle reply draining; removes its owned certificate, secret and processes. See [remote transport](REMOTE_TRANSPORT.md). |
+| `test/test_backend_results.py` | Injects rejected, short/oversized and missing backend replies through the existing guest fixture; checks DAP execution/write/termination acknowledgements, pause identity, exception-filter rejection and MCP/DAP empty-versus-failed stacks, including batch parity. |
+| `test/test_address_space_deadline.py` | Returns a synthetic root after 31 seconds to cross the previous guest timeout, then checks root application, batch parity and continued connection use. |
+| `test/test_pipe_write_failure.py`, `test_target/ipc_transport_regression.cpp` | Runs bounded native fault injection against production PipeClient: a frame delivered before write cancellation cannot be followed by another ordinary request, with/without the reader; cleanup remains available. Build target: `ipc_transport_regression`. |
 | `test/mcp_test_client.py` | Shared timeout-aware MCP stdio client. It bounds captured diagnostics and terminates only processes it started. |
 | `test/dap_test_client.py`, `test/test_dap_thread_errors.py`, `test/test_dap_guest_attach.py` | Bounded DAP stdio client; no-attach error and synthetic external guest attach, scope/identity validation, capability-gated command routing, rejection and acknowledged disconnect retry tests. The adapter runs without opening a console window. `test/test_vm_attach.py` covers malformed guest thread-list IPC through MCP. |
 | `tools/run_mcp_scenario.py` | Runs 1-500 calls from a JSON scenario, supports named result references, stops on errors by default, and optionally writes a new report without overwriting. |
@@ -192,6 +195,25 @@ It checks unsolicited stops, NUL-terminated packets, console output, short
 register replies, interrupt fallback and safe detach of execution/data
 breakpoints. Cleanup rejection must retain the session and prevent detach;
 retry must remove each original kind/size before sending `D`. No VM is used.
+
+## Acknowledgements and operation deadlines
+
+DAP command success requires the backend response: status-only operations must
+return exactly `IpcStatus::Ok`, and Continue must return complete resumed and
+still-stopped lists with `wantDetails=1`. Guest pause stops come from the backend
+`Paused` event, whose payload is one `uint32_t` thread ID (0 means all); local
+VEH uses its synchronous successful pause acknowledgement for compatibility.
+Stack failures remain errors; a valid empty stack stays empty. DAP exception
+filters currently support only `all`; empty/uncaught/advanced configurations
+are rejected because exception IPC does not identify first/second chance.
+
+`veh_address_space` allows 180 seconds for the complete resolve request, including
+scan, page fault-ins, validation and application. MCP clients and test drivers
+must allow a longer tool-call deadline when waiting for this operation. A wait
+timeout does not cancel the backend or roll back an applied root. After an
+ambiguous timeout, reconnect and query the active root before issuing another
+state-changing request. Failed pipe writes likewise have ambiguous delivery:
+ordinary requests are rejected until reconnect; detach/shutdown remain allowed.
 
 ## Backend error event semantics
 

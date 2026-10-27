@@ -1206,7 +1206,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}}}}),
 
 		Tool(&McpServer::ToolStackTrace, "trace", 0, true,
-			{{"name", "veh_stack_trace"}, {"description", "Get stack trace for a thread."},
+			{{"name", "veh_stack_trace"}, {"description", "Get stack trace for a thread. Backend/transport failures return errors; a successful empty stack returns zero frames."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}},
 			{"maxFrames", {{"type", "integer"}, {"description", "Max frames to return (default: 20)"}}}
@@ -1647,7 +1647,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			 }}}}}),
 
 		Tool(&McpServer::ToolAddressSpace, "system", 0, true,
-			{{"name", "veh_address_space"}, {"description", "The target's page-table root (CR3) by several methods, each checked by reading the PEB through it: the process object's record, the isolation user root, the root seen with its threads, a probe of every root the processors load, and a physical-memory scan. use=chosen makes later memory access use the chosen root (for targets that tamper with their process object); use=os reverts. Needs a hypervisor backend."},
+			{{"name", "veh_address_space"}, {"description", "The target's page-table root (CR3) by several methods, each checked by reading the PEB through it: the process object's record, the isolation user root, the root seen with its threads, a probe of every root the processors load, and a physical-memory scan. use=chosen makes later memory access use the chosen root (for targets that tamper with their process object); use=os reverts. Allows up to 180 seconds for scan, validation and application; a wait timeout does not cancel backend effects. Needs a hypervisor backend."},
 			 {"inputSchema", {{"type", "object"}, {"properties", {
 				{"method", {{"type", "string"}, {"enum", json::array({"auto", "kernel_record", "user_shadow", "observed", "probe", "scan", "all"})}, {"description", "Default: auto (first valid)"}}},
 				{"use", {{"type", "string"}, {"enum", json::array({"chosen", "os"})}, {"description", "chosen: use the first valid root from now on; os: back to the OS record"}}},

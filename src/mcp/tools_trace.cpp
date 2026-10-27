@@ -67,7 +67,9 @@ json McpServer::ToolStackTrace(const json& args) {
 	int maxFrames = JsonInt(args, "maxFrames", 20);
 	if (maxFrames <= 0 || maxFrames > 200) maxFrames = 20;
 
-	auto frames = session_.GetStackTrace(threadId, maxFrames);
+	std::string error;
+	auto frames = session_.GetStackTrace(threadId, maxFrames, &error);
+	if (!error.empty()) return {{"error", error}};
 	json arr = json::array();
 	for (auto& f : frames) {
 		char addrBuf[20];

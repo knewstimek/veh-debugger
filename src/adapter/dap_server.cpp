@@ -2,6 +2,7 @@
 #include "expr_eval.h"
 #include "pipe_client.h"
 #include "logger.h"
+#include "ipc_response_validation.h"
 #include <filesystem>
 #include <sstream>
 #include <algorithm>
@@ -109,6 +110,79 @@ void DapServer::SetTransport(Transport* transport) {
 	transport_->SetMessageCallback([this](const std::string& json) {
 		OnMessage(json);
 	});
+}
+
+bool DapServer::ReceiveBackendReply(IpcCommand command, const void* payload, uint32_t size,
+    std::vector<uint8_t>& response, std::string& error) {
+    PipeExchangeDiagnostics diagnostics{};
+    if (!ipcTransport_->SendAndReceive(command, payload, size, response, 3000, &diagnostics)) {
+        error = diagnostics.failure == PipeExchangeFailure::WaitTimeout ?
+            "Backend request timed out; outcome not confirmed" : "Backend IPC exchange failed";
+        if (diagnostics.systemError)
+            error += " (Win32 error " + std::to_string(diagnostics.systemError) + ")";
+        return false;
+    }
+    return ValidateBackendStatus(response, "Backend request", error);
+}
+
+bool DapServer::SendStatusCommand(IpcCommand command, const void* payload, uint32_t size,
+    std::string& error) {
+    std::vector<uint8_t> response;
+    if (!ReceiveBackendReply(command, payload, size, response, error)) return false;
+    if (response.size() != sizeof(IpcStatus)) {
+        error = "Malformed backend status response";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+bool DapServer::ContinueBackend(uint32_t threadId, bool& allContinued, std::string& error) {
+    ContinueRequest request{};
+    request.threadId = threadId;
+    request.wantDetails = 1;
+    std::vector<uint8_t> response;
+    if (!ReceiveBackendReply(IpcCommand::Continue, &request, sizeof(request), response, error)) return false;
+    ContinueResponse header{};
+    if (response.size() < sizeof(header)) {
+        error = "Incomplete Continue details";
+        return false;
+    }
+    std::memcpy(&header, response.data(), sizeof(header));
+    const uint64_t count = uint64_t(header.resumedCount) + header.stillStoppedCount;
+    if (count != (response.size() - sizeof(header)) / sizeof(uint32_t) ||
+        (response.size() - sizeof(header)) % sizeof(uint32_t)) {
+        error = "Malformed Continue thread lists";
+        return false;
+    }
+    allContinued = header.stillStoppedCount == 0;
+    if (header.resumedCount == 0 && header.stillStoppedCount != 0) {
+        error = "No thread resumed; backend reports threads still stopped";
+        return false;
+    }
+    for (uint32_t i = 0; threadId && i < header.stillStoppedCount; ++i) {
+        uint32_t stopped{};
+        std::memcpy(&stopped, response.data() + sizeof(header) +
+            (size_t(header.resumedCount) + i) * sizeof(stopped), sizeof(stopped));
+        if (stopped == threadId) {
+            error = "Requested thread is still stopped";
+            return false;
+        }
+    }
+    error.clear();
+    return true;
+}
+
+void DapServer::SendPauseStopped(uint32_t threadId) {
+    lastStoppedThreadId_.store(threadId);
+    {
+        std::lock_guard<std::mutex> lock(frameMutex_);
+        frameMap_.clear();
+        nextFrameId_ = 1;
+    }
+    SendEvent("stopped", {
+        {"reason", "pause"}, {"threadId", threadId}, {"allThreadsStopped", !guestTarget_},
+    });
 }
 
 bool DapServer::GuestSupports(IpcCommand command) const {
@@ -329,10 +403,10 @@ void DapServer::HandleRequest(const Request& req) {
 			(req.command == "next" && GuestSupports(IpcCommand::StepOver)) ||
 			(req.command == "stepIn" && GuestSupports(IpcCommand::StepInto)) ||
 			(req.command == "stepOut" && GuestSupports(IpcCommand::StepOut)) ||
-			((req.command == "stackTrace" || req.command == "scopes" || req.command == "variables") &&
-				GuestSupports(IpcCommand::GetRegisters)) ||
+			(req.command == "stackTrace" && GuestSupports(IpcCommand::GetStackTrace)) ||
+			((req.command == "scopes" || req.command == "variables") && GuestSupports(IpcCommand::GetRegisters)) ||
 			req.command == "exceptionInfo" ||
-			// Exception stops are reported by the guest backend; the filters are accepted.
+			// ExceptionEvent lacks chance metadata; only the all filter is accepted.
 			(req.command == "setExceptionBreakpoints" && GuestSupports(IpcCommand::Continue)) ||
 			(req.command == "terminate" && GuestSupports(IpcCommand::Terminate)) ||
 			(req.command == "terminateThreads" && GuestSupports(IpcCommand::TerminateThread)) ||
@@ -1247,12 +1321,19 @@ void DapServer::RetryPendingBreakpointsOnce() {
 }
 
 void DapServer::OnSetExceptionBreakpoints(const Request& req) {
-	// 예외 필터 설정 (all / uncaught)
-	// VEH 핸들러에서 처리
 	Response resp;
 	resp.request_seq = req.seq;
 	resp.command = "setExceptionBreakpoints";
-	resp.success = true;
+	const auto filters = req.arguments.value("filters", json::array());
+	// ExceptionEvent carries no first/second-chance field. Accept only the
+	// policy this adapter actually implements, rather than silently ignoring it.
+	const auto filterOptions = req.arguments.value("filterOptions", json::array());
+	const auto exceptionOptions = req.arguments.value("exceptionOptions", json::array());
+	resp.success = filters == json::array({"all"}) &&
+		filterOptions.is_array() && filterOptions.empty() &&
+		exceptionOptions.is_array() && exceptionOptions.empty();
+	if (!resp.success)
+		resp.message = "Only filters=[all] is supported; exception chance/filter options are unavailable";
 	SendResponse(resp);
 }
 
@@ -1352,33 +1433,30 @@ void DapServer::OnContinue(const Request& req) {
 		steppingMode_ = SteppingMode::None;
 	}
 
-	// 실행 재개 시 프레임 매핑 초기화 (다음 stopped에서 새로 생성됨)
-	{
-		std::lock_guard<std::mutex> lock(frameMutex_);
-		frameMap_.clear();
-		nextFrameId_ = 1;
-	}
-
 	// Launch + stopOnEntry: 메인 스레드가 아직 OS-suspended 상태
 	// VEH Continue 전에 먼저 OS resume 해야 함
 	ResumeMainThread(threadId);
 
-	ContinueRequest contReq{};
-	contReq.threadId = threadId;
-	DAP_TRACE("Continue", "threadId=" + std::to_string(threadId));
-	ipcTransport_->SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
-
+	bool allContinued = false;
+	std::string error;
 	Response resp;
 	resp.request_seq = req.seq;
 	resp.command = "continue";
-	resp.success = true;
-	resp.body = {{"allThreadsContinued", threadId == 0}};
+	resp.success = ContinueBackend(threadId, allContinued, error);
+	if (resp.success) {
+		std::lock_guard<std::mutex> lock(frameMutex_);
+		frameMap_.clear();
+		nextFrameId_ = 1;
+		resp.body = {{"allThreadsContinued", threadId == 0 && allContinued}};
+	} else resp.message = error;
 	SendResponse(resp);
 }
 
 void DapServer::OnNext(const Request& req) {
 	uint32_t threadId = req.arguments.value("threadId", 0);
 	std::string granularity = req.arguments.value("granularity", "statement");
+	bool executionOk = false, allContinued = false;
+	std::string executionError;
 	ResumeMainThread();
 
 	LOG_INFO("OnNext: threadId=%u granularity=%s", threadId, granularity.c_str());
@@ -1395,6 +1473,11 @@ void DapServer::OnNext(const Request& req) {
 	}
 
 	CleanupStaleTempBp();
+	if (guestTarget_) {
+		const StepRequest request{threadId};
+		executionOk = SendStatusCommand(IpcCommand::StepOver, &request, sizeof(request), executionError);
+		goto send_response;
+	}
 
 	// === PDB 경로: 다음 소스 라인 주소에 temp BP → Continue (O(1)) ===
 	if (!steppingInstruction_ && symbolEngineReady_) {
@@ -1472,7 +1555,7 @@ void DapServer::OnNext(const Request& req) {
 						// Continue → temp BP에서 멈춤 (single-step 0회)
 						ContinueRequest contReq{};
 						contReq.threadId = threadId;
-						ipcTransport_->SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+						executionOk = ContinueBackend(threadId, allContinued, executionError);
 						goto send_response;
 					}
 				}
@@ -1524,7 +1607,7 @@ void DapServer::OnNext(const Request& req) {
 					}
 					ContinueRequest contReq{};
 					contReq.threadId = threadId;
-					ipcTransport_->SendCommand(IpcCommand::Continue, &contReq, sizeof(contReq));
+					executionOk = ContinueBackend(threadId, allContinued, executionError);
 					callSkipped = true;
 				}
 			}
@@ -1532,7 +1615,7 @@ void DapServer::OnNext(const Request& req) {
 		if (!callSkipped) {
 			StepRequest stepReq{};
 			stepReq.threadId = threadId;
-			ipcTransport_->SendCommand(IpcCommand::StepOver, &stepReq, sizeof(stepReq));
+			executionOk = SendStatusCommand(IpcCommand::StepOver, &stepReq, sizeof(stepReq), executionError);
 		}
 	}
 
@@ -1541,7 +1624,12 @@ send_response:
 	Response resp;
 	resp.request_seq = req.seq;
 	resp.command = "next";
-	resp.success = true;
+	resp.success = executionOk;
+	if (!executionOk) {
+		std::lock_guard<std::mutex> stepLock(steppingMutex_);
+		steppingMode_ = SteppingMode::None;
+		resp.message = executionError;
+	}
 	SendResponse(resp);
 }
 
@@ -1565,12 +1653,14 @@ void DapServer::OnStepIn(const Request& req) {
 
 	StepRequest stepReq{};
 	stepReq.threadId = threadId;
-	ipcTransport_->SendCommand(IpcCommand::StepInto, &stepReq, sizeof(stepReq));
-
 	Response resp;
 	resp.request_seq = req.seq;
 	resp.command = "stepIn";
-	resp.success = true;
+	resp.success = SendStatusCommand(IpcCommand::StepInto, &stepReq, sizeof(stepReq), resp.message);
+	if (!resp.success) {
+		std::lock_guard<std::mutex> stepLock(steppingMutex_);
+		steppingMode_ = SteppingMode::None;
+	}
 	SendResponse(resp);
 }
 
@@ -1590,43 +1680,28 @@ void DapServer::OnStepOut(const Request& req) {
 
 	StepRequest stepReq{};
 	stepReq.threadId = threadId;
-	ipcTransport_->SendCommand(IpcCommand::StepOut, &stepReq, sizeof(stepReq));
-
 	Response resp;
 	resp.request_seq = req.seq;
 	resp.command = "stepOut";
-	resp.success = true;
+	resp.success = SendStatusCommand(IpcCommand::StepOut, &stepReq, sizeof(stepReq), resp.message);
+	if (!resp.success) {
+		std::lock_guard<std::mutex> stepLock(steppingMutex_);
+		steppingMode_ = SteppingMode::None;
+	}
 	SendResponse(resp);
 }
 
 void DapServer::OnPause(const Request& req) {
-	uint32_t threadId = req.arguments.value("threadId", 0);
-	PauseRequest pauseReq{};
-	pauseReq.threadId = threadId;
-	ipcTransport_->SendCommand(IpcCommand::Pause, &pauseReq, sizeof(pauseReq));
-
-	Response resp;
-	resp.request_seq = req.seq;
-	resp.command = "pause";
-	resp.success = true;
-	SendResponse(resp);
-
-	// DAP 프로토콜: pause 성공 후 stopped 이벤트를 보내야
-	// VSCode가 threads → stackTrace → scopes → variables 시퀀스를 시작한다.
-	// 이 이벤트가 없으면 CALL STACK 패널이 갱신되지 않아
-	// 스레드를 펼쳐도 스택 프레임이 표시되지 않는다.
-	lastStoppedThreadId_.store(threadId);
-	{
-		std::lock_guard<std::mutex> lock(frameMutex_);
-		frameMap_.clear();
-		nextFrameId_ = 1;
-	}
-
-	SendEvent("stopped", {
-		{"reason", "pause"},
-		{"threadId", (int)threadId},
-		{"allThreadsStopped", true},
-	});
+    const uint32_t threadId = req.arguments.value("threadId", 0u);
+    const PauseRequest pauseReq{threadId};
+    Response resp;
+    resp.request_seq = req.seq;
+    resp.command = "pause";
+    resp.success = SendStatusCommand(IpcCommand::Pause, &pauseReq, sizeof(pauseReq), resp.message);
+    SendResponse(resp);
+    // The local VEH DLL acknowledges its suspension synchronously and sends no
+    // Paused event. Guest backends report the actual selected thread via Paused.
+    if (resp.success && !guestTarget_) SendPauseStopped(threadId);
 }
 
 // --- State Queries ---
@@ -1693,136 +1768,95 @@ void DapServer::OnThreads(const Request& req) {
 }
 
 void DapServer::OnStackTrace(const Request& req) {
-	uint32_t threadId = req.arguments.value("threadId", 0u);
-	if (threadId == 0) threadId = lastStoppedThreadId_.load();
-	int startFrame = req.arguments.value("startFrame", 0);
-	int levels = req.arguments.value("levels", 20);
+    uint32_t threadId = req.arguments.value("threadId", 0u);
+    if (!threadId) threadId = lastStoppedThreadId_.load();
+    const int startFrame = req.arguments.value("startFrame", 0);
+    const int levels = req.arguments.value("levels", 20);
+    Response resp;
+    resp.request_seq = req.seq;
+    resp.command = "stackTrace";
+    if (startFrame < 0 || levels < 0) {
+        resp.success = false;
+        resp.message = "Stack frame bounds must be nonnegative";
+        SendResponse(resp);
+        return;
+    }
+    GetStackTraceRequest stReq{threadId, static_cast<uint32_t>(startFrame),
+        levels == 0 ? 200u : static_cast<uint32_t>(std::min(levels, 200))};
+    std::vector<uint8_t> respData;
+    GetStackTraceResponse header{};
+    if (!ReceiveBackendReply(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), respData, resp.message) ||
+        !ValidateStackTraceReply(respData, stReq.maxFrames, header, resp.message)) {
+        resp.success = false;
+        SendResponse(resp);
+        return;
+    }
+    // A valid empty stack stays empty; failures never become synthetic frames.
+    json framesJson = json::array();
+    const auto* frames = reinterpret_cast<const StackFrameInfo*>(respData.data() + sizeof(header));
+    const uint32_t count = header.count;
+	for (uint32_t i = 0; i < count; i++) {
+		// 순차 ID 발급 + 맵에 (threadId, frameIndex) 저장
+		// Windows 스레드 ID가 16비트 초과 가능(예: 169644)하므로 비트 패킹 불가
+		int fid;
+		{
+			std::lock_guard<std::mutex> lock(frameMutex_);
+			fid = nextFrameId_++;
+			if (nextFrameId_ & SCOPE_MASK) nextFrameId_ = 1; // scope 비트 침범 방지
+			frameMap_[fid] = {threadId, (int)(startFrame + i), frames[i].address, frames[i].frameBase};
+		}
 
-	GetStackTraceRequest stReq{};
-	stReq.threadId = threadId;
-	stReq.startFrame = startFrame;
-	stReq.maxFrames = levels;
+		StackFrameDap f;
+		f.id = fid;
+		f.instructionPointerReference = FormatAddress(frames[i].address);
 
-	json framesJson = json::array();
-	std::vector<uint8_t> respData;
+		// 프레임 이름: module!func+0xOFFSET (0xADDR) — 오프셋 + 쌩 주소 둘 다 표시
+		{
+			std::string mod = frames[i].moduleName[0] ? frames[i].moduleName : "";
+			std::string func = frames[i].functionName[0] ? frames[i].functionName : "";
+			std::string addr = FormatAddress(frames[i].address);
+			uint64_t modOffset = (frames[i].moduleBase && frames[i].address >= frames[i].moduleBase)
+				? (frames[i].address - frames[i].moduleBase) : 0;
+			char offsetStr[32];
+			snprintf(offsetStr, sizeof(offsetStr), "+0x%llX", modOffset);
 
-	// frameMap_은 stopped/continued 이벤트 시 초기화됨 (OnIpcEvent)
-	// 여기서 clear하면 안 됨: VSCode가 여러 스레드의 stackTrace를 순차 요청하므로
-	// 앞 스레드의 프레임 매핑이 뒷 스레드 요청 시 삭제되어 scopes/variables가 깨짐
-
-	if (ipcTransport_->SendAndReceive(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), respData)) {
-		if (respData.size() >= sizeof(GetStackTraceResponse)) {
-			auto* hdr = reinterpret_cast<const GetStackTraceResponse*>(respData.data());
-			auto* frames = reinterpret_cast<const StackFrameInfo*>(
-				respData.data() + sizeof(GetStackTraceResponse));
-			uint32_t maxCount = (uint32_t)((respData.size() - sizeof(GetStackTraceResponse)) / sizeof(StackFrameInfo));
-			uint32_t count = std::min(hdr->count, maxCount);
-			for (uint32_t i = 0; i < count; i++) {
-				// 순차 ID 발급 + 맵에 (threadId, frameIndex) 저장
-				// Windows 스레드 ID가 16비트 초과 가능(예: 169644)하므로 비트 패킹 불가
-				int fid;
-				{
-					std::lock_guard<std::mutex> lock(frameMutex_);
-					fid = nextFrameId_++;
-					if (nextFrameId_ & SCOPE_MASK) nextFrameId_ = 1; // scope 비트 침범 방지
-					frameMap_[fid] = {threadId, (int)(startFrame + i), frames[i].address, frames[i].frameBase};
-				}
-
-				StackFrameDap f;
-				f.id = fid;
-				f.instructionPointerReference = FormatAddress(frames[i].address);
-
-				// 프레임 이름: module!func+0xOFFSET (0xADDR) — 오프셋 + 쌩 주소 둘 다 표시
-				{
-					std::string mod = frames[i].moduleName[0] ? frames[i].moduleName : "";
-					std::string func = frames[i].functionName[0] ? frames[i].functionName : "";
-					std::string addr = FormatAddress(frames[i].address);
-					uint64_t modOffset = (frames[i].moduleBase && frames[i].address >= frames[i].moduleBase)
-						? (frames[i].address - frames[i].moduleBase) : 0;
-					char offsetStr[32];
-					snprintf(offsetStr, sizeof(offsetStr), "+0x%llX", modOffset);
-
-					if (!func.empty() && !mod.empty()) {
-						f.name = mod + "!" + func + offsetStr + " (" + addr + ")";
-					} else if (!func.empty()) {
-						f.name = func + " (" + addr + ")";
-					} else if (!mod.empty()) {
-						f.name = mod + offsetStr + " (" + addr + ")";
-					} else {
-						f.name = addr;
-					}
-				}
-
-				f.line = frames[i].line;
-				if (frames[i].sourceFile[0]) {
-					f.source.path = frames[i].sourceFile;
-					std::string fullPath = frames[i].sourceFile;
-					auto pos = fullPath.find_last_of("\\/");
-					f.source.name = (pos != std::string::npos) ? fullPath.substr(pos + 1) : fullPath;
-				}
-				if (frames[i].moduleName[0]) {
-					f.moduleId = frames[i].moduleName;
-					// 소스 파일이 없으면 모듈+오프셋을 소스로 표시 (Unknown Source 방지)
-					if (!frames[i].sourceFile[0]) {
-						uint64_t offset = (frames[i].moduleBase && frames[i].address >= frames[i].moduleBase)
-							? (frames[i].address - frames[i].moduleBase) : frames[i].address;
-						char buf[64];
-						snprintf(buf, sizeof(buf), "%s+0x%llX", frames[i].moduleName, offset);
-						f.source.name = buf;
-						f.source.presentationHint = "deemphasize";
-					}
-				}
-				framesJson.push_back(f.ToJson());
+			if (!func.empty() && !mod.empty()) {
+				f.name = mod + "!" + func + offsetStr + " (" + addr + ")";
+			} else if (!func.empty()) {
+				f.name = func + " (" + addr + ")";
+			} else if (!mod.empty()) {
+				f.name = mod + offsetStr + " (" + addr + ")";
+			} else {
+				f.name = addr;
 			}
 		}
-	}
 
-	// Fallback: DLL의 GetStackTrace가 빈 결과를 반환하는 경우 대비
-	// (스택 워킹 실패, 심볼 미로드, IPC 타임아웃 등)
-	// 빈 stackFrames를 반환하면 VSCode가 스레드 아래에 아무것도 표시하지 않고,
-	// 사용자가 Scopes/Variables도 볼 수 없게 됨.
-	// → GetRegisters로 현재 RIP를 가져와 합성 프레임 1개를 만들어 최소한의 디버깅 보장.
-	if (framesJson.empty() && startFrame == 0) {
-		GetRegistersRequest regReq{};
-		regReq.threadId = threadId;
-		std::vector<uint8_t> regData;
-		if (ipcTransport_->SendAndReceive(IpcCommand::GetRegisters, &regReq, sizeof(regReq), regData)) {
-			if (regData.size() >= sizeof(GetRegistersResponse)) {
-				auto* regResp = reinterpret_cast<const GetRegistersResponse*>(regData.data());
-				auto& r = regResp->regs;
-				uint64_t ip = r.rip;
-
-				if (ip != 0) {
-					int fid;
-					{
-						std::lock_guard<std::mutex> lock(frameMutex_);
-						fid = nextFrameId_++;
-						if (nextFrameId_ & SCOPE_MASK) nextFrameId_ = 1;
-						frameMap_[fid] = {threadId, 0, ip, r.rbp};
-					}
-
-					StackFrameDap f;
-					f.id = fid;
-					f.name = FormatAddress(ip);
-					f.line = 0;
-					f.instructionPointerReference = FormatAddress(ip);
-					framesJson.push_back(f.ToJson());
-
-					LOG_DEBUG("StackTrace fallback: thread %u, RIP=%s", threadId, FormatAddress(ip).c_str());
-				}
+		f.line = frames[i].line;
+		if (frames[i].sourceFile[0]) {
+			f.source.path = frames[i].sourceFile;
+			std::string fullPath = frames[i].sourceFile;
+			auto pos = fullPath.find_last_of("\\/");
+			f.source.name = (pos != std::string::npos) ? fullPath.substr(pos + 1) : fullPath;
+		}
+		if (frames[i].moduleName[0]) {
+			f.moduleId = frames[i].moduleName;
+			// 소스 파일이 없으면 모듈+오프셋을 소스로 표시 (Unknown Source 방지)
+			if (!frames[i].sourceFile[0]) {
+				uint64_t offset = (frames[i].moduleBase && frames[i].address >= frames[i].moduleBase)
+					? (frames[i].address - frames[i].moduleBase) : frames[i].address;
+				char buf[64];
+				snprintf(buf, sizeof(buf), "%s+0x%llX", frames[i].moduleName, offset);
+				f.source.name = buf;
+				f.source.presentationHint = "deemphasize";
 			}
 		}
+		framesJson.push_back(f.ToJson());
 	}
 
-	Response resp;
-	resp.request_seq = req.seq;
-	resp.command = "stackTrace";
-	resp.success = true;
-	resp.body = {
-		{"stackFrames", framesJson},
-		{"totalFrames", (int)framesJson.size()},
-	};
-	SendResponse(resp);
+    resp.success = true;
+    resp.message.clear();
+    resp.body = {{"stackFrames", framesJson}, {"totalFrames", header.totalFrames}};
+    SendResponse(resp);
 }
 
 void DapServer::OnScopes(const Request& req) {
@@ -2447,12 +2481,12 @@ void DapServer::OnWriteMemory(const Request& req) {
 	resp.request_seq = req.seq;
 	resp.command = "writeMemory";
 
-	if (ipcTransport_->SendCommand(IpcCommand::WriteMemory, payload.data(), (uint32_t)payload.size())) {
+	if (SendStatusCommand(IpcCommand::WriteMemory, payload.data(), (uint32_t)payload.size(), resp.message)) {
 		resp.success = true;
 		resp.body = {{"bytesWritten", (int)bytes.size()}};
 	} else {
 		resp.success = false;
-		resp.message = "Failed to write memory";
+		// Preserve the transport/backend reason; bytesWritten is unconfirmed.
 	}
 	SendResponse(resp);
 }
@@ -2854,29 +2888,35 @@ void DapServer::OnCancel(const Request& req) {
 }
 
 void DapServer::OnTerminateThreads(const Request& req) {
-	auto threadIds = req.arguments.value("threadIds", json::array());
-
-	bool allOk = true;
-	for (auto& tid : threadIds) {
-		if (!tid.is_number()) continue;
-		TerminateThreadRequest termReq{};
-		termReq.threadId = tid.get<uint32_t>();
-
-		std::vector<uint8_t> respData;
-		if (ipcTransport_->SendAndReceive(IpcCommand::TerminateThread, &termReq, sizeof(termReq), respData)) {
-			if (respData.size() >= sizeof(IpcStatus)) {
-				auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
-				if (status != IpcStatus::Ok) allOk = false;
-			}
-		}
-	}
-
-	Response resp;
-	resp.request_seq = req.seq;
-	resp.command = "terminateThreads";
-	resp.success = allOk;
-	if (!allOk) resp.message = "a thread was not terminated";
-	SendResponse(resp);
+    Response resp;
+    resp.request_seq = req.seq;
+    resp.command = "terminateThreads";
+    const auto ids = req.arguments.value("threadIds", json::array());
+    resp.success = ids.is_array();
+    for (const auto& id : ids) {
+        if (!id.is_number_integer() || id.get<int64_t>() <= 0 ||
+            id.get<int64_t>() > UINT32_MAX) {
+            resp.success = false;
+            resp.message = "threadIds must contain positive 32-bit thread IDs";
+            SendResponse(resp);
+            return;
+        }
+    }
+    if (!resp.success) {
+        resp.message = "threadIds must be an array";
+        SendResponse(resp);
+        return;
+    }
+    for (const auto& id : ids) {
+        const TerminateThreadRequest request{id.get<uint32_t>()};
+        std::string error;
+        if (!SendStatusCommand(IpcCommand::TerminateThread, &request, sizeof(request), error)) {
+            resp.success = false;
+            if (resp.message.empty())
+                resp.message = "Thread " + std::to_string(request.threadId) + ": " + error;
+        }
+    }
+    SendResponse(resp);
 }
 
 void DapServer::OnGotoTargets(const Request& req) {
@@ -3380,9 +3420,11 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 		break;
 
 	case IpcEvent::Paused:
-		// OnPause에서 이미 선제적으로 stopped 이벤트를 보냄.
-		// DLL에서 오는 Paused 이벤트는 중복 방지를 위해 로깅만 한다.
-		LOG_DEBUG("IPC Paused event received (already handled by OnPause)");
+		if (guestTarget_ && size == sizeof(uint32_t)) {
+			uint32_t threadId{};
+			std::memcpy(&threadId, payload, sizeof(threadId));
+			SendPauseStopped(threadId);
+		}
 		break;
 
 	default:
