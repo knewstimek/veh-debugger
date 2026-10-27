@@ -211,7 +211,7 @@ struct SetHwBreakpointResponse {
 // Module-load breakpoint: freeze the loading thread when a matching module loads.
 struct SetModuleLoadStopRequest {
 	uint8_t action;      // 0 = add pattern, 1 = remove pattern, 2 = clear all
-	char    name[256];   // module-name substring, case-insensitive (e.g. "D2Common")
+	char    name[256];   // case-insensitive base-name substring (e.g. "version.dll"), not a path
 };
 
 struct SetModuleLoadStopResponse {

@@ -255,6 +255,14 @@ queries current stop state before binding, drops resumed notices, preserves
 known stop reasons, and exposes an observed stop for explicit user continuation.
 A failed/unsupported stop query emits a diagnostic without inventing a stop.
 
+A loader-origin stop may retain the target loader lock. During that hold, keep
+work to stop-state queries, symbol resolution and breakpoint bookkeeping; do not
+invoke ExecuteShellcode, remote-thread creation or other target code execution
+that can wait on loader initialization. Finish binding and explicitly Continue
+before starting those operations. A manual pause following module load is not
+a general-purpose safe call point. Guard names are module base names such as
+`version.dll`, not file paths; matching remains the backend substring contract.
+
 There is deliberately no automatic Continue: `IsThreadStopped` proves state,
 not ownership, and neither the module event nor Continue carries a hold ID.
 Transparent automatic continuation would require a backend-issued stop identity

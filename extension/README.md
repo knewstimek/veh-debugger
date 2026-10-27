@@ -153,7 +153,9 @@ continuation, preserving any known exception/breakpoint reason. It does not
 automatically resume: the IPC has no token to condition continuation on the
 same hold. Other backends retain best-effort module notifications. Loader
 patterns use the backend substring contract and may also stop similarly named
-DLLs. This is separate from the explicit guest `stopOnModuleLoad` option.
+DLLs. This is separate from the explicit guest `stopOnModuleLoad` option. A loader-origin stop may retain the loader lock:
+finish binding and explicitly continue before executing target code or creating
+target threads. Such a stop is not a general-purpose safe call point.
 
 DAP exception filtering currently supports only `all`. Empty, uncaught-only
 and advanced filters return an error rather than claiming they were applied.

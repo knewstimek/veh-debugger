@@ -1243,6 +1243,8 @@ void DapServer::QueueDeferredModuleStop(const ModuleLoadStopEvent& event) {
 }
 
 void DapServer::HandleDeferredModuleStop(const DeferredModuleStop& stop) {
+    // A loader-origin stop may hold the target loader lock. Keep this path to
+    // stop-state/symbol/breakpoint operations; never execute code or create threads.
     if (!running_ || !ipcTransport_->IsConnected()) return;
     // A queued event is historical. An explicit Continue/Step can have consumed
     // its hold before this worker acquires the transaction mutex.
