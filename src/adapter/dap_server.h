@@ -9,6 +9,8 @@
 #include <thread>
 #include <condition_variable>
 #include <memory>
+#include <deque>
+#include <set>
 #include "dap_types.h"
 #include "transport.h"
 #include "ipc_transport.h"
@@ -31,7 +33,7 @@ private:
 	void OnMessage(const std::string& jsonStr);
 	void HandleRequest(const Request& req);
 	void SendResponse(const Response& resp);
-	void SendEvent(const std::string& event, const json& body = json::object());
+	void SendEvent(const std::string& event, const json& body = json::object(), bool onlyIfUnknown = false);
 
 	// DAP command handlers
 	void OnInitialize(const Request& req);
@@ -90,7 +92,9 @@ private:
 	bool ReceiveBackendReply(IpcCommand command, const void* payload, uint32_t size,
 		std::vector<uint8_t>& response, std::string& error);
 	bool SendStatusCommand(IpcCommand command, const void* payload, uint32_t size, std::string& error);
-	bool ContinueBackend(uint32_t threadId, bool& allContinued, std::string& error);
+	bool ContinueBackend(uint32_t threadId, bool& allContinued, std::string& error,
+		uint64_t resumeCutoff = UINT64_MAX);
+	void ClearVisibleStops(uint32_t threadId, uint64_t cutoff);
 	void SendPauseStopped(uint32_t threadId);
 
 	Transport* transport_ = nullptr;
@@ -157,6 +161,9 @@ private:
 		bool pending = false;        // true면 vehId/address 미설정, 모듈 로드 대기 중
 	};
 	std::vector<BreakpointMapping> breakpointMappings_;
+	// Serializes foreground requests, deferred transactions and transport cleanup.
+	// Reader callbacks only queue work; they never take this mutex.
+	std::recursive_mutex deferredMutex_;
 	int nextDapBpId_ = 1;
 
 	// Deferred BP 재시도: 단일 영속 워커 + condvar.
@@ -168,11 +175,23 @@ private:
 	std::condition_variable retryCv_;
 	bool retryWake_ = false;   // retryMutex_ 보호
 	bool retryStop_ = false;   // retryMutex_ 보호
+	struct DeferredModuleStop {
+		ModuleLoadStopEvent event{};
+		bool owned = false;
+	};
+	std::deque<DeferredModuleStop> deferredModuleStops_;
+	std::set<std::string> internalModuleStops_; // retryMutex_; acknowledged/arming patterns
+	std::unordered_map<uint32_t, uint64_t> visibleStops_; // retryMutex_
+	std::atomic<uint64_t> visibleStopVersion_{0};
+	void SyncInternalModuleStops();
+	void QueueDeferredModuleStop(const ModuleLoadStopEvent& event);
+	void HandleDeferredModuleStop(const DeferredModuleStop& stop);
+	void RemoveUnreferencedBreakpoint(uint32_t id);
 	void StartRetryThread();
 	void StopRetryThread();
 	void RetryThreadLoop();              // 워커 본체: wait -> RetryPendingBreakpointsOnce
 	void NotifyRetry();                  // reader 스레드에서 호출: wake signal만
-	void RetryPendingBreakpointsOnce();  // pending 재해석 1패스 (락 잡고 스냅샷 -> IPC -> 갱신)
+	void RetryPendingBreakpointsOnce(bool notify = true, const std::string& heldModule = {});  // pending 재해석 1패스 (락 잡고 스냅샷 -> IPC -> 갱신)
 
 	// Data breakpoint (hardware watchpoint) mapping
 	struct DataBreakpointMapping {

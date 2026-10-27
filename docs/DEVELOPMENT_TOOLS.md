@@ -8,6 +8,7 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 |---|---|
 | `tools/run_tests.py` | Runs every `test/test_*.py` file in parallel (`--jobs`, longest first from `test/.test_durations.json`) with a per-file timeout, prints durations, flags exit-0 runs that report FAIL, skips `# requires: x64` files on an x86 build and `# slow` files with `--quick`, and cleans up exactly the processes each file started (parent chain + creation time, so reused pids are never adopted). |
 | `test/test_remote_transport.py` | Exercises resident TCP/TLS authentication, IPC routing, late/missing detach replies, dead-agent recovery, startup exit/Win32 and structured common error diagnostics (including invalid-record fallback), launch width/initial-thread metadata and retry recovery, and real DLL lifecycle reply draining; removes its owned certificate, secret and processes. See [remote transport](REMOTE_TRANSPORT.md). |
+| `test/test_dap_deferred_loader_stop.py` | Uses the guest fixture without dwell sleeps: binding requires a hold and the DLL disappears on explicit continuation. Covers reload, failed-install retry, shared BP IDs, query failures, historical versus new holds delivered inside a Continue exchange, known stop reasons and termination/exit with TID reuse. |
 | `test/test_backend_results.py` | Injects rejected, short/oversized and missing backend replies through the existing guest fixture; checks DAP execution/write/termination acknowledgements, pause identity, exception-filter rejection and MCP/DAP empty-versus-failed stacks, including batch parity. |
 | `test/test_address_space_deadline.py` | Returns a synthetic root after 31 seconds to cross the previous guest timeout, then checks root application, batch parity and continued connection use. |
 | `test/test_pipe_write_failure.py`, `test_target/ipc_transport_regression.cpp` | Runs bounded native fault injection against production PipeClient: a frame delivered before write cancellation cannot be followed by another ordinary request, with/without the reader; cleanup remains available. Build target: `ipc_transport_regression`. |
@@ -244,6 +245,27 @@ and uses backend-provided width for disassembly. Guest event ownership is the
 authenticated backend's responsibility, not a host Toolhelp lookup. Backend
 reuse requires identical path, arguments and scope. Guest `veh_launch` is
 explicitly unsupported until guest process creation and stopOnEntry are wired.
+
+For guest DAP module-qualified function breakpoints (`module!function`), the
+adapter uses `SetModuleLoadStop` only when that command, Continue and
+`IsThreadStopped` are advertised. It arms the DLL-name guard before resolving
+and queues `ModuleLoadStopped` to the existing worker. That event is historical:
+a foreground Continue/Step may already have consumed the hold. The worker
+queries current stop state before binding, drops resumed notices, preserves
+known stop reasons, and exposes an observed stop for explicit user continuation.
+A failed/unsupported stop query emits a diagnostic without inventing a stop.
+
+There is deliberately no automatic Continue: `IsThreadStopped` proves state,
+not ownership, and neither the module event nor Continue carries a hold ID.
+Transparent automatic continuation would require a backend-issued stop identity
+and an atomic resume-if-that-hold-is-current operation. Arrival counters or a
+reason query alone do not close that race. Guards remain while functions are
+configured so reloads can rebind; replacement removes only internal patterns
+and preserves shared software breakpoint IDs. Backend patterns use substring
+matching, so similarly named DLLs may also produce an observed stop. Missing
+guard/query support retains best-effort ModuleLoaded handling. This does not enable the explicit guest
+`stopOnModuleLoad` configuration option. The short-lifetime VM fixture still
+needs to be run by the backend test session after updating the frontend.
 
 DAP uses `targetScope="guest"`, `processId`, an absolute `agent` and optional
 `agentArgs`. It validates the pipe peer and guest metadata, then gates command

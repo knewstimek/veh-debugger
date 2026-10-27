@@ -87,6 +87,23 @@ std::wstring QuoteWindowsArg(const std::wstring& value) {
 	return result;
 }
 
+std::string ModuleName(std::string value) {
+	const auto slash = value.find_last_of("\\\\/");
+	if (slash != std::string::npos) value.erase(0, slash + 1);
+	for (char& c : value) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+	return value;
+}
+
+std::string FunctionModule(const std::string& function) {
+	const auto bang = function.find('!');
+	if (bang == std::string::npos || bang == 0) return {};
+	std::string module = ModuleName(function.substr(0, bang));
+	if (module.size() > 250 || module.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_.-") != std::string::npos)
+		return {};
+	if (module.find('.') == std::string::npos) module += ".dll";
+	return module;
+}
+
 bool AddAddressOffset(uint64_t base, int64_t offset, uint64_t& result) {
 	if (offset >= 0) {
 		const auto amount = static_cast<uint64_t>(offset);
@@ -127,17 +144,24 @@ bool DapServer::ReceiveBackendReply(IpcCommand command, const void* payload, uin
 
 bool DapServer::SendStatusCommand(IpcCommand command, const void* payload, uint32_t size,
     std::string& error) {
+    const auto stopCutoff = visibleStopVersion_.load();
     std::vector<uint8_t> response;
     if (!ReceiveBackendReply(command, payload, size, response, error)) return false;
     if (response.size() != sizeof(IpcStatus)) {
         error = "Malformed backend status response";
         return false;
     }
+    if (command == IpcCommand::TerminateThread && size == sizeof(TerminateThreadRequest)) {
+        TerminateThreadRequest request{};
+        std::memcpy(&request, payload, sizeof(request));
+        ClearVisibleStops(request.threadId, stopCutoff);
+    }
     error.clear();
     return true;
 }
 
-bool DapServer::ContinueBackend(uint32_t threadId, bool& allContinued, std::string& error) {
+bool DapServer::ContinueBackend(uint32_t threadId, bool& allContinued, std::string& error, uint64_t resumeCutoff) {
+    if (resumeCutoff == UINT64_MAX) resumeCutoff = visibleStopVersion_.load();
     ContinueRequest request{};
     request.threadId = threadId;
     request.wantDetails = 1;
@@ -169,8 +193,22 @@ bool DapServer::ContinueBackend(uint32_t threadId, bool& allContinued, std::stri
             return false;
         }
     }
+    if (allContinued || threadId) ClearVisibleStops(threadId, resumeCutoff);
+    else for (uint32_t i = 0; i < header.resumedCount; ++i) {
+        uint32_t resumed{};
+        std::memcpy(&resumed, response.data() + sizeof(header) + size_t(i) * sizeof(resumed), sizeof(resumed));
+        ClearVisibleStops(resumed, resumeCutoff);
+    }
     error.clear();
     return true;
+}
+
+void DapServer::ClearVisibleStops(uint32_t threadId, uint64_t cutoff) {
+    std::lock_guard<std::mutex> lock(retryMutex_);
+    for (auto it = visibleStops_.begin(); it != visibleStops_.end();) {
+        if ((!threadId || it->first == threadId) && it->second <= cutoff) it = visibleStops_.erase(it);
+        else ++it;
+    }
 }
 
 void DapServer::SendPauseStopped(uint32_t threadId) {
@@ -376,6 +414,7 @@ void DapServer::OnMessage(const std::string& jsonStr) {
 }
 
 void DapServer::HandleRequest(const Request& req) {
+	std::lock_guard<std::recursive_mutex> transaction(deferredMutex_);
 	LOG_DEBUG("Request: %s (seq=%d)", req.command.c_str(), req.seq);
 	DAP_TRACE("REQUEST", req.command + " | " + req.arguments.dump());
 
@@ -496,20 +535,20 @@ void DapServer::SendResponse(const Response& resp) {
 	}
 }
 
-void DapServer::SendEvent(const std::string& event, const json& body) {
-	json j = {
-		{"seq", 0},  // placeholder
-		{"type", "event"},
-		{"event", event},
-		{"body", body},
-	};
-	// A guest backend stops only the selected thread; its siblings keep running.
-	if (guestTarget_ && event == "stopped") j["body"]["allThreadsStopped"] = false;
-	{
-		std::lock_guard<std::mutex> lock(sendMutex_);
-		j["seq"] = seq_++;
-		transport_->Send(j.dump());
-	}
+void DapServer::SendEvent(const std::string& event, const json& body, bool onlyIfUnknown) {
+    // Publish stopped state and its wire event in one serialization order.
+    // In particular a deferred pause cannot overwrite a newer exception/BP.
+    std::lock_guard<std::mutex> sending(sendMutex_);
+    if (event == "stopped") {
+        std::lock_guard<std::mutex> state(retryMutex_);
+        const auto threadId = body.value("threadId", 0u);
+        if (onlyIfUnknown && visibleStops_.count(threadId)) return;
+        visibleStops_[threadId] = ++visibleStopVersion_;
+        lastStoppedThreadId_.store(threadId);
+    }
+    json message = {{"seq", seq_++}, {"type", "event"}, {"event", event}, {"body", body}};
+    if (guestTarget_ && event == "stopped") message["body"]["allThreadsStopped"] = false;
+    transport_->Send(message.dump());
 }
 
 // --- Lifecycle ---
@@ -1087,100 +1126,175 @@ void DapServer::OnSetBreakpoints(const Request& req) {
 }
 
 void DapServer::OnSetFunctionBreakpoints(const Request& req) {
-	std::lock_guard<std::mutex> lock(breakpointMutex_);
-	json breakpointsJson = json::array();
-	auto bps = req.arguments.value("breakpoints", json::array());
-
-	// 기존 function breakpoint 제거 (DAP: 전체 교체 방식)
-	for (auto it = breakpointMappings_.begin(); it != breakpointMappings_.end(); ) {
-		if (it->type == BpType::Function) {
-			if (it->vehId != 0) {  // pending(vehId==0)은 실제 DLL BP가 없으므로 생략
-				RemoveBreakpointRequest rmReq{};
-				rmReq.id = it->vehId;
-				ipcTransport_->SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
-			}
-			it = breakpointMappings_.erase(it);
-		} else {
-			++it;
-		}
-	}
-
-	for (auto& bp : bps) {
-		std::string funcName = bp.value("name", "");
-		if (funcName.empty()) {
-			Breakpoint dbp;
-			dbp.id = nextDapBpId_++;
-			dbp.verified = false;
-			dbp.message = "Function name required";
-			breakpointsJson.push_back(dbp.ToJson());
-			continue;
-		}
-
-		// PDB 심볼로 함수명 → 주소 해석
-		ResolveFunctionRequest resolveReq = {};
-		strncpy_s(resolveReq.functionName, funcName.c_str(), sizeof(resolveReq.functionName) - 1);
-
-		uint64_t address = 0;
-		std::vector<uint8_t> resolveResp;
-		if (ipcTransport_->SendAndReceive(IpcCommand::ResolveFunction, &resolveReq, sizeof(resolveReq), resolveResp)) {
-			if (resolveResp.size() >= sizeof(ResolveFunctionResponse)) {
-				auto* resp2 = reinterpret_cast<const ResolveFunctionResponse*>(resolveResp.data());
-				if (resp2->status == IpcStatus::Ok) {
-					address = resp2->address;
-				}
-			}
-		}
-
-		if (address == 0) {
-			Breakpoint dbp;
-			dbp.id = nextDapBpId_++;
-			dbp.verified = false;
-			dbp.message = "Symbol not found: " + funcName + " (pending: will bind when module loads)";
-			// 함수 심볼 미해결 -> deferred로 보관. 모듈 로드 시 재해석.
-			BreakpointMapping m{};
-			m.dapId = dbp.id;
-			m.type = BpType::Function;
-			m.functionName = funcName;
-			m.pending = true;
-			breakpointMappings_.push_back(m);
-			breakpointsJson.push_back(dbp.ToJson());
-			continue;
-		}
-
-		// INT3 브레이크포인트 설정
-		SetBreakpointRequest setReq{};
-		setReq.address = address;
-
-		std::vector<uint8_t> respData;
-		if (ipcTransport_->SendAndReceive(IpcCommand::SetBreakpoint, &setReq, sizeof(setReq), respData)) {
-			if (respData.size() >= sizeof(SetBreakpointResponse)) {
-				auto* setResp = reinterpret_cast<const SetBreakpointResponse*>(respData.data());
-				Breakpoint dbp;
-				dbp.id = nextDapBpId_++;
-				dbp.verified = (setResp->status == IpcStatus::Ok);
-				dbp.instructionReference = address;
-
-				breakpointMappings_.push_back({dbp.id, setResp->id, address, {}, {}, {}, 0, {}, BpType::Function});
-				breakpointsJson.push_back(dbp.ToJson());
-			}
-		} else {
-			Breakpoint dbp;
-			dbp.id = nextDapBpId_++;
-			dbp.verified = false;
-			dbp.message = "IPC error setting breakpoint on " + funcName;
-			breakpointsJson.push_back(dbp.ToJson());
-		}
-	}
-
-	Response resp;
-	resp.request_seq = req.seq;
-	resp.command = "setFunctionBreakpoints";
-	resp.success = true;
-	resp.body = {{"breakpoints", breakpointsJson}};
-	SendResponse(resp);
+    std::set<uint32_t> obsolete;
+    json breakpointsJson = json::array();
+    {
+        std::lock_guard<std::mutex> lock(breakpointMutex_);
+        for (auto it = breakpointMappings_.begin(); it != breakpointMappings_.end();) {
+            if (it->type == BpType::Function) {
+                if (it->vehId) obsolete.insert(it->vehId);
+                it = breakpointMappings_.erase(it);
+            } else ++it;
+        }
+        for (const auto& bp : req.arguments.value("breakpoints", json::array())) {
+            const std::string name = bp.value("name", "");
+            Breakpoint dbp;
+            dbp.id = nextDapBpId_++;
+            dbp.verified = false;
+            if (name.empty()) dbp.message = "Function name required";
+            else {
+                BreakpointMapping mapping{};
+                mapping.dapId = dbp.id;
+                mapping.type = BpType::Function;
+                mapping.functionName = name;
+                mapping.condition = bp.value("condition", "");
+                mapping.hitCondition = bp.value("hitCondition", "");
+                mapping.pending = true;
+                breakpointMappings_.push_back(mapping);
+            }
+            breakpointsJson.push_back(dbp.ToJson());
+        }
+    }
+    for (auto id : obsolete) RemoveUnreferencedBreakpoint(id);
+    // Arm first, then recheck symbols. This closes the registration/load race.
+    SyncInternalModuleStops();
+    RetryPendingBreakpointsOnce(false);
+    {
+        std::lock_guard<std::mutex> lock(breakpointMutex_);
+        for (auto& bp : breakpointsJson) {
+            for (const auto& mapping : breakpointMappings_) {
+                if (mapping.dapId != bp["id"].get<int>()) continue;
+                bp["verified"] = !mapping.pending;
+                if (mapping.pending) bp["message"] = "Function breakpoint pending: " + mapping.functionName;
+                else bp["instructionReference"] = FormatAddress(mapping.address);
+            }
+        }
+    }
+    Response response;
+    response.request_seq = req.seq;
+    response.command = "setFunctionBreakpoints";
+    response.success = true;
+    response.body = {{"breakpoints", breakpointsJson}};
+    SendResponse(response);
 }
 
-// Deferred BP: 단일 영속 워커 + condvar.
+// Deferred BP: single persistent worker; reader callbacks only enqueue.
+void DapServer::RemoveUnreferencedBreakpoint(uint32_t id) {
+    if (!id) return;
+    {
+        std::lock_guard<std::mutex> lock(breakpointMutex_);
+        for (const auto& mapping : breakpointMappings_)
+            if (mapping.vehId == id) return;
+    }
+    const RemoveBreakpointRequest request{id};
+    ipcTransport_->SendCommand(IpcCommand::RemoveBreakpoint, &request, sizeof(request));
+}
+
+void DapServer::SyncInternalModuleStops() {
+    if (!guestTarget_ || !GuestSupports(IpcCommand::SetModuleLoadStop) ||
+        !GuestSupports(IpcCommand::Continue) || !GuestSupports(IpcCommand::IsThreadStopped)) return;
+    std::set<std::string> desired, current;
+    {
+        std::lock_guard<std::mutex> lock(breakpointMutex_);
+        for (const auto& mapping : breakpointMappings_) {
+            if (mapping.type != BpType::Function) continue;
+            const auto module = FunctionModule(mapping.functionName);
+            if (!module.empty()) desired.insert(module);
+        }
+    }
+    { std::lock_guard<std::mutex> lock(retryMutex_); current = internalModuleStops_; }
+    for (const auto& module : desired) {
+        if (current.count(module)) continue;
+        // Publish ownership before the request: the stop can precede its reply.
+        { std::lock_guard<std::mutex> lock(retryMutex_); internalModuleStops_.insert(module); }
+        SetModuleLoadStopRequest request{};
+        strncpy_s(request.name, module.c_str(), sizeof(request.name) - 1);
+        std::string error;
+        if (!SendStatusCommand(IpcCommand::SetModuleLoadStop, &request, sizeof(request), error)) {
+            std::lock_guard<std::mutex> lock(retryMutex_);
+            internalModuleStops_.erase(module);
+            for (auto& queued : deferredModuleStops_)
+                if (ModuleName(queued.event.name).find(module) != std::string::npos) queued.owned = false;
+            LOG_WARN("Deferred module guard could not be registered: %s", error.c_str());
+        }
+    }
+    for (const auto& module : current) {
+        if (desired.count(module)) continue;
+        SetModuleLoadStopRequest request{};
+        request.action = 1; // remove our pattern only; never clear all backend patterns
+        strncpy_s(request.name, module.c_str(), sizeof(request.name) - 1);
+        std::string error;
+        if (SendStatusCommand(IpcCommand::SetModuleLoadStop, &request, sizeof(request), error)) {
+            std::lock_guard<std::mutex> lock(retryMutex_);
+            internalModuleStops_.erase(module);
+        } else LOG_WARN("Deferred module guard removal failed: %s", error.c_str());
+    }
+}
+
+void DapServer::QueueDeferredModuleStop(const ModuleLoadStopEvent& event) {
+    std::lock_guard<std::mutex> lock(retryMutex_);
+    const auto name = ModuleName(event.name);
+    // The backend pattern contract is a case-insensitive substring match.
+    const bool owned = std::any_of(internalModuleStops_.begin(), internalModuleStops_.end(),
+        [&](const auto& pattern) { return name.find(pattern) != std::string::npos; });
+    deferredModuleStops_.push_back({event, owned});
+    retryWake_ = true;
+    retryCv_.notify_one();
+}
+
+void DapServer::HandleDeferredModuleStop(const DeferredModuleStop& stop) {
+    if (!running_ || !ipcTransport_->IsConnected()) return;
+    // A queued event is historical. An explicit Continue/Step can have consumed
+    // its hold before this worker acquires the transaction mutex.
+    std::vector<uint8_t> bytes;
+    std::string error;
+    const IsThreadStoppedRequest request{stop.event.threadId};
+    if (!stop.event.threadId || !GuestSupports(IpcCommand::IsThreadStopped) ||
+        !ReceiveBackendReply(IpcCommand::IsThreadStopped, &request, sizeof(request), bytes, error) ||
+        bytes.size() != sizeof(IsThreadStoppedResponse)) {
+        SendEvent("output", {{"category", "stderr"},
+            {"output", "Deferred binding skipped: current thread stop could not be confirmed.\n"}});
+        return;
+    }
+    IsThreadStoppedResponse state{};
+    std::memcpy(&state, bytes.data(), sizeof(state));
+    if (state.stopped == 0) return; // already resumed; do not rebind or invent a stop
+    if (state.stopped != 1) {
+        SendEvent("output", {{"category", "stderr"}, {"output", "Invalid backend thread-stop state.\n"}});
+        return;
+    }
+    const auto module = ModuleName(stop.event.name);
+    if (stop.owned) {
+        std::set<uint32_t> obsolete;
+        {
+            std::lock_guard<std::mutex> lock(breakpointMutex_);
+            for (auto& mapping : breakpointMappings_) {
+                if (mapping.type != BpType::Function || FunctionModule(mapping.functionName) != module) continue;
+                if (mapping.vehId) obsolete.insert(mapping.vehId);
+                mapping.vehId = 0;
+                mapping.address = 0;
+                mapping.pending = true;
+            }
+        }
+        for (auto id : obsolete) RemoveUnreferencedBreakpoint(id);
+    }
+    RetryPendingBreakpointsOnce(true, module);
+    bool pending = false;
+    {
+        std::lock_guard<std::mutex> lock(breakpointMutex_);
+        for (const auto& mapping : breakpointMappings_)
+            if (mapping.type == BpType::Function && FunctionModule(mapping.functionName) == module && mapping.pending)
+                pending = true;
+    }
+    // The current IPC proves only "stopped", not the identity/reason of the
+    // current hold. Binding is allowed; automatic continuation is not.
+    SendEvent("stopped", {
+        {"reason", "pause"}, {"threadId", stop.event.threadId}, {"allThreadsStopped", false},
+        {"description", std::string("Backend confirms stopped thread; ") +
+            (pending ? "function breakpoint remains pending for " : "deferred binding checked for ") + module},
+    }, true);
+}
+
 void DapServer::StartRetryThread() {
 	retryStop_ = false;
 	retryThread_ = std::thread(&DapServer::RetryThreadLoop, this);
@@ -1214,6 +1328,10 @@ void DapServer::RetryThreadLoop() {
 			retryWake_ = false;   // wake 소비. 처리 중 새 signal이 오면 다시 set되어 재실행됨(lost-wakeup 방지)
 		}
 		try {
+			std::lock_guard<std::recursive_mutex> transaction(deferredMutex_);
+			std::deque<DeferredModuleStop> stops;
+			{ std::lock_guard<std::mutex> lock(retryMutex_); stops.swap(deferredModuleStops_); }
+			for (const auto& stop : stops) HandleDeferredModuleStop(stop);
 			RetryPendingBreakpointsOnce();
 		} catch (...) {
 			LOG_ERROR("RetryPendingBreakpointsOnce threw");
@@ -1224,7 +1342,7 @@ void DapServer::RetryThreadLoop() {
 // pending BP를 DLL 심볼로 재해석하고, 성공하면 실제 BP 설정 +
 // DAP breakpoint(reason=changed, verified=true) 이벤트로 통지한다.
 // 워커 스레드에서만 호출되므로 IPC(SendAndReceive)를 안전하게 쓸 수 있다.
-void DapServer::RetryPendingBreakpointsOnce() {
+void DapServer::RetryPendingBreakpointsOnce(bool notify, const std::string& heldModule) {
 	// pending이 소진되거나 더 이상 해석되지 않을 때까지 반복.
 	for (;;) {
 		if (!running_ || !ipcTransport_->IsConnected()) return;
@@ -1237,10 +1355,16 @@ void DapServer::RetryPendingBreakpointsOnce() {
 			std::string functionName;
 		};
 		std::vector<Retry> todo;
+		std::set<std::string> guards;
+		{ std::lock_guard<std::mutex> lock(retryMutex_); guards = internalModuleStops_; }
 		{
 			std::lock_guard<std::mutex> lock(breakpointMutex_);
 			for (auto& m : breakpointMappings_) {
-				if (!m.pending) continue;
+				if (!m.pending || (!notify && m.type != BpType::Function)) continue;
+				// Ordinary inventory notifications must not bypass the guarded
+				// module stop query, including after that query failed.
+				if (notify && m.type == BpType::Function && guards.count(FunctionModule(m.functionName)) &&
+					FunctionModule(m.functionName) != heldModule) continue;
 				todo.push_back({m.dapId, m.type == BpType::Function, m.source, m.line, m.functionName});
 			}
 		}
@@ -1304,16 +1428,14 @@ void DapServer::RetryPendingBreakpointsOnce() {
 				dbp.id = r.dapId;
 				dbp.verified = true;
 				dbp.instructionReference = addr;
-				SendEvent("breakpoint", {
+				if (notify) SendEvent("breakpoint", {
 					{"reason", "changed"},
 					{"breakpoint", dbp.ToJson()},
 				});
 				DAP_TRACE("DeferredBPResolved", (r.isFunc ? r.functionName : (r.source + ":" + std::to_string(r.line))) + " -> " + FormatAddress(addr));
 			} else {
 				// 매핑이 사라짐(동시 재설정) -> 방금 설정한 BP 정리
-				RemoveBreakpointRequest rmReq{};
-				rmReq.id = newVehId;
-				ipcTransport_->SendCommand(IpcCommand::RemoveBreakpoint, &rmReq, sizeof(rmReq));
+				RemoveUnreferencedBreakpoint(newVehId);
 			}
 		}
 		if (!anyResolved) return;  // 이번 라운드에 아무것도 못 풀면 종료
@@ -1422,6 +1544,7 @@ void DapServer::OnSetInstructionBreakpoints(const Request& req) {
 // --- Execution Control ---
 
 void DapServer::OnContinue(const Request& req) {
+	const auto resumeCutoff = visibleStopVersion_.load();
 	// DAP: continue resumes every thread unless the client asks for singleThread.
 	const bool singleThread = req.arguments.value("singleThread", false);
 	uint32_t threadId = singleThread ? req.arguments.value("threadId", 0u) : 0;
@@ -1442,7 +1565,7 @@ void DapServer::OnContinue(const Request& req) {
 	Response resp;
 	resp.request_seq = req.seq;
 	resp.command = "continue";
-	resp.success = ContinueBackend(threadId, allContinued, error);
+	resp.success = ContinueBackend(threadId, allContinued, error, resumeCutoff);
 	if (resp.success) {
 		std::lock_guard<std::mutex> lock(frameMutex_);
 		frameMap_.clear();
@@ -1453,6 +1576,7 @@ void DapServer::OnContinue(const Request& req) {
 }
 
 void DapServer::OnNext(const Request& req) {
+	const auto resumeCutoff = visibleStopVersion_.load();
 	uint32_t threadId = req.arguments.value("threadId", 0);
 	std::string granularity = req.arguments.value("granularity", "statement");
 	bool executionOk = false, allContinued = false;
@@ -1555,7 +1679,7 @@ void DapServer::OnNext(const Request& req) {
 						// Continue → temp BP에서 멈춤 (single-step 0회)
 						ContinueRequest contReq{};
 						contReq.threadId = threadId;
-						executionOk = ContinueBackend(threadId, allContinued, executionError);
+						executionOk = ContinueBackend(threadId, allContinued, executionError, resumeCutoff);
 						goto send_response;
 					}
 				}
@@ -1607,7 +1731,7 @@ void DapServer::OnNext(const Request& req) {
 					}
 					ContinueRequest contReq{};
 					contReq.threadId = threadId;
-					executionOk = ContinueBackend(threadId, allContinued, executionError);
+					executionOk = ContinueBackend(threadId, allContinued, executionError, resumeCutoff);
 					callSkipped = true;
 				}
 			}
@@ -1625,6 +1749,7 @@ send_response:
 	resp.request_seq = req.seq;
 	resp.command = "next";
 	resp.success = executionOk;
+	if (executionOk) ClearVisibleStops(threadId, resumeCutoff);
 	if (!executionOk) {
 		std::lock_guard<std::mutex> stepLock(steppingMutex_);
 		steppingMode_ = SteppingMode::None;
@@ -1634,6 +1759,7 @@ send_response:
 }
 
 void DapServer::OnStepIn(const Request& req) {
+	const auto resumeCutoff = visibleStopVersion_.load();
 	uint32_t threadId = req.arguments.value("threadId", 0);
 	std::string granularity = req.arguments.value("granularity", "statement");
 	ResumeMainThread();
@@ -1657,6 +1783,7 @@ void DapServer::OnStepIn(const Request& req) {
 	resp.request_seq = req.seq;
 	resp.command = "stepIn";
 	resp.success = SendStatusCommand(IpcCommand::StepInto, &stepReq, sizeof(stepReq), resp.message);
+	if (resp.success) ClearVisibleStops(threadId, resumeCutoff);
 	if (!resp.success) {
 		std::lock_guard<std::mutex> stepLock(steppingMutex_);
 		steppingMode_ = SteppingMode::None;
@@ -1665,6 +1792,7 @@ void DapServer::OnStepIn(const Request& req) {
 }
 
 void DapServer::OnStepOut(const Request& req) {
+	const auto resumeCutoff = visibleStopVersion_.load();
 	uint32_t threadId = req.arguments.value("threadId", 0);
 	ResumeMainThread();
 
@@ -1684,6 +1812,7 @@ void DapServer::OnStepOut(const Request& req) {
 	resp.request_seq = req.seq;
 	resp.command = "stepOut";
 	resp.success = SendStatusCommand(IpcCommand::StepOut, &stepReq, sizeof(stepReq), resp.message);
+	if (resp.success) ClearVisibleStops(threadId, resumeCutoff);
 	if (!resp.success) {
 		std::lock_guard<std::mutex> stepLock(steppingMutex_);
 		steppingMode_ = SteppingMode::None;
@@ -3317,7 +3446,15 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 
 	case IpcEvent::ModuleLoadStopped: {
 		if (size >= sizeof(ModuleLoadStopEvent)) {
-			auto* e = reinterpret_cast<const ModuleLoadStopEvent*>(payload);
+			ModuleLoadStopEvent copy{};
+			std::memcpy(&copy, payload, sizeof(copy));
+			copy.name[sizeof(copy.name) - 1] = '\0';
+			if (guestTarget_) {
+				QueueDeferredModuleStop(copy);
+				break;
+			}
+			const auto* e = &copy;
+			NotifyRetry();
 			lastStoppedThreadId_.store(e->threadId);
 			char nameBuf[sizeof(e->name)];
 			memcpy(nameBuf, e->name, sizeof(e->name));
@@ -3346,6 +3483,7 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 	case IpcEvent::ThreadExited: {
 		if (size >= sizeof(ThreadEvent)) {
 			auto* e = reinterpret_cast<const ThreadEvent*>(payload);
+			ClearVisibleStops(e->threadId, visibleStopVersion_.load());
 			SendEvent("thread", {
 				{"reason", "exited"},
 				{"threadId", (int)e->threadId},
@@ -3901,6 +4039,7 @@ void DapServer::ResumeMainThread(uint32_t requestedThreadId) {
 }
 
 void DapServer::Cleanup(bool detachOnly, bool backendDetached) {
+	std::lock_guard<std::recursive_mutex> transaction(deferredMutex_);
 	// 모니터 스레드 먼저 정리 (double-close 방지)
 	StopProcessMonitor();
 
@@ -3939,6 +4078,14 @@ void DapServer::Cleanup(bool detachOnly, bool backendDetached) {
 		std::lock_guard<std::mutex> lock(frameMutex_);
 		frameMap_.clear();
 		nextFrameId_ = 1;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(retryMutex_);
+		deferredModuleStops_.clear();
+		internalModuleStops_.clear();
+		visibleStops_.clear();
+		retryWake_ = false;
 	}
 
 	// SymbolEngine 정리 (targetProcess_ close 전에 — SymCleanup이 핸들 사용)

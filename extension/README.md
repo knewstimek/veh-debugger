@@ -146,6 +146,15 @@ inspection and writes, continue/pause, instruction steps, execution/data
 breakpoints, symbol-based source/function breakpoints and termination.
 Unsupported commands return errors. Stops identify the selected thread;
 guest launch, `stopOnEntry` and `stopOnModuleLoad` remain unsupported.
+Module-qualified pending guest functions (`module!function`) use advertised
+loader-stop and stop-query support to bind while the DLL is held. The adapter
+confirms the thread is still stopped and exposes that state for explicit user
+continuation, preserving any known exception/breakpoint reason. It does not
+automatically resume: the IPC has no token to condition continuation on the
+same hold. Other backends retain best-effort module notifications. Loader
+patterns use the backend substring contract and may also stop similarly named
+DLLs. This is separate from the explicit guest `stopOnModuleLoad` option.
+
 DAP exception filtering currently supports only `all`. Empty, uncaught-only
 and advanced filters return an error rather than claiming they were applied.
 

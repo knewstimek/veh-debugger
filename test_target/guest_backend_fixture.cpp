@@ -53,11 +53,38 @@ int wmain(int argc, wchar_t** argv) {
     const bool vmMode=mode.rfind(L"vm",0)==0||machineMode;uint32_t vmState=2,detachFailures=0;
     uint32_t continueRequests = 0, pauseRequests = 0, resolveRequests = 0;
     uint32_t fixtureBreakpointId = 0;
+    const bool deferredMode=mode.rfind(L"deferred-",0)==0;
+    bool deferredGuard=false,moduleHeld=false,exceptionHeld=false;
+    uint32_t moduleHeldTid=77,deferredStopQueries=0;
+    uint32_t deferredResolves=0,deferredSets=0,deferredResumes=0,deferredRemoves=0,deferredId=0,deferredContinueCalls=0;
     if ((!pid&&!machineMode)||name.empty()||(machineMode&&pidProvided)) return 2;
     HANDLE pipe = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 65536, 65536, 0, nullptr);
     if (pipe == INVALID_HANDLE_VALUE) return 3;
     if (!ConnectNamedPipe(pipe, nullptr) && GetLastError() != ERROR_PIPE_CONNECTED) { CloseHandle(pipe); return 4; }
     if (mode == L"ready-exit") { Sleep(100); CloseHandle(pipe); return 0; }
+    auto emitDeferredLoad=[&](bool force=false){
+        const bool initialOnly=mode==L"deferred-queued-release"||mode==L"deferred-queued-new"||
+            mode==L"deferred-terminate-old"||mode==L"deferred-exit-old";
+        if(!force&&(mode==L"deferred-user-stop"||initialOnly)){
+            exceptionHeld=true;
+            veh::ExceptionEvent e{};e.threadId=88;e.exceptionCode=0xc0000005;e.address=0x3000;
+            if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ExceptionOccurred),e))return false;
+        }
+        if(!force&&initialOnly)return true;
+        if(deferredGuard){
+            moduleHeld=true;
+            moduleHeldTid=(mode==L"deferred-terminate-old"||mode==L"deferred-exit-old")?88u:77u;
+            if(force&&(mode==L"deferred-terminate-old"||mode==L"deferred-exit-old")){
+                const veh::ThreadEvent created{88};
+                if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ThreadCreated),created))return false;
+            }
+            veh::ModuleLoadStopEvent e{0x1000,0x1000,moduleHeldTid};
+            strcpy_s(e.name,mode==L"deferred-external"?"other.dll":mode==L"deferred-prefix"?"prefix-sample.dll":"sample.dll");
+            return reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ModuleLoadStopped),e);
+        }
+        veh::ModuleEvent e{};e.module.baseAddress=0x1000;strcpy_s(e.module.name,"sample.dll");
+        return reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ModuleLoaded),e);
+    };
     send(pipe, static_cast<uint32_t>(veh::IpcEvent::Ready), nullptr, 0);
     for (;;) {
         veh::IpcHeader header{};
@@ -80,6 +107,12 @@ int wmain(int argc, wchar_t** argv) {
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::GetProcesses);
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::ControlVirtualMachine);
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::TraceVirtualCpu);
+            }
+            if(deferredMode){
+                for(auto op:{veh::IpcCommand::ResolveFunction,veh::IpcCommand::SetBreakpoint,
+                    veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue,veh::IpcCommand::TerminateThread})veh::SetCommandSupported(caps.commands,op);
+                if(mode!=L"deferred-no-query")veh::SetCommandSupported(caps.commands,veh::IpcCommand::IsThreadStopped);
+                if(mode!=L"deferred-unsupported")veh::SetCommandSupported(caps.commands,veh::IpcCommand::SetModuleLoadStop);
             }
             if(mode.rfind(L"control-",0)==0) {
                 for(auto op:{veh::IpcCommand::Continue,veh::IpcCommand::Pause,veh::IpcCommand::StepInto,
@@ -115,6 +148,91 @@ int wmain(int argc, wchar_t** argv) {
             if (mode == L"wrong-scope") info.scope = veh::IpcTargetScope::Host;
             if (mode == L"not-found") { info = {}; info.status = veh::IpcStatus::NotFound; }
             if (!send(pipe, header.command, &info, (mode == L"truncated"||mode==L"machine-truncated") ? 8 : sizeof(info))) break;
+        } else if(deferredMode && command==veh::IpcCommand::IsThreadStopped){
+            ++deferredStopQueries;
+            if(mode==L"deferred-query-error"){if(!reply(pipe,header.command,veh::IpcStatus::Error))break;continue;}
+            if(mode==L"deferred-query-short"){if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;continue;}
+            veh::IsThreadStoppedRequest request{};
+            if(bytes.size()!=sizeof(request))break;
+            std::memcpy(&request,bytes.data(),sizeof(request));
+            veh::IsThreadStoppedResponse response{veh::IpcStatus::Ok,
+                static_cast<uint8_t>((moduleHeld&&request.threadId==moduleHeldTid)||(exceptionHeld&&request.threadId==88))};
+            if(!reply(pipe,header.command,response))break;
+            if(!response.stopped&&mode==L"deferred-queued-release"){
+                veh::ModuleEvent unloaded{};unloaded.module.baseAddress=0x1000;
+                strcpy_s(unloaded.module.name,"sample.dll");
+                if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ModuleUnloaded),unloaded))break;
+            }
+        } else if(deferredMode && command==veh::IpcCommand::TerminateThread){
+            exceptionHeld=false;
+            if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
+            if(mode==L"deferred-terminate-old"&&!emitDeferredLoad(true))break;
+        } else if (deferredMode && command==veh::IpcCommand::SetModuleLoadStop) {
+            veh::SetModuleLoadStopRequest request{};
+            if(bytes.size()!=sizeof(request)){if(!reply(pipe,header.command,veh::IpcStatus::InvalidArgs))break;continue;}
+            std::memcpy(&request,bytes.data(),sizeof(request));
+            const std::string pattern(request.name,strnlen(request.name,sizeof(request.name)));
+            if(request.action==0&&pattern=="sample.dll")deferredGuard=true;
+            else if(request.action==1&&pattern=="sample.dll")deferredGuard=false;
+            else {if(!reply(pipe,header.command,veh::IpcStatus::Error))break;continue;}
+            if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
+        } else if(deferredMode && command==veh::IpcCommand::ResolveFunction) {
+            ++deferredResolves;
+            const bool stale=mode==L"deferred-stale"&&deferredResolves==1;
+            const bool resident=(moduleHeld&&mode!=L"deferred-prefix")||stale;
+            veh::ResolveFunctionResponse response{resident?veh::IpcStatus::Ok:veh::IpcStatus::NotFound,
+                resident?0x1100ull:0ull};
+            if(!reply(pipe,header.command,response))break;
+            if(deferredResolves==1&&!stale&&!emitDeferredLoad())break;
+        } else if(deferredMode && command==veh::IpcCommand::SetBreakpoint) {
+            ++deferredSets;
+            if(!moduleHeld||(mode==L"deferred-reject"&&deferredSets==1)){
+                if(!reply(pipe,header.command,veh::IpcStatus::Error))break;
+                if(!moduleHeld&&mode==L"deferred-stale"&&!emitDeferredLoad())break;
+                continue;
+            }
+            if((mode==L"deferred-during"||mode==L"deferred-same-tid")&&deferredSets==1){
+                exceptionHeld=true;
+                veh::ExceptionEvent e{};e.threadId=mode==L"deferred-same-tid"?77:88;e.exceptionCode=0xc0000005;e.address=0x3000;
+                if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ExceptionOccurred),e))break;
+            }
+            deferredId=9000;
+            if(!reply(pipe,header.command,veh::SetBreakpointResponse{veh::IpcStatus::Ok,deferredId}))break;
+        } else if(deferredMode && command==veh::IpcCommand::RemoveBreakpoint) {
+            ++deferredRemoves;deferredId=0;
+            if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
+        } else if(deferredMode && command==veh::IpcCommand::Continue){
+            ++deferredContinueCalls;
+            veh::ContinueRequest request{};
+            if(bytes.size()!=sizeof(request))break;
+            std::memcpy(&request,bytes.data(),sizeof(request));
+            if(!request.wantDetails){if(!reply(pipe,header.command,veh::IpcStatus::Error))break;continue;}
+            if(mode==L"deferred-retained"&&deferredContinueCalls==1){
+                struct {veh::ContinueResponse head;uint32_t tid;} held{{veh::IpcStatus::Ok,0,1},77};
+                if(!reply(pipe,header.command,held))break;
+                continue;
+            }
+            const bool released=mode==L"deferred-queued-release";
+            const bool newer=mode==L"deferred-queued-new";
+            if(released&&!emitDeferredLoad(true))break; // old hold delivered inside foreground exchange
+            std::vector<uint32_t> resumed,remaining;
+            if(moduleHeld&&(request.threadId==0||request.threadId==moduleHeldTid)){
+                resumed.push_back(moduleHeldTid);moduleHeld=false;deferredId=0;
+            }else if(moduleHeld)remaining.push_back(moduleHeldTid);
+            if(exceptionHeld&&(request.threadId==0||request.threadId==88)){resumed.push_back(88);exceptionHeld=false;}
+            else if(exceptionHeld)remaining.push_back(88);
+            if(newer){
+                if(!emitDeferredLoad(true))break; // genuine new hold before the reply
+                remaining.push_back(moduleHeldTid);
+            }
+            ++deferredResumes;
+            veh::ContinueResponse head{veh::IpcStatus::Ok,static_cast<uint32_t>(resumed.size()),static_cast<uint32_t>(remaining.size())};
+            std::vector<uint8_t> wire(sizeof(head)+(resumed.size()+remaining.size())*sizeof(uint32_t));
+            std::memcpy(wire.data(),&head,sizeof(head));
+            size_t offset=sizeof(head);
+            for(auto tid:resumed){std::memcpy(wire.data()+offset,&tid,sizeof(tid));offset+=sizeof(tid);}
+            for(auto tid:remaining){std::memcpy(wire.data()+offset,&tid,sizeof(tid));offset+=sizeof(tid);}
+            if(!send(pipe,header.command,wire.data(),static_cast<uint32_t>(wire.size())))break;
         } else if (mode.rfind(L"control-",0)==0 &&
             (command==veh::IpcCommand::Continue || command==veh::IpcCommand::Pause ||
              command==veh::IpcCommand::StepInto || command==veh::IpcCommand::StepOver ||
@@ -231,6 +349,8 @@ int wmain(int argc, wchar_t** argv) {
             threads.header.status = veh::IpcStatus::Ok;
             threads.header.count = mode==L"machine-thread-short"?2:1;
             threads.thread.id = 77;
+            if(deferredMode)std::snprintf(threads.thread.name,sizeof(threads.thread.name),
+                "g=%u,set=%u,res=%u,held=%u,rm=%u,c=%u,q=%u",deferredGuard?1u:0u,deferredSets,deferredResumes,moduleHeld?1u:0u,deferredRemoves,deferredContinueCalls,deferredStopQueries);
             if (mode == L"silent-detach" || mode == L"late-detach" || mode == L"host-cap")
                 sprintf_s(threads.thread.name, "fixture-agent:%lu", GetCurrentProcessId());
             if (mode == L"trace") strcpy_s(threads.thread.name,
@@ -266,6 +386,11 @@ int wmain(int argc, wchar_t** argv) {
             if (request.size) response[sizeof(status)] = 0x42;
             if (request.size > 1) response[sizeof(status) + 1] = 0xc3;
             if (!send(pipe, header.command, response.data(), static_cast<uint32_t>(response.size()))) break;
+            if(deferredMode&&request.address==0x3000&&mode==L"deferred-exit-old"){
+                exceptionHeld=false;const veh::ThreadEvent exited{88};
+                if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ThreadExited),exited)||!emitDeferredLoad(true))break;
+            }
+            if(deferredMode&&request.address==0x2000&&!emitDeferredLoad(true))break;
         } else if(vmMode&&command==veh::IpcCommand::ControlVirtualMachine&&bytes.size()==sizeof(veh::ControlVirtualMachineRequest)) {
             veh::ControlVirtualMachineRequest request{};memcpy(&request,bytes.data(),sizeof(request));
             veh::ControlVirtualMachineResponse response{veh::IpcStatus::Ok,veh::VirtualMachineState::Paused};
