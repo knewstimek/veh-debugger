@@ -160,6 +160,8 @@ enum class IpcEvent : uint32_t {
 	Paused                 = 0x1009,
 	ModuleLoadStopped      = 0x100A,  // stopped at a matching module load
 	HeartbeatAck           = 0x10FE,
+	// Non-terminal backend diagnostic: not detach, target exit, or a stop event.
+	// MCP/DAP currently log receipt only; no standardized payload/loss-count format.
 	Error                  = 0x10FF,
 	Ready                  = 0x1000,
 };

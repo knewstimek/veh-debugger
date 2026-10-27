@@ -193,6 +193,18 @@ register replies, interrupt fallback and safe detach of execution/data
 breakpoints. Cleanup rejection must retain the session and prevent detach;
 retry must remove each original kind/size before sending `D`. No VM is used.
 
+## Backend error event semantics
+
+`IpcEvent::Error` (`0x10FF`) is a non-terminal backend diagnostic. Receipt does
+not disconnect the transport, detach the session, terminate the target or
+complete a pending stop wait. MCP and DAP currently log receipt only; they do
+not decode its payload or forward a structured loss notification to clients.
+A backend may use it to diagnose a stop-queue overflow, but it must not count
+that diagnostic as delivery of the lost stop. There is no agreed payload or
+loss-counter format yet; reliable client-visible loss reporting requires a
+separately agreed contract. Target exit uses `ProcessExited`; transport failure
+is detected by the transport itself.
+
 ## External guest targets
 
 For a backend whose PIDs belong to an analyzed VM, set `target_scope: "guest"`

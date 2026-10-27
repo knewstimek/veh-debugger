@@ -11,6 +11,7 @@
 - **Guest checkpoint and capture routing** -- checkpoint regions use the backend memory map instead of host process APIs. Guest targeted captures omit TEB capture by default; explicit unsupported TEB requests still fail. Local guest/VM backend exchanges have a 30-second timeout floor.
 
 ### Fixed
+- **Backend error-event contract** -- documented `IpcEvent::Error` as a non-terminal diagnostic. MCP/DAP currently log receipt only; it neither closes a session nor substitutes for a stop event or structured stop-loss notification.
 - **Acknowledged backend detach (MCP/DAP)** -- local MCP backends and guest DAP sessions must return `Ok` before detach reports success. Failed replies retain the session, and MCP attach/launch cannot replace it. TCP detach retains the resident-work closure confirmation. Complete replies survive an immediate peer disconnect.
 - **Module-list backend errors** -- MCP `veh_modules` distinguishes a valid empty module list from an unsupported, failed, truncated, or unterminated IPC response. Direct and batch calls return the same error semantics, including for WoW64 guest backends that do not advertise module enumeration.
 - **DAP shutdown and memory bounds** -- shutdown wakes and joins the transport reader without polling or missed wakeups. Memory/disassembly requests reject address overflow and ranges outside a 32-bit guest address space; thread termination failures report failure.
