@@ -14,6 +14,7 @@ inline std::string BackendStatusText(IpcStatus status) {
     case IpcStatus::InvalidArgs: return "backend rejected arguments";
     case IpcStatus::Unsupported: return "request unsupported by backend";
     case IpcStatus::LimitReached: return "backend resource limit reached";
+    case IpcStatus::InvalidState: return "operation refused in the current target state";
     default: return "unknown backend status " + std::to_string(static_cast<uint32_t>(status));
     }
 }

@@ -933,7 +933,10 @@ json McpServer::ToolExecuteShellcode(const json& args) {
 	auto result = session_.ExecuteShellcode(bytes.data(), static_cast<uint32_t>(bytes.size()),
 	                                         static_cast<uint32_t>(timeoutMs));
 	if (!result.ok) {
-		return {{"error", "Shellcode execution failed (alloc or thread creation error)"}};
+		json error = {{"error", result.error.empty() ? "Shellcode execution failed" : result.error}};
+		if (result.backendStatus) error["backendStatus"] = static_cast<uint32_t>(*result.backendStatus);
+		if (result.backendStatus == IpcStatus::InvalidState) error["code"] = "invalid_state";
+		return error;
 	}
 
 	char addrBuf[20];

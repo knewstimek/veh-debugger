@@ -174,6 +174,7 @@ enum class IpcStatus : uint32_t {
 	InvalidArgs            = 3,
 	Unsupported            = 4,  // the backend does not implement this command
 	LimitReached           = 5,  // a backend table is full (breakpoint/watch slots); free one first
+	InvalidState           = 6,  // supported operation refused before starting in the current target state
 };
 
 // --- Payload structures ---

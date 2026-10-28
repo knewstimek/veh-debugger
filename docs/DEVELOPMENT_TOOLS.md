@@ -9,9 +9,12 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 | `tools/run_tests.py` | Runs every `test/test_*.py` file in parallel (`--jobs`, longest first from `test/.test_durations.json`) with a per-file timeout, prints durations, flags exit-0 runs that report FAIL, skips `# requires: x64` files on an x86 build and `# slow` files with `--quick`, and cleans up exactly the processes each file started (parent chain + creation time, so reused pids are never adopted). |
 | `test/test_remote_transport.py` | Exercises resident TCP/TLS authentication, IPC routing, late/missing detach replies, dead-agent recovery, startup exit/Win32 and structured common error diagnostics (including invalid-record fallback), launch width/initial-thread metadata and retry recovery, and real DLL lifecycle reply draining; removes its owned certificate, secret and processes. See [remote transport](REMOTE_TRANSPORT.md). |
 | `test/test_dap_deferred_loader_stop.py` | Uses the guest fixture without dwell sleeps: binding requires a hold and the DLL disappears on explicit continuation. Covers reload, failed-install retry, shared BP IDs, query failures, historical versus new holds delivered inside a Continue exchange, known stop reasons and termination/exit with TID reuse. |
+| `test/test_local_backend_recovery.py` | Kills only exact test-owned agent handles and checks same-MCP reattachment, death during detach, live pipe loss without agent termination, and stale-agent isolation from native DLL cleanup. |
+| `test/test_shellcode_results.py` | Checks status-only/full target-state refusal, generic/unknown statuses, malformed success and transport failure; direct/batch/BP-action results agree. TCP routing is covered by `test_remote_transport.py`. |
 | `test/test_backend_results.py` | Injects rejected, short/oversized and missing backend replies through the existing guest fixture; checks DAP execution/write/termination acknowledgements, pause identity, exception-filter rejection and MCP/DAP empty-versus-failed stacks, including batch parity. |
 | `test/test_address_space_deadline.py` | Returns a synthetic root after 31 seconds to cross the previous guest timeout, then checks root application, batch parity and continued connection use. |
 | `test/test_pipe_write_failure.py`, `test_target/ipc_transport_regression.cpp` | Runs bounded native fault injection against production PipeClient: a frame delivered before write cancellation cannot be followed by another ordinary request, with/without the reader; cleanup remains available. Build target: `ipc_transport_regression`. |
+| `test/owned_mcp_client.py` | Captures the MCP and all descendants in a private Windows job before requests, then terminates and waits exact owned handles even if attach never exposes an agent PID. |
 | `test/mcp_test_client.py` | Shared timeout-aware MCP stdio client. It bounds captured diagnostics and terminates only processes it started. |
 | `test/dap_test_client.py`, `test/test_dap_thread_errors.py`, `test/test_dap_guest_attach.py` | Bounded DAP stdio client; no-attach error and synthetic external guest attach, scope/identity validation, capability-gated command routing, rejection and acknowledged disconnect retry tests. The adapter runs without opening a console window. `test/test_vm_attach.py` covers malformed guest thread-list IPC through MCP. |
 | `tools/run_mcp_scenario.py` | Runs 1-500 calls from a JSON scenario, supports named result references, stops on errors by default, and optionally writes a new report without overwriting. |
@@ -294,7 +297,32 @@ checks immediate step refusals and zero-call hypervisor traces without automatic
 Continue/Pause, using the same synthetic fixture rather than a real VM. The
 fixture also returns three Detach errors before success to check that direct
 detach and attach/launch replacement keep the prior session until the backend
-acknowledges cleanup.
+acknowledges cleanup. A dead external agent or disconnected local pipe instead
+permits MCP to clear its stale session/cache and reconnect. The agent's original
+process handle and matching pipe identify the current peer; PID reuse or a stale
+external-agent record cannot stand in for a native DLL. Clearing local state does
+not prove target cleanup: explicit `veh_detach` returns
+`backendCleanupConfirmed: false` in that case. TCP work closure also cannot
+confirm a backend acknowledgement, so TCP detach carries the same marker while
+retaining its existing resident-work closure wait. A connected live backend's rejected,
+malformed or unavailable reply still retains the session. DAP cleanup is unchanged.
+
+`IpcStatus::InvalidState = 6` means an advertised operation was refused **before
+starting** because of the current target state. Values 0-5 and existing response
+layouts are unchanged. For `ExecuteShellcode`, a non-Ok status may be sent alone
+or in the existing response; success requires the complete response. MCP returns
+`backendStatus` for a received failure status and `code: "invalid_state"` for 6,
+with identical direct/batch/action errors. Generic Error remains generic; transport
+failure does not invent a backend status. Do not infer reasons from backend exit
+codes or logs, automatically resume the target, or retry code execution.
+
+Backends should check loader initialization, held module-load stops and stopped
+threads owning LoaderLock **in the target's address space**, before creating an
+execution thread. For an inner guest these are guest state, not host state. A
+loader-related refusal may use InvalidState; the frontend does not implement or
+claim those backend checks. Command capabilities describe implemented support;
+runtime target-state refusal does not change that capability.
+
 A first top-level `veh_batch` step can attach/launch an unattached session;
 repeated/nested batches and breakpoint actions cannot replace sessions.
 Inspect commands retain their ordinary batch/action routes. `veh_processes`

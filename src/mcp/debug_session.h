@@ -83,6 +83,8 @@ struct DisasmInsn {
 
 struct ShellcodeResult {
 	bool ok = false;
+	std::string error;
+	std::optional<IpcStatus> backendStatus;
 	uint32_t exitCode = 0;
 	uint64_t allocatedAddress = 0;
 	bool crashed = false;
@@ -212,6 +214,7 @@ public:
 	bool IsTargetAlive();
 	// Last Attach() failure reason (categorized: suspended / access-denied / injection / pipe).
 	const std::string& LastAttachError() const { return lastAttachError_; }
+	bool LastDetachBackendConfirmed() const { return lastDetachBackendConfirmed_; }
 
 	// --- Breakpoints ---
 	BpResult SetBreakpoint(uint64_t address);
@@ -538,6 +541,7 @@ private:
 		std::vector<std::string> args;
 		bool guestTarget;
         bool vmTarget;
+		std::shared_ptr<void> process; // exact CreateProcess handle; never reopen by PID
 	};
 	std::map<uint32_t, RunningAgent> externalAgents_; // target pid -> agent we started
 	BackendInfo backendInfo_;
@@ -557,6 +561,7 @@ private:
 	bool externalAttachPending_ = false;
 	uint32_t targetAddressBits_ = 0;
 	std::string lastAttachError_;   // categorized reason for the last Attach() failure
+	bool lastDetachBackendConfirmed_ = false;
 	std::atomic<bool> attached_{false};
 	std::atomic<bool> launchedByUs_{false};
 	uint32_t launchedMainThreadId_ = 0;

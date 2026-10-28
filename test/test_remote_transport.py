@@ -481,7 +481,7 @@ try{$pin=([BitConverter]::ToString($hash.ComputeHash($cert.RawData))).Replace('-
                     "host": {"path": backend, "target_scope": "host", "args": ["--metadata", "host-cap"], "allow_launch": True},
                     **{alias: {"path": backend, "target_scope": "guest", "args": ["--metadata", mode]}
                        for alias, mode in (("early", "early-exit"), ("ready-exit", "ready-exit"),
-                                           ("cap-exit", "cap-exit"), ("scope-mismatch", "host-cap"),
+                                           ("cap-exit", "cap-exit"), ("scope-mismatch", "host-cap"), ("state-refusal", "shellcode-state"),
                                            ("diagnostic-driver", "diagnostic-driver"), ("diagnostic-abi", "diagnostic-abi"),
                                            ("diagnostic-invalid", "diagnostic-invalid"))},
                     "missing-agent": {"path": str(directory / "missing-agent.exe"), "target_scope": "guest"},
@@ -560,7 +560,7 @@ try{$pin=([BitConverter]::ToString($hash.ComputeHash($cert.RawData))).Replace('-
             for alias, scope in (("guest", "guest"), ("machine", "vm"), ("host", "host"),
                                  ("early", "guest"), ("ready-exit", "guest"), ("cap-exit", "guest"),
                                  ("diagnostic-driver", "guest"), ("diagnostic-abi", "guest"), ("diagnostic-invalid", "guest"),
-                                 ("scope-mismatch", "guest"), ("missing-agent", "guest")):
+                                 ("scope-mismatch", "guest"), ("missing-agent", "guest"), ("state-refusal", "guest")):
                 mappings[alias] = {"target_scope": scope, "remote": {
                     "address": "127.0.0.1", "port": port, "certificate_sha256": pin,
                     "token_file": str(token_path), "backend": alias, "timeout_ms": 20000}}
@@ -596,6 +596,13 @@ try{$pin=([BitConverter]::ToString($hash.ComputeHash($cert.RawData))).Replace('-
                 previous_work = current_work
             assert client.tool("veh_threads")["count"] == 1
             passed("20 consecutive authenticated same-PID reattachments without sleeps or quota failures")
+            assert client.tool("veh_attach", {"backend": "state-refusal", "pid": 424244}, timeout=25).get("success")
+            refusal = client.tool("veh_execute_shellcode", {"shellcode": "C3"})
+            assert refusal.get("code") == "invalid_state" and refusal.get("backendStatus") == 6, refusal
+            batch = client.tool("veh_batch", {"steps": [{"tool": "veh_execute_shellcode", "args": {"shellcode": "C3"}}]})
+            assert batch["failed"] == 1 and batch["results"][0]["result"] == refusal, batch
+            assert client.tool("veh_attach", {"backend": "guest", "pid": 424244}, timeout=25).get("success")
+            passed("target-state refusal survives TCP routing and direct/batch dispatch")
             for alias, exit_code, stages in (
                 ("early", 37, ("agent_pipe",)),
                 ("ready-exit", 0, ("agent_ready", "agent_pipe")),
@@ -653,7 +660,8 @@ try{$pin=([BitConverter]::ToString($hash.ComputeHash($cert.RawData))).Replace('-
             rejected = client.tool("veh_launch", {"backend": "guest", "program": "synthetic.exe"})
             assert "error" in rejected, "guest process launch accepted"
             assert client.tool("veh_threads")["count"] == 1, "launch rejection lost prior guest session"
-            assert client.tool("veh_detach").get("success"), "guest detach"
+            detached = client.tool("veh_detach")
+            assert detached.get("success") and detached.get("backendCleanupConfirmed") is False, detached
             passed("MCP guest metadata/threads and unsupported launch preserves session")
 
             batch_marker = directory / "batch-launch.txt"

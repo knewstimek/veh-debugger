@@ -24,13 +24,14 @@ bool send(HANDLE pipe, uint32_t command, const void* bytes, uint32_t size) {
 template<class T> bool reply(HANDLE pipe, uint32_t command, const T& value) { return send(pipe, command, &value, sizeof(value)); }
 
 int wmain(int argc, wchar_t** argv) {
-    std::wstring name, mode;
+    std::wstring name, mode, readyEvent;
     uint32_t pid = 0;bool pidProvided=false;
     for (int i = 1; i + 1 < argc; i += 2) {
         const std::wstring option = argv[i];
         if (option == L"--pid"){pid = std::stoul(argv[i + 1]);pidProvided=true;}
         else if (option == L"--pipe") name = argv[i + 1];
         else if (option == L"--metadata") mode = argv[i + 1];
+        else if (option == L"--ready-event") readyEvent = argv[i + 1];
     }
     if (mode == L"diagnostic-driver" || mode == L"diagnostic-abi") {
         const bool driver = mode == L"diagnostic-driver";
@@ -52,7 +53,7 @@ int wmain(int argc, wchar_t** argv) {
     const bool machineMode=mode.rfind(L"machine",0)==0;
     const bool vmMode=mode.rfind(L"vm",0)==0||machineMode;uint32_t vmState=2,detachFailures=0;
     uint32_t continueRequests = 0, pauseRequests = 0, resolveRequests = 0;
-    uint32_t fixtureBreakpointId = 0;
+    uint32_t fixtureBreakpointId = 0, shellcodeRequests=0, localThreadQueries=0;
     const bool deferredMode=mode.rfind(L"deferred-",0)==0;
     bool deferredGuard=false,moduleHeld=false,exceptionHeld=false;
     uint32_t moduleHeldTid=77,deferredStopQueries=0;
@@ -60,6 +61,12 @@ int wmain(int argc, wchar_t** argv) {
     if ((!pid&&!machineMode)||name.empty()||(machineMode&&pidProvided)) return 2;
     HANDLE pipe = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 65536, 65536, 0, nullptr);
     if (pipe == INVALID_HANDLE_VALUE) return 3;
+    if (!readyEvent.empty()) {
+        HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, readyEvent.c_str());
+        if (!event) { CloseHandle(pipe); return 5; }
+        const BOOL signaled = SetEvent(event); CloseHandle(event);
+        if (!signaled) { CloseHandle(pipe); return 5; }
+    }
     if (!ConnectNamedPipe(pipe, nullptr) && GetLastError() != ERROR_PIPE_CONNECTED) { CloseHandle(pipe); return 4; }
     if (mode == L"ready-exit") { Sleep(100); CloseHandle(pipe); return 0; }
     auto emitDeferredLoad=[&](bool force=false){
@@ -114,6 +121,8 @@ int wmain(int argc, wchar_t** argv) {
                 if(mode!=L"deferred-no-query")veh::SetCommandSupported(caps.commands,veh::IpcCommand::IsThreadStopped);
                 if(mode!=L"deferred-unsupported")veh::SetCommandSupported(caps.commands,veh::IpcCommand::SetModuleLoadStop);
             }
+            if(mode.rfind(L"shellcode-",0)==0)veh::SetCommandSupported(caps.commands,veh::IpcCommand::ExecuteShellcode);
+            if(mode==L"shellcode-action")for(auto op:{veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue})veh::SetCommandSupported(caps.commands,op);
             if(mode.rfind(L"control-",0)==0) {
                 for(auto op:{veh::IpcCommand::Continue,veh::IpcCommand::Pause,veh::IpcCommand::StepInto,
                     veh::IpcCommand::StepOver,veh::IpcCommand::StepOut,veh::IpcCommand::WriteMemory,veh::IpcCommand::TerminateThread})
@@ -288,6 +297,35 @@ int wmain(int argc, wchar_t** argv) {
             response.head.status=veh::IpcStatus::Ok;response.head.count=1;response.head.chosen=0;
             response.head.inUse=0x22000;response.candidate={0x22000,veh::AddressSpaceMethod::Scan,1};
             if(!reply(pipe,header.command,response))break;
+        } else if(mode.rfind(L"shellcode-",0)==0 && command==veh::IpcCommand::ExecuteShellcode){
+            ++shellcodeRequests;
+            if(mode==L"shellcode-drop")break;
+            if(mode==L"shellcode-state"||mode==L"shellcode-action"){
+                if(!reply(pipe,header.command,veh::IpcStatus::InvalidState))break;
+            }else if(mode==L"shellcode-error"){
+                if(!reply(pipe,header.command,veh::IpcStatus::Error))break;
+            }else if(mode==L"shellcode-unknown"){
+                if(!reply(pipe,header.command,static_cast<veh::IpcStatus>(99)))break;
+            }else if(mode==L"shellcode-short"){
+                if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
+            }else{
+                veh::ExecuteShellcodeResponse response{};
+                response.status=mode==L"shellcode-state-full"?veh::IpcStatus::InvalidState:veh::IpcStatus::Ok;
+                response.exitCode=7;
+                if(!reply(pipe,header.command,response))break;
+            }
+        } else if(mode==L"shellcode-action"&&command==veh::IpcCommand::SetBreakpoint){
+            fixtureBreakpointId=9001;
+            if(!reply(pipe,header.command,veh::SetBreakpointResponse{veh::IpcStatus::Ok,fixtureBreakpointId}))break;
+        } else if(mode==L"shellcode-action"&&command==veh::IpcCommand::RemoveBreakpoint){
+            if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
+        } else if(mode==L"shellcode-action"&&command==veh::IpcCommand::Continue){
+            veh::ContinueRequest request{};
+            if(bytes.size()!=sizeof(request))break;
+            std::memcpy(&request,bytes.data(),sizeof(request));
+            if(request.wantDetails&&!reply(pipe,header.command,veh::ContinueResponse{veh::IpcStatus::Ok,0,0}))break;
+            const veh::BreakpointHitEvent hit{77,++continueRequests==1?fixtureBreakpointId:7u,0x1000,{}};
+            if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::BreakpointHit),hit))break;
         } else if (mode == L"bp-kinds" && command == veh::IpcCommand::SetHwBreakpoint) {
             fixtureBreakpointId = 1; // external backends need not reserve the DLL ID range
             const veh::SetHwBreakpointResponse response{veh::IpcStatus::Ok, fixtureBreakpointId, 0};
@@ -349,6 +387,14 @@ int wmain(int argc, wchar_t** argv) {
             threads.header.status = veh::IpcStatus::Ok;
             threads.header.count = mode==L"machine-thread-short"?2:1;
             threads.thread.id = 77;
+            if(mode==L"local-drop-live"&&++localThreadQueries==2){
+                CloseHandle(pipe);
+                HANDLE exitEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);
+                if(exitEvent){WaitForSingleObject(exitEvent,10000);CloseHandle(exitEvent);}
+                return 0; // deliberately alive after losing its IPC endpoint
+            }
+            if(mode.rfind(L"local-",0)==0)sprintf_s(threads.thread.name,"fixture-agent:%lu",GetCurrentProcessId());
+            if(mode==L"shellcode-action")sprintf_s(threads.thread.name,"shellcode-calls:%u",shellcodeRequests);
             if(deferredMode)std::snprintf(threads.thread.name,sizeof(threads.thread.name),
                 "g=%u,set=%u,res=%u,held=%u,rm=%u,c=%u,q=%u",deferredGuard?1u:0u,deferredSets,deferredResumes,moduleHeld?1u:0u,deferredRemoves,deferredContinueCalls,deferredStopQueries);
             if (mode == L"silent-detach" || mode == L"late-detach" || mode == L"host-cap")
@@ -428,6 +474,7 @@ int wmain(int argc, wchar_t** argv) {
         } else if (command == veh::IpcCommand::Shutdown && mode == L"silent-detach") {
             Sleep(5000); break;
         } else if (command == veh::IpcCommand::Detach) {
+            if(mode==L"local-die-detach")break;
             if (mode == L"silent-detach") continue;
             if (mode == L"late-detach") Sleep(4500);
             if(mode==L"detach-three-errors"&&detachFailures++<3) {

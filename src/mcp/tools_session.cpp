@@ -315,6 +315,9 @@ json McpServer::ToolDetach(const json& args) {
         const auto& error = session_.LastAttachError();
         return {{"error", error.empty() ? "Detach completion could not be confirmed" : error}};
     }
+	if (!session_.LastDetachBackendConfirmed())
+		return {{"success", true}, {"message", "Session cleared; backend cleanup acknowledgement unavailable"},
+			{"backendCleanupConfirmed", false}};
 	return {{"success", true}, {"message", "Detached"}};
 }
 

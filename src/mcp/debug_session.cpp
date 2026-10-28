@@ -124,9 +124,8 @@ bool DebugSession::ConnectExternalAgent(uint32_t pid, const ExternalAgent& agent
 	}
 	auto running = externalAgents_.find(pid);
 	if (running != externalAgents_.end()) {
-		HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, running->second.processId);
-		const bool alive = h && WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
-		if (h) CloseHandle(h);
+		const auto process = running->second.process.get();
+		const bool alive = process && WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
 		if (!alive || running->second.path != agent.path || running->second.args != agent.args ||
             running->second.guestTarget != agent.guestTarget || running->second.vmTarget != agent.vmTarget) externalAgents_.erase(running);
 	}
@@ -147,8 +146,9 @@ bool DebugSession::ConnectExternalAgent(uint32_t pid, const ExternalAgent& agent
 			return false;
 		}
 		CloseHandle(pi.hThread);
-		CloseHandle(pi.hProcess);
-		running = externalAgents_.emplace(pid, RunningAgent{agent.path, pipe, pi.dwProcessId, agent.args, agent.guestTarget, agent.vmTarget}).first;
+		std::shared_ptr<void> process(pi.hProcess, [](void* handle) { CloseHandle(handle); });
+		running = externalAgents_.emplace(pid, RunningAgent{agent.path, pipe, pi.dwProcessId,
+			agent.args, agent.guestTarget, agent.vmTarget, std::move(process)}).first;
 	}
 	UseTransport(running->second.pipe, (agent.guestTarget || agent.vmTarget) ? 30000 : 0);
 	if (!ipcTransport_->Connect(pid, 5000)) {
@@ -487,6 +487,7 @@ DebugSession::LaunchResult DebugSession::Launch(const LaunchOptions& opts) {
 }
 
 bool DebugSession::Detach() {
+	lastDetachBackendConfirmed_ = false;
 	if (!attached_) return false;
 
 	auto* remote = dynamic_cast<TcpIpcTransport*>(ipcTransport_.get());
@@ -503,28 +504,43 @@ bool DebugSession::Detach() {
 			const bool sent = ipcTransport_->SendCommand(IpcCommand::Detach);
 			detachConfirmed = !wasConnected || (sent && remote->WaitForWorkClose(5000));
 		} catch (...) { detachConfirmed = false; }
+        // Resident work closure is not an acknowledgement of backend cleanup.
 	} else {
-		// A local backend's Ok comes first: a refused or lost Detach reply keeps
-		// the session (its guest effects may remain), so a retry stays possible
-		// and no attach/launch replaces it.
-		if (!backendInfo_.Supports(IpcCommand::Detach)) return false;
-		std::vector<uint8_t> reply;
-		if (!ipcTransport_->SendAndReceive(IpcCommand::Detach, nullptr, 0, reply, 5000) ||
-			reply.size() != sizeof(IpcStatus)) {
-			lastAttachError_ = "Backend detach failed or its reply is unavailable; session retained";
-			return false;
-		}
-		IpcStatus status{};
-		std::memcpy(&status, reply.data(), sizeof(status));
-		if (status != IpcStatus::Ok) {
-			lastAttachError_ = "Backend refused detach (status " + std::to_string(static_cast<uint32_t>(status)) + "); session retained";
-			return false;
-		}
-		ResumeMainThread();
-		attached_ = false;
-		StopProcessMonitor();
-		ipcTransport_->StopHeartbeat();
-		ipcTransport_->StopEventListener();
+        auto currentAgent = externalAgents_.find(targetPid_);
+        if (currentAgent != externalAgents_.end() && currentAgent->second.pipe != transportPipe_)
+            currentAgent = externalAgents_.end(); // an old external agent is not the current VEH DLL
+        const auto backendGone = [&] {
+            if (!ipcTransport_->IsConnected()) return true;
+            return currentAgent != externalAgents_.end() && currentAgent->second.process &&
+                WaitForSingleObject(currentAgent->second.process.get(), 0) == WAIT_OBJECT_0;
+        };
+        bool acknowledged = false;
+        if (!backendGone()) {
+            std::vector<uint8_t> reply;
+            const bool received = backendInfo_.Supports(IpcCommand::Detach) &&
+                ipcTransport_->SendAndReceive(IpcCommand::Detach, nullptr, 0, reply, 5000);
+            IpcStatus status{};
+            if (received && reply.size() == sizeof(status)) {
+                std::memcpy(&status, reply.data(), sizeof(status));
+                acknowledged = status == IpcStatus::Ok;
+            }
+            // A live connected peer's rejection/lost reply must retain the
+            // session. Death/disconnection during the exchange permits recovery.
+            if (!acknowledged && !backendGone()) {
+                lastAttachError_ = received && reply.size() == sizeof(status) ?
+                    "Backend refused detach (status " + std::to_string(static_cast<uint32_t>(status)) + "); session retained" :
+                    "Backend detach failed or its reply is unavailable; session retained";
+                return false;
+            }
+        }
+        lastDetachBackendConfirmed_ = acknowledged;
+        if (!acknowledged && currentAgent != externalAgents_.end())
+            externalAgents_.erase(currentAgent); // retire only this exact stale pipe/agent record
+        ResumeMainThread();
+        attached_ = false;
+        StopProcessMonitor();
+        ipcTransport_->StopHeartbeat();
+        ipcTransport_->StopEventListener();
 	}
 	ipcTransport_->Disconnect();
 
@@ -1004,6 +1020,7 @@ bool DebugSession::ReceiveBackendReply(IpcCommand command, const void* payload, 
 		case IpcStatus::InvalidArgs: reason = "backend rejected arguments"; break;
 		case IpcStatus::Unsupported: reason = "request unsupported by backend"; break;
 		case IpcStatus::LimitReached: reason = "backend resource limit reached"; break;
+		case IpcStatus::InvalidState: reason = "operation refused in the current target state"; break;
 		default: break;
 	}
 	error = std::string(operation) + ": " + (reason ? std::string(reason) :
@@ -1452,13 +1469,30 @@ ShellcodeResult DebugSession::ExecuteShellcode(const uint8_t* code, uint32_t siz
 	// The default 3-second exchange timeout can expire before the requested run.
 	const int ipcTimeout = static_cast<int>(std::min<uint64_t>(
 		static_cast<uint64_t>(timeoutMs) + 20000, 0x7FFFFFFF));
+	PipeExchangeDiagnostics diagnostics{};
 	if (!ipcTransport_->SendAndReceive(IpcCommand::ExecuteShellcode, payload.data(),
-	                                 static_cast<uint32_t>(payload.size()), respData, ipcTimeout))
+	                                 static_cast<uint32_t>(payload.size()), respData, ipcTimeout, &diagnostics)) {
+		result.error = "ExecuteShellcode: " + DescribeIpcFailure(&diagnostics);
 		return result;
-	if (respData.size() < sizeof(ExecuteShellcodeResponse)) return result;
-
+	}
+	if (respData.size() >= sizeof(IpcStatus)) {
+		IpcStatus status{};
+		std::memcpy(&status, respData.data(), sizeof(status));
+		result.backendStatus = status;
+		if (status != IpcStatus::Ok) {
+			result.error = "ExecuteShellcode: " + BackendStatusText(status);
+			return result;
+		}
+	}
+	if (respData.size() != sizeof(ExecuteShellcodeResponse)) {
+		result.error = "ExecuteShellcode: malformed or incomplete backend response";
+		return result;
+	}
 	auto* resp = reinterpret_cast<const ExecuteShellcodeResponse*>(respData.data());
-	if (resp->status != IpcStatus::Ok) return result;
+	if (resp->crashed > 1) {
+		result.error = "ExecuteShellcode: invalid backend crash flag";
+		return result;
+	}
 
 	result.ok = true;
 	result.exitCode = resp->exitCode;

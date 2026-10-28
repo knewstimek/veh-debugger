@@ -77,6 +77,7 @@ const char* StatusText(IpcStatus s) {
 	case IpcStatus::NotFound: return "not found";
 	case IpcStatus::InvalidArgs: return "invalid arguments or address";
 	case IpcStatus::Unsupported: return "unsupported by this backend";
+	case IpcStatus::InvalidState: return "operation refused in the current target state";
 	default: return "failed";
 	}
 }
