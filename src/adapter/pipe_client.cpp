@@ -103,6 +103,10 @@ uint32_t PipeClient::PeerProcessId() const {
 }
 
 bool PipeClient::Connect(uint32_t targetPid, int timeoutMs) {
+    return ConnectToPeer(targetPid, timeoutMs, nullptr);
+}
+
+bool PipeClient::ConnectToPeer(uint32_t targetPid, int timeoutMs, HANDLE peerProcess) {
 	const std::wstring pipeName = pipeName_.empty() ? GetPipeName(targetPid) : pipeName_;
 
 	stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -110,6 +114,10 @@ bool PipeClient::Connect(uint32_t targetPid, int timeoutMs) {
 
 	auto start = std::chrono::steady_clock::now();
 	while (true) {
+        if (peerProcess && WaitForSingleObject(peerProcess, 0) == WAIT_OBJECT_0) {
+            CloseHandle(stopEvent_); stopEvent_ = nullptr;
+            SetLastError(ERROR_PROCESS_ABORTED); return false;
+        }
 		pipe_ = CreateFileW(
 			pipeName.c_str(),
 			GENERIC_READ | GENERIC_WRITE,
@@ -130,9 +138,10 @@ bool PipeClient::Connect(uint32_t targetPid, int timeoutMs) {
 		}
 
 		if (GetLastError() == ERROR_PIPE_BUSY) {
-			WaitNamedPipeW(pipeName.c_str(), 500);
+			WaitNamedPipeW(pipeName.c_str(), peerProcess ? 50 : 500);
 		} else {
-			Sleep(50);
+            if (peerProcess) (void)WaitForSingleObject(peerProcess, 50);
+            else Sleep(50);
 		}
 	}
 

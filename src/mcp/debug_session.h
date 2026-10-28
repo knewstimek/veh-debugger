@@ -219,6 +219,9 @@ public:
 	// --- Breakpoints ---
 	BpResult SetBreakpoint(uint64_t address);
 	bool RemoveBreakpoint(uint32_t id);
+	// Exact status receipt; unknown/malformed transport results remain unconfirmed.
+	std::optional<IpcStatus> RemoveBreakpointStatus(uint32_t id, bool hardware = false,
+		std::string* error = nullptr);
 	bool RemoveBreakpointByAddress(uint64_t address);
 	HwBpResult SetHwBreakpoint(uint64_t address, uint8_t type, uint8_t size);
 	bool RemoveHwBreakpoint(uint32_t id);
@@ -260,6 +263,8 @@ public:
 	bool SetRegister(uint32_t threadId, uint32_t regIndex, uint64_t value);
 	bool SetRegisters(uint32_t threadId, const RegisterSet& regs);
 	bool IsThreadStopped(uint32_t threadId);
+	// A failed or unsupported query is unknown, not a confirmed running state.
+	std::optional<bool> QueryThreadStopped(uint32_t threadId, std::string* error = nullptr);
 	std::vector<ModuleEntry> GetModules(std::string* error = nullptr);
 	std::string DescribeIpcFailure(const PipeExchangeDiagnostics* diagnostics = nullptr) const;
 	std::vector<LocalVarEntry> EnumLocals(uint32_t threadId, uint64_t instrAddr, uint64_t frameBase);
@@ -571,6 +576,7 @@ private:
 	uint32_t targetAddressBits_ = 0;
 	std::string lastAttachError_;   // categorized reason for the last Attach() failure
 	bool lastDetachBackendConfirmed_ = false;
+	EventCallback eventCallback_; // replaced only after the previous monitor/listener is stopped
 	std::atomic<bool> attached_{false};
 	std::atomic<bool> launchedByUs_{false};
 	uint32_t launchedMainThreadId_ = 0;

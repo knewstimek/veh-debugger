@@ -355,6 +355,8 @@ The table below documents the complete public tool surface. Treat the running se
 | `veh_set_data_breakpoint` | `address, type, size, condition?, hitCondition?` | HW BP (write/readwrite/execute). `condition`'s `value` token = current value at the watched address (e.g. `value != 0` filters zero-write noise); `hitCondition:"5"` stops only on the 5th hit |
 | `veh_remove_data_breakpoint` | `id` | Remove HW BP |
 | `veh_set_module_breakpoint` | `module, enabled?, clear?` | Stop when a module (DLL) whose name matches is loaded (case-insensitive substring, e.g. `"D2Common"`). Freezes the loading thread right after the module is mapped (LdrRegisterDllNotification; no INT3/patching) so you can set BPs inside it or dump it. Fires after the module's DllMain on modern Windows. `enabled:false` removes a pattern, `clear:true` clears all |
+| `veh_execution` | `operation?, threadId?, address?, enabled?` | Confirmed thread state, selected-thread run-to, temporary ownership cancellation and opt-in stop notifications; lazy discovery |
+| `veh_value_freeze` | `operation?, address?, data?, interval_ms?, lease_seconds?, id?` | Bounded periodic value-write leases; at most 16 jobs/64 bytes each, requiring read and write support; distinct from thread freezing |
 | `veh_continue` | `threadId?, wait?, timeout?, pass_exception?, ignore_exceptions?` | Continue. `ignore_exceptions=[0x80000003]` auto-passes specific exceptions to SEH |
 | `veh_step_in` | `threadId` | Step Into |
 | `veh_step_over` | `threadId` | Step Over |

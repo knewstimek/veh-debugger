@@ -138,6 +138,14 @@ json BackendSummary(const DebugSession::BackendInfo& info, const RemoteWorkInfo*
 		{"hiddenBreakpoints", (info.flags & kCapHiddenBreakpoints) != 0},
 		{"noTargetFootprint", (info.flags & kCapNoTargetFootprint) != 0},
 		{"targetScope", (info.flags & kCapVirtualMachineTarget) ? "vm" : (info.flags & kCapGuestTarget) ? "guest" : "host"}};
+    const bool process = (info.flags & kCapVirtualMachineTarget) == 0;
+    const bool runUntil = process && info.reported && info.Supports(IpcCommand::SetBreakpoint) &&
+        info.Supports(IpcCommand::RemoveBreakpoint) && info.Supports(IpcCommand::Continue) &&
+        info.Supports(IpcCommand::IsThreadStopped) && info.Supports(IpcCommand::GetRegisters);
+    const bool valueFreeze = process && info.reported && info.Supports(IpcCommand::ReadMemory) &&
+        info.Supports(IpcCommand::WriteMemory);
+    out["frontendOperations"] = {{"protocol", "veh-session/1"}, {"runUntil", runUntil},
+        {"valueFreeze", valueFreeze}, {"stopNotifications", "opt-in"}};
 	json missing = json::array();
 	for (const auto& c : kOptionalCommands)
 		if (!info.Supports(c.cmd)) missing.push_back(c.name);
@@ -169,12 +177,14 @@ json McpServer::ToolAttach(const json& args) {
 		if (detached.contains("error")) return detached;
 	} else if (session_.GetPipeClient().IsConnected() && !(agent && agent->remote)) {
 		LOG_WARN("Stale pipe connection detected, cleaning up");
+        session_.StopProcessMonitor();
 		session_.GetPipeClient().StopHeartbeat();
 		session_.GetPipeClient().StopEventListener();
 		session_.GetPipeClient().Disconnect();
 	}
 
 
+    if (!session_.IsAttached()) session_.StopProcessMonitor(); // quiesce only an ended session
 	if (!session_.Attach(pid, agent ? &*agent : nullptr)) {
 		std::string why = session_.LastAttachError();
 		if (why.empty()) why = "Attach failed for PID " + std::to_string(pid) + ". Check logs for details.";
@@ -183,7 +193,9 @@ json McpServer::ToolAttach(const json& args) {
 	ResetSessionEventState();
 
 	// Start event listener + heartbeat + process monitor
-	session_.SetEventCallback([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
+    const auto eventGeneration = session_.GetSessionGeneration();
+	session_.SetEventCallback([this, eventGeneration](uint32_t eventId, const uint8_t* payload, uint32_t size) {
+        if (eventGeneration != session_.GetSessionGeneration()) return;
 		OnIpcEvent(eventId, payload, size);
 	});
 	// VEH 설치 완료(Ready) 대기 (이벤트 리스너 시작 후 -- condvar). attach 직후 BP race 방지.
@@ -229,6 +241,7 @@ json McpServer::ToolLaunch(const json& args) {
 		if (detached.contains("error")) return detached;
 	} else if (session_.GetPipeClient().IsConnected() && !(agent && agent->remote)) {
 		LOG_WARN("Stale pipe connection detected, cleaning up");
+        session_.StopProcessMonitor();
 		session_.GetPipeClient().StopHeartbeat();
 		session_.GetPipeClient().StopEventListener();
 		session_.GetPipeClient().Disconnect();
@@ -264,6 +277,7 @@ json McpServer::ToolLaunch(const json& args) {
 	opts.cwd = args.value("cwd", "");
 	opts.agent = agent ? &*agent : nullptr;
 
+    if (!session_.IsAttached()) session_.StopProcessMonitor();
 	auto result = session_.Launch(opts);
 	if (!result.ok) {
 		return {{"error", result.error}};
@@ -271,7 +285,9 @@ json McpServer::ToolLaunch(const json& args) {
 	ResetSessionEventState();
 
 	// Start event listener + heartbeat + process monitor
-	session_.SetEventCallback([this](uint32_t eventId, const uint8_t* payload, uint32_t size) {
+    const auto eventGeneration = session_.GetSessionGeneration();
+	session_.SetEventCallback([this, eventGeneration](uint32_t eventId, const uint8_t* payload, uint32_t size) {
+        if (eventGeneration != session_.GetSessionGeneration()) return;
 		OnIpcEvent(eventId, payload, size);
 	});
 	// VEH 설치 완료(Ready) 대기 (이벤트 리스너 시작 후 -- condvar). attach 직후 BP race 방지.
@@ -308,6 +324,7 @@ json McpServer::ToolLaunch(const json& args) {
 
 json McpServer::ToolDetach(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+    StopValueFreezes("scope-ended");
 
 	// Deferred BP 워커는 영속(McpServer 생애). 워커는 session_.IsAttached()를 확인하므로
 	// detach 후 죽은 세션에 접근하지 않는다. 여기서 join하지 않는다(재attach 시 재사용).
@@ -315,6 +332,8 @@ json McpServer::ToolDetach(const json& args) {
         const auto& error = session_.LastAttachError();
         return {{"error", error.empty() ? "Detach completion could not be confirmed" : error}};
     }
+    ClearRunUntil("detached", session_.LastDetachBackendConfirmed());
+    operationPid_ = 0;
 	if (!session_.LastDetachBackendConfirmed())
 		return {{"success", true}, {"message", "Session cleared; backend cleanup acknowledgement unavailable"},
 			{"backendCleanupConfirmed", false}};
@@ -324,10 +343,13 @@ json McpServer::ToolDetach(const json& args) {
 json McpServer::ToolTerminate(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
+    StopValueFreezes("scope-ended");
 	uint32_t pid = session_.GetTargetPid();
 	int exitCode = JsonInt(args, "exitCode", 0);
 	if (!session_.Terminate(static_cast<uint32_t>(exitCode)))
 		return {{"error", "Target termination is unsupported or the session is unavailable"}};
+    ClearRunUntil("terminated", false);
+    operationPid_ = 0;
 	return {{"success", true}, {"pid", pid},
 	        {"message", "Terminated target from inside (in-process kill; works on self-protected targets) and detached"}};
 }
@@ -364,9 +386,18 @@ json McpServer::ToolSetRegister(const json& args) {
 }
 
 json McpServer::ToolContinue(const json& args) {
+    if (runUntil_.active && JsonBool(args, "wait")) {
+        const auto generation = session_.GetSessionGeneration();
+        auto event = WaitForSessionStop(std::clamp(JsonInt(args, "timeout", 10), 1, 300), generation);
+        SynchronizeOperations();
+        DrainExecutionStops();
+        if (event.timeout) return {{"timeout", true}, {"runUntilPending", runUntil_.active}};
+        if (event.sessionChanged) return {{"error", "Session changed while waiting for run-until"}};
+        return {{"stopped", true}, {"reason", event.reason}, {"threadId", event.threadId},
+            {"address", HexAddr(event.address)}, {"breakpointId", event.breakpointId}, {"lastRunUntil", lastRunUntil_}};
+    }
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
-	CleanupTempStepOverBp();
 
 	uint32_t threadId = JsonUint32(args, "threadId");
 	bool wait = JsonBool(args, "wait");
@@ -454,7 +485,7 @@ json McpServer::ToolContinue(const json& args) {
 		auto remaining = std::chrono::duration_cast<std::chrono::seconds>(deadline - now);
 		int remainingSec = static_cast<int>(remaining.count());
 		if (remainingSec < 1) remainingSec = 1;
-		stopEvent = session_.WaitForStop(remainingSec, sessionGeneration);
+		stopEvent = WaitForSessionStop(remainingSec, sessionGeneration);
 		if (stopEvent.timeout) {
 			json ret = {{"timeout", true}, {"message", "No stop event within timeout. Process still running."}};
 			addResumeDetails(ret);
@@ -492,7 +523,6 @@ static std::string StepRefusedMessage(uint32_t threadId, IpcStatus status) {
 json McpServer::ToolStepIn(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 	session_.ResumeMainThread();
-	CleanupTempStepOverBp();
 	uint32_t threadId = JsonUint32(args, "threadId");
 	if (threadId == 0) return {{"error", "threadId is required"}};
 	{
@@ -507,7 +537,7 @@ json McpServer::ToolStepIn(const json& args) {
 
 	std::unique_lock<std::mutex> lock(stepMutex_);
 	if (!stepCv_.wait_for(lock, std::chrono::seconds(5), [this, threadId]{
-			return (stepCompleted_ && stepCompletedThread_ == threadId) || !session_.IsAttached();
+			return (stepCompleted_ && stepCompletedThread_ == threadId) || !session_.IsAttached() || !running_;
 		})) {
 		return {{"error", "Step timed out (threadId=" + std::to_string(threadId) + "). Thread may not be stopped or may be deadlocked."}};
 	}
@@ -525,22 +555,21 @@ json McpServer::ToolStepOver(const json& args) {
 	if (threadId == 0) return {{"error", "threadId is required"}};
 
 	// Clean up any stale temp BP from previous step-over
-	CleanupTempStepOverBp();
 
 	// Check if current instruction is CALL - if so, skip over it
 	uint64_t nextAddr = 0;
 	if (IsCallInstruction(threadId, nextAddr)) {
-		if (SetTempBpAndContinue(nextAddr)) {
-			return {{"success", true}, {"threadId", threadId}, {"skippedCall", true}};
-		}
+        auto result = StartRunUntil(nextAddr, threadId);
+        if (!result.contains("error")) { result["skippedCall"] = true; result["threadId"] = threadId; }
+        return result;
 	}
 
 	// Check if we're on a BP (rearm will execute 2 instructions)
 	uint64_t callAfterAddr = 0;
 	if (IsNextInstructionCall(threadId, callAfterAddr)) {
-		if (SetTempBpAndContinue(callAfterAddr)) {
-			return {{"success", true}, {"threadId", threadId}, {"skippedCall", true}};
-		}
+        auto result = StartRunUntil(callAfterAddr, threadId);
+        if (!result.contains("error")) { result["skippedCall"] = true; result["threadId"] = threadId; }
+        return result;
 	}
 
 	// Normal single-step with synchronous wait
@@ -558,7 +587,7 @@ json McpServer::ToolStepOver(const json& args) {
 	{
 		std::unique_lock<std::mutex> lock(stepMutex_);
 		if (!stepCv_.wait_for(lock, std::chrono::seconds(5),
-				[this, threadId]{ return (stepCompleted_ && stepCompletedThread_ == threadId) || !session_.IsAttached(); })) {
+				[this, threadId]{ return (stepCompleted_ && stepCompletedThread_ == threadId) || !session_.IsAttached() || !running_; })) {
 			return {{"error", "Step timed out (threadId=" + std::to_string(threadId) + "). Thread may not be stopped or may be deadlocked."}};
 		}
 		if (!(stepCompleted_ && stepCompletedThread_ == threadId) && !session_.IsAttached()) {
@@ -589,7 +618,7 @@ json McpServer::ToolStepOut(const json& args) {
 	// long before it returns, so the wait is bounded by `timeout`.
 	std::unique_lock<std::mutex> lock(stepMutex_);
 	if (!stepCv_.wait_for(lock, std::chrono::seconds(timeoutSec), [this, threadId]{
-			return (stepCompleted_ && stepCompletedThread_ == threadId) || !session_.IsAttached();
+			return (stepCompleted_ && stepCompletedThread_ == threadId) || !session_.IsAttached() || !running_;
 		})) {
 		return {{"error", "Step out did not complete within " + std::to_string(timeoutSec) + " s (threadId=" +
 			std::to_string(threadId) + "); the thread is still running toward its return."}};

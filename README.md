@@ -387,6 +387,8 @@ DAP의 게스트 연결 설정은 추가하지 않습니다. 실행 중 서버�
 | `veh_set_data_breakpoint` | `address, type, size, condition?, hitCondition?` | HW BP (write/readwrite/execute). `condition`의 `value` 토큰=감시 주소 현재값 (예: `value != 0`으로 0-write 노이즈 필터), `hitCondition:"5"`=5번째 hit에서만 정지 |
 | `veh_remove_data_breakpoint` | `id` | HW BP 제거 |
 | `veh_set_module_breakpoint` | `module, enabled?, clear?` | 모듈(DLL) 로드 시 정지. 이름 부분일치(대소문자 무시, 예: `"D2Common"`). 매핑 직후 로더 스레드 정지(LdrRegisterDllNotification, INT3/패치 없음) -> 내부 함수에 BP 설치나 덤프 가능. 모던 Windows에선 DllMain 실행 후 발화. `enabled:false`로 패턴 제거, `clear:true`로 전체 제거 |
+| `veh_execution` | `operation?, threadId?, address?, enabled?` | 정지/실행/미확인 상태 조회, 단일 스레드 Run Till, 임시 BP 취소, 선택적 정지 알림. 지연 도구 검색으로 조회 |
+| `veh_value_freeze` | `operation?, address?, data?, interval_ms?, lease_seconds?, id?` | 명시한 임대 시간 동안 주기적 값 쓰기. 최대 16작업·64바이트, 읽기·쓰기 지원 필요. 스레드 freeze와 별개 |
 | `veh_continue` | `threadId?, wait?, timeout?, pass_exception?, ignore_exceptions?` | 실행 계속. `ignore_exceptions=[0x80000003]`으로 특정 예외만 SEH 전달 |
 | `veh_step_in` | `threadId` | Step Into |
 | `veh_step_over` | `threadId` | Step Over |

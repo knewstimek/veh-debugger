@@ -259,6 +259,10 @@ function Invoke-ReleaseTests {
         'test/test_shellcode_results.py',
         'test/test_code_patch.py',
         'test/test_assemble.py',
+        'test/test_session_receipts.py',
+        'test/test_system_receipts.py',
+        'test/test_session_operations.py',
+        'test/test_operation_lifetime.py',
         'test/test_address_space_deadline.py',
         'test/test_pipe_write_failure.py',
         'test/test_dap_deferred_loader_stop.py'
@@ -277,6 +281,8 @@ function Invoke-ReleaseTests {
         'test_dap_guest_attach.py', 'test_dap_thread_errors.py', 'test_kernel_debug_protocol.py',
         'test_backend_results.py', 'test_local_backend_recovery.py', 'test_shellcode_results.py',
         'test_code_patch.py', 'test_assemble.py',
+        'test_session_receipts.py', 'test_system_receipts.py',
+        'test_session_operations.py', 'test_operation_lifetime.py',
         'test_address_space_deadline.py', 'test_pipe_write_failure.py',
         'test_dap_deferred_loader_stop.py',
         '--build-dir', 'build32', '--jobs', '1', '--timeout', '180'

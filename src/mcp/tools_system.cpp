@@ -755,26 +755,40 @@ json McpServer::ToolEvent(const json& args) {
 		req.low = low;
 		req.high = high;
 		if (!SystemExchange(IpcCommand::AddSystemEvent, &req, sizeof(req), resp, error)) return error;
-		if (resp.size() < sizeof(AddSystemEventResponse)) return {{"error", "short response"}};
+        IpcStatus status{};
+        std::memcpy(&status, resp.data(), sizeof(status));
+        if (status != IpcStatus::Ok) return {{"error", std::string("not added: ") + StatusText(status)}};
+        if (resp.size() != sizeof(AddSystemEventResponse))
+            return {{"error", "AddSystemEvent: malformed response; registration is unconfirmed"}};
 		const auto* r = reinterpret_cast<const AddSystemEventResponse*>(resp.data());
-		if (r->status != IpcStatus::Ok) return {{"error", std::string("not added: ") + StatusText(r->status)}};
 		return {{"id", r->id}, {"type", EventName(req.type)}, {"action", req.action ? "stop" : "record"},
 			{"note", "records: veh_event_records"}};
 	}
 	if (op == "remove") {
 		RemoveSystemEventRequest req{args.contains("id") ? JsonUint32(args, "id", 0) : ~0u};
 		if (!SystemExchange(IpcCommand::RemoveSystemEvent, &req, sizeof(req), resp, error)) return error;
+        if (resp.size() != sizeof(IpcStatus))
+            return {{"error", "RemoveSystemEvent: malformed response; removal is unconfirmed"}};
 		const IpcStatus status = *reinterpret_cast<const IpcStatus*>(resp.data());
 		if (status != IpcStatus::Ok) return {{"error", StatusText(status)}};
 		return {{"removed", args.contains("id") ? json(req.id) : json("all")}};
 	}
 	if (op != "list") return {{"error", "operation: add, remove, list"}};
 	if (!SystemExchange(IpcCommand::ListSystemEvents, nullptr, 0, resp, error)) return error;
-	if (resp.size() < sizeof(ListSystemEventsResponse)) return {{"error", "short response"}};
-	const auto* head = reinterpret_cast<const ListSystemEventsResponse*>(resp.data());
+    IpcStatus status{};
+    std::memcpy(&status, resp.data(), sizeof(status));
+    if (status != IpcStatus::Ok) return {{"error", std::string("ListSystemEvents: ") + StatusText(status)}};
+    if (resp.size() < sizeof(ListSystemEventsResponse))
+        return {{"error", "ListSystemEvents: malformed or incomplete response"}};
+    ListSystemEventsResponse header{};
+    std::memcpy(&header, resp.data(), sizeof(header));
+    constexpr uint32_t kMaxListedEvents = 256;
+    if (header.count > kMaxListedEvents ||
+        resp.size() != sizeof(header) + static_cast<size_t>(header.count) * sizeof(SystemEventInfo))
+        return {{"error", "ListSystemEvents: malformed or incomplete event list"}};
 	json list = json::array();
-	const auto* e = reinterpret_cast<const SystemEventInfo*>(head + 1);
-	for (uint32_t i = 0; i < head->count && sizeof(*head) + (i + 1) * sizeof(*e) <= resp.size(); ++i)
+    const auto* e = reinterpret_cast<const SystemEventInfo*>(resp.data() + sizeof(header));
+	for (uint32_t i = 0; i < header.count; ++i)
 		list.push_back({{"id", e[i].id}, {"type", EventName(e[i].type)},
 			{"action", e[i].action == 2 ? "edit" : e[i].action ? "stop" : "record"},
 			{"pid", e[i].pid}, {"tid", e[i].tid}, {"cpu", e[i].cpu == ~0u ? json("any") : json(e[i].cpu)},
@@ -823,11 +837,14 @@ json McpServer::ToolHiddenHook(const json& args) {
 	json error;
 	std::vector<uint8_t> resp;
 	if (!SystemExchange(IpcCommand::AddHiddenHook, &req, sizeof(req), resp, error)) return error;
-	if (resp.size() < sizeof(AddHiddenHookResponse)) return {{"error", "short response"}};
+    IpcStatus status{};
+    std::memcpy(&status, resp.data(), sizeof(status));
+    if (status != IpcStatus::Ok) return {{"error", std::string("not added: ") + StatusText(status)}};
+    if (resp.size() != sizeof(AddHiddenHookResponse))
+        return {{"error", "AddHiddenHook: malformed response; registration is unconfirmed"}};
 	const auto* r = reinterpret_cast<const AddHiddenHookResponse*>(resp.data());
-	if (r->status != IpcStatus::Ok) return {{"error", std::string("not added: ") + StatusText(r->status)}};
 	return {{"id", r->id}, {"address", HexAddr(req.address)}, {"pid", req.pid},
-		{"note", "every hit is also a veh_event_records entry (type memory_execute)"}};
+		{"note", "Registration confirmed; this response does not report arming, EPT use or per-hit records"}};
 }
 
 json McpServer::ToolBranchTrace(const json& args) {

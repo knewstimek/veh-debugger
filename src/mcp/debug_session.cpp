@@ -130,6 +130,7 @@ bool DebugSession::ConnectExternalAgent(uint32_t pid, const ExternalAgent& agent
             running->second.guestTarget != agent.guestTarget || running->second.vmTarget != agent.vmTarget) externalAgents_.erase(running);
 	}
 	running = externalAgents_.find(pid);
+    const bool reusing = running != externalAgents_.end();
 	if (running == externalAgents_.end()) {
 		uint64_t nonce = 0;
 		BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&nonce), sizeof(nonce), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
@@ -151,11 +152,21 @@ bool DebugSession::ConnectExternalAgent(uint32_t pid, const ExternalAgent& agent
 			agent.args, agent.guestTarget, agent.vmTarget, std::move(process)}).first;
 	}
 	UseTransport(running->second.pipe, (agent.guestTarget || agent.vmTarget) ? 30000 : 0);
-	if (!ipcTransport_->Connect(pid, 5000)) {
-		lastAttachError_ = "External backend: agent pipe for PID " + std::to_string(pid) + " did not come up within 5s.";
-		externalAgents_.erase(running);
-		return false;
-	}
+    auto* pipe = dynamic_cast<PipeClient*>(ipcTransport_.get());
+    const bool connected = pipe && pipe->ConnectToPeer(pid, 5000, running->second.process.get());
+    if (!connected) {
+        const bool exited = WaitForSingleObject(running->second.process.get(), 0) == WAIT_OBJECT_0;
+        DWORD exitCode = 0;
+        if (exited) GetExitCodeProcess(running->second.process.get(), &exitCode);
+        externalAgents_.erase(running);
+        // A previously acknowledged agent may exit just after its liveness check.
+        // Retry only a confirmed-dead cached peer, never a live/ambiguous startup.
+        if (reusing && exited) return ConnectExternalAgent(pid, agent);
+        lastAttachError_ = exited ? "External backend agent exited before accepting its pipe (exit code " +
+            std::to_string(exitCode) + ")" : "External backend: agent pipe for PID " +
+            std::to_string(pid) + " did not come up within 5s.";
+        return false;
+    }
 	if (ipcTransport_->PeerProcessId() != running->second.processId) {
 		ipcTransport_->Disconnect();
 		lastAttachError_ = "External backend: the pipe is served by another process; refusing it.";
@@ -628,9 +639,13 @@ BpResult DebugSession::SetBreakpoint(uint64_t address) {
 	if (!ipcTransport_->SendAndReceive(IpcCommand::SetBreakpoint, &req, sizeof(req), respData))
 		return result;
 
-	if (respData.size() >= sizeof(SetBreakpointResponse)) {
+    if (respData.size() == sizeof(IpcStatus) || respData.size() == sizeof(SetBreakpointResponse)) {
+        IpcStatus status{}; std::memcpy(&status, respData.data(), sizeof(status));
+        result.full = status == IpcStatus::LimitReached;
+    }
+	if (respData.size() == sizeof(SetBreakpointResponse)) {
 		auto* resp = reinterpret_cast<const SetBreakpointResponse*>(respData.data());
-		if (resp->status == IpcStatus::Ok) {
+		if (resp->status == IpcStatus::Ok && resp->id != 0) {
 			result.ok = true;
 			result.id = resp->id;
 		}
@@ -655,18 +670,42 @@ bool DebugSession::SetModuleLoadStop(const std::string& name, int action) {
 	return false;
 }
 
-bool DebugSession::RemoveBreakpoint(uint32_t id) {
-	RemoveBreakpointRequest req{};
-	req.id = id;
-	std::vector<uint8_t> respData;
-	if (!ipcTransport_->SendAndReceive(IpcCommand::RemoveBreakpoint, &req, sizeof(req), respData))
-		return false;
+std::optional<IpcStatus> DebugSession::RemoveBreakpointStatus(uint32_t id, bool hardware,
+    std::string* error) {
+    if (error) error->clear();
+    const auto command = hardware ? IpcCommand::RemoveHwBreakpoint : IpcCommand::RemoveBreakpoint;
+    const std::string operation = hardware ? "RemoveHwBreakpoint" : "RemoveBreakpoint";
+    const auto fail = [&](const std::string& reason) {
+        if (error) *error = operation + ": " + reason;
+    };
+    if (!attached_) { fail("target is not attached; removal was not confirmed"); return std::nullopt; }
+    if (!backendInfo_.Supports(command)) {
+        fail(BackendStatusText(IpcStatus::Unsupported)); return IpcStatus::Unsupported;
+    }
+    if (!id) { fail(BackendStatusText(IpcStatus::InvalidArgs)); return IpcStatus::InvalidArgs; }
+    const RemoveBreakpointRequest softwareRequest{id};
+    const RemoveHwBreakpointRequest hardwareRequest{id};
+    const void* request = hardware ? static_cast<const void*>(&hardwareRequest) :
+        static_cast<const void*>(&softwareRequest);
+    const auto requestSize = hardware ? sizeof(hardwareRequest) : sizeof(softwareRequest);
+    std::vector<uint8_t> response;
+    PipeExchangeDiagnostics diagnostics{};
+    if (!ipcTransport_->SendAndReceive(command, request, static_cast<uint32_t>(requestSize),
+        response, 3000, &diagnostics)) {
+        fail(DescribeIpcFailure(&diagnostics) + "; removal was not confirmed"); return std::nullopt;
+    }
+    if (response.size() != sizeof(IpcStatus)) {
+        fail("malformed or incomplete backend response; removal was not confirmed"); return std::nullopt;
+    }
+    IpcStatus status{};
+    std::memcpy(&status, response.data(), sizeof(status));
+    if (status != IpcStatus::Ok) fail(BackendStatusText(status));
+    return status;
+}
 
-	if (respData.size() >= sizeof(IpcStatus)) {
-		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
-		if (status == IpcStatus::NotFound) return false;
-	}
-	return true;
+bool DebugSession::RemoveBreakpoint(uint32_t id) {
+    const auto status = RemoveBreakpointStatus(id);
+    return status && *status == IpcStatus::Ok;
 }
 
 bool DebugSession::RemoveBreakpointByAddress(uint64_t address) {
@@ -703,17 +742,8 @@ HwBpResult DebugSession::SetHwBreakpoint(uint64_t address, uint8_t type, uint8_t
 }
 
 bool DebugSession::RemoveHwBreakpoint(uint32_t id) {
-	RemoveHwBreakpointRequest req{};
-	req.id = id;
-	std::vector<uint8_t> respData;
-	if (!ipcTransport_->SendAndReceive(IpcCommand::RemoveHwBreakpoint, &req, sizeof(req), respData))
-		return false;
-
-	if (respData.size() >= sizeof(IpcStatus)) {
-		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
-		if (status == IpcStatus::NotFound) return false;
-	}
-	return true;
+    const auto status = RemoveBreakpointStatus(id, true);
+    return status && *status == IpcStatus::Ok;
 }
 
 // --- Execution control ---
@@ -802,7 +832,7 @@ IpcStatus DebugSession::StepIn(uint32_t threadId) {
 	std::vector<uint8_t> respData;
 	if (!ipcTransport_->SendAndReceive(IpcCommand::StepInto, &req, sizeof(req), respData))
 		return IpcStatus::Error;
-	return respData.size() >= sizeof(IpcStatus) ? *reinterpret_cast<const IpcStatus*>(respData.data()) : IpcStatus::Ok;
+	return respData.size() == sizeof(IpcStatus) ? *reinterpret_cast<const IpcStatus*>(respData.data()) : IpcStatus::Error;
 }
 
 IpcStatus DebugSession::StepOver(uint32_t threadId) {
@@ -811,7 +841,7 @@ IpcStatus DebugSession::StepOver(uint32_t threadId) {
 	std::vector<uint8_t> respData;
 	if (!ipcTransport_->SendAndReceive(IpcCommand::StepOver, &req, sizeof(req), respData))
 		return IpcStatus::Error;
-	return respData.size() >= sizeof(IpcStatus) ? *reinterpret_cast<const IpcStatus*>(respData.data()) : IpcStatus::Ok;
+	return respData.size() == sizeof(IpcStatus) ? *reinterpret_cast<const IpcStatus*>(respData.data()) : IpcStatus::Error;
 }
 
 IpcStatus DebugSession::StepOut(uint32_t threadId) {
@@ -820,7 +850,7 @@ IpcStatus DebugSession::StepOut(uint32_t threadId) {
 	std::vector<uint8_t> respData;
 	if (!ipcTransport_->SendAndReceive(IpcCommand::StepOut, &req, sizeof(req), respData))
 		return IpcStatus::Error;
-	return respData.size() >= sizeof(IpcStatus) ? *reinterpret_cast<const IpcStatus*>(respData.data()) : IpcStatus::Ok;
+	return respData.size() == sizeof(IpcStatus) ? *reinterpret_cast<const IpcStatus*>(respData.data()) : IpcStatus::Error;
 }
 
 bool DebugSession::Pause(uint32_t threadId) {
@@ -1141,13 +1171,42 @@ bool DebugSession::SetRegisters(uint32_t threadId, const RegisterSet& regs) {
 	return reinterpret_cast<const SetRegistersResponse*>(response.data())->status == IpcStatus::Ok;
 }
 
+std::optional<bool> DebugSession::QueryThreadStopped(uint32_t threadId, std::string* error) {
+    if (error) error->clear();
+    const auto fail = [&](const std::string& reason) {
+        if (error) *error = "IsThreadStopped: " + reason;
+    };
+    if (!attached_) { fail("target is not attached"); return std::nullopt; }
+    if (!backendInfo_.Supports(IpcCommand::IsThreadStopped)) {
+        fail(BackendStatusText(IpcStatus::Unsupported)); return std::nullopt;
+    }
+    if (!threadId) { fail(BackendStatusText(IpcStatus::InvalidArgs)); return std::nullopt; }
+    const IsThreadStoppedRequest request{threadId};
+    std::vector<uint8_t> response;
+    PipeExchangeDiagnostics diagnostics{};
+    if (!ipcTransport_->SendAndReceive(IpcCommand::IsThreadStopped, &request, sizeof(request),
+        response, 3000, &diagnostics)) {
+        fail(DescribeIpcFailure(&diagnostics)); return std::nullopt;
+    }
+    if (response.size() < sizeof(IpcStatus)) {
+        fail("malformed or incomplete backend response"); return std::nullopt;
+    }
+    IpcStatus status{};
+    std::memcpy(&status, response.data(), sizeof(status));
+    if (status != IpcStatus::Ok) { fail(BackendStatusText(status)); return std::nullopt; }
+    if (response.size() != sizeof(IsThreadStoppedResponse)) {
+        fail("malformed or incomplete backend response"); return std::nullopt;
+    }
+    IsThreadStoppedResponse result{};
+    std::memcpy(&result, response.data(), sizeof(result));
+    if (result.stopped > 1) {
+        fail("invalid stopped-state value from backend"); return std::nullopt;
+    }
+    return result.stopped != 0;
+}
+
 bool DebugSession::IsThreadStopped(uint32_t threadId) {
-	IsThreadStoppedRequest req{threadId};
-	std::vector<uint8_t> response;
-	if (!ipcTransport_->SendAndReceive(IpcCommand::IsThreadStopped, &req, sizeof(req), response)) return false;
-	if (response.size() < sizeof(IsThreadStoppedResponse)) return false;
-	auto* result = reinterpret_cast<const IsThreadStoppedResponse*>(response.data());
-	return result->status == IpcStatus::Ok && result->stopped != 0;
+    return QueryThreadStopped(threadId).value_or(false);
 }
 
 std::vector<ModuleEntry> DebugSession::GetModules(std::string* error) {
@@ -1395,7 +1454,7 @@ bool DebugSession::WriteMemory(uint64_t address, const uint8_t* data, uint32_t s
 	                                 static_cast<uint32_t>(payload.size()), respData))
 		return false;
 
-	if (respData.size() >= sizeof(IpcStatus)) {
+	if (respData.size() == sizeof(IpcStatus)) {
 		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
 		return status == IpcStatus::Ok;
 	}
@@ -1485,7 +1544,7 @@ bool DebugSession::FreeMemory(uint64_t address) {
 	std::vector<uint8_t> respData;
 	if (!ipcTransport_->SendAndReceive(IpcCommand::FreeMemory, &req, sizeof(req), respData))
 		return false;
-	if (respData.size() >= sizeof(IpcStatus)) {
+	if (respData.size() == sizeof(IpcStatus)) {
 		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
 		return status == IpcStatus::Ok;
 	}
@@ -2160,6 +2219,7 @@ uint64_t DebugSession::ResolveFunction(const std::string& name) {
 // --- IPC event handling ---
 
 void DebugSession::SetEventCallback(EventCallback cb) {
+    eventCallback_ = cb;
 	ipcTransport_->StartEventListener([this, cb](uint32_t eventId, const uint8_t* payload, uint32_t size) {
 		if (cb) cb(eventId, payload, size);
 	});
@@ -2181,7 +2241,7 @@ void DebugSession::StartProcessMonitor() {
 
 	monitorStopEvent_ = CreateEvent(nullptr, TRUE, FALSE, nullptr);
 
-	processMonitorThread_ = std::thread([this, hWait, stopEv = monitorStopEvent_]() {
+	processMonitorThread_ = std::thread([this, hWait, stopEv = monitorStopEvent_, callback = eventCallback_]() {
 		HANDLE handles[2] = { hWait, stopEv };
 		DWORD result = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
 		CloseHandle(hWait);
@@ -2198,6 +2258,11 @@ void DebugSession::StartProcessMonitor() {
 
 			// Signal stop event
 			SignalStop("exit", 0, 0, 0);
+            if (callback) {
+                const ProcessExitEvent event{exitCode};
+                callback(static_cast<uint32_t>(IpcEvent::ProcessExited),
+                    reinterpret_cast<const uint8_t*>(&event), sizeof(event));
+            }
 
 			// Pipe cleanup
 			ipcTransport_->StopHeartbeat();

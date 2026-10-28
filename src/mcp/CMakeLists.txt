@@ -3,6 +3,7 @@ add_executable(veh-mcp-server
 	mcp_server.cpp
 	tools_common.cpp
 	tools_session.cpp
+	session_operations.cpp
 	tools_breakpoint.cpp
 	tools_inspect.cpp
 	tools_memory.cpp

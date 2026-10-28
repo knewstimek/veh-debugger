@@ -24,6 +24,7 @@ public:
 
 	// Connect to VEH DLL's named pipe (overlapped)
 	bool Connect(uint32_t targetPid, int timeoutMs = 7000) override;
+    bool ConnectToPeer(uint32_t targetPid, int timeoutMs, HANDLE peerProcess); // borrowed exact startup handle
 	void Disconnect() override;
 	bool IsConnected() const override { return connected_; }
 

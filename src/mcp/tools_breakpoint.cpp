@@ -96,9 +96,14 @@ json McpServer::ToolRemoveBreakpoint(const json& args) {
 		return {{"error", "id is required (positive integer)"}};
 	}
 
-	if (!session_.RemoveBreakpoint(id)) {
-		return {{"error", "Breakpoint not found (id=" + std::to_string(id) + ")"}};
-	}
+    std::string error;
+    const auto status = session_.RemoveBreakpointStatus(id, false, &error);
+    if (!status || *status != IpcStatus::Ok) {
+        json result = {{"error", status == IpcStatus::NotFound ?
+            "Breakpoint not found (id=" + std::to_string(id) + ")" : error}};
+        if (status) result["backendStatus"] = static_cast<uint32_t>(*status);
+        return result;
+    }
 
 	{
 		std::lock_guard<std::mutex> lock(session_.GetBpMutex());
@@ -338,9 +343,14 @@ json McpServer::ToolRemoveDataBreakpoint(const json& args) {
 		return {{"error", "id is required (positive integer)"}};
 	}
 
-	if (!session_.RemoveHwBreakpoint(id)) {
-		return {{"error", "Data breakpoint not found (id=" + std::to_string(id) + ")"}};
-	}
+    std::string error;
+    const auto status = session_.RemoveBreakpointStatus(id, true, &error);
+    if (!status || *status != IpcStatus::Ok) {
+        json result = {{"error", status == IpcStatus::NotFound ?
+            "Data breakpoint not found (id=" + std::to_string(id) + ")" : error}};
+        if (status) result["backendStatus"] = static_cast<uint32_t>(*status);
+        return result;
+    }
 
 	{
 		std::lock_guard<std::mutex> lock(session_.GetBpMutex());

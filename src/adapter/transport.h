@@ -4,6 +4,8 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
+#include <deque>
 #include <cstdint>
 
 #ifdef _WIN32
@@ -85,16 +87,24 @@ public:
 	void Stop() override;
 	bool Send(const std::string& json) override;
 
+	// Read-only pipe-state check before autonomous writes; emits no control traffic.
+    bool IsOutputConnected() const;
+
 	// Called when stdin EOF is detected (reader thread exits)
 	using CloseCallback = std::function<void()>;
 	void SetCloseCallback(CloseCallback cb) { closeCallback_ = std::move(cb); }
 
 private:
 	void ReadThread();
+    void WriteThread();
 
 	std::thread readThread_;
+    std::thread writeThread_;
 	std::atomic<bool> running_{false};
 	std::mutex writeMutex_;
+    std::condition_variable outputReady_;
+    std::deque<std::string> output_;
+    size_t outputBytes_ = 0;
 	CloseCallback closeCallback_;
 };
 

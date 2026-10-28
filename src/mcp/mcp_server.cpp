@@ -38,15 +38,23 @@ namespace veh {
 // Eager-profile bits for McpServer::ToolDef::profiles
 constexpr unsigned kLite = 1, kInteractive = 2, kCapture = 4, kFullProfile = ~0u;
 
-McpServer::McpServer(std::string toolProfile)
-	: toolProfile_(std::move(toolProfile)), eventsReady_(CreateEventW(nullptr, FALSE, FALSE, nullptr)) {
+McpServer::McpServer(std::string toolProfile, std::function<uint64_t()> monotonicClock)
+	: operationClock_(monotonicClock ? std::move(monotonicClock) : [] { return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()); }),
+      toolProfile_(std::move(toolProfile)), eventsReady_(CreateEventW(nullptr, FALSE, FALSE, nullptr)) {
 	StartRetryThread();
 }
 McpServer::~McpServer() {
 	running_ = false;
+    session_.ResetStopState();
+    stepCv_.notify_all();
 	// Deferred BP 워커 정리 (session_ 멤버가 아직 유효할 때 stop+join).
 	// 단일 영속 워커라 여기서만 join하며, 이후 reader가 NotifyRetry해도 재기동 없음.
 	StopRetryThread();
+    ReapToolWorkers(true);
+    session_.StopProcessMonitor(); // no lifecycle worker/monitor can race these joins
+    session_.GetPipeClient().StopHeartbeat();
+    session_.GetPipeClient().StopEventListener(); // quiesce callbacks before their queues/mutexes die
 	if (eventsReady_) CloseHandle(eventsReady_);
 }
 
@@ -87,12 +95,13 @@ void McpServer::Run() {
 	// are queued (eventsReady_), not on a timer.
 	while (running_) {
 		const HANDLE handles[2] = { eventsReady_, hParent };
-		const DWORD result = WaitForMultipleObjects(hParent ? 2 : 1, handles, FALSE, INFINITE);
+		const DWORD result = WaitForMultipleObjects(hParent ? 2 : 1, handles, FALSE, OperationWaitMs());
 		if (result == WAIT_OBJECT_0 + 1) {
 			LOG_INFO("Parent process exited, stopping MCP server");
 			running_ = false;
 			break;
 		}
+		if (running_) RunDueFreeze();
 		FlushEvents();
 	}
 
@@ -102,6 +111,8 @@ void McpServer::Run() {
 
 void McpServer::Stop() {
 	running_ = false;
+    session_.ResetStopState(); // cancel tool waits without waiting for command admission
+    stepCv_.notify_all();
 	SetEvent(eventsReady_);
 }
 
@@ -164,7 +175,8 @@ void McpServer::SendResult(const json& id, const json& result) {
 		{"result", result}
 	};
 	std::lock_guard<std::mutex> lock(sendMutex_);
-	transport_->Send(msg.dump());
+    if (!running_) return;
+	if (!transport_->Send(msg.dump())) Stop();
 }
 
 void McpServer::SendError(const json& id, int code, const std::string& message) {
@@ -174,7 +186,8 @@ void McpServer::SendError(const json& id, int code, const std::string& message) 
 		{"error", {{"code", code}, {"message", message}}}
 	};
 	std::lock_guard<std::mutex> lock(sendMutex_);
-	transport_->Send(msg.dump());
+    if (!running_) return;
+	if (!transport_->Send(msg.dump())) Stop();
 }
 
 void McpServer::SendNotification(const std::string& method, const json& params) {
@@ -184,7 +197,8 @@ void McpServer::SendNotification(const std::string& method, const json& params) 
 		{"params", params}
 	};
 	std::lock_guard<std::mutex> lock(sendMutex_);
-	transport_->Send(msg.dump());
+    if (!running_) return;
+	if (!transport_->Send(msg.dump())) Stop();
 }
 
 // --- MCP Protocol Handlers ---
@@ -211,7 +225,12 @@ void McpServer::OnToolsList(const json& id, const json& params) {
 }
 
 void McpServer::OnToolsCall(const json& id, const json& params) {
-	std::thread([this, id, params]() {
+    ReapToolWorkers(false);
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    std::unique_lock<std::mutex> workers(toolWorkersMutex_);
+    if (toolWorkers_.size() >= 64) { workers.unlock(); SendError(id, -32000, "Too many pending tool calls"); return; }
+    toolWorkers_.push_back({std::thread([this, id, params, done]() {
+        struct Finished { std::shared_ptr<std::atomic<bool>> value; ~Finished(){ *value = true; } } finished{done};
 		std::string name = params.value("name", "");
 		json args = params.value("arguments", json::object());
 
@@ -241,7 +260,7 @@ void McpServer::OnToolsCall(const json& id, const json& params) {
 				{"isError", true}
 			});
 		}
-	}).detach();
+	}), done});
 }
 
 
@@ -272,6 +291,13 @@ void McpServer::ResetSessionEventState() {
 	pendingEvents_ = {};
 	pendingAutoContinue_ = {};
 	pendingBreakpointActions_ = {};
+    executionNotices_ = {};
+    runUntil_ = {};
+    lastRunUntil_ = nullptr;
+    terminalGeneration_ = 0;
+    terminalNoticeGeneration_ = 0;
+    operationPid_ = session_.GetTargetPid();
+    StopValueFreezes("scope-ended");
 	tempStepOverBpId_ = 0;
 	stepCompleted_ = false;
 	stepCompletedAddr_ = 0;
@@ -362,6 +388,11 @@ bool McpServer::IsCurrentStopEvent(const StopEvent& event) {
 // --- Event Queue Flush ---
 
 void McpServer::FlushEvents() {
+    if (!running_) return;
+    OperationAdmission operation(*this, true);
+    if (!operation.acquired()) return;
+    SynchronizeOperations();
+    DrainExecutionStops();
 	std::queue<std::pair<std::string, json>> events;
 	std::queue<uint32_t> autoContinues;
 	std::queue<PendingBreakpointAction> actions;
@@ -382,6 +413,8 @@ void McpServer::FlushEvents() {
 	while (!actions.empty()) {
 		auto pending = std::move(actions.front());
 		actions.pop();
+        if (runUntil_.active) continue; // old queued actions must not resume a new operation
+        struct ActionScope { bool& flag; bool old; ActionScope(bool& f):flag(f),old(f){flag=true;} ~ActionScope(){flag=old;} } actionScope(inBreakpointAction_);
 		BatchExecutor executor = NewBatchExecutor();
 		json result = executor.Execute(pending.steps);
 		if (result.dump().find("\"error\"") != std::string::npos) {
@@ -396,10 +429,12 @@ void McpServer::FlushEvents() {
 	while (!autoContinues.empty()) {
 		uint32_t tid = autoContinues.front();
 		autoContinues.pop();
+        if (runUntil_.active) continue;
 		if (!session_.Continue(tid)) {
 			LOG_WARN("Auto-continue failed for thread %u", tid);
 		}
 	}
+    operation.release();
 }
 
 void McpServer::StoreBreakpointAction(uint32_t breakpointId, const json& action) {
@@ -527,23 +562,10 @@ std::string McpServer::ExpandLogMessage(const std::string& msg, uint32_t threadI
 
 // --- StepOver CALL skip helpers ---
 
-bool McpServer::SetTempBpAndContinue(uint64_t address) {
-	auto bpResult = session_.SetBreakpoint(address);
-	if (bpResult.ok) {
-		{
-			std::lock_guard<std::mutex> lock(eventMutex_);
-			tempStepOverBpId_ = bpResult.id;
-		}
-		session_.Continue(0);
-		return true;
-	}
-	return false;
-}
-
 bool McpServer::IsNextInstructionCall(uint32_t threadId, uint64_t& addrAfterCall) {
-	auto frames = session_.GetStackTrace(threadId, 1);
-	if (frames.empty()) return false;
-	uint64_t rip = frames[0].address;
+    const auto regs = session_.GetRegisters(threadId);
+    if (!regs) return false;
+    const uint64_t rip = regs->is32bit ? regs->rip & UINT32_MAX : regs->rip;
 
 	// Check if this address has a BP (only relevant for BP rearm case)
 	bool onBp = false;
@@ -579,9 +601,9 @@ bool McpServer::IsNextInstructionCall(uint32_t threadId, uint64_t& addrAfterCall
 }
 
 bool McpServer::IsCallInstruction(uint32_t threadId, uint64_t& nextInsnAddr) {
-	auto frames = session_.GetStackTrace(threadId, 1);
-	if (frames.empty()) return false;
-	uint64_t rip = frames[0].address;
+    const auto regs = session_.GetRegisters(threadId);
+    if (!regs) return false;
+    const uint64_t rip = regs->is32bit ? regs->rip & UINT32_MAX : regs->rip;
 
 	auto mem = session_.ReadMemory(rip, 16);
 	if (mem.empty()) return false;
@@ -602,19 +624,6 @@ bool McpServer::IsCallInstruction(uint32_t threadId, uint64_t& nextInsnAddr) {
 		return true;
 	}
 	return false;
-}
-
-void McpServer::CleanupTempStepOverBp() {
-	uint32_t tempId = 0;
-	{
-		std::lock_guard<std::mutex> lock(eventMutex_);
-		tempId = tempStepOverBpId_;
-		tempStepOverBpId_ = 0;
-	}
-	if (tempId != 0) {
-		session_.RemoveBreakpoint(tempId);
-		LOG_DEBUG("CleanupTempStepOverBp: removed temp BP #%u", tempId);
-	}
 }
 
 // --- Deferred BP retry (worker thread) ---
@@ -664,8 +673,10 @@ void McpServer::RetryThreadLoop() {
 // notifications/logging으로 통지한다 (에이전트는 veh_list_breakpoints로도 확인 가능).
 // 워커 스레드에서만 호출되므로 IPC(SendAndReceive)를 안전하게 쓸 수 있다.
 void McpServer::RetryPendingBreakpointsOnce() {
+    std::unique_lock<std::recursive_mutex> operation(operationMutex_, std::try_to_lock);
+    if (!operation.owns_lock() || runUntil_.active) { operationRetryPending_ = true; return; }
 	for (;;) {
-		if (!session_.IsAttached()) return;
+		if (!running_ || !session_.IsAttached()) return;
 
 		struct Retry { bool isFunc; std::string source; uint32_t line; std::string functionName; };
 		std::vector<Retry> todo;
@@ -684,6 +695,7 @@ void McpServer::RetryPendingBreakpointsOnce() {
 			                         : session_.ResolveSourceLine(r.source, r.line);
 			if (addr == 0) continue;  // 아직 해석 불가 (이 모듈이 아님)
 
+            if (!running_) return;
 			auto bpResult = session_.SetBreakpoint(addr);
 			if (!bpResult.ok) continue;
 
@@ -741,6 +753,8 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 			}
 
 			if (isTempBp) {
+                session_.SignalStop("breakpoint", e->address, e->threadId, e->breakpointId, "software");
+                QueueExecutionStop("breakpoint", e->address, e->threadId, e->breakpointId);
 				char buf[128];
 				snprintf(buf, sizeof(buf), "Step completed at 0x%llX (thread %u)",
 					e->address, e->threadId);
@@ -868,6 +882,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 							pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}}); SetEvent(eventsReady_);
 						}
 						session_.SignalStop("breakpoint", e->address, e->threadId, e->breakpointId, bpType);
+                            QueueExecutionStop("breakpoint", e->address, e->threadId, e->breakpointId);
 					}
 				}
 			}
@@ -892,9 +907,13 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				stepCompletedThread_ = e->threadId;
 			}
 			stepCv_.notify_all();
+            QueueExecutionStop("step", e->address, e->threadId, 0);
 		}
 		break;
 	}
+    case IpcEvent::ThreadExited:
+        if (size == sizeof(ThreadEvent)) QueueExecutionStop("thread-exit", 0, reinterpret_cast<const ThreadEvent*>(payload)->threadId, 0);
+        break;
 	case IpcEvent::HeartbeatAck:
 		break;
 	case IpcEvent::Ready:
@@ -910,6 +929,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 		// after the thread had been resumed).
 		const uint32_t tid = size >= sizeof(ThreadEvent) ? reinterpret_cast<const ThreadEvent*>(payload)->threadId : 0;
 		session_.SignalStop("pause", 0, tid, 0);
+        QueueExecutionStop("pause", 0, tid, 0);
 		break;
 	}
 	case IpcEvent::ProcessExited: {
@@ -923,6 +943,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}}); SetEvent(eventsReady_);
 			}
 			session_.SignalStop("exit", 0, 0, 0);
+            QueueExecutionStop("exit", 0, 0, 0);
 		}
 		break;
 	}
@@ -966,6 +987,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				pendingEvents_.push({"notifications/logging", {{"level", "warning"}, {"logger", "veh-debugger"}, {"data", buf}}}); SetEvent(eventsReady_);
 			}
 			session_.SignalStop("exception", e->address, e->threadId, 0);
+            QueueExecutionStop("exception", e->address, e->threadId, 0);
 		}
 		break;
 	}
@@ -986,6 +1008,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}}); SetEvent(eventsReady_);
 			}
 			session_.SignalStop("module-load", e->baseAddress, e->threadId, 0, e->name);
+            QueueExecutionStop("module-load", e->baseAddress, e->threadId, 0);
 		}
 		break;
 	}
@@ -1159,6 +1182,25 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"id", {{"type", "integer"}, {"description", "Data breakpoint ID"}}}
 		 }}, {"required", json::array({"id"})}}}}),
 
+        Tool(&McpServer::ToolExecution, "session", 0, true,
+            {{"name", "veh_execution"}, {"description", "Query confirmed thread state, run to an address with owned temporary breakpoints, cancel, or opt into bounded stop notifications. No implicit VM-wide stop or resume. Run-to is supported in batches, excluded from breakpoint actions."},
+             {"inputSchema", {{"type", "object"}, {"properties", {
+                {"operation", {{"type", "string"}, {"enum", json::array({"state", "run_to", "cancel", "notifications"})}, {"default", "state"}}},
+                {"threadId", {{"type", "integer"}, {"minimum", 1}}},
+                {"address", {{"type", "string"}}},
+                {"enabled", {{"type", "boolean"}}},
+                {"expected_generation", {{"type", "string"}, {"description", "Optional exact sessionGeneration for mutation admission"}}}
+             }}}}}),
+        Tool(&McpServer::ToolValueFreeze, "memory", 0, true,
+            {{"name", "veh_value_freeze"}, {"description", "Own a bounded periodic value-write lease. Requires reported ReadMemory and WriteMemory. Uses monotonic deadlines, at most one write at a time, no catch-up/retry after uncertain effects; stops on control/scope loss. Direct, batch and breakpoint actions share semantics."},
+             {"inputSchema", {{"type", "object"}, {"properties", {
+                {"operation", {{"type", "string"}, {"enum", json::array({"add", "list", "remove", "renew", "clear"})}, {"default", "list"}}},
+                {"address", {{"type", "string"}}}, {"data", {{"type", "string"}, {"description", "1-64 hex bytes"}}},
+                {"interval_ms", {{"type", "integer"}, {"minimum", 250}, {"maximum", 60000}, {"default", 1000}}},
+                {"lease_seconds", {{"type", "integer"}, {"minimum", 1}, {"maximum", 300}, {"description", "Required for add/renew; no unbounded leases"}}},
+                {"id", {{"type", "string"}, {"description", "Exact returned job ID"}}},
+                {"expected_generation", {{"type", "string"}}}
+             }}}}}),
 		Tool(&McpServer::ToolContinue, "session", kLite | kInteractive | kCapture, true,
 			{{"name", "veh_continue"}, {"description", "Continue execution. threadId=0 resumes all debugger-stopped threads; threadId=X resumes only X and leaves the others stopped. Every executed continue reports resumedThreadIds and stillStoppedThreadIds. Use wait=true to block until a breakpoint hit, exception, pause, or process exit occurs (returns stop reason, address, threadId). Use pass_exception=true to forward the current exception to the process's own SEH handler (for CFF/obfuscated INT3, etc.). Default timeout 10s, configurable."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
@@ -1838,13 +1880,24 @@ const McpServer::ToolDef* McpServer::FindTool(const std::string& name) const {
 }
 
 json McpServer::DispatchTool(const std::string& name, const json& args, bool* known) {
+    OperationAdmission operation(*this);
+    if (!running_) return {{"error", "MCP server is stopping"}};
+    SynchronizeOperations();
+    DrainExecutionStops();
 	const ToolDef* tool = FindTool(name);
 	if (known) *known = tool != nullptr;
 	if (!tool) return {{"error", "Unknown tool: " + name}};
+    if (inBreakpointAction_ && (name == "veh_step_over" ||
+        (name == "veh_continue" && JsonBool(args, "wait")) ||
+        (name == "veh_execution" && args.value("operation", "state") == "run_to")))
+        return {{"error", "Run-until, CALL step-over and blocking continue cannot start inside breakpoint actions"}};
+    if (!OperationAllowed(name, args)) return {{"error", "A run-until operation is pending; query, pause, cancel or detach it before another mutation"}};
     if (session_.IsRemoteTarget() && tool->category == std::string("breakpoint") &&
         args.contains("condition") && args["condition"] != "" && args["condition"] != nullptr)
         return {{"error", "Conditional breakpoint evaluation is not supported by this remote path"}};
-	return (this->*tool->handler)(args);
+	auto result = (this->*tool->handler)(args);
+    operation.release();
+    return result;
 }
 
 json McpServer::RunNestedTool(const std::string& name, const json& args) {
@@ -1855,11 +1908,17 @@ json McpServer::RunNestedTool(const std::string& name, const json& args) {
 }
 
 BatchExecutor McpServer::NewBatchExecutor(bool allowSessionStart) {
-	return BatchExecutor([this, allowSessionStart](const std::string& name, const json& args) {
-		if (allowSessionStart && (name == "veh_launch" || name == "veh_attach"))
-			return DispatchTool(name, args);
-		return RunNestedTool(name, args);
-	});
+    auto generation = std::make_shared<uint64_t>(session_.GetSessionGeneration());
+    return BatchExecutor([this, allowSessionStart, generation](const std::string& name, const json& args) {
+        if (*generation != session_.GetSessionGeneration())
+            return json{{"error", "Session changed before this batch/action step"}};
+        if (allowSessionStart && (name == "veh_launch" || name == "veh_attach")) {
+            auto result = DispatchTool(name, args);
+            if (!result.contains("error")) *generation = session_.GetSessionGeneration();
+            return result;
+        }
+        return RunNestedTool(name, args);
+    });
 }
 
 

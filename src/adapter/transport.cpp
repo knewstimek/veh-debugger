@@ -242,27 +242,84 @@ bool McpStdioTransport::Start() {
 	setvbuf(stdout, NULL, _IONBF, 0);
 #endif
 	running_ = true;
+    writeThread_ = std::thread(&McpStdioTransport::WriteThread, this);
 	readThread_ = std::thread(&McpStdioTransport::ReadThread, this);
 	LOG_INFO("MCP stdio transport started");
 	return true;
 }
 
 void McpStdioTransport::Stop() {
-	running_ = false;
-	if (readThread_.joinable()) {
-		// Unblock the blocking ReadFile in ReadThread
-		CancelSynchronousIo(readThread_.native_handle());
-		readThread_.join();
-	}
+    {
+        std::lock_guard<std::mutex> lock(writeMutex_);
+        running_ = false; // publish under the predicate mutex; no lost CV wake
+    }
+    outputReady_.notify_all();
+    // Repeat cancellation until both threads exit: a one-shot cancel can race
+    // the last running_ check immediately before a synchronous Read/WriteFile.
+    HANDLE pending[2]; DWORD count = 0;
+    if (readThread_.joinable()) pending[count++] = readThread_.native_handle();
+    if (writeThread_.joinable()) pending[count++] = writeThread_.native_handle();
+    while (count) {
+        for (DWORD i = 0; i < count;) {
+            if (WaitForSingleObject(pending[i], 0) == WAIT_OBJECT_0) pending[i] = pending[--count];
+            else { (void)CancelSynchronousIo(pending[i]); ++i; }
+        }
+        if (count) (void)WaitForMultipleObjects(count, pending, FALSE, 100);
+    }
+    if (readThread_.joinable()) readThread_.join();
+    if (writeThread_.joinable()) writeThread_.join();
+    std::lock_guard<std::mutex> lock(writeMutex_);
+    output_.clear();
+    outputBytes_ = 0;
+}
+
+bool McpStdioTransport::IsOutputConnected() const {
+    if (!running_) return false;
+    const HANDLE pipe = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stdout)));
+    if (pipe == INVALID_HANDLE_VALUE || GetFileType(pipe) != FILE_TYPE_PIPE) return false;
+    struct IoStatus { ULONG_PTR status; ULONG_PTR information; };
+    struct PipeInfo { ULONG type, configuration, maximumInstances, instances,
+        inboundQuota, readable, outboundQuota, writable, state, end; };
+    using Query = LONG (NTAPI*)(HANDLE, IoStatus*, void*, ULONG, ULONG);
+    static const auto query = reinterpret_cast<Query>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationFile"));
+    IoStatus io{}; PipeInfo info{};
+    // FILE_PIPE_LOCAL_INFORMATION (24), FILE_PIPE_CONNECTED_STATE (3).
+    // Unknown/closing/disconnected output must never authorize another write.
+    return query && query(pipe, &io, &info, sizeof(info), 24) >= 0 && info.state == 3;
 }
 
 bool McpStdioTransport::Send(const std::string& json) {
-	std::lock_guard<std::mutex> lock(writeMutex_);
-	// MCP: JSON + newline (no Content-Length header)
-	std::string msg = json + "\n";
-	size_t written = fwrite(msg.c_str(), 1, msg.size(), stdout);
-	fflush(stdout);
-	return written == msg.size();
+    // Main-loop notifications and protocol replies must not block the reader
+    // that detects EOF. Only the owned writer performs synchronous stdout I/O.
+    std::lock_guard<std::mutex> lock(writeMutex_);
+    constexpr size_t maximumBytes = 64 * 1024 * 1024;
+    if (!running_ || output_.size() >= 64 || json.size() >= maximumBytes ||
+        outputBytes_ > maximumBytes - json.size() - 1) return false;
+    output_.push_back(json + "\n");
+    outputBytes_ += output_.back().size();
+    outputReady_.notify_one();
+    return true;
+}
+
+void McpStdioTransport::WriteThread() {
+    for (;;) {
+        std::string message;
+        {
+            std::unique_lock<std::mutex> lock(writeMutex_);
+            outputReady_.wait(lock, [this] { return !running_ || !output_.empty(); });
+            if (!running_) return;
+            message = std::move(output_.front());
+            output_.pop_front();
+            outputBytes_ -= message.size();
+        }
+        const size_t written = fwrite(message.data(), 1, message.size(), stdout);
+        const bool flushed = fflush(stdout) == 0;
+        if (written != message.size() || !flushed) {
+            if (running_.exchange(false) && closeCallback_) closeCallback_();
+            return;
+        }
+    }
 }
 
 void McpStdioTransport::ReadThread() {

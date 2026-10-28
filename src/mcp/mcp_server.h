@@ -25,7 +25,7 @@ class BatchExecutor;
 
 class McpServer {
 public:
-	explicit McpServer(std::string toolProfile = "lite");
+	explicit McpServer(std::string toolProfile = "lite", std::function<uint64_t()> monotonicClock = {});
 	~McpServer();
 
 	void SetTransport(dap::Transport* transport);
@@ -60,6 +60,66 @@ private:
 	json ToolSetDataBreakpoint(const json& args);
 	json ToolRemoveDataBreakpoint(const json& args);
 	json ToolContinue(const json& args);
+    json ToolExecution(const json& args);
+    json ToolValueFreeze(const json& args);
+    json StartRunUntil(uint64_t address, uint32_t threadId);
+    bool RetireRunUntil(bool explicitRequest, std::string& error);
+    void ClearRunUntil(const char* reason, bool cleanupConfirmed, bool reached = false);
+    void SynchronizeOperations();
+    void DrainExecutionStops();
+    void QueueExecutionStop(const char* reason, uint64_t address, uint32_t threadId, uint32_t breakpointId);
+    json ExecutionSnapshot(uint32_t threadId);
+    json FreezeSnapshot();
+    void StopValueFreezes(const char* reason);
+    uint32_t OperationWaitMs();
+    void RunDueFreeze();
+    bool OperationAllowed(const std::string& name, const json& args);
+    struct RunUntilState {
+        bool active = false, owned = false, uncertain = false, cleanupAttempted = false;
+        uint64_t operation = 0, generation = 0, address = 0, watermark = 0;
+        uint32_t breakpoint = 0, thread = 0;
+    };
+    struct ExecutionNotice {
+        uint64_t sequence = 0, generation = 0, address = 0, lost = 0;
+        uint32_t pid = 0, thread = 0, breakpoint = 0;
+        std::string reason;
+    };
+    struct ValueFreeze {
+        uint64_t id = 0, generation = 0, address = 0, due = 0, expires = 0;
+        uint64_t writes = 0, skipped = 0, completedAt = 0;
+        uint32_t pid = 0, intervalMs = 1000;
+        std::vector<uint8_t> bytes;
+        std::string state = "active";
+    };
+    std::recursive_mutex operationMutex_;
+    struct OperationAdmission {
+        McpServer& server;
+        std::unique_lock<std::recursive_mutex> lock;
+        OperationAdmission* previous = nullptr;
+        bool outer = false, wakeOnRelease = true;
+        OperationAdmission(McpServer& owner, bool tryOnly = false);
+        ~OperationAdmission();
+        bool acquired() const;
+        void release();
+    };
+    static thread_local OperationAdmission* currentAdmission_;
+    StopEvent WaitForSessionStop(int seconds, uint64_t generation);
+    std::function<uint64_t()> operationClock_; // monotonic ms, never serialized as UTC
+    RunUntilState runUntil_;
+    json lastRunUntil_ = nullptr;
+    std::vector<ValueFreeze> valueFreezes_;
+    uint64_t nextOperation_ = 1, nextFreeze_ = 1, terminalGeneration_ = 0;
+    bool executionNotifications_ = false, inBreakpointAction_ = false;
+    std::atomic<uint32_t> operationPid_{0};
+    std::atomic<uint64_t> executionSequence_{0};
+    std::atomic<uint64_t> terminalNoticeGeneration_{0}; // reader-side effect fence
+    std::queue<ExecutionNotice> executionNotices_; // eventMutex_, bounded to 64
+    uint64_t executionLost_ = 0; // eventMutex_
+    std::atomic<bool> operationRetryPending_{false};
+    std::mutex toolWorkersMutex_;
+    struct ToolWorker { std::thread thread; std::shared_ptr<std::atomic<bool>> done; };
+    std::vector<ToolWorker> toolWorkers_;
+    void ReapToolWorkers(bool all);
 	json ToolStepIn(const json& args);
 	json ToolStepOver(const json& args);
 	json ToolStepOut(const json& args);
@@ -166,8 +226,6 @@ private:
 	// StepOver CALL skip helpers
 	bool IsCallInstruction(uint32_t threadId, uint64_t& nextInsnAddr);
 	bool IsNextInstructionCall(uint32_t threadId, uint64_t& addrAfterCall);
-	bool SetTempBpAndContinue(uint64_t address);
-	void CleanupTempStepOverBp();
 
 	// Condition/evaluate helpers (MCP-level logic)
 	bool EvaluateCondition(const std::string& condition, uint32_t threadId, const RegisterSet* cachedRegs);
@@ -233,7 +291,7 @@ private:
 	uint64_t nextCheckpointId_ = 1;
 	size_t checkpointBytes_ = 0;
 
-	// Temp breakpoint for StepOver CALL skip (guarded by eventMutex_)
+	// Published run-until breakpoint ID (guarded by eventMutex_); callbacks never use owner state.
 	uint32_t tempStepOverBpId_ = 0;
 
 	// Step completion synchronization

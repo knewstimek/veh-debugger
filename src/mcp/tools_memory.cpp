@@ -78,11 +78,12 @@ json McpServer::ToolReadPointerChain(const json& args) {
 	bool derefFinal = JsonBool(args, "derefFinal", true);
 	int readSize = JsonInt(args, "size", 0);
 
-	// 포인터 크기 판정 (QUERY 권한만 필요). deref 자체는 IPC ReadMemory(DLL 인-프로세스)로
-	// 처리 -- targetProcess_ 핸들에 VM_READ가 없어도 동작.
-	BOOL isWow64 = FALSE;
-	if (HANDLE hProc = session_.GetTargetProcess()) IsWow64Process(hProc, &isWow64);
-	int ptrSize = isWow64 ? 4 : 8;
+    // The negotiated target address width applies to both local and remote
+    // namespaces; a missing host process handle says nothing about guest bitness.
+    const auto addressBits = session_.TargetAddressBits();
+    if (addressBits != 32 && addressBits != 64)
+        return {{"error", "Target address width is unavailable; pointer size cannot be determined"}};
+    const int ptrSize = static_cast<int>(addressBits / 8);
 
 	json steps = json::array();
 	for (size_t i = 0; i < offsets.size(); i++) {

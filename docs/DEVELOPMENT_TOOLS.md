@@ -10,6 +10,8 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 | `test/test_remote_transport.py` | Exercises resident TCP/TLS authentication, IPC routing, late/missing detach replies, dead-agent recovery, startup exit/Win32 and structured common error diagnostics (including invalid-record fallback), launch width/initial-thread metadata and retry recovery, and real DLL lifecycle reply draining; removes its owned certificate, secret and processes. See [remote transport](REMOTE_TRANSPORT.md). |
 | `test/test_dap_deferred_loader_stop.py` | Uses the guest fixture without dwell sleeps: binding requires a hold and the DLL disappears on explicit continuation. Covers reload, failed-install retry, shared BP IDs, query failures, historical versus new holds delivered inside a Continue exchange, known stop reasons and termination/exit with TID reuse. |
 | `test/test_local_backend_recovery.py` | Kills only exact test-owned agent handles and checks same-MCP reattachment, death during detach, live pipe loss without agent termination, and stale-agent isolation from native DLL cleanup. |
+| `test/test_session_operations.py`, `test/test_operation_lifetime.py` | VM-free run-until ownership, fast/stale/other-thread events, exit/reconnect, CALL step-over, bounded value-write leases, receipt loss, action parity, and input/output control-loss checks. Uses the existing guest fixture and owned MCP process job. |
+| `test/test_session_receipts.py`, `test/test_system_receipts.py` | Target pointer width, exact breakpoint-removal/stopped-state and system event/hook receipts; direct/batch parity with synthetic malformed/refused responses. |
 | `test/test_code_patch.py` | Exercises real DLL instruction-aware patches in x64/x86: automatic spans, default/disabled NOP fill, explicit oversized/split spans, breakpoint overlap, page-edge failures, raw opt-in and direct/batch/native-action parity. Guest tests verify reported bitness and unsupported direct/batch/action parity. |
 | `test/test_shellcode_results.py` | Checks status-only/full target-state refusal, generic/unknown statuses, malformed success and transport failure; direct/batch/BP-action results agree. TCP routing is covered by `test_remote_transport.py`. |
 | `test/test_backend_results.py` | Injects rejected, short/oversized and missing backend replies through the existing guest fixture; checks DAP execution/write/termination acknowledgements, pause identity, exception-filter rejection and MCP/DAP empty-versus-failed stacks, including batch parity. |
@@ -26,6 +28,77 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 | `tools/measure_mcp_schema.py` | Measures bounded initialize and `tools/list` bytes, input-schema bytes, output-schema count, and eager names for every exposure profile. |
 
 All process-launching helpers use finite timeouts and wait for their children during cleanup. The compatibility runner stages copies under an OS temporary directory and removes them when complete.
+
+## Execution ownership and leased writes
+
+`veh_execution` and `veh_value_freeze` are lazy-discovered tools: use a toolbox
+manifest/description or call by name. They do not expand the default eager schema.
+Attach/launch backend summaries include `frontendOperations` with protocol
+`veh-session/1`, `runUntil`, `valueFreeze` and opt-in stop notifications.
+Run-until requires reported software breakpoint creation/removal, detailed
+Continue, stopped-state query and register commands. Leased writes require both
+ReadMemory and WriteMemory. Unknown or missing support is not advertised.
+These are MCP operations; they add no DAP configuration or UI.
+
+`veh_execution(operation="state", threadId=77)` returns sessionGeneration and
+sequence as exact strings, current PID/thread, a stopped/running/unknown query
+result, temporary ownership and the last completion. A VM-wide pause or an old
+event is not proof that the selected thread has a debugger stop.
+`operation="run_to"` takes a destination address and one current stopped
+thread. It resumes that thread only. A simple existing software breakpoint may
+be borrowed; cleanup never removes it. Pending/conditional/log/action-bearing
+breakpoints and frozen threads conflict with this operation. Capacity refusal is
+different from uncertain creation. Lost/malformed creation or removal receipts
+retain ownership, and ordinary mutations stay fenced until explicit cancellation
+or session cleanup. Detach/terminate/reconnect remain available and do not claim
+unconfirmed backend cleanup. Cancellation removes only an owned temporary
+breakpoint and does not pause, resume or roll back execution.
+CALL `veh_step_over` uses the same owner and return-address stop; it uses the
+selected thread's registers rather than requiring a stack walk.
+
+Use `operation="cancel"` to retire an operation. Use
+`operation="notifications", enabled=true` to subscribe to
+`notifications/veh/stopped`; the default is off. Events carry protocol, exact
+sessionGeneration/sequence/operationId, PID, TID, reason, address, breakpoint ID,
+local queue loss and ownership-cleanup facts. The queue holds at most 64 records.
+Sequence describes frontend admission, not guest capture time. A stop packet
+is an event observation; query current state before issuing state-dependent work.
+Backend event loss is not quantified by the local queue's dropped count.
+All-thread stops, atomic snapshots and backend cleanup are not inferred.
+
+`veh_value_freeze(operation="add", address="0x2000", data="01 00 00 00",
+interval_ms=1000, lease_seconds=10)` creates a job and returns an exact string ID.
+The lease is required: 1-300 seconds. The interval is a minimum delay after
+completion: 250-60000 ms, default1000. Each job stores1-64 bytes; the table holds
+at most16 entries, including terminal records until explicitly removed/cleared.
+`list` returns states, confirmed writes, skipped intervals and remaining lease.
+`renew` extends an active, unexpired job with a new explicit lease;
+`remove` deletes one job and `clear` removes all jobs. Overlapping active
+ranges, wrong address width and missing read/write support are rejected.
+
+A single injected monotonic millisecond clock supplies all due/completion/expiry
+instants; none are UTC or persisted across restart. The existing event loop
+schedules one write/readback at a time, with no extra worker, catch-up burst or
+automatic retry after uncertainty. Failed write/readback fences every active job.
+Target exit, generation/PID changes, input EOF, parent exit or closed output stop
+new autonomous effects. A write already admitted can finish; ending a lease or
+connection does not undo it. A read-only output-pipe probe adds no heartbeat
+notification traffic. A dedicated output writer keeps notifications and protocol
+replies from blocking EOF detection. Its queue is bounded to 64 records/64 MiB;
+overflow ends the connection rather than accumulating output indefinitely.
+Shutdown cancels blocked pipe I/O and waits for bounded in-flight backend commands;
+it does not force-kill their threads. Jobs are not restored after restart.
+
+Both tools support direct and batch calls; leased jobs also support breakpoint
+actions. Run-to, CALL step-over and blocking Continue are excluded from actions
+because action completion already auto-continues. Batch/action steps refuse a
+scope changed during a yielded wait. Optional `expected_generation` exact
+strings bind operation admission to the caller's current session. Existing
+read/inspect operations remain usable during pending execution.
+
+Run `py -3 tools/run_tests.py test_session_operations.py test_operation_lifetime.py
+test_session_receipts.py test_system_receipts.py --jobs 2`; repeat with
+`--build-dir build32` for x86.
 
 ## Assembly patches
 

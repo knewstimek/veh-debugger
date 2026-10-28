@@ -54,6 +54,13 @@ int wmain(int argc, wchar_t** argv) {
     const bool vmMode=mode.rfind(L"vm",0)==0||machineMode;uint32_t vmState=2,detachFailures=0;
     uint32_t continueRequests = 0, pauseRequests = 0, resolveRequests = 0;
     uint32_t fixtureBreakpointId = 0, shellcodeRequests=0, localThreadQueries=0;
+    const bool operationsMode = mode.rfind(L"ops-", 0) == 0;
+    const bool receiptMode = mode.rfind(L"receipt-", 0) == 0;
+    const bool systemReceiptMode = mode.rfind(L"system-receipts-", 0) == 0;
+    bool operationsStopped = true, operationsExitSent = false;
+    uint64_t operationsRip = 0x1000, operationsBreakpointAddress = 0x1000;
+    uint32_t operationsCreated = 0, operationsRemoved = 0, operationsResumed = 0, operationsWrites = 0;
+    unsigned char operationsMemory[64]; std::memset(operationsMemory, 0x11, sizeof(operationsMemory));
     const bool deferredMode=mode.rfind(L"deferred-",0)==0;
     bool deferredGuard=false,moduleHeld=false,exceptionHeld=false;
     uint32_t moduleHeldTid=77,deferredStopQueries=0;
@@ -115,6 +122,26 @@ int wmain(int argc, wchar_t** argv) {
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::ControlVirtualMachine);
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::TraceVirtualCpu);
             }
+            if (systemReceiptMode)
+                for (auto op : {veh::IpcCommand::ListSystemEvents, veh::IpcCommand::RemoveSystemEvent,
+                                veh::IpcCommand::AddHiddenHook, veh::IpcCommand::AddSystemEvent})
+                    veh::SetCommandSupported(caps.commands, op);
+            if (receiptMode && mode != L"receipt-unsupported")
+                for (auto op : {veh::IpcCommand::RemoveBreakpoint, veh::IpcCommand::RemoveHwBreakpoint,
+                                veh::IpcCommand::IsThreadStopped})
+                    veh::SetCommandSupported(caps.commands, op);
+            if (operationsMode) {
+                for (auto op : {veh::IpcCommand::SetBreakpoint, veh::IpcCommand::RemoveBreakpoint,
+                                veh::IpcCommand::Continue, veh::IpcCommand::IsThreadStopped,
+                                veh::IpcCommand::GetRegisters, veh::IpcCommand::FreezeThread,
+                                veh::IpcCommand::StepInto, veh::IpcCommand::StepOver, veh::IpcCommand::Pause})
+                    veh::SetCommandSupported(caps.commands, op);
+                if (mode == L"ops-no-read") {
+                    const auto index = static_cast<uint32_t>(veh::IpcCommand::ReadMemory);
+                    caps.commands[index / 8] &= static_cast<uint8_t>(~(1u << (index % 8)));
+                }
+                if (mode != L"ops-no-write") veh::SetCommandSupported(caps.commands, veh::IpcCommand::WriteMemory);
+            }
             if(deferredMode){
                 for(auto op:{veh::IpcCommand::ResolveFunction,veh::IpcCommand::SetBreakpoint,
                     veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue,veh::IpcCommand::TerminateThread})veh::SetCommandSupported(caps.commands,op);
@@ -157,6 +184,210 @@ int wmain(int argc, wchar_t** argv) {
             if (mode == L"wrong-scope") info.scope = veh::IpcTargetScope::Host;
             if (mode == L"not-found") { info = {}; info.status = veh::IpcStatus::NotFound; }
             if (!send(pipe, header.command, &info, (mode == L"truncated"||mode==L"machine-truncated") ? 8 : sizeof(info))) break;
+        } else if (systemReceiptMode && command == veh::IpcCommand::ListSystemEvents) {
+            struct {veh::ListSystemEventsResponse head; veh::SystemEventInfo entry;} response{};
+            response.head.status = mode == L"system-receipts-error" ? veh::IpcStatus::Error : veh::IpcStatus::Ok;
+            response.head.count = mode == L"system-receipts-empty" || mode == L"system-receipts-error" ? 0 :
+                mode == L"system-receipts-short" ? 2 : mode == L"system-receipts-count" ? 257 : 1;
+            response.entry.id = 7;
+            response.entry.type = static_cast<uint32_t>(veh::SystemEventType::MemoryExecute);
+            response.entry.action = 2; response.entry.pid = 424242;
+            response.entry.low = response.entry.high = 0x1000; response.entry.hits = 3;
+            const bool noEntries = response.head.count == 0 || mode == L"system-receipts-count";
+            const auto length = noEntries ? sizeof(response.head) : sizeof(response);
+            std::vector<unsigned char> result(length + (mode == L"system-receipts-long" ? 1 : 0), 0);
+            std::memcpy(result.data(), &response, length);
+            if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
+        } else if (systemReceiptMode && command == veh::IpcCommand::RemoveSystemEvent) {
+            if (mode == L"system-receipts-short") {
+                const uint8_t shortReply = 0; if (!reply(pipe, header.command, shortReply)) break;
+            } else if (mode == L"system-receipts-long") {
+                const uint64_t longReply = 0; if (!reply(pipe, header.command, longReply)) break;
+            } else if (!reply(pipe, header.command, mode == L"system-receipts-error" ?
+                veh::IpcStatus::Error : veh::IpcStatus::Ok)) break;
+        } else if (systemReceiptMode &&
+            (command == veh::IpcCommand::AddHiddenHook || command == veh::IpcCommand::AddSystemEvent)) {
+            if (mode == L"system-receipts-short") {
+                if (!reply(pipe, header.command, veh::IpcStatus::Ok)) break;
+            } else {
+                // These two receipts have the same fixed status/id layout.
+                veh::AddHiddenHookResponse response{mode == L"system-receipts-error" ?
+                    veh::IpcStatus::Error : veh::IpcStatus::Ok, 7};
+                std::vector<unsigned char> result(sizeof(response) +
+                    (mode == L"system-receipts-long" ? 1 : 0), 0);
+                std::memcpy(result.data(), &response, sizeof(response));
+                if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
+            }
+        } else if (receiptMode &&
+            (command == veh::IpcCommand::RemoveBreakpoint || command == veh::IpcCommand::RemoveHwBreakpoint)) {
+            if (mode == L"receipt-short") {
+                const uint8_t shortReply = 0; if (!reply(pipe, header.command, shortReply)) break;
+            } else if (mode == L"receipt-long") {
+                const uint64_t longReply = 0; if (!reply(pipe, header.command, longReply)) break;
+            } else {
+                const auto status = mode == L"receipt-error" ? veh::IpcStatus::Error :
+                    mode == L"receipt-invalid" ? static_cast<veh::IpcStatus>(99) :
+                    mode == L"receipt-unsupported" ? veh::IpcStatus::Unsupported :
+                    mode == L"receipt-not-found" ? veh::IpcStatus::NotFound : veh::IpcStatus::Ok;
+                if (!reply(pipe, header.command, status)) break;
+            }
+        } else if (receiptMode && command == veh::IpcCommand::IsThreadStopped) {
+            if (mode == L"receipt-short") {
+                const uint8_t shortReply = 0; if (!reply(pipe, header.command, shortReply)) break;
+            } else {
+                veh::IsThreadStoppedResponse response{mode == L"receipt-error" ? veh::IpcStatus::Error :
+                    mode == L"receipt-unsupported" ? veh::IpcStatus::Unsupported : veh::IpcStatus::Ok,
+                    static_cast<uint8_t>(mode == L"receipt-invalid" ? 2 : 1)};
+                std::vector<unsigned char> result(sizeof(response) + (mode == L"receipt-long" ? 1 : 0), 0);
+                std::memcpy(result.data(), &response, sizeof(response));
+                if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
+            }
+        } else if (operationsMode && command != veh::IpcCommand::Heartbeat && command != veh::IpcCommand::Detach) {
+            if (command == veh::IpcCommand::SetBreakpoint) {
+                veh::SetBreakpointRequest request{};
+                if (bytes.size() != sizeof(request)) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
+                std::memcpy(&request, bytes.data(), sizeof(request));
+                operationsBreakpointAddress = request.address;
+                if (mode == L"ops-no-create-short") {
+                    if (!reply(pipe, header.command, veh::IpcStatus::LimitReached)) break;
+                    continue;
+                }
+                if (mode == L"ops-no-create") {
+                    if (!reply(pipe, header.command, veh::SetBreakpointResponse{veh::IpcStatus::LimitReached, 0})) break;
+                    continue;
+                }
+                ++operationsCreated;
+                if (mode == L"ops-create-ambiguous") {
+                    if (!reply(pipe, header.command, veh::IpcStatus::Error)) break;
+                    continue;
+                }
+                if (mode == L"ops-stale") {
+                    const veh::BreakpointHitEvent event{77, 100, operationsBreakpointAddress, {}};
+                    if (!reply(pipe, static_cast<uint32_t>(veh::IpcEvent::BreakpointHit), event)) break;
+                }
+                if (!reply(pipe, header.command, veh::SetBreakpointResponse{veh::IpcStatus::Ok, 100})) break;
+            } else if (command == veh::IpcCommand::RemoveBreakpoint) {
+                ++operationsRemoved;
+                if (!reply(pipe, header.command, mode == L"ops-remove-error" ? veh::IpcStatus::Error : veh::IpcStatus::Ok)) break;
+            } else if (command == veh::IpcCommand::IsThreadStopped) {
+                if (!reply(pipe, header.command, veh::IsThreadStoppedResponse{veh::IpcStatus::Ok,
+                    static_cast<uint8_t>(operationsStopped)})) break;
+            } else if (command == veh::IpcCommand::GetRegisters) {
+                veh::GetRegistersResponse response{};
+                response.status = veh::IpcStatus::Ok; response.regs.is32bit = 1; response.regs.rip = operationsRip;
+                if (!reply(pipe, header.command, response)) break;
+            } else if (command == veh::IpcCommand::GetThreads) {
+                if (mode == L"ops-exit-on-threads" && !operationsExitSent) {
+                    operationsExitSent = true; operationsStopped = false;
+                    const veh::ProcessExitEvent event{0};
+                    if (!reply(pipe, static_cast<uint32_t>(veh::IpcEvent::ProcessExited), event)) break;
+                }
+                struct {veh::GetThreadsResponse head; veh::ThreadInfo thread;} response{};
+                response.head = {veh::IpcStatus::Ok, 1}; response.thread.id = 77;
+                std::snprintf(response.thread.name, sizeof(response.thread.name),
+                    "created:%u removed:%u resumed:%u writes:%u",
+                    operationsCreated, operationsRemoved, operationsResumed, operationsWrites);
+                if (!reply(pipe, header.command, response)) break;
+            } else if (command == veh::IpcCommand::FreezeThread) {
+                struct {veh::FreezeThreadResponse head; uint32_t thread;} response{};
+                response.head = {veh::IpcStatus::Ok, mode == L"ops-frozen" ? 1u : 0u}; response.thread = 77;
+                if (!send(pipe, header.command, &response, static_cast<uint32_t>(sizeof(response.head) +
+                    response.head.count * sizeof(response.thread)))) break;
+            } else if (command == veh::IpcCommand::Continue) {
+                veh::ContinueRequest request{};
+                if (bytes.size() != sizeof(request)) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
+                std::memcpy(&request, bytes.data(), sizeof(request));
+                if (request.threadId != 77) {
+                    if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break;
+                    continue;
+                }
+                ++operationsResumed; operationsStopped = false;
+                if (mode == L"ops-drop") break;
+                const bool hit = mode == L"ops-normal" || mode == L"ops-fast" ||
+                    ((mode == L"ops-action" || mode == L"ops-action-fast") && operationsResumed <= 2);
+                const auto emitHit = [&] {
+                    const bool ordinaryActionStop = (mode == L"ops-action" || mode == L"ops-action-fast") && operationsResumed == 2;
+                    const uint64_t address = ordinaryActionStop ? 0x1010 : operationsBreakpointAddress;
+                    operationsStopped = true; operationsRip = address;
+                    const veh::BreakpointHitEvent event{77, ordinaryActionStop ? 7u : 100u, address, {}};
+                    return reply(pipe, static_cast<uint32_t>(veh::IpcEvent::BreakpointHit), event);
+                };
+                const bool earlyAction = mode == L"ops-action-fast" && operationsResumed == 1;
+                const bool beforeReply = mode == L"ops-fast" || earlyAction;
+                if (beforeReply && !emitHit()) break;
+                if (earlyAction) {
+                    // Hold the reply briefly after the stop to exercise command-gate wakeups.
+                    HANDLE delay = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+                    if (!delay) break;
+                    WaitForSingleObject(delay, 100); CloseHandle(delay);
+                }
+                if (request.wantDetails) {
+                    struct {veh::ContinueResponse head; uint32_t thread;} response{};
+                    response.head = {veh::IpcStatus::Ok, mode == L"ops-fast" ? 0u : 1u, 0};
+                    response.thread = 77;
+                    if (!send(pipe, header.command, &response, static_cast<uint32_t>(sizeof(response.head) +
+                        response.head.resumedCount * sizeof(response.thread)))) break;
+                }
+                if (hit && !beforeReply && !emitHit()) break;
+                if (mode == L"ops-other-thread") {
+                    const veh::BreakpointHitEvent event{88, 100, operationsBreakpointAddress, {}};
+                    if (!reply(pipe, static_cast<uint32_t>(veh::IpcEvent::BreakpointHit), event)) break;
+                }
+                if (mode == L"ops-exit") {
+                    const veh::ProcessExitEvent event{0};
+                    if (!reply(pipe, static_cast<uint32_t>(veh::IpcEvent::ProcessExited), event)) break;
+                }
+            } else if (command == veh::IpcCommand::StepInto || command == veh::IpcCommand::StepOver) {
+                ++operationsRip; operationsStopped = true;
+                if (!reply(pipe, header.command, veh::IpcStatus::Ok)) break;
+                const veh::StepCompletedEvent event{77, operationsRip};
+                if (!reply(pipe, static_cast<uint32_t>(veh::IpcEvent::StepCompleted), event)) break;
+            } else if (command == veh::IpcCommand::Pause) {
+                operationsStopped = true;
+                if (!reply(pipe, header.command, veh::IpcStatus::Ok)) break;
+                const uint32_t thread = 77;
+                if (!reply(pipe, static_cast<uint32_t>(veh::IpcEvent::Paused), thread)) break;
+            } else if (command == veh::IpcCommand::ReadMemory) {
+                veh::ReadMemoryRequest request{};
+                if (bytes.size() != sizeof(request)) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
+                std::memcpy(&request, bytes.data(), sizeof(request));
+                if (mode == L"ops-no-read") { if (!reply(pipe, header.command, veh::IpcStatus::Unsupported)) break; continue; }
+                static constexpr unsigned char callCode[] = {0xe8, 0xfb, 0x0f, 0x00, 0x00, 0x90, 0xc3};
+                const bool memoryRange = request.address >= 0x2000 && request.address - 0x2000 <= sizeof(operationsMemory) &&
+                    request.size <= sizeof(operationsMemory) - static_cast<size_t>(request.address - 0x2000);
+                const bool codeRange = request.address >= 0x1000 && request.address - 0x1000 < 4096 && request.size <= 4096 &&
+                    request.size <= 4096 - (request.address - 0x1000);
+                if (!memoryRange && !codeRange) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
+                std::vector<unsigned char> response(sizeof(veh::IpcStatus) + request.size, 0x90);
+                const auto status = veh::IpcStatus::Ok; std::memcpy(response.data(), &status, sizeof(status));
+                if (memoryRange) std::memcpy(response.data() + sizeof(status),
+                    operationsMemory + static_cast<size_t>(request.address - 0x2000), request.size);
+                else for (uint32_t i = 0; i < request.size; ++i) {
+                    const auto index = request.address - 0x1000 + i;
+                    if (index < sizeof(callCode)) response[sizeof(status) + i] = callCode[index];
+                }
+                if (!send(pipe, header.command, response.data(), static_cast<uint32_t>(response.size()))) break;
+            } else if (command == veh::IpcCommand::WriteMemory) {
+                veh::WriteMemoryRequest request{};
+                if (bytes.size() < sizeof(request)) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
+                std::memcpy(&request, bytes.data(), sizeof(request));
+                if (mode == L"ops-no-write") { if (!reply(pipe, header.command, veh::IpcStatus::Unsupported)) break; continue; }
+                const bool valid = request.size && request.size <= sizeof(operationsMemory) &&
+                    bytes.size() - sizeof(request) == request.size && request.address >= 0x2000 &&
+                    request.address - 0x2000 <= sizeof(operationsMemory) &&
+                    request.size <= sizeof(operationsMemory) - static_cast<size_t>(request.address - 0x2000);
+                if (!valid) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
+                if (++operationsWrites == 1 && mode == L"ops-lease-delay") {
+                    HANDLE delay = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+                    if (!delay) break;
+                    WaitForSingleObject(delay, 1100); CloseHandle(delay);
+                }
+                if (mode == L"ops-write-error") { if (!reply(pipe, header.command, veh::IpcStatus::Error)) break; continue; }
+                if (mode != L"ops-write-mismatch") std::memcpy(
+                    operationsMemory + static_cast<size_t>(request.address - 0x2000),
+                    bytes.data() + sizeof(request), request.size);
+                if (!reply(pipe, header.command, veh::IpcStatus::Ok)) break;
+            } else if (!reply(pipe, header.command, veh::IpcStatus::Unsupported)) break;
         } else if(deferredMode && command==veh::IpcCommand::IsThreadStopped){
             ++deferredStopQueries;
             if(mode==L"deferred-query-error"){if(!reply(pipe,header.command,veh::IpcStatus::Error))break;continue;}
