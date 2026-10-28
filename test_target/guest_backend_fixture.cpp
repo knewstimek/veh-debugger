@@ -54,6 +54,12 @@ int wmain(int argc, wchar_t** argv) {
     const bool vmMode=mode.rfind(L"vm",0)==0||machineMode;uint32_t vmState=2,detachFailures=0;
     uint32_t continueRequests = 0, pauseRequests = 0, resolveRequests = 0;
     uint32_t fixtureBreakpointId = 0, shellcodeRequests=0, localThreadQueries=0;
+    const bool instrumentationMode = mode.rfind(L"inst-", 0) == 0 || mode == L"ops-action-inst";
+    bool captureActive[3]{}, captureCreated[3]{};
+    uint64_t captureIds[3]{}, nextCaptureId = 9007199254740993ULL;
+    veh::InstrumentationDataPolicy captureData[3]{};
+    veh::InstrumentationTransactionPolicy captureTransaction[3]{};
+    uint32_t captureBuffer[3]{};
     const bool operationsMode = mode.rfind(L"ops-", 0) == 0;
     const bool receiptMode = mode.rfind(L"receipt-", 0) == 0;
     const bool systemReceiptMode = mode.rfind(L"system-receipts-", 0) == 0;
@@ -122,6 +128,15 @@ int wmain(int argc, wchar_t** argv) {
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::ControlVirtualMachine);
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::TraceVirtualCpu);
             }
+            if (instrumentationMode)
+                for (auto op : {veh::IpcCommand::QueryBranchTrace, veh::IpcCommand::StartBranchTrace,
+                                veh::IpcCommand::StopBranchTrace, veh::IpcCommand::ReadBranchTrace})
+                    veh::SetCommandSupported(caps.commands, op);
+            if (instrumentationMode && mode != L"inst-no-caps")
+                for (auto op : {veh::IpcCommand::QueryInstrumentation, veh::IpcCommand::StartInstrumentation,
+                                veh::IpcCommand::StopInstrumentation, veh::IpcCommand::ReadInstrumentation})
+                    if (mode != L"inst-partial" || op == veh::IpcCommand::QueryInstrumentation)
+                        veh::SetCommandSupported(caps.commands, op);
             if (systemReceiptMode)
                 for (auto op : {veh::IpcCommand::ListSystemEvents, veh::IpcCommand::RemoveSystemEvent,
                                 veh::IpcCommand::AddHiddenHook, veh::IpcCommand::AddSystemEvent})
@@ -173,6 +188,119 @@ int wmain(int argc, wchar_t** argv) {
             if (mode == L"delayed-trace") veh::SetCommandSupported(caps.commands, veh::IpcCommand::TraceCallers);
             strcpy_s(caps.name, "synthetic-guest");
             if (!reply(pipe, header.command, caps)) break;
+        } else if (instrumentationMode && command == veh::IpcCommand::QueryBranchTrace) {
+            veh::QueryBranchTraceResponse response{};
+            response.status = veh::IpcStatus::Ok; response.lastBranches = 1; response.fullPath = 1;
+            strcpy_s(response.provider, "synthetic-branches");
+            if (!reply(pipe, header.command, response)) break;
+        } else if (instrumentationMode && (command == veh::IpcCommand::StartBranchTrace ||
+            command == veh::IpcCommand::StopBranchTrace)) {
+            if (!reply(pipe, header.command, bytes.size() == sizeof(veh::StartBranchTraceRequest) ?
+                veh::IpcStatus::Ok : veh::IpcStatus::InvalidArgs)) break;
+        } else if (instrumentationMode && command == veh::IpcCommand::ReadBranchTrace) {
+            veh::ReadBranchTraceRequest request{};
+            if (bytes.size() != sizeof(request)) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
+            std::memcpy(&request, bytes.data(), sizeof(request));
+            const struct { veh::ReadBranchTraceResponse head; veh::BranchRecord branch; } response{
+                {veh::IpcStatus::Ok, request.kind, 1, 0}, {0x1000, 0x2000}};
+            if (!reply(pipe, header.command, response)) break;
+        } else if (instrumentationMode && command == veh::IpcCommand::QueryInstrumentation) {
+            veh::QueryInstrumentationRequest request{};
+            if (bytes.size() != sizeof(request)) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
+            std::memcpy(&request, bytes.data(), sizeof(request));
+            veh::QueryInstrumentationResponse response{};
+            response.status = mode == L"inst-error" ? veh::IpcStatus::Error : veh::IpcStatus::Ok;
+            response.version = mode == L"inst-version" ? 2 : 1; response.kind = request.kind;
+            response.features = 511;
+            if (mode == L"inst-cpu-off") response.features &= ~(veh::kInstrumentationIntelPt |
+                veh::kInstrumentationPtWrite | veh::kInstrumentationPtWriteAvailable);
+            if (mode == L"inst-no-original") response.features &= ~veh::kInstrumentationOriginal;
+            if (mode == L"inst-no-rollback") response.features &= ~veh::kInstrumentationRollback;
+            response.maxBufferRecords = mode == L"inst-low-limit" ? 16 : 65536;
+            response.maxPageRecords = 256;
+            strcpy_s(response.provider, "synthetic-instrumentation");
+            strcpy_s(response.ptWriteReason, mode == L"inst-cpu-off" ? "PTWRITE unavailable" : "");
+            if (mode == L"inst-query-long") {
+                std::vector<unsigned char> result(sizeof(response) + 1);
+                std::memcpy(result.data(), &response, sizeof(response));
+                if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
+            } else if (!send(pipe, header.command, &response, mode == L"inst-query-short" ? 4 : sizeof(response))) break;
+        } else if (instrumentationMode && (command == veh::IpcCommand::StartInstrumentation ||
+            command == veh::IpcCommand::StopInstrumentation || command == veh::IpcCommand::ReadInstrumentation)) {
+            veh::InstrumentationKind kind{};
+            uint64_t requestedId = 0, cursor = 0;
+            uint32_t maximum = 0;
+            veh::StartInstrumentationRequest start{};
+            bool valid = true;
+            if (command == veh::IpcCommand::StartInstrumentation && bytes.size() == sizeof(start)) {
+                std::memcpy(&start, bytes.data(), sizeof(start));
+                kind = start.kind;
+                valid = start.version == 1 && start.bufferRecords > 0 && start.bufferRecords <= 65536 &&
+                    start.includeIp <= 1 && static_cast<uint32_t>(start.dataPolicy) <= 1 &&
+                    static_cast<uint32_t>(start.transactionPolicy) <= 1;
+            } else if (command == veh::IpcCommand::StopInstrumentation && bytes.size() == sizeof(veh::StopInstrumentationRequest)) {
+                veh::StopInstrumentationRequest request{}; std::memcpy(&request, bytes.data(), sizeof(request));
+                kind = request.kind; requestedId = request.traceId; valid = request.version == 1;
+            } else if (command == veh::IpcCommand::ReadInstrumentation && bytes.size() == sizeof(veh::ReadInstrumentationRequest)) {
+                veh::ReadInstrumentationRequest request{}; std::memcpy(&request, bytes.data(), sizeof(request));
+                kind = request.kind; requestedId = request.traceId; cursor = request.cursor; maximum = request.maxRecords;
+                valid = request.version == 1 && maximum <= 256;
+            } else valid = false;
+            const auto index = static_cast<uint32_t>(kind);
+            if (!valid || index < 1 || index > 2) {
+                if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue;
+            }
+            if (command == veh::IpcCommand::StartInstrumentation && !captureActive[index]) captureIds[index] = ++nextCaptureId;
+            const uint64_t id = captureIds[index];
+            if (command == veh::IpcCommand::StartInstrumentation) {
+                if (captureActive[index]) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidState)) break; continue; }
+                captureActive[index] = true; captureCreated[index] = true;
+                captureData[index] = start.dataPolicy; captureTransaction[index] = start.transactionPolicy;
+                captureBuffer[index] = start.bufferRecords;
+            } else if (!captureCreated[index] || id != requestedId) {
+                if (!reply(pipe, header.command, veh::IpcStatus::NotFound)) break; continue;
+            } else if (command == veh::IpcCommand::StopInstrumentation) captureActive[index] = false;
+            else if (maximum && captureActive[index]) {
+                if (!reply(pipe, header.command, veh::IpcStatus::InvalidState)) break; continue;
+            }
+            veh::InstrumentationResponse response{};
+            response.status = veh::IpcStatus::Ok; response.version = 1; response.kind = kind;
+            response.traceId = id; response.flags = captureActive[index] ? veh::kInstrumentationActive : 0;
+            response.dataPolicy = captureData[index]; response.transactionPolicy = captureTransaction[index];
+            response.bufferRecords = captureBuffer[index];
+            response.totalRecords = command == veh::IpcCommand::StartInstrumentation ? 0 : (captureBuffer[index] < 3 ? captureBuffer[index] : 3);
+            response.omittedTransactionalRecords = 2; response.abortedTransactions = 1;
+            if (cursor > response.totalRecords) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
+            response.cursor = cursor;
+            response.count = static_cast<uint32_t>(response.totalRecords - cursor);
+            if (response.count > maximum) response.count = maximum;
+            response.nextCursor = cursor + response.count;
+            if (mode == L"inst-loss" || mode == L"inst-unknown-loss") {
+                response.flags |= veh::kInstrumentationOverflow | veh::kInstrumentationIncomplete;
+                response.lostRecords = mode == L"inst-loss" ? 9 : UINT64_MAX;
+            }
+            if (mode == L"inst-ip-missing") response.flags |= veh::kInstrumentationIncomplete;
+            if (mode == L"inst-policy-mismatch") response.dataPolicy = veh::InstrumentationDataPolicy::Patched;
+            if (mode == L"inst-kind-mismatch") response.kind = index == 1 ? veh::InstrumentationKind::PtWrite : veh::InstrumentationKind::DetourCalls;
+            if (mode == L"inst-id-mismatch") ++response.traceId;
+            if (mode == L"inst-bad-cursor") ++response.nextCursor;
+            if (mode == L"inst-count") response.count = 257;
+            std::vector<unsigned char> result(sizeof(response) + response.count * sizeof(veh::InstrumentationRecord));
+            std::memcpy(result.data(), &response, sizeof(response));
+            for (uint32_t i = 0; i < response.count; ++i) {
+                veh::InstrumentationRecord record{};
+                record.value = index == 2 ? 0xfedcba9876543210ULL + cursor + i : 0x1000;
+                record.instructionAddress = 0x1000 + (cursor + i) * 5;
+                record.callerAddress = 0x2000 + (cursor + i) * 5;
+                record.threadId = 77;
+                record.flags = veh::kInstrumentationIpValid | (index == 1 ? veh::kInstrumentationCallerValid : 0);
+                if (mode == L"inst-ip-missing" && cursor + i == 1) record.flags &= ~veh::kInstrumentationIpValid;
+                if (mode == L"inst-record-flags") record.flags |= 4;
+                std::memcpy(result.data() + sizeof(response) + i * sizeof(record), &record, sizeof(record));
+            }
+            if (mode == L"inst-reply-short") result.resize(4);
+            if (mode == L"inst-reply-long") result.push_back(0);
+            if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
         } else if (command == veh::IpcCommand::GetTargetInfo) {
             veh::GetTargetInfoResponse info{veh::IpcStatus::Ok, veh::IpcTargetScope::Guest, pid, 32};
             if(machineMode){info.scope=veh::IpcTargetScope::VirtualMachine;info.pid=0;info.addressBits=0;}
@@ -304,9 +432,9 @@ int wmain(int argc, wchar_t** argv) {
                 ++operationsResumed; operationsStopped = false;
                 if (mode == L"ops-drop") break;
                 const bool hit = mode == L"ops-normal" || mode == L"ops-fast" ||
-                    ((mode == L"ops-action" || mode == L"ops-action-fast") && operationsResumed <= 2);
+                    ((mode.rfind(L"ops-action", 0) == 0) && operationsResumed <= 2);
                 const auto emitHit = [&] {
-                    const bool ordinaryActionStop = (mode == L"ops-action" || mode == L"ops-action-fast") && operationsResumed == 2;
+                    const bool ordinaryActionStop = (mode.rfind(L"ops-action", 0) == 0) && operationsResumed == 2;
                     const uint64_t address = ordinaryActionStop ? 0x1010 : operationsBreakpointAddress;
                     operationsStopped = true; operationsRip = address;
                     const veh::BreakpointHitEvent event{77, ordinaryActionStop ? 7u : 100u, address, {}};

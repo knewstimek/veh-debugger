@@ -1352,12 +1352,21 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
 
 		Tool(&McpServer::ToolTraceCallers, "trace", 0, true,
-			{{"name", "veh_trace_callers"}, {"description", "Profile function callers with hit counts, including zero hits. duration_ms overrides duration_sec. VEH resumes before collection and pauses after; hypervisor tracing does neither. x64 unwinds callers; x86 uses [ESP], accurate only at function entry."},
+			{{"name", "veh_trace_callers"}, {"description", "Standard preserves caller hit-count profiling and duration_ms precedence. VEH resumes/pauses; hypervisor tracing does neither. x86 [ESP] is accurate at entry only. Explicit mode=detour uses status/start/stop/read, summary by default and stopped-capture pages; backend support required, no automatic fallback."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"address", {{"type", "string"}, {"description", "Hex address to set breakpoint (e.g. '0x7FF600001000')"}}},
+                {"mode", {{"type", "string"}, {"enum", json::array({"standard", "detour"})}, {"default", "standard"}}},
+                {"operation", {{"type", "string"}, {"enum", json::array({"status", "start", "stop", "read"})}, {"description", "Explicit instrumentation only; default status"}}},
+                {"trace_id", {{"type", "string"}, {"description", "Exact capture ID from start; read/stop"}}},
+                {"cursor", {{"type", "string"}, {"description", "Read: exact returned nextCursor, default 0"}}},
+                {"max", {{"type", "integer"}, {"minimum", 0}, {"maximum", 256}, {"default", 0}, {"description", "Instrumentation read: 0 summary only; stopped capture pages up to 256"}}},
+                {"buffer_records", {{"type", "integer"}, {"minimum", 1}, {"maximum", 65536}, {"description", "Start: default min(4096, backend limit)"}}},
+                {"data_policy", {{"type", "string"}, {"enum", json::array({"original", "patched"})}, {"default", "original"}, {"description", "Start: patched exposes E9/detour bytes to target reads; integrity checks/self-code reads can change"}}},
+                {"transaction_policy", {{"type", "string"}, {"enum", json::array({"omit", "rollback"})}, {"default", "omit"}, {"description", "Start: omit all transactional records; rollback stages until commit and discards aborted records"}}},
+                {"include_ip", {{"type", "boolean"}, {"default", true}, {"description", "Start: request instruction addresses; unavailable IP remains null"}}},
+			{"address", {{"type", "string"}, {"description", "Required: standard trace address or detour start function entry"}}},
 			{"duration_sec", {{"type", "integer"}, {"description", "How long to collect callers in seconds (default: 5, max: 60)"}}},
 			{"duration_ms", {{"type", "integer"}, {"description", "Same window in milliseconds (50-60000); overrides duration_sec"}}}
-		 }}, {"required", json::array({"address"})}}}}),
+		 }}}}}),
 
 		Tool(&McpServer::ToolTraceCalls, "trace", 0, true,
 			{{"name", "veh_trace_calls"}, {"description", "Monitor where call/jmp instructions go at runtime. Sets breakpoints on call sites, runs program for N seconds, collects actual targets. With resolve=true, follows through obfuscated thunks to the final API using natural call context (no forced RIP). Ideal for IAT reconstruction on packed binaries."},
@@ -1605,13 +1614,19 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			 }}}}}),
 
 		Tool(&McpServer::ToolBranchTrace, "system", 0, true,
-			{{"name", "veh_branch_trace"}, {"description", "Hardware branch tracing through a common interface: last branches (LBR: the branches that led to a thread's stop) or the full path of the target (Intel PT, reconstructed into branches). status reports what this machine offers and, when it does not, why (vendor, not exposed by a hypervisor below, disabled). Needs a hypervisor backend."},
+			{{"name", "veh_branch_trace"}, {"description", "Hardware trace: last=LBR, full=existing Intel PT branch path. Explicit kind=ptwrite uses status/start/stop/read for values and instruction addresses, summaries and bounded stopped-capture pages, loss/incompleteness and transaction policy. Backend support required; no raw PT packets."},
 			 {"inputSchema", {{"type", "object"}, {"properties", {
 				{"operation", {{"type", "string"}, {"enum", json::array({"status", "start", "stop", "read"})}, {"description", "Default: status"}}},
-				{"kind", {{"type", "string"}, {"enum", json::array({"last", "full"})}, {"description", "Default: last"}}},
+				{"kind", {{"type", "string"}, {"enum", json::array({"last", "full", "ptwrite"})}, {"description", "Default: last"}}},
+                {"trace_id", {{"type", "string"}, {"description", "Exact capture ID from start; read/stop"}}},
+                {"cursor", {{"type", "string"}, {"description", "Read: exact returned nextCursor, default 0"}}},
+                {"buffer_records", {{"type", "integer"}, {"minimum", 1}, {"maximum", 65536}, {"description", "Start: default min(4096, backend limit)"}}},
+                {"data_policy", {{"type", "string"}, {"enum", json::array({"original", "patched"})}, {"default", "original"}, {"description", "Start: patched exposes E9/detour bytes to target reads; integrity checks/self-code reads can change"}}},
+                {"transaction_policy", {{"type", "string"}, {"enum", json::array({"omit", "rollback"})}, {"default", "omit"}, {"description", "Start: omit all transactional records; rollback stages until commit and discards aborted records"}}},
+                {"include_ip", {{"type", "boolean"}, {"default", true}, {"description", "Start: request instruction addresses; unavailable IP remains null"}}},
 				{"threadId", {{"type", "integer"}, {"description", "read last: a stopped thread"}}},
 				{"buffer_kb", {{"type", "integer"}, {"description", "start full: per processor, power of two (default 4096)"}}},
-				{"max", {{"type", "integer"}, {"description", "read: branches (default 4096)"}}}
+				{"max", {{"type", "integer"}, {"description", "read branches: default 4096; ptwrite: 0 summary (default), 1-256 stopped records"}}}
 			 }}}}}),
 
 		// Halting kernel debugging (GDB remote serial protocol); independent of the attached process.

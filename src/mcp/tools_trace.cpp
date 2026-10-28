@@ -28,6 +28,12 @@ static uint32_t DurationMs(const json& args) {
 }
 
 json McpServer::ToolTraceCallers(const json& args) {
+    const auto mode = args.value("mode", "standard");
+    if (mode == "detour") return ToolInstrumentation(args, InstrumentationKind::DetourCalls);
+    if (mode != "standard") return {{"error", "mode must be standard or detour"}};
+    for (const auto* key : {"operation", "trace_id", "cursor", "max", "buffer_records",
+        "data_policy", "transaction_policy", "include_ip"})
+        if (args.contains(key)) return {{"error", std::string(key) + " requires mode=detour"}};
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
 	std::string addrStr = args.value("address", "");

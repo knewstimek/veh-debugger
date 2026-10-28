@@ -82,6 +82,10 @@ enum class IpcCommand : uint32_t {
 
 	// Tracing
 	TraceCallers           = 0x0050,
+    QueryInstrumentation  = 0x0051,
+    StartInstrumentation  = 0x0052,
+    StopInstrumentation   = 0x0053,
+    ReadInstrumentation   = 0x0054,
 
 	// Memory management
 	AllocateMemory         = 0x0060,
@@ -1479,6 +1483,93 @@ struct TraceCallersResponse {
 	uint32_t uniqueCallers;    // number of TraceCallerEntry following
 	// followed by: TraceCallerEntry[uniqueCallers]
 };
+
+// --- Explicit instrumentation (wire version 1; legacy TraceCallers is unchanged) ---
+// Commands are additive. Advertise them only when implemented. CPU support is
+// distinct from a usable collector. All structs remain packed on x86 and x64.
+enum class InstrumentationKind : uint32_t { DetourCalls = 1, PtWrite = 2 };
+enum class InstrumentationDataPolicy : uint32_t { Original = 0, Patched = 1 };
+enum class InstrumentationTransactionPolicy : uint32_t { Omit = 0, Rollback = 1 };
+constexpr uint32_t kInstrumentationVersion = 1;
+constexpr uint32_t kInstrumentationMaxRecords = 65536, kInstrumentationMaxPage = 256;
+enum InstrumentationFeatures : uint32_t {
+    kInstrumentationIntelPt = 1, kInstrumentationPtWrite = 2,
+    kInstrumentationDetourAvailable = 4, kInstrumentationPtWriteAvailable = 8,
+    kInstrumentationOriginal = 16, kInstrumentationPatched = 32,
+    kInstrumentationOmit = 64, kInstrumentationRollback = 128,
+    kInstrumentationIncludeIp = 256,
+};
+// Policy bits and limits apply to the requested kind, not all collectors.
+struct QueryInstrumentationRequest { uint32_t version; InstrumentationKind kind; };
+struct QueryInstrumentationResponse {
+    IpcStatus status;
+    uint32_t version;
+    InstrumentationKind kind;
+    uint32_t features, maxBufferRecords, maxPageRecords;
+    char provider[32], intelPtReason[128], ptWriteReason[128], detourReason[128];
+};
+struct StartInstrumentationRequest {
+    uint32_t version;
+    InstrumentationKind kind;
+    uint64_t address; // DetourCalls: entry; PtWrite: zero (passive collection)
+    uint32_t bufferRecords; // 1..65536, default 4096; no silent overwrite
+    InstrumentationDataPolicy dataPolicy; // target data reads of instrumented code pages
+    InstrumentationTransactionPolicy transactionPolicy;
+    uint32_t includeIp; // 0/1; 1 requires IP collection support; missing IP is never guessed
+};
+struct StopInstrumentationRequest {
+    uint32_t version;
+    InstrumentationKind kind;
+    uint64_t traceId;
+};
+struct ReadInstrumentationRequest {
+    uint32_t version;
+    InstrumentationKind kind;
+    uint64_t traceId, cursor; // opaque capture ID; zero-based committed record offset
+    uint32_t maxRecords; // zero = summary, 1..256 = stopped immutable capture page
+};
+enum InstrumentationResultFlags : uint32_t {
+    kInstrumentationActive = 1, kInstrumentationOverflow = 2, kInstrumentationIncomplete = 4,
+};
+enum InstrumentationRecordFlags : uint32_t {
+    kInstrumentationIpValid = 1, kInstrumentationCallerValid = 2,
+};
+struct InstrumentationRecord {
+    uint64_t value; // PtWrite: payload; DetourCalls: called function entry address
+    uint64_t instructionAddress, callerAddress; // valid flags; caller = return address, not call site
+    uint32_t threadId, flags; // threadId zero = unknown
+};
+// Same exact header for Start/Stop/Read. Only Read appends records[count].
+// traceId is nonzero, connection-scoped and never reused on that connection.
+// Start creates one active collector per kind; never implicitly replaces it.
+// Stop is idempotent and retains the stopped capture until detach/next start.
+// Stop/read summary use count=0. Detail reads require stopped, immutable data.
+// totalRecords counts retained committed records. nextCursor=cursor+count.
+// Unknown lost/omitted/aborted counters use UINT64_MAX (JSON null), never fake zero.
+// Omit: publish no transactional records (including committed transactions).
+// Rollback: stage until commit, discard on abort. Never expose speculative pages.
+// If that policy cannot be guaranteed, reject before installation with Unsupported.
+// On buffer exhaustion stop retaining new records, preserve existing offsets,
+// set Overflow|Incomplete, and account for loss (or mark its count unknown).
+// Original (default) preserves target data-read bytes; Patched exposes detour
+// bytes (e.g. E9), changing integrity/self-read results. Never silently downgrade.
+struct InstrumentationResponse {
+    IpcStatus status;
+    uint32_t version;
+    InstrumentationKind kind;
+    uint32_t flags;
+    InstrumentationDataPolicy dataPolicy;
+    InstrumentationTransactionPolicy transactionPolicy;
+    uint32_t bufferRecords, count;
+    uint64_t traceId, cursor, nextCursor, totalRecords, lostRecords,
+        omittedTransactionalRecords, abortedTransactions;
+};
+static_assert(sizeof(QueryInstrumentationResponse) == 440);
+static_assert(sizeof(StartInstrumentationRequest) == 32);
+static_assert(sizeof(StopInstrumentationRequest) == 16);
+static_assert(sizeof(ReadInstrumentationRequest) == 28);
+static_assert(sizeof(InstrumentationResponse) == 88);
+static_assert(sizeof(InstrumentationRecord) == 32);
 
 // --- System inspection ---
 // cpu = logical processor index; ~0u = any (the backend picks one).

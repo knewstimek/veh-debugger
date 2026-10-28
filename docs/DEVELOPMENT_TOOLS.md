@@ -29,6 +29,16 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 
 All process-launching helpers use finite timeouts and wait for their children during cleanup. The compatibility runner stages copies under an OS temporary directory and removes them when complete.
 
+## Explicit instrumentation
+
+See [instrumentation contract](INSTRUMENTATION.md) for the additive version1
+IPC and backend qualification requirements. Existing lazy caller/branch tools
+provide explicit detour/PTWRITE modes, summary defaults and bounded stopped
+capture pages without adding eager tools. `test/test_instrumentation.py` uses the
+existing owned guest fixture to verify exact receipts, policies, loss/unknown
+metadata, pagination and direct/batch/action parity. Run with the shared test
+runner and repeat with `--build-dir build32`.
+
 ## Execution ownership and leased writes
 
 `veh_execution` and `veh_value_freeze` are lazy-discovered tools: use a toolbox

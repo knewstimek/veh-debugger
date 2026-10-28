@@ -850,6 +850,10 @@ json McpServer::ToolHiddenHook(const json& args) {
 json McpServer::ToolBranchTrace(const json& args) {
 	const std::string op = args.value("operation", "status");
 	const std::string kind_name = args.value("kind", "last");
+    if (kind_name == "ptwrite") return ToolInstrumentation(args, InstrumentationKind::PtWrite);
+    if (kind_name != "last" && kind_name != "full") return {{"error", "kind must be last, full or ptwrite"}};
+    for (const auto* key : {"trace_id", "cursor", "buffer_records", "data_policy", "transaction_policy", "include_ip"})
+        if (args.contains(key)) return {{"error", std::string(key) + " requires kind=ptwrite"}};
 	const uint32_t kind = kind_name == "full" ? 2u : 1u;
 	json error;
 	std::vector<uint8_t> resp;

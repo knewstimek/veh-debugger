@@ -422,7 +422,7 @@ DAP의 게스트 연결 설정은 추가하지 않습니다. 실행 중 서버�
 | `veh_trace_memory` | `address, size?, timeout_ms?, duration_ms?, access?, max_entries?` | 기본은 첫 쓰기 감지. `duration_ms` 지정 시 쓰기 또는 읽기·쓰기 접근 횟수 수집 |
 | `veh_resolve_imports` | `threadId, addresses, max_steps?, follow_exceptions?, system_only?, target_modules?` | 난독화 import 일괄 해석 (thunk -> DLL 스텝 추적, 최대 2000개) |
 | `veh_batch` | `steps, inputs?, input_variable?, stop_on_error?` | 다중 명령 일괄 실행 및 동일 세션의 입력별 순차 실행. 결과 참조, 제어 흐름, 입력별 status/count/첫 실패/trace artifact 요약을 반환한다. |
-| `veh_trace_callers` | `address, duration_sec?, duration_ms?` | 함수 호출자별 횟수 수집. `duration_ms` 우선, 호출 0회도 정상 결과. VEH만 수집 전 재개·후 정지하며 하이퍼바이저는 실행 상태 유지. x64: unwind, x86: 함수 진입점의 [ESP] |
+| `veh_trace_callers` | `address?, duration_sec?, duration_ms?, mode?, operation?` | 기본 호출자별 횟수 수집. 명시적 `mode="detour"`는 별도 계측·요약·페이지 조회([규약](docs/INSTRUMENTATION.md), 백엔드 지원 필요). `duration_ms` 우선, 호출 0회도 정상 결과. VEH만 수집 전 재개·후 정지하며 하이퍼바이저는 실행 상태 유지. x64: unwind, x86: 함수 진입점의 [ESP] |
 | `veh_trace_calls` | `addresses, duration_sec?, duration_ms?, resolve?, system_only?` | call/jmp 명령이 런타임에 어디로 가는지 모니터링. 콜 사이트에 BP 설치 후 N초간 실행, 실제 타겟 주소 + API 이름 수집. `resolve=true`: thunk/trampoline을 자연스러운 call 컨텍스트에서 따라가 최종 API까지 추적 (예외 기반 난독화 대응). `system_only=true`: 시스템 DLL 타겟만 반환. 패킹된 바이너리의 IAT 복원용. |
 | `veh_trace_basic_blocks` | `threadId, start, end, ..., stop_on_return?, collect_events?, collect_memory_events?, collect_register_events?, collect_code?, ...` | DLL 내부 bounded trace. 선택적 function-return scope, ordered block/code/memory/register occurrence stream 및 block/edge, delta, memory, dependency, region, exception을 반환한다. |
 | `veh_targeted_capture` | `inputs, steps?, trace, trigger, window, environment?, output_directory, stop_on_error?` | 입력별 setup 후 occurrence 전후 ordered trace와 환경 snapshot을 서버 파일에 저장한다. instruction이 1개 이상 완료되고 요청한 target-window stop으로 끝난 입력만 성공으로 집계한다. |
@@ -459,7 +459,7 @@ VEH 수집은 하드웨어 데이터 중단점 슬롯 하나를 사용하며 주
 |------|-----------|------|
 | `veh_event` | `operation, type, value?/low?/high?, address?, size?, pid?, tid?, cpu?, mode?, action?` | 머신 전체 이벤트: `cpuid`, `msr_read`/`msr_write`, `exception`, `port_in`/`port_out`, `syscall`/`sysret`, `hypercall`, `xsetbv`, `rdtsc`, `dr_access`(디버그 레지스터 접근), `interrupt`(외부 인터럽트, 기록 뒤 그대로 전달), `memory_read`/`memory_write`/`memory_execute`. 조건(pid/tid/CPU/커널·유저/값 범위)에 맞으면 레지스터와 함께 기록. 가로챈 명령은 그대로 한 번 실제 실행되므로 대상은 차이를 보지 못한다. `action=stop`은 커널 디버거가 연결돼 있으면 머신 전체를 정지 |
 | `veh_event_records` | `max?, registers?` | 이벤트 기록 가져오기 (CPU, 프로세스/스레드, 모드, 값, rip/rsp/cr3, 타임스탬프) |
-| `veh_branch_trace` | `operation, kind?, threadId?, buffer_kb?, max?` | 하드웨어 분기 기록 공통 인터페이스: `last`(LBR: 스레드가 멈추기 직전 분기들), `full`(Intel PT: 대상 프로세스의 전체 실행 경로를 분기 목록으로 복원). `status`는 이 기계에서 무엇을 쓸 수 있는지, 못 쓰면 이유(제조사, 하위 하이퍼바이저 미노출, 비활성)와 대안을 알려준다 |
+| `veh_branch_trace` | `operation?, kind?, threadId?, buffer_kb?, max?` | 명시적 `kind="ptwrite"`는 값·명령 주소·유실 요약 수집([규약](docs/INSTRUMENTATION.md), 기본 상세 미반환). 기존 하드웨어 분기 기록: `last`(LBR: 스레드가 멈추기 직전 분기들), `full`(Intel PT: 대상 프로세스의 전체 실행 경로를 분기 목록으로 복원). `status`는 이 기계에서 무엇을 쓸 수 있는지, 못 쓰면 이유(제조사, 하위 하이퍼바이저 미노출, 비활성)와 대안을 알려준다 |
 | `veh_hidden_hook` | `operation, address, pid?, set?, return?, pop?` | 숨은 실행 훅: 주소가 실행될 때 레지스터를 바꾸거나(`set`) 함수를 즉시 반환값과 함께 돌려보냄(`return`, stdcall은 `pop`). 코드 바이트는 그대로, 스레드도 멈추지 않음. `pid` 생략 시 커널 주소 |
 
 **정지형 커널 디버깅** (GDB 원격 시리얼 프로토콜 스텁에 연결, 대상 프로세스 attach와 무관)
