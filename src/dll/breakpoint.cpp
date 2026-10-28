@@ -12,6 +12,19 @@ BreakpointManager& BreakpointManager::Instance() {
 	return instance;
 }
 
+std::vector<SoftBreakpoint> BreakpointManager::InRange(uint64_t address, uint32_t size) {
+    std::vector<SoftBreakpoint> tracked;
+    // One record per address, at most size entries. Allocate before locking:
+    // an allocator breakpoint must be able to reenter FindByAddress.
+    tracked.reserve(size);
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& entry : breakpoints_) {
+        const auto start = entry.second.address;
+        if (start >= address && start - address < size) tracked.push_back(entry.second);
+    }
+    return tracked;
+}
+
 // INT3(0xCC) 패치로 소프트웨어 브레이크포인트 설정
 uint32_t BreakpointManager::Add(uint64_t address) {
 	std::lock_guard<std::mutex> lock(mutex_);

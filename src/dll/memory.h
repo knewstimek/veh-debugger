@@ -15,6 +15,8 @@ public:
 
 	std::vector<uint8_t> Read(uint64_t address, uint32_t size);
 	bool Write(uint64_t address, const uint8_t* data, uint32_t size);
+	void PatchCode(const PatchCodeRequest& request, const uint8_t* code,
+		PatchCodeResponse& response, std::vector<uint8_t>& original, std::vector<uint8_t>& patched);
 
 	// Change memory protection temporarily for patching
 	bool MakeWritable(uint64_t address, uint32_t size, DWORD& oldProtect);

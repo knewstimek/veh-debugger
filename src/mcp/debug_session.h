@@ -165,7 +165,7 @@ public:
 	bool Attach(uint32_t pid, const ExternalAgent* agent = nullptr);
 
 	// What the connected backend reported through GetCapabilities. A peer that
-	// predates the command is the VEH DLL with every command (reported = false).
+	// predates the command uses legacy assumptions; new commands require explicit reporting.
 	struct BackendInfo {
 		bool reported = false;
 		IpcBackend backend = IpcBackend::VehDll;
@@ -272,6 +272,15 @@ public:
 	// --- Memory ---
 	std::vector<uint8_t> ReadMemory(uint64_t address, uint32_t size);
 	bool WriteMemory(uint64_t address, const uint8_t* data, uint32_t size);
+    struct CodePatchResult {
+        bool ok = false;
+        std::string error;
+        std::optional<IpcStatus> backendStatus;
+        PatchCodeResponse header{};
+        std::vector<uint8_t> original, patched;
+    };
+    CodePatchResult PatchCode(uint64_t address, const std::vector<uint8_t>& code,
+        uint32_t overwriteSize, bool nopFill, uint32_t addressBits);
 	uint64_t AllocateMemory(uint32_t size, uint32_t protection);
 	bool FreeMemory(uint64_t address);
 	struct ProtectMemoryResult {

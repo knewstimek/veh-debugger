@@ -10,6 +10,7 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 | `test/test_remote_transport.py` | Exercises resident TCP/TLS authentication, IPC routing, late/missing detach replies, dead-agent recovery, startup exit/Win32 and structured common error diagnostics (including invalid-record fallback), launch width/initial-thread metadata and retry recovery, and real DLL lifecycle reply draining; removes its owned certificate, secret and processes. See [remote transport](REMOTE_TRANSPORT.md). |
 | `test/test_dap_deferred_loader_stop.py` | Uses the guest fixture without dwell sleeps: binding requires a hold and the DLL disappears on explicit continuation. Covers reload, failed-install retry, shared BP IDs, query failures, historical versus new holds delivered inside a Continue exchange, known stop reasons and termination/exit with TID reuse. |
 | `test/test_local_backend_recovery.py` | Kills only exact test-owned agent handles and checks same-MCP reattachment, death during detach, live pipe loss without agent termination, and stale-agent isolation from native DLL cleanup. |
+| `test/test_code_patch.py` | Exercises real DLL instruction-aware patches in x64/x86: automatic spans, default/disabled NOP fill, explicit oversized/split spans, breakpoint overlap, page-edge failures, raw opt-in and direct/batch/native-action parity. Guest tests verify reported bitness and unsupported direct/batch/action parity. |
 | `test/test_shellcode_results.py` | Checks status-only/full target-state refusal, generic/unknown statuses, malformed success and transport failure; direct/batch/BP-action results agree. TCP routing is covered by `test_remote_transport.py`. |
 | `test/test_backend_results.py` | Injects rejected, short/oversized and missing backend replies through the existing guest fixture; checks DAP execution/write/termination acknowledgements, pause identity, exception-filter rejection and MCP/DAP empty-versus-failed stacks, including batch parity. |
 | `test/test_address_space_deadline.py` | Returns a synthetic root after 31 seconds to cross the previous guest timeout, then checks root application, batch parity and continued connection use. |
@@ -25,6 +26,59 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 | `tools/measure_mcp_schema.py` | Measures bounded initialize and `tools/list` bytes, input-schema bytes, output-schema count, and eager names for every exposure profile. |
 
 All process-launching helpers use finite timeouts and wait for their children during cleanup. The compatibility runner stages copies under an OS temporary directory and removes them when complete.
+
+## Assembly patches
+
+`veh_assemble` still defaults to assembly only (`write=false`). With `write=true`,
+the default overwrite span covers **enough complete original instructions for
+the assembled code**, starting at the supplied address. The caller must supply
+an instruction start. Longer JMP encodings automatically extend to that boundary.
+`nop_fill=true` fills the unused span with single-byte `90` NOPs.
+Set `overwrite_size` (1-4096) to explicitly replace several complete original
+instructions. The end must be an instruction boundary and all bytes must lie in
+one readable committed memory region. `nop_fill=false` preserves unused original
+tail bytes; these can be instruction fragments, so this opt-out does not preserve
+instruction integrity.
+`raw_write=true` uses the previous byte-write path and cannot be combined with
+`overwrite_size` or `nop_fill`. These options require `write=true`.
+
+For example, replacing a two-byte `xor al, al` with `ret` writes `C3 90`.
+If a five-byte JMP replaces that XOR and the next original instruction is five
+bytes, the default span is seven bytes: JMP plus two NOPs. `overwrite_size=2`
+explicitly limits the span and rejects that JMP; `overwrite_size=7` gives the
+same output as automatic sizing. Existing raw-code-buffer callers can explicitly
+opt into `raw_write=true` to avoid instruction decoding.
+
+The response keeps assembled `size`, `bytes` and `listing`; validated writes
+also return `patchSize`, `overwrittenInstructions`, `nopBytes`,
+`originalBytes` and `patchedBytes`. With NOP fill disabled, `preservedBytes`
+reports the original tail length. Raw writes return `rawWrite=true`.
+The backend performs the read/decode/validation/write as one IPC operation.
+Software breakpoint records, including temporarily disabled/rearming records,
+must not overlap the actual overwrite span. No original instructions are
+relocated, and no threads are automatically stopped. Stop relevant execution
+before patching: instruction-boundary checks and a final byte recheck do not make
+the write atomic with respect to running threads or external/self-modifying writers.
+A transport or write-completion error can leave memory/protection changed; inspect
+the target before retrying. There is no automatic rollback.
+
+`IpcCommand::PatchCode = 0x0032` uses its command bit in
+`GetCapabilities.commands`; no separate named flag is added. The frontend
+requires explicit capability reporting and never falls back to byte writes.
+External backends must implement the common header contract before advertising it.
+Request (pack1, little-endian): version1/flags/address/codeSize/overwriteSize/
+addressBits (28 bytes), then codeSize code bytes. Flag bit0 enables NOP fill;
+unknown flags and versions are invalid. A zero overwriteSize selects the minimum
+whole-instruction span covering codeSize; nonzero selects an exact span. Code size/span limit is4096 bytes.
+The backend validates address width against the target.
+An Ok response has status/detail0/overwriteSize/instructionCount (16 bytes),
+followed by exactly overwriteSize original bytes then overwriteSize patched bytes.
+A non-Ok response may be status-only or that header without payload.
+See `PatchCodeDetail` in `src/common/ipc_protocol.h` for stable detail values.
+Neither capability reporting nor TCP connectivity implies backend implementation.
+
+Run `py -3 tools/run_tests.py test_code_patch.py test_assemble.py --jobs 2`;
+use `--build-dir build32` for x86.
 
 ## RepoPlane catalog
 

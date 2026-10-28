@@ -5,6 +5,8 @@
 #include "syscall_resolver.h"
 #include <cstring>
 #include <limits>
+#include <algorithm>
+#include <Zydis/Zydis.h>
 
 namespace veh {
 
@@ -47,13 +49,91 @@ bool MemoryManager::Write(uint64_t address, const uint8_t* data, uint32_t size) 
 	auto* dst = reinterpret_cast<void*>(address);
 	bool success = SafeCopyMemory(dst, data, size);
 
-	RestoreProtection(address, size, oldProtect);
+    const bool restored = RestoreProtection(address, size, oldProtect);
+    // A failed copy can still have changed part of the executable range.
+    const bool flushed = FlushInstructionCache(GetCurrentProcess(), dst, size) != FALSE;
+    return success && restored && flushed;
+}
 
-	if (success) {
-		FlushInstructionCache(GetCurrentProcess(), dst, size);
-	}
-
-	return success;
+void MemoryManager::PatchCode(const PatchCodeRequest& req, const uint8_t* code,
+    PatchCodeResponse& response, std::vector<uint8_t>& original, std::vector<uint8_t>& patched) {
+    response = {IpcStatus::InvalidArgs, PatchCodeDetail::None, 0, 0};
+    original.clear(); patched.clear();
+    if (req.version != 1 || (req.flags & ~kPatchCodeNopFill) ||
+        !req.codeSize || req.codeSize > kPatchCodeMaxBytes || req.overwriteSize > kPatchCodeMaxBytes ||
+        !req.address || req.address > (std::numeric_limits<uintptr_t>::max)()) return;
+    if (req.addressBits != sizeof(void*) * 8) {
+        response.detail = PatchCodeDetail::ArchitectureMismatch; return;
+    }
+    // A single VirtualQuery region has one protection value. Do not reuse the
+    // generic writer across regions with potentially different protection.
+    MEMORY_BASIC_INFORMATION region{};
+    if (!VirtualQuery(reinterpret_cast<void*>(static_cast<uintptr_t>(req.address)), &region, sizeof(region)) ||
+        region.State != MEM_COMMIT || (region.Protect & (PAGE_GUARD | PAGE_NOACCESS))) {
+        response.status = IpcStatus::Error; response.detail = PatchCodeDetail::Unreadable; return;
+    }
+    const uint64_t offset = req.address - reinterpret_cast<uintptr_t>(region.BaseAddress);
+    if (offset >= region.RegionSize) return;
+    const uint64_t available = region.RegionSize - offset;
+    const uint32_t readSize = req.overwriteSize ? req.overwriteSize :
+        static_cast<uint32_t>((std::min)(available,
+            static_cast<uint64_t>((std::min)(kPatchCodeMaxBytes, req.codeSize + 14))));
+    if (!readSize || readSize > available ||
+        readSize - 1 > (std::numeric_limits<uintptr_t>::max)() - req.address) {
+        response.detail = PatchCodeDetail::Unreadable; return;
+    }
+    // Installs/removals and PatchCode are serialized by the control pipe. Include
+    // disabled records so a pending rearm cannot restore an overwritten byte.
+    // Do not hold the BP mutex across APIs the user may have breakpoints on.
+    const auto tracked = BreakpointManager::Instance().InRange(req.address, readSize);
+    original = Read(req.address, readSize);
+    if (original.size() != readSize) {
+        response.status = IpcStatus::Error; response.detail = PatchCodeDetail::Unreadable; return;
+    }
+    auto decodedBytes = original;
+    for (const auto& bp : tracked) decodedBytes[static_cast<size_t>(bp.address - req.address)] = bp.originalByte;
+    ZydisDecoder decoder;
+    if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder,
+        sizeof(void*) == 8 ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LONG_COMPAT_32,
+        sizeof(void*) == 8 ? ZYDIS_STACK_WIDTH_64 : ZYDIS_STACK_WIDTH_32))) return;
+    uint32_t span = 0, count = 0;
+    while (span < readSize) {
+        ZydisDecodedInstruction instruction{};
+        const auto decoded = ZydisDecoderDecodeInstruction(&decoder, nullptr,
+            decodedBytes.data() + span, readSize - span, &instruction);
+        if (!ZYAN_SUCCESS(decoded)) {
+            response.detail = req.overwriteSize && decoded == ZYDIS_STATUS_NO_MORE_DATA ?
+                PatchCodeDetail::SplitInstruction : PatchCodeDetail::InvalidInstruction;
+            return;
+        }
+        span += instruction.length; ++count;
+        if (!req.overwriteSize && span >= req.codeSize) break;
+    }
+    response.overwriteSize = span; response.instructionCount = count;
+    if (req.overwriteSize && span != req.overwriteSize) {
+        response.detail = PatchCodeDetail::SplitInstruction; return;
+    }
+    for (const auto& bp : tracked) {
+        if (bp.address - req.address < span) {
+            response.status = IpcStatus::InvalidState;
+            response.detail = PatchCodeDetail::BreakpointOverlap; return;
+        }
+    }
+    if (req.codeSize > span) { response.detail = PatchCodeDetail::TooLarge; return; }
+    original.resize(span);
+    patched = original;
+    if (req.flags & kPatchCodeNopFill) std::fill(patched.begin(), patched.end(), uint8_t{0x90});
+    std::memcpy(patched.data(), code, req.codeSize);
+    const auto current = Read(req.address, span);
+    if (current != original) {
+        response.status = IpcStatus::InvalidState;
+        response.detail = PatchCodeDetail::OriginalChanged; return;
+    }
+    // No target code or thread is created. This does not suspend other writers.
+    if (!Write(req.address, patched.data(), span)) {
+        response.status = IpcStatus::Error; response.detail = PatchCodeDetail::WriteFailed; return;
+    }
+    response.status = IpcStatus::Ok;
 }
 
 bool MemoryManager::MakeWritable(uint64_t address, uint32_t size, DWORD& oldProtect) {

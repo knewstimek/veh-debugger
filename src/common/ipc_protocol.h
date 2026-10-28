@@ -71,6 +71,7 @@ enum class IpcCommand : uint32_t {
 	// Memory
 	ReadMemory             = 0x0030,
 	WriteMemory            = 0x0031,
+	PatchCode              = 0x0032,  // bounded replacement of whole original instructions
 
 	// Symbol resolution (PDB)
 	ResolveSourceLine      = 0x0040,
@@ -293,6 +294,37 @@ struct WriteMemoryRequest {
 	uint32_t size;
 	// followed by `size` bytes of data
 };
+
+// PatchCode v1: target-side read/decode/validate/write; no relocation.
+// Default span covers whole original instructions until codeSize fits.
+// Caller supplies an instruction start.
+// Backends advertise only after implementing this complete contract.
+// Not atomic with respect to running threads or external/self-modifying writers.
+inline constexpr uint32_t kPatchCodeMaxBytes = 4096;
+inline constexpr uint32_t kPatchCodeNopFill = 1; // unset: preserve original tail bytes
+enum class PatchCodeDetail : uint32_t {
+    None = 0, TooLarge = 1, SplitInstruction = 2, // value 3 reserved
+    Unreadable = 4, InvalidInstruction = 5, BreakpointOverlap = 6,
+    WriteFailed = 7, ArchitectureMismatch = 8, OriginalChanged = 9
+};
+struct PatchCodeRequest {
+    uint32_t version;       // 1
+    uint32_t flags;         // kPatchCodeNopFill only
+    uint64_t address;
+    uint32_t codeSize;      // 1..kPatchCodeMaxBytes; followed by codeSize bytes
+    uint32_t overwriteSize; // 0: minimum whole-instruction span covering codeSize; else exact span
+    uint32_t addressBits;   // 32 or 64, must match the target
+};
+struct PatchCodeResponse {
+    IpcStatus status;
+    PatchCodeDetail detail;
+    uint32_t overwriteSize;
+    uint32_t instructionCount;
+    // On Ok: overwriteSize original bytes, then overwriteSize patched bytes.
+    // Non-Ok may be status-only or this header without trailing bytes.
+};
+static_assert(sizeof(PatchCodeRequest) == 28 && sizeof(PatchCodeResponse) == 16,
+    "PatchCode wire layout");
 
 // Thread info
 struct ThreadInfo {

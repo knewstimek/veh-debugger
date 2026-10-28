@@ -75,7 +75,7 @@ def test_round_trip_against_zydis_and_write():
         # write=true patches the target; the arch follows the target automatically.
         cave = client.tool("veh_allocate_memory", {"size": 4096, "protection": "rwx"})
         target = int(cave["address"], 16)
-        written = client.tool("veh_assemble", {"code": "xor eax, eax; ret", "address": hex(target), "write": True})
+        written = client.tool("veh_assemble", {"code": "xor eax, eax; ret", "address": hex(target), "write": True, "raw_write": True})
         assert written.get("written") and written["arch"] == ("x86" if IS_X86 else "x64"), written
         memory = client.tool("veh_read_memory", {"address": hex(target), "size": 3})
         assert memory["hex"].replace(" ", "").upper() == written["bytes"].replace(" ", ""), memory

@@ -1270,12 +1270,15 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}}}}),
 
 		Tool(&McpServer::ToolAssemble, "memory", 0, true,
-			{{"name", "veh_assemble"}, {"description", "Assemble Intel-syntax x86/x64 text (asmjit/asmtk) at an address so relative jmp/call/jcc and rip-relative operands are computed for that location. Instructions separated by ';' or newlines; labels allowed. Returns bytes plus a decoded listing. write=true patches the bytes into the target at address. Works without a target (arch defaults to x64)."},
+			{{"name", "veh_assemble"}, {"description", "Assemble Intel-syntax x86/x64 text (asmjit/asmtk) at an address so relative jmp/call/jcc and rip-relative operands are computed for that location. Instructions separated by ';' or newlines; labels allowed. Returns bytes plus a decoded listing. write=true covers enough whole original instructions for the code and NOP-fills unused bytes by default. overwrite_size explicitly selects an exact whole-instruction span (max 4096). Requires backend PatchCode support; no silent fallback. raw_write=true explicitly uses unchecked byte writing. No relocation or automatic thread suspension. Works without a target (arch defaults to x64)."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"code", {{"type", "string"}, {"description", "e.g. \"mov esi, eax; jmp 0x140001000\""}}},
 			{"address", {{"type", "string"}, {"description", "Where the code will live (hex or module+RVA); default 0"}}},
 			{"arch", {{"type", "string"}, {"enum", json::array({"x64", "x86"})}, {"description", "Default: the attached target's bitness, else x64"}}},
-			{"write", {{"type", "boolean"}, {"description", "Write the bytes into the target at address (default false)"}}}
+			{"write", {{"type", "boolean"}, {"description", "Patch at address (default false); stop relevant target threads before writing"}}},
+            {"overwrite_size", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4096}, {"description", "Write-only: explicit overwrite span, ending on an original instruction boundary. Default: minimum whole-instruction span covering the assembled code"}}},
+            {"nop_fill", {{"type", "boolean"}, {"default", true}, {"description", "Write-only: fill unused overwrite bytes with 0x90 (default true); false preserves the original tail bytes, which may be instruction fragments"}}},
+            {"raw_write", {{"type", "boolean"}, {"default", false}, {"description", "Write-only: explicitly bypass boundary checks and NOP fill; incompatible with overwrite_size/nop_fill"}}}
 		 }}, {"required", json::array({"code"})}}}}),
 
 		Tool(&McpServer::ToolDisplayType, "inspect", 0, true,

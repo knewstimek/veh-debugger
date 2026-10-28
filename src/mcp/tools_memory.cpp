@@ -206,7 +206,7 @@ json McpServer::ToolWriteMemory(const json& args) {
 	}
 
 	if (!session_.WriteMemory(addr, bytes.data(), static_cast<uint32_t>(bytes.size()))) {
-		return {{"error", "Memory write failed (address may be invalid, read-only, or inaccessible)"}};
+		return {{"error", "Memory write failed; memory or page protection may have changed"}};
 	}
 
 	return {{"success", true}, {"bytesWritten", bytes.size()}};
@@ -969,15 +969,32 @@ json McpServer::ToolAssemble(const json& args) {
 	if (write && (!session_.IsAttached() || addrStr.empty()))
 		return {{"error", "write=true needs an attached target and an address"}};
 
+    for (const char* option : {"nop_fill", "raw_write"})
+        if (args.contains(option) && !args[option].is_boolean())
+            return {{"error", std::string(option) + " must be boolean"}};
+    const bool rawWrite = args.value("raw_write", false);
+    const bool nopFill = args.value("nop_fill", true);
+    uint32_t overwriteSize = 0;
+    if (args.contains("overwrite_size")) {
+        const auto& value = args["overwrite_size"];
+        if (!value.is_number_integer() || value < 1 || value > kPatchCodeMaxBytes)
+            return {{"error", "overwrite_size must be an integer from 1 to 4096"}};
+        overwriteSize = value.get<uint32_t>();
+    }
+    if (!write && (rawWrite || args.contains("overwrite_size") || args.contains("nop_fill")))
+        return {{"error", "overwrite_size, nop_fill and raw_write require write=true"}};
+    if (rawWrite && (args.contains("overwrite_size") || args.contains("nop_fill")))
+        return {{"error", "raw_write cannot be combined with overwrite_size or nop_fill"}};
+
 	// Bitness: explicit arch, else the attached target, else x64.
 	bool x64 = true;
 	std::string arch = args.value("arch", "");
 	if (arch == "x86") x64 = false;
 	else if (!arch.empty() && arch != "x64") return {{"error", "arch must be x86 or x64"}};
 	else if (arch.empty() && session_.IsAttached()) {
-		BOOL isWow64 = FALSE;
-		if (HANDLE hProc = session_.GetTargetProcess()) IsWow64Process(hProc, &isWow64);
-		x64 = !isWow64;
+        const auto bits = session_.TargetAddressBits();
+        if (bits != 32 && bits != 64) return {{"error", "target address width is unavailable; specify arch"}};
+        x64 = bits == 64;
 	}
 
 	auto assembled = AssembleText(code, address, x64);
@@ -1002,8 +1019,40 @@ json McpServer::ToolAssemble(const json& args) {
 	json result = {{"address", HexAddr(address)}, {"arch", x64 ? "x64" : "x86"}, {"size", assembled.bytes.size()},
 	               {"bytes", hex}, {"listing", listing}};
 	if (write) {
-		if (!session_.WriteMemory(address, assembled.bytes.data(), static_cast<uint32_t>(assembled.bytes.size())))
-			return {{"error", "assembled but the write failed"}, {"bytes", hex}};
+        const auto limit = rawWrite ? 1048576u : kPatchCodeMaxBytes;
+        if (assembled.bytes.empty() || assembled.bytes.size() > limit)
+            return {{"error", "assembled write size must be 1-" + std::to_string(limit) + " bytes"}};
+        if (address > (std::numeric_limits<uint64_t>::max)() - (assembled.bytes.size() - 1) ||
+            (!x64 && (address > UINT32_MAX || assembled.bytes.size() - 1 > UINT32_MAX - address)))
+            return {{"error", "assembled write exceeds the address space"}};
+        if (rawWrite) {
+            if (!session_.WriteMemory(address, assembled.bytes.data(), static_cast<uint32_t>(assembled.bytes.size())))
+                return {{"error", "assembled but the raw write failed; inspect memory before retrying"}, {"bytes", hex}};
+            result["rawWrite"] = true;
+        } else {
+            auto patch = session_.PatchCode(address, assembled.bytes, overwriteSize, nopFill, x64 ? 64 : 32);
+            if (!patch.ok) {
+                json error = {{"error", patch.error}, {"bytes", hex}};
+                if (patch.backendStatus) error["backendStatus"] = static_cast<uint32_t>(*patch.backendStatus);
+                if (patch.backendStatus == IpcStatus::InvalidState) error["code"] = "invalid_state";
+                if (patch.header.overwriteSize) error["patchSize"] = patch.header.overwriteSize;
+                return error;
+            }
+            const auto encode = [](const std::vector<uint8_t>& bytes) {
+                std::string text;
+                for (uint8_t byte : bytes) {
+                    char part[4]; snprintf(part, sizeof(part), text.empty() ? "%02X" : " %02X", byte);
+                    text += part;
+                }
+                return text;
+            };
+            result["patchSize"] = patch.header.overwriteSize;
+            result["overwrittenInstructions"] = patch.header.instructionCount;
+            result["nopBytes"] = nopFill ? patch.patched.size() - assembled.bytes.size() : 0;
+            if (!nopFill) result["preservedBytes"] = patch.patched.size() - assembled.bytes.size();
+            result["originalBytes"] = encode(patch.original);
+            result["patchedBytes"] = encode(patch.patched);
+        }
 		result["written"] = true;
 	}
 	return result;

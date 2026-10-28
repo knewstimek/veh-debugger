@@ -1402,6 +1402,66 @@ bool DebugSession::WriteMemory(uint64_t address, const uint8_t* data, uint32_t s
 	return false;
 }
 
+DebugSession::CodePatchResult DebugSession::PatchCode(uint64_t address, const std::vector<uint8_t>& code,
+    uint32_t overwriteSize, bool nopFill, uint32_t addressBits) {
+    CodePatchResult result;
+    if (!backendInfo_.reported || !backendInfo_.Supports(IpcCommand::PatchCode)) {
+        result.backendStatus = IpcStatus::Unsupported;
+        result.error = "PatchCode: instruction-aware patching unsupported by backend; update the backend or explicitly use raw_write";
+        return result;
+    }
+    PatchCodeRequest request{1, nopFill ? kPatchCodeNopFill : 0, address,
+        static_cast<uint32_t>(code.size()), overwriteSize, addressBits};
+    std::vector<uint8_t> payload(sizeof(request) + code.size()), reply;
+    std::memcpy(payload.data(), &request, sizeof(request));
+    std::memcpy(payload.data() + sizeof(request), code.data(), code.size());
+    PipeExchangeDiagnostics diagnostics{};
+    if (!ipcTransport_->SendAndReceive(IpcCommand::PatchCode, payload.data(),
+        static_cast<uint32_t>(payload.size()), reply, 5000, &diagnostics)) {
+        result.error = "PatchCode: " + DescribeIpcFailure(&diagnostics) +
+            "; write outcome may be unknown, inspect memory before retrying";
+        return result;
+    }
+    result.error = "PatchCode: malformed or incomplete backend response; inspect memory before retrying";
+    if (reply.size() < sizeof(IpcStatus)) return result;
+    IpcStatus status{};
+    std::memcpy(&status, reply.data(), sizeof(status));
+    result.backendStatus = status;
+    if (reply.size() >= sizeof(result.header)) std::memcpy(&result.header, reply.data(), sizeof(result.header));
+    if (status != IpcStatus::Ok) {
+        const char* detail = nullptr;
+        switch (result.header.detail) {
+        case PatchCodeDetail::TooLarge: detail = "assembled code exceeds the overwrite range; specify a larger whole-instruction overwrite_size"; break;
+        case PatchCodeDetail::SplitInstruction: detail = "overwrite_size ends inside an original instruction"; break;
+        case PatchCodeDetail::Unreadable: detail = "overwrite range must be readable within one committed memory region"; break;
+        case PatchCodeDetail::InvalidInstruction: detail = "original instruction cannot be decoded"; break;
+        case PatchCodeDetail::BreakpointOverlap: detail = "remove software breakpoints from the overwrite range first"; break;
+        case PatchCodeDetail::WriteFailed: detail = "code patch write failed; memory may have changed"; break;
+        case PatchCodeDetail::ArchitectureMismatch: detail = "arch does not match the target address width"; break;
+        case PatchCodeDetail::OriginalChanged: detail = "original bytes changed before the write"; break;
+        default: break;
+        }
+        result.error = "PatchCode: " + (detail ? std::string(detail) : BackendStatusText(status));
+        return result;
+    }
+    const auto& header = result.header;
+    const auto span = header.overwriteSize;
+    if (reply.size() < sizeof(header) || header.detail != PatchCodeDetail::None ||
+        !span || span > kPatchCodeMaxBytes || span < code.size() ||
+        !header.instructionCount || header.instructionCount > span ||
+        (overwriteSize ? span != overwriteSize : span > code.size() + 14) ||
+        reply.size() != sizeof(header) + 2 * static_cast<size_t>(span)) return result;
+    const auto start = reply.begin() + sizeof(header);
+    result.original.assign(start, start + span);
+    result.patched.assign(start + span, reply.end());
+    if (!std::equal(code.begin(), code.end(), result.patched.begin())) return result;
+    for (size_t index = code.size(); index < span; ++index)
+        if (result.patched[index] != (nopFill ? 0x90 : result.original[index])) return result;
+    result.ok = true;
+    result.error.clear();
+    return result;
+}
+
 uint64_t DebugSession::AllocateMemory(uint32_t size, uint32_t protection) {
 	AllocateMemoryRequest req{};
 	req.size = size;

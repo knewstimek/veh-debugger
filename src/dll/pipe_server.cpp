@@ -858,6 +858,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 
 	case IpcCommand::ReadMemory:
 	case IpcCommand::WriteMemory:
+	case IpcCommand::PatchCode:
 	case IpcCommand::AllocateMemory:
 	case IpcCommand::FreeMemory:
 	case IpcCommand::ProtectMemory:
@@ -1501,6 +1502,24 @@ void PipeServer::HandleMemoryCommand(uint32_t command, const uint8_t* payload, u
 		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
 		break;
 	}
+	case IpcCommand::PatchCode: {
+        PatchCodeRequest request{};
+        PatchCodeResponse response{IpcStatus::InvalidArgs, PatchCodeDetail::None, 0, 0};
+        std::vector<uint8_t> original, patched;
+        if (payloadSize >= sizeof(request)) {
+            std::memcpy(&request, payload, sizeof(request));
+            if (request.codeSize <= kPatchCodeMaxBytes && payloadSize - sizeof(request) == request.codeSize)
+                MemoryManager::Instance().PatchCode(request, payload + sizeof(request), response, original, patched);
+        }
+        std::vector<uint8_t> bytes(sizeof(response));
+        std::memcpy(bytes.data(), &response, sizeof(response));
+        if (response.status == IpcStatus::Ok) {
+            bytes.insert(bytes.end(), original.begin(), original.end());
+            bytes.insert(bytes.end(), patched.begin(), patched.end());
+        }
+        SendResponse(command, bytes.data(), static_cast<uint32_t>(bytes.size()));
+        break;
+    }
 	case IpcCommand::WriteMemory: {
 		if (payloadSize < sizeof(WriteMemoryRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -3172,7 +3191,7 @@ void PipeServer::HandleLifecycleCommand(uint32_t command, const uint8_t* payload
 			IpcCommand::Pause, IpcCommand::TerminateThread, IpcCommand::SetInstructionPointer,
 			IpcCommand::GetThreads, IpcCommand::GetStackTrace, IpcCommand::GetRegisters, IpcCommand::GetModules,
 			IpcCommand::SetRegister, IpcCommand::SetRegisters, IpcCommand::IsThreadStopped, IpcCommand::FreezeThread,
-			IpcCommand::ReadMemory, IpcCommand::WriteMemory,
+			IpcCommand::ReadMemory, IpcCommand::WriteMemory, IpcCommand::PatchCode,
 			IpcCommand::ResolveSourceLine, IpcCommand::ResolveFunction, IpcCommand::EnumLocals,
 			IpcCommand::Symbolize, IpcCommand::DisplayType, IpcCommand::TraceCallers,
 			IpcCommand::AllocateMemory, IpcCommand::FreeMemory, IpcCommand::ExecuteShellcode,

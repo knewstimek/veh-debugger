@@ -4,6 +4,7 @@
 #include <optional>
 #include <unordered_map>
 #include <mutex>
+#include <vector>
 #include <windows.h>
 
 namespace veh {
@@ -31,6 +32,8 @@ public:
 	std::optional<SoftBreakpoint> FindById(uint32_t id);
 	// Recognize an INT3 already dispatched when its breakpoint was removed.
 	bool WasRecentlyRemoved(uint64_t address);
+	// Includes disabled records awaiting rearm; code patches must not change their original byte.
+	std::vector<SoftBreakpoint> InRange(uint64_t address, uint32_t size);
 
 	// Called after single-step to re-enable breakpoint
 	void RearmBreakpoint(uint64_t address);
