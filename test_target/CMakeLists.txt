@@ -9,7 +9,17 @@ target_compile_definitions(ipc_transport_regression PRIVATE WIN32_LEAN_AND_MEAN 
 add_executable(trace_path_regression trace_path_regression.cpp)
 target_compile_definitions(trace_path_regression PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 
+# Loaded only by test_target --symbol-lookup; duplicate export names exercise ambiguity.
+add_library(symbol_lookup_a SHARED symbol_lookup_probe.cpp)
+add_library(symbol_lookup_b SHARED symbol_lookup_probe.cpp)
+target_compile_definitions(symbol_lookup_a PRIVATE SYMBOL_PROBE_A)
+foreach(probe symbol_lookup_a symbol_lookup_b)
+    target_compile_options(${probe} PRIVATE /Zi /Od)
+    target_link_options(${probe} PRIVATE /DEBUG /PDB:$<TARGET_FILE_DIR:${probe}>/${probe}.pdb)
+endforeach()
+
 add_executable(test_target main.cpp)
+add_dependencies(test_target symbol_lookup_a symbol_lookup_b)
 target_compile_definitions(test_target PRIVATE
     _CRT_SECURE_NO_WARNINGS
     WIN32_LEAN_AND_MEAN

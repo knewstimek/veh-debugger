@@ -5,6 +5,7 @@
 #include "memory.h"
 #include "../common/logger.h"
 #include <algorithm>
+#include <cctype>
 #include <string>
 
 #include <dbghelp.h>
@@ -216,6 +217,98 @@ void ResolveAddressSymbol(HANDLE hProcess, uint64_t address, SYMBOL_INFO* symInf
 }
 
 } // anonymous namespace
+
+
+namespace {
+struct NameSearch {
+    FindSymbolEntry entries[kFindSymbolsMaxResults]{};
+    uint32_t count = 0, maximum = 0, flags = 0, visited = 0;
+};
+BOOL CALLBACK CollectNamedSymbol(PSYMBOL_INFO symbol, ULONG, PVOID opaque) {
+    auto& state = *static_cast<NameSearch*>(opaque);
+    if (++state.visited > 65536) { state.flags |= kFindSymbolsIncomplete; return FALSE; }
+    if (!symbol || !symbol->ModBase || !symbol->NameLen) return TRUE;
+    const bool forwarder = (symbol->Flags & SYMFLAG_FORWARDER) != 0;
+    if (!forwarder) {
+        MEMORY_BASIC_INFORMATION page{};
+        if (!symbol->Address || !VirtualQuery(reinterpret_cast<LPCVOID>(
+            static_cast<uintptr_t>(symbol->Address)), &page, sizeof(page)) || page.State != MEM_COMMIT)
+            return TRUE;
+        const DWORD protection = page.Protect & 0xff;
+        if (protection != PAGE_EXECUTE && protection != PAGE_EXECUTE_READ &&
+            protection != PAGE_EXECUTE_READWRITE && protection != PAGE_EXECUTE_WRITECOPY) return TRUE;
+    }
+    const auto address = forwarder ? 0 : symbol->Address;
+    for (uint32_t i = 0; i < state.count; ++i)
+        if (state.entries[i].address == address && state.entries[i].moduleBase == symbol->ModBase &&
+            (!forwarder || std::string(symbol->Name, symbol->NameLen) == state.entries[i].functionName))
+            return TRUE;
+    if (state.count == state.maximum) { state.flags |= kFindSymbolsTruncated; return FALSE; }
+    auto& entry = state.entries[state.count++];
+    entry.address = address; entry.moduleBase = symbol->ModBase;
+    entry.flags = (forwarder ? kFindSymbolForwarder : 0) | ((symbol->Flags & SYMFLAG_EXPORT) ? kFindSymbolExport : 0);
+    const auto length = std::min<size_t>(symbol->NameLen, sizeof(entry.functionName) - 1);
+    std::memcpy(entry.functionName, symbol->Name, length);
+    if (length != symbol->NameLen) state.flags |= kFindSymbolsIncomplete;
+    return TRUE;
+}
+}
+
+IpcStatus StackWalker::FindSymbols(const std::string& name, uint32_t maximum,
+        std::vector<FindSymbolEntry>& entries, uint32_t& flags) {
+    entries.clear(); flags = 0;
+    if (name.empty() || name.size() >= sizeof(FindSymbolsRequest::name) ||
+        !maximum || maximum > kFindSymbolsMaxResults) return IpcStatus::InvalidArgs;
+    if (!initialized_) return IpcStatus::InvalidState;
+    std::lock_guard<std::mutex> lock(dbghelpMutex_);
+    auto mask = name;
+    std::string qualifiedModule;
+    const auto bang = mask.find('!');
+    if (bang == std::string::npos) mask = "*!" + mask;
+    else {
+        if (!bang || bang + 1 == mask.size() || mask.find('!', bang + 1) != std::string::npos)
+            return IpcStatus::InvalidArgs;
+        // DbgHelp module aliases normally omit the file extension.
+        const auto module = mask.substr(0, bang);
+        const auto dot = module.rfind('.');
+        if (dot != std::string::npos) {
+            auto suffix = module.substr(dot);
+            std::transform(suffix.begin(), suffix.end(), suffix.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (suffix == ".dll" || suffix == ".exe" || suffix == ".sys") {
+                qualifiedModule = module;
+                // Include DbgHelp aliases for another image with the same basename;
+                // the full filename is filtered after enumeration.
+                mask.erase(dot, bang - dot); mask.insert(dot, "*");
+            }
+        }
+    }
+    const auto process = GetCurrentProcess();
+    if (!SymRefreshModuleList(process)) return IpcStatus::Error;
+    NameSearch search{}; search.maximum = maximum;
+    SetLastError(ERROR_SUCCESS);
+    const bool enumerated = SymEnumSymbols(process, 0, mask.c_str(), CollectNamedSymbol, &search) != FALSE;
+    if (!enumerated && !search.flags) return IpcStatus::Error;
+    for (uint32_t i = 0; i < search.count; ++i) {
+        auto entry = search.entries[i];
+        IMAGEHLP_MODULE64 module{}; module.SizeOfStruct = sizeof(module);
+        if (!SymGetModuleInfo64(process, entry.moduleBase, &module)) {
+            search.flags |= kFindSymbolsIncomplete;
+        } else {
+            std::string file(module.ImageName, strnlen(module.ImageName, sizeof(module.ImageName)));
+            if (file.empty()) file.assign(module.ModuleName, strnlen(module.ModuleName, sizeof(module.ModuleName)));
+            const auto slash = file.find_last_of("/\\");
+            if (slash != std::string::npos) file.erase(0, slash + 1);
+            if (!qualifiedModule.empty() && !SymMatchString(file.c_str(), qualifiedModule.c_str(), FALSE)) continue;
+            const auto length = std::min(file.size(), sizeof(entry.moduleName) - 1);
+            std::memcpy(entry.moduleName, file.data(), length);
+            if (length != file.size() || file.empty()) search.flags |= kFindSymbolsIncomplete;
+        }
+        entries.push_back(entry);
+    }
+    flags = search.flags;
+    return IpcStatus::Ok;
+}
 
 std::vector<AddressSymbol> StackWalker::Symbolize(const std::vector<uint64_t>& addresses) {
 	std::vector<AddressSymbol> result(addresses.size());

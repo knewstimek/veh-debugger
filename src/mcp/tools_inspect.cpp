@@ -57,6 +57,34 @@ json McpServer::ToolExceptionInfo(const json& args) {
 
 json McpServer::ToolSymbolize(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+    if (args.contains("name")) {
+        if (!args["name"].is_string() || args.contains("address") || args.contains("addresses"))
+            return {{"error", "Use name OR address/addresses"}};
+        uint32_t maximum = kFindSymbolsMaxResults;
+        if (args.contains("max_results")) {
+            if (!args["max_results"].is_number_integer() || args["max_results"] < 1 ||
+                args["max_results"] > kFindSymbolsMaxResults) return {{"error", "max_results must be 1-10"}};
+            maximum = args["max_results"].get<uint32_t>();
+        }
+        const auto result = session_.FindSymbols(args["name"].get<std::string>(), maximum);
+        if (!result.ok) return {{"error", result.error}};
+        json matches = json::array();
+        for (const auto& entry : result.matches) matches.push_back({
+            {"address", entry.address ? json(HexAddr(entry.address)) : json(nullptr)},
+            {"module", entry.moduleName}, {"moduleBase", HexAddr(entry.moduleBase)},
+            {"function", entry.functionName}, {"symbol", std::string(entry.moduleName) + "!" + entry.functionName},
+            {"forwarded", bool(entry.flags & kFindSymbolForwarder)},
+            {"source", (entry.flags & kFindSymbolExport) ? "export" : "symbol"}});
+        const bool unique = result.matches.size() == 1 && !result.truncated && !result.incomplete &&
+            result.matches[0].address != 0;
+        json out = {{"query", args["name"]}, {"matches", matches}, {"count", matches.size()},
+            {"truncated", result.truncated}, {"incomplete", result.incomplete}, {"resolved", unique},
+            {"ambiguous", result.matches.size() > 1 || result.truncated}};
+        if (unique) out["address"] = HexAddr(result.matches[0].address);
+        return out;
+    }
+    if (args.contains("max_results")) return {{"error", "max_results applies to name searches"}};
+
 
 	json inputs = json::array();
 	if (args.contains("addresses") && args["addresses"].is_array()) inputs = args["addresses"];

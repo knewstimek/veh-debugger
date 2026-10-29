@@ -133,6 +133,19 @@ int main(int argc, char* argv[]) {
 		return 1; // unreachable
 	}
 
+    for (int i = 1; i < argc; ++i) if (strcmp(argv[i], "--symbol-lookup") == 0) {
+        char path[MAX_PATH]{};
+        const DWORD pathLength = GetModuleFileNameA(nullptr, path, MAX_PATH);
+        if (!pathLength || pathLength >= MAX_PATH) return 3;
+        char* slash = strrchr(path, '\\');
+        if (!slash) return 3;
+        *(slash + 1) = 0;
+        const char* symbolProbes[] = {"symbol_lookup_a.dll", "symbol_lookup_b.dll"};
+        for (const auto* name : symbolProbes) {
+            char full[MAX_PATH]{};
+            if (sprintf_s(full, "%s%s", path, name) < 0 || !LoadLibraryA(full)) return 3;
+        }
+    }
 	printf("Press Ctrl+C to exit.\n\n");
 	g_type_fixture.self = &g_type_fixture;
 	g_trace_executable = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE,

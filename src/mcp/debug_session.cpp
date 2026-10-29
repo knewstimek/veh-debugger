@@ -2279,6 +2279,50 @@ uint64_t DebugSession::ResolveSourceLine(const std::string& file, uint32_t line)
 	return resolved->address;
 }
 
+
+DebugSession::SymbolMatches DebugSession::FindSymbols(const std::string& name, uint32_t maximum) {
+    SymbolMatches result;
+    if (name.empty() || name.size() >= sizeof(FindSymbolsRequest::name) ||
+        name.find('\0') != std::string::npos || !maximum || maximum > kFindSymbolsMaxResults) {
+        result.error = "Symbol name must be 1-255 bytes and max_results must be 1-10"; return result;
+    }
+    if (!attached_ || !backendInfo_.reported || !backendInfo_.Supports(IpcCommand::FindSymbols)) {
+        result.error = "Backend does not advertise bounded symbol-name lookup (FindSymbols 0x45)"; return result;
+    }
+    FindSymbolsRequest request{}; request.maxResults = maximum;
+    std::memcpy(request.name, name.data(), name.size());
+    std::vector<uint8_t> bytes;
+    PipeExchangeDiagnostics diagnostics{};
+    if (!ipcTransport_->SendAndReceive(IpcCommand::FindSymbols, &request, sizeof(request), bytes, 10000, &diagnostics)) {
+        result.error = "FindSymbols: " + DescribeIpcFailure(&diagnostics); return result;
+    }
+    if (!ValidateBackendStatus(bytes, "FindSymbols", result.error)) return result;
+    FindSymbolsResponse header{};
+    if (bytes.size() < sizeof(header)) { result.error = "FindSymbols: incomplete response"; return result; }
+    std::memcpy(&header, bytes.data(), sizeof(header));
+    if (header.count > maximum || (header.flags & ~(kFindSymbolsTruncated | kFindSymbolsIncomplete)) ||
+        bytes.size() != sizeof(header) + static_cast<size_t>(header.count) * sizeof(FindSymbolEntry)) {
+        result.error = "FindSymbols: malformed candidate list"; return result;
+    }
+    for (uint32_t i = 0; i < header.count; ++i) {
+        FindSymbolEntry entry{};
+        std::memcpy(&entry, bytes.data() + sizeof(header) + i * sizeof(entry), sizeof(entry));
+        if ((entry.flags & ~(kFindSymbolForwarder | kFindSymbolExport)) || !entry.moduleBase ||
+            !std::memchr(entry.functionName, 0, sizeof(entry.functionName)) || !entry.functionName[0] ||
+            !std::memchr(entry.moduleName, 0, sizeof(entry.moduleName)) ||
+            (!entry.moduleName[0] && !(header.flags & kFindSymbolsIncomplete)) ||
+            ((entry.flags & kFindSymbolForwarder) ? entry.address != 0 : entry.address < entry.moduleBase) ||
+            (TargetAddressBits() == 32 && (entry.address > UINT32_MAX || entry.moduleBase > UINT32_MAX))) {
+            result.error = "FindSymbols: invalid candidate metadata"; return result;
+        }
+        result.matches.push_back(entry);
+    }
+    result.truncated = (header.flags & kFindSymbolsTruncated) != 0;
+    result.incomplete = (header.flags & kFindSymbolsIncomplete) != 0;
+    result.ok = true; result.error.clear();
+    return result;
+}
+
 uint64_t DebugSession::ResolveFunction(const std::string& name) {
 	ResolveFunctionRequest req = {};
 	strncpy_s(req.functionName, name.c_str(), sizeof(req.functionName) - 1);

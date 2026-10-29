@@ -403,7 +403,7 @@ DAP의 게스트 연결 설정은 추가하지 않습니다. 실행 중 서버�
 | `veh_stack_trace` | `threadId, maxFrames?` | 스택 트레이스. PDB 없는 모듈은 PE export 테이블을 직접 파싱해 정확한 함수명 제공 (DbgHelp의 부정확한 `OrdinalNNNNN` 라벨 대신) |
 | `veh_enum_locals` | `threadId, instructionAddress?, frameBase?` | 정지된 스레드의 스택 프레임에서 지역변수/파라미터 열거 (이름/타입/주소/값). 생략 시 최상위 프레임 자동 감지 (PDB 필요) |
 | `veh_display_type` | `type, address?, depth?, max_members?` | WinDbg `dt`처럼 PDB 구조체 레이아웃 표시 (오프셋/타입/크기/비트필드/기본 클래스/중첩 멤버). `address`를 주면 스칼라/포인터/enum/비트필드 값까지 읽음. `module!Type` 형식 지원 (PDB 필요) |
-| `veh_symbolize` | `address` 또는 `addresses` | 주소를 `module!function+offset`으로 변환 (PDB 심볼, 없으면 export, 없으면 module+RVA) + 소스 파일/줄. 최대 256개 |
+| `veh_symbolize` | `address`/`addresses` 또는 `name, max_results?` | 이름 검색은 최대 10개 후보와 중복·잘림 여부 반환. 유일한 후보만 자동 주소 해석. 주소를 `module!function+offset`으로 변환 (PDB 심볼, 없으면 export, 없으면 module+RVA) + 소스 파일/줄. 최대 256개 |
 | `veh_registers` | `threadId` | 레지스터 조회 |
 | `veh_set_register` | `threadId, name, value` | 레지스터 값 변경 |
 | `veh_evaluate` | `expression, threadId` | 레지스터/메모리/포인터/세그먼트 평가 (`[reg+offset]`, `gs:[0x60]` 등) |

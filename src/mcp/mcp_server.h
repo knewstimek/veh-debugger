@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <stdexcept>
 #include <functional>
 #include <atomic>
 #include <vector>
@@ -235,6 +236,11 @@ private:
 	std::string ExpandLogMessage(const std::string& msg, uint32_t threadId, const RegisterSet* cachedRegs);
 
 	// Helper
+    struct AddressResolutionError : std::runtime_error {
+        std::string code;
+        AddressResolutionError(std::string message, std::string value)
+            : std::runtime_error(std::move(message)), code(std::move(value)) {}
+    };
 	bool ParseAddress(const std::string& addrStr, uint64_t& out);
 	std::string NotAttachedMessage();
 	std::string IpcErrorMessage();

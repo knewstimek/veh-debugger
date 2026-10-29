@@ -37,6 +37,8 @@ public:
 
 	// Module/function/line for arbitrary addresses (same resolution as stack frames)
 	std::vector<AddressSymbol> Symbolize(const std::vector<uint64_t>& addresses);
+    IpcStatus FindSymbols(const std::string& name, uint32_t maximum,
+        std::vector<FindSymbolEntry>& entries, uint32_t& flags);
 
 	// PDB type layout (and values when req.address != 0). false when the type is not found.
 	bool DisplayType(const DisplayTypeRequest& req, DisplayTypeResponse& resp,

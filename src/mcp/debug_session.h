@@ -514,6 +514,12 @@ public:
 	// --- Resolve (PDB) ---
 	uint64_t ResolveSourceLine(const std::string& file, uint32_t line);
 	uint64_t ResolveFunction(const std::string& name);
+    struct SymbolMatches {
+        bool ok = false, truncated = false, incomplete = false;
+        std::string error;
+        std::vector<FindSymbolEntry> matches;
+    };
+    SymbolMatches FindSymbols(const std::string& name, uint32_t maximum = kFindSymbolsMaxResults);
 
 	// --- IPC event handling ---
 	using EventCallback = std::function<void(uint32_t eventId, const uint8_t* payload, uint32_t size)>;

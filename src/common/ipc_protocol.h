@@ -78,6 +78,7 @@ enum class IpcCommand : uint32_t {
 	ResolveFunction        = 0x0041,
 	EnumLocals             = 0x0042,
 	Symbolize              = 0x0043,  // addresses -> module!function+offset, source line
+    FindSymbols            = 0x0045,  // bounded name -> candidate addresses; no first-match selection
 	DisplayType            = 0x0044,  // PDB struct layout (+ values) at an address
 
 	// Tracing
@@ -496,6 +497,27 @@ struct ResolveFunctionResponse {
 	IpcStatus status;
 	uint64_t  address;
 };
+
+// Additive name lookup. Existing ResolveFunction keeps its legacy wire format.
+// Patterns use DbgHelp's [module!]name syntax; '*'/'?' are allowed. No aliases
+// (e.g. adding/removing A/W) are invented. Backends must enumerate candidates.
+constexpr uint32_t kFindSymbolsMaxResults = 10;
+constexpr uint32_t kFindSymbolsTruncated = 1, kFindSymbolsIncomplete = 2;
+constexpr uint32_t kFindSymbolForwarder = 1, kFindSymbolExport = 2;
+struct FindSymbolsRequest { char name[256]; uint32_t maxResults; };
+struct FindSymbolsResponse { IpcStatus status; uint32_t count, flags; };
+struct FindSymbolEntry {
+    uint64_t address, moduleBase; // forwarder: address=0, never its export-string address
+    uint32_t flags;
+    char moduleName[128], functionName[256];
+};
+// Entries are deduplicated by module/address (forwarders also by name).
+// Count is returned candidates, NOT an invented total. Truncated means more
+// candidates exist; incomplete means enumeration/metadata budget was exhausted.
+// Only one non-forwarded candidate with neither flag can auto-resolve an address.
+static_assert(sizeof(FindSymbolsRequest) == 260);
+static_assert(sizeof(FindSymbolsResponse) == 12);
+static_assert(sizeof(FindSymbolEntry) == 404);
 
 static constexpr uint32_t kSymbolizeMaxAddresses = 256;
 

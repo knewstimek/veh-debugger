@@ -371,7 +371,7 @@ The table below documents the complete public tool surface. Treat the running se
 | `veh_stack_trace` | `threadId, maxFrames?` | Stack trace. For PDB-less modules, parses the PE export table directly for accurate function names (instead of DbgHelp's inaccurate `OrdinalNNNNN` labels) |
 | `veh_enum_locals` | `threadId, instructionAddress?, frameBase?` | Enumerate locals/parameters in a stopped thread's stack frame (name/type/address/value). Auto-detects the top frame if omitted (PDB required) |
 | `veh_display_type` | `type, address?, depth?, max_members?` | PDB struct layout like WinDbg `dt` (offsets, types, sizes, bitfields, base classes, nested members); with `address`, also scalar/pointer/enum/bitfield values. Accepts `module!Type` (PDB required) |
-| `veh_symbolize` | `address` or `addresses` | Addresses to `module!function+offset` (PDB symbol, else export, else module+RVA) plus source file/line. Up to 256 |
+| `veh_symbolize` | `address`/`addresses` or `name, max_results?` | Name search lists up to 10 candidates with ambiguity/truncation; only a complete unique match auto-resolves. Addresses to `module!function+offset` (PDB symbol, else export, else module+RVA) plus source file/line. Up to 256 |
 | `veh_registers` | `threadId` | Read registers |
 | `veh_set_register` | `threadId, name, value` | Modify register value |
 | `veh_evaluate` | `expression, threadId` | Evaluate register/memory/pointer/segment (`[reg+offset]`, `gs:[0x60]`, etc.) |

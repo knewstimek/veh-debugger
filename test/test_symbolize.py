@@ -4,16 +4,16 @@ import os
 import pytest
 
 from build_paths import RELEASE
-from mcp_test_client import McpClient
+from owned_mcp_client import OwnedMcpClient
 
 TARGET = os.path.join(RELEASE, "test_target.exe")
 
 
 @pytest.fixture(scope="module")
 def session():
-    with McpClient() as client:
+    with OwnedMcpClient() as client:
         client.initialize("symbolize-test")
-        assert client.tool("veh_launch", {"program": TARGET, "stopOnEntry": True}).get("success")
+        assert client.tool("veh_launch", {"program": TARGET, "args": ["--symbol-lookup", "--interval", "10"], "stopOnEntry": True}).get("success")
         bp = client.tool("veh_set_function_breakpoint", {"name": "WorkFunction"})
         assert bp.get("success"), bp
         stop = client.tool("veh_continue", {"threadId": 0, "wait": True, "timeout": 30}, timeout=40)
@@ -58,3 +58,127 @@ def test_argument_errors(session):
     assert "error" in client.tool("veh_symbolize", {})
     assert "error" in client.tool("veh_symbolize", {"address": "not-an-address"})
     assert "error" in client.tool("veh_symbolize", {"addresses": ["0x1000"] * 257})
+
+
+
+def test_name_lookup_and_direct_address(session):
+    client, entry, _ = session
+    result = client.tool("veh_symbolize", {"name": "WorkFunction"})
+    assert result.get("resolved") and result["count"] == 1, result
+    assert int(result["address"], 16) == entry, result
+    listing = client.tool("veh_disassemble", {"address": "test_target.exe!WorkFunction", "count": 1})
+    assert int(listing["instructions"][0]["address"], 16) == entry, listing
+    report = client.tool("veh_batch", {"steps": [{"tool": "veh_symbolize", "args": {"name": "WorkFunction"}}]})
+    assert report["results"][0]["result"] == result, report
+
+
+def test_real_duplicate_exports_and_limits(session):
+    client, _, _ = session
+    found = client.tool("veh_symbolize", {"name": "SharedProbe"})
+    assert found["count"] == 2 and not found["resolved"] and found["ambiguous"], found
+    assert {row["module"].lower() for row in found["matches"]} == {"symbol_lookup_a.dll", "symbol_lookup_b.dll"}, found
+    rejected = client.tool("veh_disassemble", {"address": "SharedProbe", "count": 1})
+    assert rejected.get("code") == "ambiguous_symbol", rejected
+    mutation = client.tool("veh_set_breakpoint", {"address": "SharedProbe"})
+    assert mutation.get("code") == "ambiguous_symbol", mutation
+    limited = client.tool("veh_symbolize", {"name": "SharedProbe", "max_results": 1})
+    assert limited["count"] == 1 and limited["truncated"] and not limited["resolved"] and "address" not in limited, limited
+    for row in found["matches"]:
+        selected = client.tool("veh_symbolize", {"name": row["module"] + "!SharedProbe"})
+        assert selected.get("resolved") and selected["address"] == row["address"], selected
+        listing = client.tool("veh_disassemble", {"address": row["module"] + "!SharedProbe", "count": 1})
+        assert listing["instructions"][0]["address"] == row["address"], listing
+    assert client.tool("veh_symbolize", {"name": "NoSuchSyntheticFunction"})["matches"] == []
+
+
+def test_prefix_free_hex_and_legacy_numbers(session):
+    client, entry, modules = session
+    base = int(modules["test_target.exe"]["baseAddress"], 16)
+    rva = entry - base
+    found = client.tool("veh_symbolize", {"address": f"test_target.exe+{rva:X}"})
+    assert int(found["symbols"][0]["address"], 16) == entry, found
+    read = client.tool("veh_read_memory", {"address": "test_target.exe+10", "size": 1})
+    assert int(read["address"], 16) == base + 0x10, read
+    assert "error" in client.tool("veh_read_memory", {"address": "-1", "size": 1})
+    assert "error" in client.tool("veh_read_memory", {"address": "0xFFFFFFFFFFFFFFFF+1", "size": 1})
+    for args in ({"name": "WorkFunction", "address": hex(entry)}, {"name": "WorkFunction", "max_results": 11},
+                 {"name": "WorkFunction", "max_results": 0}, {"name": "WorkFunction", "max_results": "2"}):
+        assert "error" in client.tool("veh_symbolize", args), args
+
+
+
+def test_synthetic_name_receipts_and_address_rules():
+    agent = os.path.join(RELEASE, "guest_backend_fixture.exe")
+    with OwnedMcpClient() as client:
+        client.initialize("symbol-boundaries")
+        def attach(mode):
+            result = client.tool("veh_attach", {"pid": 424242, "agent": agent, "target_scope": "guest",
+                "agent_args": ["--metadata", mode]})
+            assert result.get("success"), result
+        def lookup(name="UniqueProbe", **options):
+            return client.tool("veh_symbolize", {"name": name, **options})
+        attach("symbols-ok")
+        many = lookup("ManyProbe*")
+        assert many["count"] == 10 and many["truncated"] and not many["resolved"], many
+        ambiguous = client.tool("veh_read_memory", {"address": "SharedProbe", "size": 1})
+        assert ambiguous.get("code") == "ambiguous_symbol", ambiguous
+        batch = client.tool("veh_batch", {"steps": [
+            {"tool": "veh_symbolize", "args": {"name": "SharedProbe"}},
+            {"tool": "veh_read_memory", "args": {"address": "SharedProbe", "size": 1}},
+        ]})
+        assert batch["results"][0]["result"]["count"] == 2, batch
+        assert batch["results"][1]["result"] == ambiguous, batch
+        forwarded = lookup("ForwardedProbe")
+        assert not forwarded["resolved"] and forwarded["matches"][0]["address"] is None, forwarded
+        assert client.tool("veh_read_memory", {"address": "ForwardedProbe", "size": 1})["code"] == "forwarded_symbol"
+        for expression, expected in (("probe_a.dll+10", 0x1010), ("probe_a.dll+352DD", 0x362DD),
+                ("UniqueProbe+10", 0x1110), ("UniqueProbe", 0x1100), ("16", 16), ("10AB", 0x10AB)):
+            result = client.tool("veh_read_memory", {"address": expression, "size": 1})
+            assert int(result["address"], 16) == expected, (expression, result)
+        assert "error" in client.tool("veh_read_memory", {"address": "probe_a.dll+FFFFFFFFFFFFFFFF", "size": 1})
+        assert "error" in client.tool("veh_read_memory", {"address": "probe_a.dll+100000000", "size": 1})
+        assert "error" in client.tool("veh_read_memory", {"address": "Shared*", "size": 1})
+        attach("symbols-incomplete")
+        assert lookup()["incomplete"] and not lookup()["resolved"]
+        assert client.tool("veh_read_memory", {"address": "UniqueProbe", "size": 1})["code"] == "incomplete_symbol_lookup"
+        attach("symbols-no-caps")
+        assert "0x45" in lookup()["error"]
+        # Legacy ResolveFunction is advertised and returns a usable first match.
+        # Name-based address admission must still refuse instead of falling back.
+        assert client.tool("veh_read_memory", {"address": "SharedProbe", "size": 1})["code"] == "symbol_lookup_failed"
+        for mode in ("symbols-error", "symbols-short", "symbols-long", "symbols-count",
+                     "symbols-flags", "symbols-name", "symbols-address"):
+            attach(mode)
+            assert "error" in lookup(), mode
+
+
+
+def test_name_search_in_breakpoint_actions():
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="veh-symbol-actions-") as directory:
+        logfile = os.path.join(directory, "actions.log")
+        with OwnedMcpClient(args=["--log=" + logfile]) as client:
+            client.initialize()
+            attached = client.tool("veh_attach", {"pid": 424242, "agent": os.path.join(RELEASE, "guest_backend_fixture.exe"),
+                "target_scope": "guest", "agent_args": ["--metadata", "ops-action-symbols"]})
+            assert attached.get("success"), attached
+            action = [{"tool": "veh_symbolize", "args": {"name": "SharedProbe"}},
+                      {"tool": "veh_symbolize", "args": {"name": "UniqueProbe"}}]
+            installed = client.tool("veh_set_breakpoint", {"address": "0x1800", "action": action})
+            assert installed.get("success"), installed
+            stop = client.tool("veh_continue", {"threadId": 77, "wait": True, "timeout": 3}, timeout=5)
+            assert stop.get("breakpointId") == 7, stop
+            stats = client.tool("veh_threads")
+            assert stats["threads"][0]["name"] == "symbols:2", stats
+            assert client.tool("veh_detach").get("success")
+        with open(logfile, encoding="utf-8") as handle:
+            assert "Breakpoint action completed with an error:" not in handle.read()
+
+
+def test_windows_export_spelling(session):
+    client, _, _ = session
+    found = client.tool("veh_symbolize", {"name": "WriteFile"})
+    assert found["count"] and all(row["function"] == "WriteFile" for row in found["matches"]), found
+    actual = client.tool("veh_symbolize", {"name": "kernelbase.dll!WriteFile"})
+    assert actual.get("resolved"), actual
+    assert client.tool("veh_symbolize", {"name": "WriteFileW"})["count"] == 0

@@ -55,6 +55,8 @@ int wmain(int argc, wchar_t** argv) {
     uint32_t continueRequests = 0, pauseRequests = 0, resolveRequests = 0;
     uint32_t fixtureBreakpointId = 0, shellcodeRequests=0, localThreadQueries=0;
     const bool scanMode=mode.rfind(L"scan-",0)==0;
+    uint32_t symbolLookupRequests = 0;
+    const bool symbolsMode = mode.rfind(L"symbols-", 0) == 0 || mode == L"ops-action-symbols";
     const bool instrumentationMode = mode.rfind(L"inst-", 0) == 0 || mode == L"ops-action-inst";
     bool captureActive[3]{}, captureCreated[3]{};
     uint64_t captureIds[3]{}, nextCaptureId = 9007199254740993ULL;
@@ -129,6 +131,11 @@ int wmain(int argc, wchar_t** argv) {
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::GetProcesses);
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::ControlVirtualMachine);
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::TraceVirtualCpu);
+            }
+            if (symbolsMode) {
+                for (auto op : {veh::IpcCommand::GetModules, veh::IpcCommand::ResolveFunction})
+                    veh::SetCommandSupported(caps.commands, op);
+                if (mode != L"symbols-no-caps") veh::SetCommandSupported(caps.commands, veh::IpcCommand::FindSymbols);
             }
             if (instrumentationMode)
                 for (auto op : {veh::IpcCommand::QueryBranchTrace, veh::IpcCommand::StartBranchTrace,
@@ -235,6 +242,47 @@ int wmain(int argc, wchar_t** argv) {
             std::memcpy(result.data(), &response, sizeof(response));
             if (response.eventCount) std::memcpy(result.data() + sizeof(response), events, sizeof(events));
             if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
+        } else if (symbolsMode && command == veh::IpcCommand::FindSymbols) {
+            ++symbolLookupRequests;
+            veh::FindSymbolsRequest request{};
+            if (bytes.size() != sizeof(request)) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
+            std::memcpy(&request, bytes.data(), sizeof(request));
+            const std::string query(request.name, strnlen(request.name, sizeof(request.name)));
+            const bool many = query == "ManyProbe*";
+            const bool ambiguous = query == "SharedProbe";
+            const bool forwarder = query == "ForwardedProbe";
+            const bool single = query == "UniqueProbe" || query == "probe_a.dll!SharedProbe" || query == "probe_b.dll!SharedProbe";
+            veh::FindSymbolsResponse response{mode == L"symbols-error" ? veh::IpcStatus::Error : veh::IpcStatus::Ok,
+                (ambiguous || many) ? (request.maxResults < 2 ? request.maxResults : many ? request.maxResults : 2) : single || forwarder ? 1u : 0u, 0};
+            if (many || (ambiguous && request.maxResults == 1)) response.flags |= veh::kFindSymbolsTruncated;
+            if (mode == L"symbols-incomplete") response.flags |= veh::kFindSymbolsIncomplete;
+            if (mode == L"symbols-flags") response.flags |= 4;
+            if (mode == L"symbols-count") response.count = 11;
+            std::vector<unsigned char> result(sizeof(response) + response.count * sizeof(veh::FindSymbolEntry));
+            std::memcpy(result.data(), &response, sizeof(response));
+            for (uint32_t i = 0; i < response.count; ++i) {
+                veh::FindSymbolEntry entry{};
+                const bool second = query == "probe_b.dll!SharedProbe" || (ambiguous && i == 1);
+                entry.moduleBase = second ? 0x2000 : 0x1000;
+                entry.address = forwarder ? 0 : entry.moduleBase + 0x100 + i * 16;
+                entry.flags = veh::kFindSymbolExport | (forwarder ? veh::kFindSymbolForwarder : 0);
+                strcpy_s(entry.moduleName, second ? "probe_b.dll" : "probe_a.dll");
+                strcpy_s(entry.functionName, query == "UniqueProbe" ? "UniqueProbe" : forwarder ? "ForwardedProbe" : "SharedProbe");
+                if (mode == L"symbols-name") std::memset(entry.functionName, 'X', sizeof(entry.functionName));
+                if (mode == L"symbols-address") entry.address = 1;
+                std::memcpy(result.data() + sizeof(response) + i * sizeof(entry), &entry, sizeof(entry));
+            }
+            if (mode == L"symbols-short") result.resize(4);
+            if (mode == L"symbols-long") result.push_back(0);
+            if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
+        } else if (symbolsMode && command == veh::IpcCommand::ResolveFunction) {
+            if (!reply(pipe, header.command, veh::ResolveFunctionResponse{veh::IpcStatus::Ok, 0x1100})) break;
+        } else if (symbolsMode && command == veh::IpcCommand::GetModules) {
+            struct { veh::GetModulesResponse head; veh::ModuleInfo module; } response{};
+            response.head = {veh::IpcStatus::Ok, 1};
+            response.module.baseAddress = 0x1000; response.module.size = 0x10000;
+            strcpy_s(response.module.name, "probe_a.dll");
+            if (!reply(pipe, header.command, response)) break;
         } else if (instrumentationMode && command == veh::IpcCommand::QueryBranchTrace) {
             veh::QueryBranchTraceResponse response{};
             response.status = veh::IpcStatus::Ok; response.lastBranches = 1; response.fullPath = 1;
@@ -495,6 +543,7 @@ int wmain(int argc, wchar_t** argv) {
                 std::snprintf(response.thread.name, sizeof(response.thread.name),
                     "created:%u removed:%u resumed:%u writes:%u",
                     operationsCreated, operationsRemoved, operationsResumed, operationsWrites);
+                if (mode == L"ops-action-symbols") sprintf_s(response.thread.name, "symbols:%u", symbolLookupRequests);
                 if (!reply(pipe, header.command, response)) break;
             } else if (command == veh::IpcCommand::FreezeThread) {
                 struct {veh::FreezeThreadResponse head; uint32_t thread;} response{};

@@ -876,6 +876,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 	case IpcCommand::EnumLocals:
 	case IpcCommand::Symbolize:
 	case IpcCommand::DisplayType:
+    case IpcCommand::FindSymbols:
 		HandleSymbolCommand(command, payload, payloadSize);
 		break;
 
@@ -1778,6 +1779,23 @@ void PipeServer::HandleSymbolCommand(uint32_t command, const uint8_t* payload, u
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}
+    case IpcCommand::FindSymbols: {
+        FindSymbolsResponse response{IpcStatus::InvalidArgs, 0, 0};
+        std::vector<FindSymbolEntry> entries;
+        if (payloadSize == sizeof(FindSymbolsRequest)) {
+            FindSymbolsRequest request{}; std::memcpy(&request, payload, sizeof(request));
+            const auto end = static_cast<const char*>(std::memchr(request.name, 0, sizeof(request.name)));
+            if (end && end != request.name)
+                response.status = StackWalker::Instance().FindSymbols(
+                    std::string(request.name, static_cast<size_t>(end - request.name)), request.maxResults, entries, response.flags);
+        }
+        response.count = static_cast<uint32_t>(entries.size());
+        std::vector<uint8_t> bytes(sizeof(response) + entries.size() * sizeof(FindSymbolEntry));
+        std::memcpy(bytes.data(), &response, sizeof(response));
+        if (!entries.empty()) std::memcpy(bytes.data() + sizeof(response), entries.data(), entries.size() * sizeof(FindSymbolEntry));
+        SendResponse(command, bytes.data(), static_cast<uint32_t>(bytes.size()));
+        break;
+    }
 	case IpcCommand::ResolveFunction: {
 		if (payloadSize < sizeof(ResolveFunctionRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;
@@ -3238,7 +3256,7 @@ void PipeServer::HandleLifecycleCommand(uint32_t command, const uint8_t* payload
 			IpcCommand::GetThreads, IpcCommand::GetStackTrace, IpcCommand::GetRegisters, IpcCommand::GetModules,
 			IpcCommand::SetRegister, IpcCommand::SetRegisters, IpcCommand::IsThreadStopped, IpcCommand::FreezeThread,
 			IpcCommand::ReadMemory, IpcCommand::WriteMemory, IpcCommand::PatchCode,
-			IpcCommand::ResolveSourceLine, IpcCommand::ResolveFunction, IpcCommand::EnumLocals,
+			IpcCommand::FindSymbols, IpcCommand::ResolveSourceLine, IpcCommand::ResolveFunction, IpcCommand::EnumLocals,
 			IpcCommand::Symbolize, IpcCommand::DisplayType, IpcCommand::TraceCallers,
 			IpcCommand::AllocateMemory, IpcCommand::FreeMemory, IpcCommand::ExecuteShellcode,
 			IpcCommand::QueryMemoryMap, IpcCommand::SearchMemory, IpcCommand::ProtectMemory, IpcCommand::ValueScan,

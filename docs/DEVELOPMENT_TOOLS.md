@@ -40,6 +40,61 @@ They create only small synthetic allocations, not billion-candidate artifacts.
 See [value scan contract](VALUE_SCAN.md) for usage, budgets, cleanup and the full
 backend adoption checklist. Reuse the existing IPC matrix and schema-size helpers.
 
+## Name and address lookup
+
+The existing lazy `veh_symbolize` supports either address(es) or a name search:
+
+```text
+veh_symbolize(name="SharedProbe", max_results=10)
+veh_symbolize(name="symbol_lookup_a.dll!SharedProbe")
+veh_disassemble(address="symbol_lookup_a.dll!SharedProbe", count=20)
+veh_read_memory(address="symbol_lookup_a.dll+352DD", size=64)
+```
+
+Name search returns at most1-10 `matches` (default10), each with module, name,
+qualified symbol, exact hexadecimal address/moduleBase and source. Pattern
+searches use DbgHelp's `[module!]name` syntax, including wildcard patterns.
+`count` is returned rows, not an invented total. `truncated` means more
+candidates exist; `incomplete` marks enumeration-budget/metadata limitations.
+`resolved=true` and top-level `address` require exactly one complete candidate.
+Forwarded exports have `forwarded=true,address=null`; their export strings
+are never returned as code addresses. Select the implementation module instead.
+Only available loaded symbols/exports can be found; no A/W suffix alias is
+invented. Windows' file-writing API is named
+[WriteFile](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-writefile).
+
+Shared MCP address fields also accept unambiguous function names and
+`module!function`. Multiple matches, truncated/incomplete searches and
+unresolved forwarders refuse automatic address selection with a structured
+error. Pattern-based selection belongs in the name search, not an address field.
+Legacy function-breakpoint/DAP resolution retains its existing IPC contract.
+
+For module/function offsets, an omitted `0x` means hexadecimal:
+`module.dll+10` adds0x10, and `module.dll+352DD` adds0x352DD.
+Standalone digit-only literals and literal arithmetic retain existing parsing;
+digit-leading literals containing A-F also accept prefix-free hexadecimal.
+Letter-leading names remain symbols: write `0xADD` for an address instead of
+the possible function name `Add`. Overflow, underflow and negative literals
+are rejected. Resolution observes the current loaded namespace; it is not an
+atomic guarantee that another thread cannot unload/change code afterwards.
+
+Backend contract: advertise `FindSymbols=0x0045` only when implemented.
+Packed request260bytes: `char name[256]`, `uint32 maxResults` (1..10).
+Response12bytes: status/count/flags, followed by count*404byte entries.
+Entries contain uint64 address/moduleBase, uint32 flags, moduleName[128],
+functionName[256]. Header flags1=truncated,2=incomplete; entry flags1=forwarder,
+2=export. Strings must terminate; ordinary entries require executable code
+addresses. No successful short/oversized response is accepted. Name lookup
+does not fall back to the legacy first-match ResolveFunction command.
+The in-process implementation serializes DbgHelp through StackWalker's mutex,
+uses a bounded callback/table and returns only module basenames.
+
+`test/test_symbolize.py` covers x64/x86 real PDB/export lookup, two independently
+loaded DLLs exporting SharedProbe, prefix-free RVA input, caps/incomplete/
+malformed receipts, no unsafe legacy fallback, and direct/batch/action parity.
+Use `test_target --symbol-lookup` only through the owned harness; the normal
+synthetic target does not load the two probe DLLs.
+
 ## Explicit instrumentation
 
 See [instrumentation contract](INSTRUMENTATION.md) for the additive version1

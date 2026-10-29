@@ -1056,65 +1056,81 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 // --- Helpers ---
 
 bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
-	std::string s = addrStr;
-	while (!s.empty() && s.front() == ' ') s.erase(s.begin());
-	while (!s.empty() && s.back() == ' ') s.pop_back();
-	if (s.empty()) return false;
-
-	auto parseNum = [](const std::string& t, uint64_t& v) -> bool {
-		if (t.empty()) return false;
-		try { size_t pos; v = std::stoull(t, &pos, 0); return pos == t.size(); }
-		catch (...) { return false; }
-	};
-	auto trimTok = [](std::string t) {
-		while (!t.empty() && t.front() == ' ') t.erase(t.begin());
-		while (!t.empty() && t.back() == ' ') t.pop_back();
-		return t;
-	};
-
-	// 1) Plain hex/decimal address (fully consumed).
-	if (parseNum(s, out)) return true;
-
-	// 2) '+' form: module+RVA ("crackme.exe+0x1000") or literal arithmetic ("0x1000+0x34").
-	//    Fully-numeric left => arithmetic; otherwise treat left as a module name.
-	auto plusPos = s.find('+');
-	if (plusPos != std::string::npos && plusPos > 0) {
-		std::string left = trimTok(s.substr(0, plusPos));
-		std::string right = trimTok(s.substr(plusPos + 1));
-		uint64_t rv;
-		if (!parseNum(right, rv)) return false;  // offset/RVA must be numeric
-		uint64_t lv;
-		if (parseNum(left, lv)) {  // literal arithmetic
-			uint64_t r = lv + rv;
-			if (r < lv) return false;  // overflow -> reject rather than wrap to a bogus address
-			out = r; return true;
-		}
-		if (session_.IsAttached()) {
-			auto toLo = [](char c) { return (char)::tolower((unsigned char)c); };
-			std::string modLower = left;
-			std::transform(modLower.begin(), modLower.end(), modLower.begin(), toLo);
-			for (auto& m : session_.GetModules()) {
-				std::string nameLower = m.name;
-				std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), toLo);
-				if (nameLower == modLower) { out = m.baseAddress + rv; return true; }
-			}
-		}
-		return false;  // module not found
-	}
-
-	// 3) '-' form: literal subtraction only ("0x1000-0x10"). A module name may itself
-	//    contain '-', so require both sides to be pure numbers before treating it as math.
-	auto minusPos = s.find('-', 1);
-	if (minusPos != std::string::npos) {
-		uint64_t lv, rv;
-		if (parseNum(trimTok(s.substr(0, minusPos)), lv) &&
-		    parseNum(trimTok(s.substr(minusPos + 1)), rv)) {
-			if (rv > lv) return false;  // underflow -> reject rather than wrap
-			out = lv - rv;
-			return true;
-		}
-	}
-	return false;
+    auto trim = [](std::string value) {
+        const auto first = value.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) return std::string{};
+        return value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1);
+    };
+    const auto text = trim(addrStr);
+    if (text.empty() || text.find('\0') != std::string::npos) return false;
+    auto number = [](const std::string& value, uint64_t& result, int base) {
+        if (value.empty() || value.front() == '-' || value.front() == '+') return false;
+        try { size_t consumed = 0; result = std::stoull(value, &consumed, base); return consumed == value.size(); }
+        catch (...) { return false; }
+    };
+    auto literal = [&](const std::string& value, uint64_t& result) {
+        if (number(value, result, 0)) return true; // preserve existing decimal/0x/leading-zero literals
+        return !value.empty() && value[0] >= '0' && value[0] <= '9' && number(value, result, 16);
+    };
+    auto resolve = [&](const std::string& name, uint64_t& address) {
+        if (name.find_first_of("*?") != std::string::npos)
+            throw AddressResolutionError("Use veh_symbolize(name=...) to list symbol-pattern candidates", "symbol_pattern");
+        const auto found = session_.FindSymbols(name);
+        if (!found.ok) throw AddressResolutionError(found.error, "symbol_lookup_failed");
+        if (found.truncated || found.matches.size() > 1)
+            throw AddressResolutionError("Ambiguous symbol '" + name +
+                "'; list up to 10 candidates with veh_symbolize(name=...), then use module!function or an explicit address", "ambiguous_symbol");
+        if (found.incomplete)
+            throw AddressResolutionError("Symbol lookup is incomplete; an address cannot be selected safely", "incomplete_symbol_lookup");
+        if (found.matches.empty())
+            throw AddressResolutionError("No callable symbol matches '" + name +
+                "'; check the exact name and loaded symbols/exports", "symbol_not_found");
+        if (!found.matches[0].address)
+            throw AddressResolutionError("This symbol is a forwarded export; select its implementation module with veh_symbolize(name=...)", "forwarded_symbol");
+        address = found.matches[0].address;
+    };
+    if (literal(text, out)) return true;
+    const auto plus = text.find('+');
+    if (plus != std::string::npos && plus) {
+        const auto left = trim(text.substr(0, plus));
+        const auto right = trim(text.substr(plus + 1));
+        uint64_t base = 0, offset = 0;
+        if (literal(left, base)) {
+            if (!literal(right, offset)) return false;
+        } else {
+            // Module/symbol offsets are hexadecimal even when digits-only.
+            if (!number(right, offset, 16) || !session_.IsAttached()) return false;
+            bool moduleFound = false;
+            if (left.find('!') == std::string::npos) {
+                const auto modules = session_.GetModules();
+                for (const auto& module : modules) if (_stricmp(module.name.c_str(), left.c_str()) == 0) {
+                    base = module.baseAddress; moduleFound = true; break;
+                }
+                auto lower = left;
+                std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                const bool moduleName = lower.size() >= 4 && (lower.substr(lower.size() - 4) == ".dll" ||
+                    lower.substr(lower.size() - 4) == ".exe" || lower.substr(lower.size() - 4) == ".sys");
+                if (!moduleFound && moduleName)
+                    throw AddressResolutionError("Module '" + left + "' is not present in the target module list", "module_not_found");
+            }
+            if (!moduleFound) resolve(left, base);
+        }
+        if (offset > UINT64_MAX - base) return false;
+        out = base + offset;
+        return session_.TargetAddressBits() != 32 || out <= UINT32_MAX;
+    }
+    const auto minus = text.find('-', 1);
+    if (minus != std::string::npos) {
+        uint64_t left = 0, right = 0;
+        if (literal(trim(text.substr(0, minus)), left) && literal(trim(text.substr(minus + 1)), right)) {
+            if (right > left) return false;
+            out = left - right; return true;
+        }
+    }
+    if (!session_.IsAttached() || text.front() == '-' || text.front() == '+' ||
+        (text.front() >= '0' && text.front() <= '9')) return false;
+    resolve(text, out);
+    return true;
 }
 
 // --- Tool List Definition ---
@@ -1296,7 +1312,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		Tool(&McpServer::ToolReadMemory, "memory", kInteractive, true,
 			{{"name", "veh_read_memory"}, {"description", "Read memory from the target process. Returns hex dump."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"address", {{"type", "string"}, {"description", "Hex address"}}},
+			{"address", {{"type", "string"}, {"description", "Address: hex, module+RVA or unique [module!]function"}}},
 			{"size", {{"type", "integer"}, {"description", "Bytes to read (default: 64, max: 1MB)"}}}
 		 }}, {"required", json::array({"address"})}}}}),
 
@@ -1324,7 +1340,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		Tool(&McpServer::ToolDisassemble, "inspect", kInteractive, true,
 			{{"name", "veh_disassemble"}, {"description", "Disassemble instructions at an address."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"address", {{"type", "string"}, {"description", "Hex address"}}},
+			{"address", {{"type", "string"}, {"description", "Address: hex, module+RVA or unique [module!]function"}}},
 			{"count", {{"type", "integer"}, {"description", "Number of instructions (default: 20)"}}}
 		 }}, {"required", json::array({"address"})}}}}),
 
@@ -1337,9 +1353,11 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}, {"required", json::array({"threadId"})}}}}),
 
 		Tool(&McpServer::ToolSymbolize, "inspect", 0, true,
-			{{"name", "veh_symbolize"}, {"description", "Resolve addresses to module!function+offset (PDB symbol, else nearest export, else module+RVA) plus source file/line when available. Works while the target runs. Up to 256 addresses per call, e.g. trace targets or stack values."},
+			{{"name", "veh_symbolize"}, {"description", "Resolve addresses to symbols/source lines, or search name=[module!]function with max_results=1-10. Name search lists candidates and never chooses an ambiguous/truncated/incomplete result; forwarder addresses stay null. Requires backend FindSymbols for names. Address input accepts module+hex RVA (0x optional) or an unambiguous symbol. Up to 256 input addresses."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "One address (hex, or module+RVA)"}}},
+            {"name", {{"type", "string"}, {"description", "Name search instead of address(es): function or module!function; wildcard patterns allowed"}}},
+            {"max_results", {{"type", "integer"}, {"minimum", 1}, {"maximum", 10}, {"default", 10}}},
 			{"addresses", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Several addresses (max 256)"}}}
 		 }}}}}),
 
@@ -1952,9 +1970,13 @@ json McpServer::DispatchTool(const std::string& name, const json& args, bool* kn
     if (session_.IsRemoteTarget() && tool->category == std::string("breakpoint") &&
         args.contains("condition") && args["condition"] != "" && args["condition"] != nullptr)
         return {{"error", "Conditional breakpoint evaluation is not supported by this remote path"}};
-	auto result = (this->*tool->handler)(args);
-    operation.release();
-    return result;
+    try {
+        auto result = (this->*tool->handler)(args);
+        operation.release();
+        return result;
+    } catch (const AddressResolutionError& error) {
+        return {{"error", error.what()}, {"code", error.code}};
+    }
 }
 
 json McpServer::RunNestedTool(const std::string& name, const json& args) {
