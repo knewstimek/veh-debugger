@@ -1,4 +1,5 @@
 - Publish a release only when the user explicitly authorizes it and chooses the version. Follow `RELEASING.md` exactly.
+- Release metadata matching must accept both LF and CRLF and preserve line endings; repeated preparation must not duplicate headings or change dependency versions. Keep `test/test_release_metadata.py` as the boundary regression.
 - Before committing or packaging release-facing artifacts, remove or generalize personal machine paths, credentials, private target names, and any details that reveal which real program or protected sample was being debugged; use synthetic fixtures and neutral examples instead.
 - Use `docs/DEVELOPMENT_TOOLS.md` as the catalog for reusable MCP scenario, trace-validation, parity, and IPC-compatibility tooling; extend those tools instead of adding one-off harnesses when practical.
 

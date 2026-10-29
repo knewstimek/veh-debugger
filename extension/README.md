@@ -2,6 +2,10 @@
 
 Windows debugger based on **VEH (Vectored Exception Handler)** instead of the Windows Debug API. Ideal for reverse engineering targets with anti-debug protection.
 
+## Module and symbol selection
+
+MCP symbol search lists up to ten candidates with image bases, paths and available address widths. Use `veh_symbolize(name="Function", module_base="0x...")` or `0xBASE!Function` in address expressions to select a duplicate image. Unknown widths stay unknown; external backend support is required for the new queries. See [the changelog](CHANGELOG.md) for upgrade notes.
+
 ## Features
 
 - **Anti-debug friendly** — Uses VEH instead of `ntdll!DbgUiRemoteBreakin`, bypasses common anti-debug checks

@@ -2,6 +2,10 @@
 
 These bounded command-line helpers are the preferred way to reproduce and validate MCP trace changes. Run them from the repository root. Examples use only synthetic build targets; do not commit local machine paths, credentials, private target names, trace artifacts, or details that identify a real analyzed program.
 
+## Release metadata boundary
+
+`test/test_release_metadata.py` runs metadata-only preparation in isolated LF and CRLF Git fixtures. It verifies synchronized versions, unchanged dependency versions, preserved line endings and idempotent headings/notes. Run it with `py -3 tools/run_tests.py test_release_metadata.py --jobs 1 --timeout 90`; it is also included in the release test set.
+
 ## Tool catalog
 
 | Tool | Purpose |

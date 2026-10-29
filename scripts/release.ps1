@@ -58,12 +58,12 @@ function Set-ReleaseMetadata {
         '\{"version", "\d+\.\d+\.\d+"\}' `
         "{`"version`", `"$Version`"}"
     Replace-Checked (Join-Path $repoRoot 'extension\package.json') `
-        '(?m)^(  "version": ")\d+\.\d+\.\d+(",)$' `
+        '(?m)^(  "version": ")\d+\.\d+\.\d+(",\r?)$' `
         "`${1}$Version`${2}"
 
     $lockPath = Join-Path $repoRoot 'extension\package-lock.json'
     $lockText = Read-Utf8File $lockPath
-    $lockPattern = '(?m)^(\s*"version": ")\d+\.\d+\.\d+(",)$'
+    $lockPattern = '(?m)^(\s*"version": ")\d+\.\d+\.\d+(",\r?)$'
     $lockMatches = [regex]::Matches($lockText, $lockPattern)
     if ($lockMatches.Count -lt 2) {
         throw "Expected at least two package-lock version fields, found $($lockMatches.Count)."
@@ -236,6 +236,7 @@ function Assert-Archives {
 
 function Invoke-ReleaseTests {
     $tests = @(
+        'test/test_release_metadata.py',
         'test/test_step.py',
         'test/test_stepin.py',
         'test/test_bp_masking.py',

@@ -4,6 +4,10 @@
 
 An in-process Windows debugger built on **VEH (Vectored Exception Handler)**. Breakpoints, hardware watchpoints, memory/register inspection, pointer-chain and runtime call tracing -- **every debugging operation is exposed as a callable, headless primitive.** With no GUI to drive, an AI agent calls them directly as MCP functions; a human uses the same engine through DAP in VSCode.
 
+## Module and symbol selection
+
+Use `veh_symbolize(name="Function", max_results=10)` to list symbol candidates. Candidates and `veh_modules` include image paths, bases and available 32/64-bit widths; unavailable widths remain unknown. Select duplicate images with `module_base="0x..."` or use `0xBASE!Function` in address expressions. Ambiguous names are never resolved by choosing the first match. External backends must support these queries; selecting an image does not switch the session's execution mode.
+
 ## Why VEH
 
 It doesn't use the Windows Debug API. Instead of `DebugActiveProcess` / `NtSetInformationThread`, it catches exceptions from inside the target via VEH, so `PEB.BeingDebugged` stays 0. The PEB/NtQuery-based anti-debug checks in Themida and VMProtect don't see the debugger. (Kernel anti-cheats that scan for VEH registration itself, like EAC, are the exception.)

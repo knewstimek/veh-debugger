@@ -2,7 +2,7 @@
   "name": "veh-debugger",
   "displayName": "VEH Debugger",
   "description": "Windows VEH debugger — anti-debug bypass, execution-path tracing, hardware breakpoints, memory watch and disassembly. DAP & MCP supported.",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "icon": "images/icon.png",
   "publisher": "knewstimek",
   "license": "MIT",
