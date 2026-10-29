@@ -867,7 +867,7 @@ json McpServer::ToolBranchTrace(const json& args) {
 		if (!q->lastBranches) out["last_branches"]["reason"] = q->lastBranchesReason;
 		if (!q->fullPath) out["full_path"]["reason"] = q->fullPathReason;
 		if (!q->lastBranches && !q->fullPath)
-			out["alternative"] = "veh_trace_basic_blocks traces by single-stepping: slower, works everywhere";
+			out["alternative"] = "Use veh_trace_basic_blocks if supported; compress_paths reduces records, not single-step exceptions";
 		return out;
 	}
 	if (op == "start" || op == "stop") {

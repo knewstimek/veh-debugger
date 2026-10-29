@@ -342,6 +342,53 @@ matrix accepts `--old-supports-existing-extensions` and
 `--expect-old-no-collection-policies`; it verifies policy refusal before target
 execution as well as default old/new compatibility.
 
+### MCP usage size
+
+README and development-document text is not emitted by MCP initialization.
+The default `lite` and `interactive` tool inventories do not eagerly expose
+`veh_trace_basic_blocks`; discover it through a toolbox manifest/description.
+Its two optional fields add no new tools. Measure actual serialized bytes with
+`tools/measure_mcp_schema.py`; bytes are not a model-specific token count.
+Code collection can add inline bytes even when paths compress: use file artifacts
+and `output_file` for bounded metadata responses when large captures are needed.
+`output_file` reduces the MCP response while the server still builds the full
+JSON result; it does not skip target collection.
+
+### Backend adoption checklist
+
+External backends have not been updated by this frontend/VEH change. Share this
+section and `src/common/ipc_protocol.h` with their maintainers:
+
+- Keep wire10 request/response prefixes fixed; use the versioned size constants,
+  not a newly enlarged `sizeof` for an old wire layout.
+- Implement both wire11 collection flags before advertising
+  `kCapBasicTracePolicies` (GetCapabilities flags bit6). CPU support, an existing
+  TraceBasicBlocks command or transport connectivity is insufficient.
+- Validate flags and incompatible combinations before target effects; refuse
+  unsupported policy requests instead of silently ignoring them. Snapshot
+  suppression skips collection, not just JSON fields.
+- Return the responseV9 header with exact `appliedCollectionFlags`,
+  `decodeIncomplete` and retained `expandedEventCount`. Preserve non-Ok refusal
+  reasons. Empty snapshot arrays must have no snapshot references.
+- For compression, implement event schema3 and immutable raw-suffix Repeat
+  records with exact stride, branch choices and thread identity. Flush at
+  collection/loss/exception/code-version/unknown-metadata boundaries; retain
+  partial tails raw. Never infer an unobserved path.
+- File compression uses artifact/transport schema2; raw files remain schema1.
+  Count physical records separately from logical retained/dropped events.
+  Validate file thread/count receipts against the control response.
+- Perform collection in backend IPC, retaining direct/batch/action parity.
+  Prove compatibility, real capture boundaries and exact stops on that backend;
+  frontend fixture success alone does not qualify another collector. The VEH
+  HW-breakpoint conflict refusal is a VEH implementation limitation; another
+  backend may support coexistence only if its ownership and precise stops are
+  actually verified.
+
+Qualification starts with the existing `veh.trace.parity`, IPC matrix and
+`test_backend_results.py` malformed-receipt cases. Default calls must continue
+working with a wire10 peer; new policies must fail before execution when bit6 is
+absent. See the collection-policy section above for the exact current limits.
+
 ## Occurrence-scoped collection
 
 Use `occurrence_window` to collect one or more dispatcher/instruction cycles:

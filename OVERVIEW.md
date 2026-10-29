@@ -193,8 +193,8 @@ Records which code paths call a given function by placing a trace BP and collect
 
 Single-steps one VEH-stopped thread inside a bounded address range while all
 storage is allocated before resume. The VEH path updates fixed-size open-addressed
-block/edge tables and captures snapshots only for initial entry and newly observed
-edges; it performs no JSON work or heap allocation.
+block/edge tables and, by default, captures snapshots only for initial entry and newly
+observed edges; it performs no JSON work or heap allocation.
 
 Responses declare aggregate schema version 4, mode, and the selected OS thread.
 The IPC reuses reserved prefix fields for an explicit wire version and request/header
@@ -203,6 +203,21 @@ serializes the matching legacy response header, keeping the following variable
 arrays at the offset expected by each caller. Current start failures return a typed
 reason together with stopped/context availability, normalized IP/range, and decode
 status/count; legacy peers retain their original result shape.
+Wire v11 adds `collect_snapshots=false` (actual register/stack capture and buffer
+suppression) and `compress_paths=true` (lossless observed path repeats).
+The latter requires code capture, excludes ordered memory/register events and
+target windows, and uses fixed32-event suffix/pending storage. It preserves exact
+sequence stride, branch choices and repetitions; gaps, exceptions, unknown code
+and observed version changes terminate runs. Partial tails remain raw.
+Inline schema3 and compressed file schema2 use immutable Repeat markers.
+TF exception counts are unchanged. Capability bit6 and exact response policy
+receipts gate new options; default requests retain wire10 compatibility.
+The VEH implementation refuses active HW breakpoints for new-policy captures.
+Known instruction metadata is not redecoded at every step, so arbitrary concurrent
+self-modifying code remains outside the fidelity guarantee.
+See [backend adoption](docs/DEVELOPMENT_TOOLS.md#backend-adoption-checklist)
+for wire fields, counting rules and qualification requirements.
+
 Optional `collect_events` appends event-schema-v1 records for the initial block
 entry and every observed block transition. Each record carries the trace-step
 sequence and thread ID. The default inline mode preallocates a bounded array;
@@ -307,6 +322,8 @@ read. `filteredSteps` and `startConditionMet` make skipped windows observable.
 Post-processing caches `VirtualQueryEx` regions and labels pointer-like values as
 image/mapped/private/stack plus protection and guard state. It also emits measured
 re-entry summaries (`loop_folds`) rather than assigning VM dispatcher semantics.
+These hit-count summaries do not preserve path order; the optional Repeat stream
+above encodes consecutive observed paths and is a separate facility.
 Exception edges retain a fault snapshot, optional fault address, continuation
 snapshot, and hit count. Windows does not expose the executed SEH handler through
 this continue callback, so no speculative handler address is returned.

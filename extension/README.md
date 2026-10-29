@@ -111,9 +111,17 @@ when full; breakpoint tools then report no free slot so an existing breakpoint c
 
 `veh_trace_basic_blocks` supports x86/x64 ordered memory and register provenance,
 self-modifying code versions, dispatcher occurrence windows, and file-backed
-JSON/JSONL or `.vtc` artifacts. Direct calls, `veh_batch`, and breakpoint actions
+JSON/JSONL, `.vtc` code or `.vte` ordered-event artifacts. Direct calls, `veh_batch`, and breakpoint actions
 share the same trace semantics. File formats use portable integer layouts, while
 the debugger and capture transport remain Windows-hosted.
+Set `collect_snapshots=false` to skip first block/edge and exception register/stack
+capture. `compress_paths=true, collect_code=true` preserves observed path order,
+branch choices and repeat counts in inline/file events, with explicit collection,
+loss, exception and observed code-version barriers. It reduces records, not TF
+exceptions. Compression excludes ordered memory/register events and target windows;
+new policies require backend support and the VEH implementation refuses active
+hardware-breakpoint conflicts before execution. Defaults are unchanged.
+See the repository's `docs/DEVELOPMENT_TOOLS.md` for usage and backend adoption.
 `veh_targeted_capture` repeats bounded setup for an input matrix, retains a
 pre/post occurrence ring, embeds thread-environment evidence, and writes one
 verified server-side JSON artifact per input.

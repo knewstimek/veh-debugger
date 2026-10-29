@@ -11,6 +11,7 @@
 - **Guest process discovery (MCP)** -- `veh_processes` asks a capable guest or VM backend for one complete OS process snapshot, returning PIDs, address widths and escaped short image names. It can be called through `veh_toolbox` or `veh_batch`; unsupported backends and malformed responses fail explicitly. Use a returned PID with `veh_attach(target_scope="guest")`; guest launch/stopOnEntry is still pending.
 
 ### Changed
+- **Trace discovery and backend guidance** -- README, tool description and CLI help explain optional snapshot collection and repeated paths; backend adoption requirements document wire11, capability gating and validation. No new eager MCP tools are added.
 - **Step-out completion (MCP)** -- `veh_step_out` waits for the matching thread to stop and returns its instruction pointer. `timeout` accepts 1-300 seconds (default 30); timing out does not cancel execution.
 - **Guest checkpoint and capture routing** -- checkpoint regions use the backend memory map instead of host process APIs. Guest targeted captures omit TEB capture by default; explicit unsupported TEB requests still fail. Local guest/VM backend exchanges have a 30-second timeout floor.
 

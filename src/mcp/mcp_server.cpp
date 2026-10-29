@@ -1379,7 +1379,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}, {"required", json::array({"addresses"})}}}}),
 
 		Tool(&McpServer::ToolTraceBasicBlocks, "trace", kCapture, true,
-			{{"name", "veh_trace_basic_blocks"}, {"description", "Bounded semantic trace for one VEH-stopped thread. Returns versioned aggregate metadata and unique blocks/edges; optional ordered streams cover transitions, per-occurrence memory accesses, instruction register deltas, and runtime code versions in one sequence space. Function-scoped mode records the entry return contract, filters external-call execution, and stops at the original return. Startup failures report structured stopped/IP/range/decode diagnostics."},
+			{{"name", "veh_trace_basic_blocks"}, {"description", "Trace one stopped thread with optional snapshots and compress_paths for lossless path repeats. Optional ordered code/memory/register events and function-return scope. collect_snapshots=false skips capture; compression requires collect_code. New policies require backend support; VEH rejects active HW breakpoints. TF exception counts are unchanged."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID currently stopped by VEH; its RIP/EIP must be inside the range"}}},
 			{"start", {{"type", "string"}, {"description", "Inclusive range start (hex or module+RVA)"}}},
@@ -1839,7 +1839,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 	targetedProperties["steps"] = {{"type", "array"}, {"maxItems", 500},
 		{"description", "Per-input veh_batch setup steps"}};
 	targetedProperties["trace"] = {{"type", "object"},
-		{"description", "veh_trace_basic_blocks arguments including threadId/start/end"}};
+		{"description", "Trace arguments incl. threadId/start/end; compress_paths is incompatible with target windows."}};
 	targetedProperties["trigger"] = {{"type", "object"},
 		{"description", "{address, occurrence?}; address may use a batch reference"}};
 	targetedProperties["window"] = {{"type", "object"},

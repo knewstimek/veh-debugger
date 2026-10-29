@@ -41,6 +41,14 @@ mixed-version IPC commands are documented in
 [`docs/DEVELOPMENT_TOOLS.md`](../docs/DEVELOPMENT_TOOLS.md). Prefer those
 bounded runners to one-off process harnesses.
 
+For basic-block policy changes, build `trace_path_regression` with the debugger
+targets before running `tools/run_trace_parity.py`. The basic-block suite checks
+raw versus expanded repeats, snapshot suppression, partial tails, loss, collection
+gaps, code versions, HW conflicts and direct/batch/action parity. Include
+`test_trace_event_stream.py` for artifact changes and `test_backend_results.py`
+for policy/refusal and malformed-repeat receipts. Existing backend-adoption
+instructions and mixed-version matrix options are in the development-tools guide.
+
 For architecture-sensitive MCP behavior, rerun the applicable test against the
 x86 build:
 
