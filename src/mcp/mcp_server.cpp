@@ -1976,8 +1976,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
     for (auto& tool : tools) {
         if (tool.name == "veh_list_breakpoints" || tool.name == "veh_stack_trace" || tool.name == "veh_continue" ||
                 tool.name == "veh_step_in" || tool.name == "veh_step_over" || tool.name == "veh_step_out")
-            tool.definition["inputSchema"]["properties"]["include_annotations"] = {{"type", "boolean"}, {"default", true},
-                {"description", "Include available saved analysis notes; lists/stacks use exact-address labels only"}};
+            tool.definition["inputSchema"]["properties"]["include_annotations"] = {{"type", "boolean"}, {"default", true}};
     }
 	return tools;
 }
