@@ -79,6 +79,8 @@ enum class IpcCommand : uint32_t {
 	EnumLocals             = 0x0042,
 	Symbolize              = 0x0043,  // addresses -> module!function+offset, source line
     FindSymbols            = 0x0045,  // bounded name -> candidate addresses; no first-match selection
+    GetModulesEx           = 0x0046,  // GetModulesResponse + ModuleInfoEx[count]; empty request
+    FindSymbolsInModule    = 0x0047,  // explicit image base, filter BEFORE candidate limit
 	DisplayType            = 0x0044,  // PDB struct layout (+ values) at an address
 
 	// Tracing
@@ -440,6 +442,11 @@ struct ModuleInfo {
 	char     path[512];
 };
 
+// Additive: legacy ModuleInfo/GetModules stays unchanged. Inspect the loaded PE
+// optional-header magic inside the backend; 0 means unknown, never infer from VA.
+struct ModuleInfoEx { ModuleInfo module; uint32_t addressBits; }; // 0, 32, 64
+static_assert(sizeof(ModuleInfoEx) == sizeof(ModuleInfo) + 4);
+
 struct GetModulesResponse {
 	IpcStatus status;
 	uint32_t  count;
@@ -505,6 +512,10 @@ constexpr uint32_t kFindSymbolsMaxResults = 10;
 constexpr uint32_t kFindSymbolsTruncated = 1, kFindSymbolsIncomplete = 2;
 constexpr uint32_t kFindSymbolForwarder = 1, kFindSymbolExport = 2;
 struct FindSymbolsRequest { char name[256]; uint32_t maxResults; };
+// name is an unqualified symbol/pattern (no '!'); moduleBase must be nonzero.
+// Response format and flags are identical to FindSymbols. No global fallback.
+struct FindSymbolsInModuleRequest { uint64_t moduleBase; FindSymbolsRequest query; };
+static_assert(sizeof(FindSymbolsInModuleRequest) == 268);
 struct FindSymbolsResponse { IpcStatus status; uint32_t count, flags; };
 struct FindSymbolEntry {
     uint64_t address, moduleBase; // forwarder: address=0, never its export-string address

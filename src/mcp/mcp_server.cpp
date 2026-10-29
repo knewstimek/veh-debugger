@@ -1075,11 +1075,20 @@ bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
     auto resolve = [&](const std::string& name, uint64_t& address) {
         if (name.find_first_of("*?") != std::string::npos)
             throw AddressResolutionError("Use veh_symbolize(name=...) to list symbol-pattern candidates", "symbol_pattern");
-        const auto found = session_.FindSymbols(name);
+        uint64_t moduleBase = 0;
+        auto query = name;
+        const auto bang = name.find('!');
+        if (bang != std::string::npos && name.rfind("0x", 0) == 0) {
+            if (!number(name.substr(0, bang), moduleBase, 16) || !moduleBase)
+                throw AddressResolutionError("Invalid explicit module base", "invalid_module_base");
+            query = name.substr(bang + 1);
+        }
+        const auto found = session_.FindSymbols(query, kFindSymbolsMaxResults, moduleBase);
         if (!found.ok) throw AddressResolutionError(found.error, "symbol_lookup_failed");
         if (found.truncated || found.matches.size() > 1)
             throw AddressResolutionError("Ambiguous symbol '" + name +
-                "'; list up to 10 candidates with veh_symbolize(name=...), then use module!function or an explicit address", "ambiguous_symbol");
+                "'; select a candidate with 0xBASE!function", "ambiguous_symbol",
+                {{"candidates", SymbolCandidates(found.matches)}, {"truncated", found.truncated}, {"incomplete", found.incomplete}});
         if (found.incomplete)
             throw AddressResolutionError("Symbol lookup is incomplete; an address cannot be selected safely", "incomplete_symbol_lookup");
         if (found.matches.empty())
@@ -1105,13 +1114,19 @@ bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
             if (!number(right, offset, 16) || !session_.IsAttached()) return false;
             bool moduleFound = false;
             if (left.find('!') == std::string::npos) {
-                const auto modules = session_.GetModules();
+                std::string moduleError;
+                const auto modules = session_.GetModules(&moduleError);
+                if (!moduleError.empty()) throw AddressResolutionError(moduleError, "module_lookup_failed");
+                json candidates = json::array();
+                std::set<uint64_t> bases;
                 for (const auto& module : modules) if (_stricmp(module.name.c_str(), left.c_str()) == 0) {
-                    if (moduleFound && base != module.baseAddress)
-                        throw AddressResolutionError("Module basename '" + left +
-                            "' matches multiple loaded images; use an explicit base address", "ambiguous_module");
+                    if (bases.insert(module.baseAddress).second && candidates.size() < 10)
+                        candidates.push_back(ModuleIdentity(module));
                     base = module.baseAddress; moduleFound = true;
                 }
+                if (bases.size() > 1) throw AddressResolutionError("Module basename '" + left +
+                    "' matches multiple loaded images; use 0xBASE+0xRVA or 0xBASE!function", "ambiguous_module",
+                    {{"candidates", candidates}, {"truncated", bases.size() > candidates.size()}});
                 auto lower = left;
                 std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                 const bool moduleName = lower.size() >= 4 && (lower.substr(lower.size() - 4) == ".dll" ||
@@ -1134,7 +1149,7 @@ bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
         }
     }
     if (!session_.IsAttached() || text.front() == '-' || text.front() == '+' ||
-        (text.front() >= '0' && text.front() <= '9')) return false;
+        ((text.front() >= '0' && text.front() <= '9') && text.find('!') == std::string::npos)) return false;
     resolve(text, out);
     return inTargetWidth(out);
 }
@@ -1359,11 +1374,12 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}, {"required", json::array({"threadId"})}}}}),
 
 		Tool(&McpServer::ToolSymbolize, "inspect", 0, true,
-			{{"name", "veh_symbolize"}, {"description", "Resolve addresses to symbols/source lines, or search name=[module!]function with max_results=1-10. Name search lists candidates and never chooses an ambiguous/truncated/incomplete result; forwarder addresses stay null. Requires backend FindSymbols for names. Address input accepts module+hex RVA (0x optional) or an unambiguous symbol. Up to 256 input addresses."},
+			{{"name", "veh_symbolize"}, {"description", "Resolve addresses to symbols/source lines, or search name=[module!]function with max_results=1-10. Name search lists candidates and never chooses an ambiguous/truncated/incomplete result; forwarder addresses stay null. Candidates include image path/width (unknown on legacy backends). module_base selects an exact image before limiting candidates (requires FindSymbolsInModule). Address input accepts module+hex RVA (0x optional), 0xBASE!function, or an unambiguous symbol. Up to 256 input addresses."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "One address (hex, or module+RVA)"}}},
             {"name", {{"type", "string"}, {"description", "Name search instead of address(es): function or module!function; wildcard patterns allowed"}}},
             {"max_results", {{"type", "integer"}, {"minimum", 1}, {"maximum", 10}, {"default", 10}}},
+            {"module_base", {{"type", "string"}, {"description", "Name search: exact 0x-prefixed image base; name must be unqualified. Requires FindSymbolsInModule."}}},
 			{"addresses", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Several addresses (max 256)"}}}
 		 }}}}}),
 
@@ -1981,7 +1997,7 @@ json McpServer::DispatchTool(const std::string& name, const json& args, bool* kn
         operation.release();
         return result;
     } catch (const AddressResolutionError& error) {
-        return {{"error", error.what()}, {"code", error.code}};
+        auto result = error.details; result["error"] = error.what(); result["code"] = error.code; return result;
     }
 }
 

@@ -73,6 +73,7 @@ struct ModuleEntry {
 	std::string path;
 	uint64_t baseAddress;
 	uint32_t size;
+    uint32_t addressBits = 0;
 };
 
 struct DisasmInsn {
@@ -519,7 +520,7 @@ public:
         std::string error;
         std::vector<FindSymbolEntry> matches;
     };
-    SymbolMatches FindSymbols(const std::string& name, uint32_t maximum = kFindSymbolsMaxResults);
+    SymbolMatches FindSymbols(const std::string& name, uint32_t maximum = kFindSymbolsMaxResults, uint64_t moduleBase = 0);
 
 	// --- IPC event handling ---
 	using EventCallback = std::function<void(uint32_t eventId, const uint8_t* payload, uint32_t size)>;

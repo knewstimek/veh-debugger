@@ -116,6 +116,10 @@ int wmain(int argc, wchar_t** argv) {
         if (!bytes.empty() && !transfer(pipe, false, bytes.data(), header.payloadSize)) break;
         const auto command = static_cast<veh::IpcCommand>(header.command);
         if (command == veh::IpcCommand::GetCapabilities) {
+            if (mode == L"symbols-unreported") {
+                if (!reply(pipe, header.command, veh::IpcStatus::Unsupported)) break;
+                continue;
+            }
             if (mode == L"cap-exit") ExitProcess(0xC0000135U);
             veh::GetCapabilitiesResponse caps{};
             caps.status = veh::IpcStatus::Ok; caps.backend = veh::IpcBackend::Hypervisor;
@@ -133,6 +137,10 @@ int wmain(int argc, wchar_t** argv) {
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::TraceVirtualCpu);
             }
             if (symbolsMode) {
+                if (mode == L"ops-action-symbols") veh::SetCommandSupported(caps.commands, veh::IpcCommand::FindSymbolsInModule);
+                if (mode.rfind(L"symbols-images", 0) == 0)
+                    for (auto op : {veh::IpcCommand::GetModulesEx, veh::IpcCommand::FindSymbolsInModule})
+                        veh::SetCommandSupported(caps.commands, op);
                 for (auto op : {veh::IpcCommand::GetModules, veh::IpcCommand::ResolveFunction})
                     veh::SetCommandSupported(caps.commands, op);
                 if (mode != L"symbols-no-caps") veh::SetCommandSupported(caps.commands, veh::IpcCommand::FindSymbols);
@@ -242,6 +250,30 @@ int wmain(int argc, wchar_t** argv) {
             std::memcpy(result.data(), &response, sizeof(response));
             if (response.eventCount) std::memcpy(result.data() + sizeof(response), events, sizeof(events));
             if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
+        } else if (symbolsMode && command == veh::IpcCommand::GetModulesEx) {
+            struct { veh::GetModulesResponse head; veh::ModuleInfoEx modules[2]; } response{};
+            response.head = {veh::IpcStatus::Ok, 2};
+            for (uint32_t i = 0; i < 2; ++i) {
+                auto& detail = response.modules[i]; auto& module = detail.module;
+                module.baseAddress = 0x1000 + i * 0x1000; module.size = 0x1000;
+                strcpy_s(module.name, "ntdll.dll");
+                strcpy_s(module.path, i ? "C:\\Windows\\System32\\ntdll.dll" : "C:\\Windows\\SysWOW64\\ntdll.dll");
+                detail.addressBits = mode == L"symbols-images-badbits" ? 48 : i ? 64 : 32;
+            }
+            size_t size = sizeof(response);
+            if (mode == L"symbols-images-short") --size;
+            if (!send(pipe, header.command, &response, static_cast<uint32_t>(size))) break;
+        } else if (symbolsMode && command == veh::IpcCommand::FindSymbolsInModule) {
+            ++symbolLookupRequests;
+            veh::FindSymbolsInModuleRequest request{};
+            if (bytes.size() != sizeof(request)) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
+            std::memcpy(&request, bytes.data(), sizeof(request));
+            struct { veh::FindSymbolsResponse head; veh::FindSymbolEntry entry; } response{};
+            response.head = {veh::IpcStatus::Ok, 1, 0};
+            response.entry.moduleBase = mode == L"symbols-images-wrongbase" ? 0x3000 : request.moduleBase;
+            response.entry.address = response.entry.moduleBase + 0x100;
+            strcpy_s(response.entry.moduleName, "ntdll.dll"); strcpy_s(response.entry.functionName, "Probe");
+            if (!reply(pipe, header.command, response)) break;
         } else if (symbolsMode && command == veh::IpcCommand::FindSymbols) {
             ++symbolLookupRequests;
             veh::FindSymbolsRequest request{};

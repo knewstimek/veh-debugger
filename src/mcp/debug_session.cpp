@@ -1217,11 +1217,13 @@ std::vector<ModuleEntry> DebugSession::GetModules(std::string* error) {
 	if (error) error->clear();
 	// The capability is authoritative: an unadvertised command is refused,
 	// never reported as an empty list.
-	if (!backendInfo_.Supports(IpcCommand::GetModules)) {
+    const bool extended = backendInfo_.reported && backendInfo_.Supports(IpcCommand::GetModulesEx);
+    const auto command = extended ? IpcCommand::GetModulesEx : IpcCommand::GetModules;
+	if (!backendInfo_.Supports(command)) {
 		if (error) *error = "GetModules: request unsupported by backend (not advertised)";
 		return result;
 	}
-	if (!ReceiveBackendReply(IpcCommand::GetModules, nullptr, 0, respData, "GetModules", detail)) {
+	if (!ReceiveBackendReply(command, nullptr, 0, respData, "GetModules", detail)) {
 		if (error) *error = detail;
 		return result;
 	}
@@ -1232,7 +1234,8 @@ std::vector<ModuleEntry> DebugSession::GetModules(std::string* error) {
 	if (respData.size() < sizeof(header)) { if (error) *error = detail; return result; }
 	std::memcpy(&header, respData.data(), sizeof(header));
 	const size_t payloadSize = respData.size() - sizeof(header);
-	if (payloadSize % sizeof(ModuleInfo) != 0 || header.count != payloadSize / sizeof(ModuleInfo)) {
+    const size_t stride = extended ? sizeof(ModuleInfoEx) : sizeof(ModuleInfo);
+	if (payloadSize % stride != 0 || header.count != payloadSize / stride) {
 		if (error) *error = "GetModules: incomplete or malformed list (count does not match the payload)";
 		return result;
 	}
@@ -1240,7 +1243,13 @@ std::vector<ModuleEntry> DebugSession::GetModules(std::string* error) {
 	result.reserve(header.count);
 	for (uint32_t i = 0; i < header.count; ++i) {
 		ModuleInfo info{};
-		std::memcpy(&info, respData.data() + sizeof(header) + static_cast<size_t>(i) * sizeof(info), sizeof(info));
+        const auto* row = respData.data() + sizeof(header) + static_cast<size_t>(i) * stride;
+		std::memcpy(&info, row, sizeof(info));
+        uint32_t bits = 0;
+        if (extended) std::memcpy(&bits, row + sizeof(info), sizeof(bits));
+        if (bits != 0 && bits != 32 && bits != 64) {
+            result.clear(); if (error) *error = "GetModules: invalid image addressBits"; return result;
+        }
 		const auto* nameEnd = static_cast<const char*>(std::memchr(info.name, '\0', sizeof(info.name)));
 		const auto* pathEnd = static_cast<const char*>(std::memchr(info.path, '\0', sizeof(info.path)));
 		if (!nameEnd || !pathEnd) {
@@ -1250,7 +1259,7 @@ std::vector<ModuleEntry> DebugSession::GetModules(std::string* error) {
 		}
 		result.push_back({std::string(info.name, static_cast<size_t>(nameEnd - info.name)),
 			std::string(info.path, static_cast<size_t>(pathEnd - info.path)),
-			info.baseAddress, info.size});
+			info.baseAddress, info.size, bits});
 	}
 	return result;
 }
@@ -2280,20 +2289,27 @@ uint64_t DebugSession::ResolveSourceLine(const std::string& file, uint32_t line)
 }
 
 
-DebugSession::SymbolMatches DebugSession::FindSymbols(const std::string& name, uint32_t maximum) {
+DebugSession::SymbolMatches DebugSession::FindSymbols(const std::string& name, uint32_t maximum, uint64_t moduleBase) {
     SymbolMatches result;
     if (name.empty() || name.size() >= sizeof(FindSymbolsRequest::name) ||
         name.find('\0') != std::string::npos || !maximum || maximum > kFindSymbolsMaxResults) {
         result.error = "Symbol name must be 1-255 bytes and max_results must be 1-10"; return result;
     }
-    if (!attached_ || !backendInfo_.reported || !backendInfo_.Supports(IpcCommand::FindSymbols)) {
-        result.error = "Backend does not advertise bounded symbol-name lookup (FindSymbols 0x45)"; return result;
+    const auto command = moduleBase ? IpcCommand::FindSymbolsInModule : IpcCommand::FindSymbols;
+    if (!attached_ || !backendInfo_.reported || !backendInfo_.Supports(command)) {
+        result.error = moduleBase ? "Backend does not advertise base-scoped symbol lookup (FindSymbolsInModule 0x47)" :
+            "Backend does not advertise bounded symbol-name lookup (FindSymbols 0x45)"; return result;
+    }
+    if (moduleBase && (name.find('!') != std::string::npos || (TargetAddressBits() == 32 && moduleBase > UINT32_MAX))) {
+        result.error = "Use an unqualified symbol and a module base within the target address width"; return result;
     }
     FindSymbolsRequest request{}; request.maxResults = maximum;
     std::memcpy(request.name, name.data(), name.size());
     std::vector<uint8_t> bytes;
     PipeExchangeDiagnostics diagnostics{};
-    if (!ipcTransport_->SendAndReceive(IpcCommand::FindSymbols, &request, sizeof(request), bytes, 10000, &diagnostics)) {
+    FindSymbolsInModuleRequest scoped{moduleBase, request};
+    if (!ipcTransport_->SendAndReceive(command, moduleBase ? static_cast<const void*>(&scoped) : static_cast<const void*>(&request),
+            moduleBase ? sizeof(scoped) : sizeof(request), bytes, 10000, &diagnostics)) {
         result.error = "FindSymbols: " + DescribeIpcFailure(&diagnostics); return result;
     }
     if (!ValidateBackendStatus(bytes, "FindSymbols", result.error)) return result;
@@ -2308,6 +2324,7 @@ DebugSession::SymbolMatches DebugSession::FindSymbols(const std::string& name, u
         FindSymbolEntry entry{};
         std::memcpy(&entry, bytes.data() + sizeof(header) + i * sizeof(entry), sizeof(entry));
         if ((entry.flags & ~(kFindSymbolForwarder | kFindSymbolExport)) || !entry.moduleBase ||
+            (moduleBase && entry.moduleBase != moduleBase) ||
             !std::memchr(entry.functionName, 0, sizeof(entry.functionName)) || !entry.functionName[0] ||
             !std::memchr(entry.moduleName, 0, sizeof(entry.moduleName)) ||
             (!entry.moduleName[0] && !(header.flags & kFindSymbolsIncomplete)) ||

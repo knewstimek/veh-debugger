@@ -72,6 +72,39 @@ def test_name_lookup_and_direct_address(session):
     assert report["results"][0]["result"] == result, report
 
 
+def test_module_identity_and_base_selection(session):
+    client, entry, modules = session
+    target = modules["test_target.exe"]
+    # Inspect the fixture's PE header through existing IPC, independent of VA.
+    image = int(target["baseAddress"], 16)
+    dos = client.tool("veh_read_memory", {"address": hex(image + 0x3c), "size": 4})
+    offset = int.from_bytes(bytes.fromhex(dos["hex"].replace(" ", "")), "little")
+    header = client.tool("veh_read_memory", {"address": hex(image + offset + 24), "size": 2})
+    magic = int.from_bytes(bytes.fromhex(header["hex"].replace(" ", "")), "little")
+    expected_bits = {0x10b: 32, 0x20b: 64}[magic]
+    assert target["addressBits"] == expected_bits, target
+    for module in modules.values():
+        assert module["addressBits"] in (None, 32, 64), module
+    result = client.tool("veh_symbolize", {"name": "SharedProbe"})
+    for row in result["matches"]:
+        assert row["addressBits"] == expected_bits and row["modulePath"], row
+        selected = client.tool("veh_symbolize", {"name": "SharedProbe", "module_base": row["moduleBase"], "max_results": 1})
+        assert selected.get("resolved") and selected["address"] == row["address"], selected
+        listing = client.tool("veh_disassemble", {"address": row["selector"], "count": 1})
+        assert listing["instructions"][0]["address"] == row["address"], listing
+    ambiguous = client.tool("veh_disassemble", {"address": "SharedProbe", "count": 1})
+    assert len(ambiguous["candidates"]) == 3 and ambiguous["candidates"][0]["addressBits"] == expected_bits, ambiguous
+    for args in ({"name": "SharedProbe", "module_base": "0x0"},
+                 {"name": "SharedProbe", "module_base": "1000"},
+                 {"name": "SharedProbe", "module_base": "0x10000000000000000"},
+                 {"name": "SharedProbe", "module_base": hex(image + 1)},
+                 {"name": "test_target.exe!WorkFunction", "module_base": hex(image)}):
+        assert "error" in client.tool("veh_symbolize", args), args
+    selected = client.tool("veh_batch", {"steps": [{"tool": "veh_symbolize", "args": {
+        "name": "WorkFunction", "module_base": hex(image)}}]})
+    assert int(selected["results"][0]["result"]["address"], 16) == entry, selected
+
+
 def test_real_duplicate_exports_and_limits(session):
     client, _, _ = session
     found = client.tool("veh_symbolize", {"name": "SharedProbe"})
@@ -118,6 +151,9 @@ def test_synthetic_name_receipts_and_address_rules():
         def lookup(name="UniqueProbe", **options):
             return client.tool("veh_symbolize", {"name": name, **options})
         attach("symbols-ok")
+        legacy = client.tool("veh_modules")
+        assert legacy["modules"][0]["addressBits"] is None, legacy
+        assert "0x47" in client.tool("veh_symbolize", {"name": "UniqueProbe", "module_base": "0x1000"})["error"]
         many = lookup("ManyProbe*")
         assert many["count"] == 10 and many["truncated"] and not many["resolved"], many
         ambiguous = client.tool("veh_read_memory", {"address": "SharedProbe", "size": 1})
@@ -142,6 +178,8 @@ def test_synthetic_name_receipts_and_address_rules():
         for tool in ("veh_read_memory", "veh_write_memory", "veh_set_breakpoint"):
             result = client.tool(tool, {"address": "probe_a.dll+10", "data": "90", "size": 1})
             assert result.get("code") == "ambiguous_module", result
+            assert len(result["candidates"]) == 2 and not result["truncated"], result
+            assert all(row["addressBits"] is None for row in result["candidates"]), result
         attach("symbols-ok")
         for expression in ("10000110A", "0x10000110A", "4294967296", "0x10000120A-0x100"):
             for tool in ("veh_read_memory", "veh_write_memory", "veh_set_breakpoint"):
@@ -172,16 +210,50 @@ def test_name_search_in_breakpoint_actions():
                 "target_scope": "guest", "agent_args": ["--metadata", "ops-action-symbols"]})
             assert attached.get("success"), attached
             action = [{"tool": "veh_symbolize", "args": {"name": "SharedProbe"}},
-                      {"tool": "veh_symbolize", "args": {"name": "UniqueProbe"}}]
+                      {"tool": "veh_symbolize", "args": {"name": "UniqueProbe"}},
+                      {"tool": "veh_symbolize", "args": {"name": "Probe", "module_base": "0x1000"}}]
             installed = client.tool("veh_set_breakpoint", {"address": "0x1800", "action": action})
             assert installed.get("success"), installed
             stop = client.tool("veh_continue", {"threadId": 77, "wait": True, "timeout": 3}, timeout=5)
             assert stop.get("breakpointId") == 7, stop
             stats = client.tool("veh_threads")
-            assert stats["threads"][0]["name"] == "symbols:2", stats
+            assert stats["threads"][0]["name"] == "symbols:3", stats
             assert client.tool("veh_detach").get("success")
         with open(logfile, encoding="utf-8") as handle:
             assert "Breakpoint action completed with an error:" not in handle.read()
+
+
+def test_same_name_image_metadata_and_scoped_reply_validation():
+    with OwnedMcpClient() as client:
+        client.initialize("image-identity")
+        def attach(mode):
+            attached = client.tool("veh_attach", {"pid": 424242, "agent": os.path.join(RELEASE, "guest_backend_fixture.exe"),
+                "target_scope": "guest", "agent_args": ["--metadata", mode]})
+            assert attached.get("success"), attached
+        attach("symbols-images")
+        modules = client.tool("veh_modules")["modules"]
+        assert [row["addressBits"] for row in modules] == [32, 64], modules
+        assert modules[0]["path"] != modules[1]["path"], modules
+        ambiguous = client.tool("veh_read_memory", {"address": "ntdll.dll+10", "size": 1})
+        assert ambiguous["code"] == "ambiguous_module" and ambiguous["candidates"] == [
+            {key: value for key, value in row.items() if key != "size"} for row in modules], ambiguous
+        for base in ("0x1000", "0x2000"):
+            result = client.tool("veh_symbolize", {"name": "Probe", "module_base": base, "max_results": 1})
+            assert result["resolved"] and result["matches"][0]["moduleBase"] == base.upper().replace("0X", "0x"), result
+            read = client.tool("veh_read_memory", {"address": base + "!Probe", "size": 1})
+            assert int(read["address"], 16) == int(base, 16) + 0x100, read
+        attach("symbols-images-wrongbase")
+        assert "error" in client.tool("veh_symbolize", {"name": "Probe", "module_base": "0x1000"})
+        for mode in ("symbols-images-badbits", "symbols-images-short"):
+            attach(mode)
+            assert "error" in client.tool("veh_modules"), mode
+            assert client.tool("veh_read_memory", {"address": "ntdll.dll+10", "size": 1})["code"] == "module_lookup_failed"
+        assert client.tool("veh_detach").get("success")
+        attached = client.tool("veh_attach", {"pid": os.getpid(), "agent": os.path.join(RELEASE, "guest_backend_fixture.exe"),
+            "agent_args": ["--metadata", "symbols-unreported"]})
+        assert attached.get("success"), attached
+        legacy = client.tool("veh_modules")
+        assert legacy["modules"][0]["name"] == "probe_a.dll" and legacy["modules"][0]["addressBits"] is None, legacy
 
 
 def test_windows_export_spelling(session):

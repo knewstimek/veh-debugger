@@ -855,6 +855,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 	case IpcCommand::GetStackTrace:
 	case IpcCommand::GetRegisters:
 	case IpcCommand::GetModules:
+    case IpcCommand::GetModulesEx:
 		HandleThreadCommand(command, payload, payloadSize);
 		break;
 
@@ -877,6 +878,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 	case IpcCommand::Symbolize:
 	case IpcCommand::DisplayType:
     case IpcCommand::FindSymbols:
+    case IpcCommand::FindSymbolsInModule:
 		HandleSymbolCommand(command, payload, payloadSize);
 		break;
 
@@ -1435,7 +1437,9 @@ void PipeServer::HandleThreadCommand(uint32_t command, const uint8_t* payload, u
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}
-	case IpcCommand::GetModules: {
+	case IpcCommand::GetModules:
+    case IpcCommand::GetModulesEx: {
+        const bool extended = static_cast<IpcCommand>(command) == IpcCommand::GetModulesEx;
 		HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, targetPid_);
 		if (snap == INVALID_HANDLE_VALUE) {
 			GetModulesResponse resp{IpcStatus::Error, 0};
@@ -1443,6 +1447,7 @@ void PipeServer::HandleThreadCommand(uint32_t command, const uint8_t* payload, u
 			break;
 		}
 		std::vector<ModuleInfo> modules;
+        std::vector<ModuleInfoEx> extendedModules;
 		MODULEENTRY32W me;
 		me.dwSize = sizeof(me);
 		if (Module32FirstW(snap, &me)) {
@@ -1455,6 +1460,27 @@ void PipeServer::HandleThreadCommand(uint32_t command, const uint8_t* payload, u
 				WideCharToMultiByte(CP_UTF8, 0, me.szExePath, -1, mi.path, sizeof(mi.path), NULL, NULL);
 				mi.path[sizeof(mi.path) - 1] = '\0';
 				modules.push_back(mi);
+                if (extended) {
+                    ModuleInfoEx detail{}; detail.module = mi;
+                    // Read loaded headers through the OS, avoiding unchecked
+                    // pointer dereferences while a concurrent unload may occur.
+                    IMAGE_DOS_HEADER dos{}; SIZE_T copied = 0;
+                    const auto read = [&](uint64_t offset, void* out, SIZE_T length) {
+                        if (offset > mi.size || length > mi.size - offset) return false;
+                        return ReadProcessMemory(GetCurrentProcess(),
+                            reinterpret_cast<const void*>(me.modBaseAddr + static_cast<size_t>(offset)),
+                            out, length, &copied) && copied == length;
+                    };
+                    if (read(0, &dos, sizeof(dos)) && dos.e_magic == IMAGE_DOS_SIGNATURE && dos.e_lfanew >= 0) {
+                        struct Header { DWORD signature; IMAGE_FILE_HEADER file; WORD magic; } header{};
+                        if (read(static_cast<uint64_t>(dos.e_lfanew), &header, sizeof(header)) &&
+                            header.signature == IMAGE_NT_SIGNATURE && header.file.SizeOfOptionalHeader >= sizeof(WORD)) {
+                            if (header.magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC) detail.addressBits = 32;
+                            else if (header.magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) detail.addressBits = 64;
+                        }
+                    }
+                    extendedModules.push_back(detail);
+                }
 			} while (Module32NextW(snap, &me));
 		}
 		CloseHandle(snap);
@@ -1462,9 +1488,12 @@ void PipeServer::HandleThreadCommand(uint32_t command, const uint8_t* payload, u
 		GetModulesResponse resp;
 		resp.status = IpcStatus::Ok;
 		resp.count = static_cast<uint32_t>(modules.size());
-		std::vector<uint8_t> buf(sizeof(resp) + modules.size() * sizeof(ModuleInfo));
+		const size_t entrySize = extended ? sizeof(ModuleInfoEx) : sizeof(ModuleInfo);
+        std::vector<uint8_t> buf(sizeof(resp) + modules.size() * entrySize);
 		memcpy(buf.data(), &resp, sizeof(resp));
-		if (!modules.empty()) memcpy(buf.data() + sizeof(resp), modules.data(), modules.size() * sizeof(ModuleInfo));
+		if (!modules.empty()) memcpy(buf.data() + sizeof(resp),
+            extended ? static_cast<const void*>(extendedModules.data()) : static_cast<const void*>(modules.data()),
+            modules.size() * entrySize);
 		SendResponse(command, buf.data(), static_cast<uint32_t>(buf.size()));
 		break;
 	}
@@ -1722,7 +1751,7 @@ void PipeServer::HandleMemoryCommand(uint32_t command, const uint8_t* payload, u
 
 void PipeServer::HandleSymbolCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize) {
 	auto cmd = static_cast<IpcCommand>(command);
-    if (cmd != IpcCommand::FindSymbols && !StackWalker::Instance().RefreshModules()) {
+    if (cmd != IpcCommand::FindSymbols && cmd != IpcCommand::FindSymbolsInModule && !StackWalker::Instance().RefreshModules()) {
         const IpcStatus status = IpcStatus::Error;
         SendResponse(command, &status, sizeof(status));
         return;
@@ -1784,15 +1813,21 @@ void PipeServer::HandleSymbolCommand(uint32_t command, const uint8_t* payload, u
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}
-    case IpcCommand::FindSymbols: {
+    case IpcCommand::FindSymbols:
+    case IpcCommand::FindSymbolsInModule: {
         FindSymbolsResponse response{IpcStatus::InvalidArgs, 0, 0};
         std::vector<FindSymbolEntry> entries;
-        if (payloadSize == sizeof(FindSymbolsRequest)) {
-            FindSymbolsRequest request{}; std::memcpy(&request, payload, sizeof(request));
+        const bool scoped = cmd == IpcCommand::FindSymbolsInModule;
+        if (payloadSize == (scoped ? sizeof(FindSymbolsInModuleRequest) : sizeof(FindSymbolsRequest))) {
+            FindSymbolsRequest request{}; uint64_t base = 0;
+            if (scoped) {
+                FindSymbolsInModuleRequest scopedRequest{}; std::memcpy(&scopedRequest, payload, sizeof(scopedRequest));
+                base = scopedRequest.moduleBase; request = scopedRequest.query;
+            } else std::memcpy(&request, payload, sizeof(request));
             const auto end = static_cast<const char*>(std::memchr(request.name, 0, sizeof(request.name)));
-            if (end && end != request.name)
+            if (end && end != request.name && (!scoped || base))
                 response.status = StackWalker::Instance().FindSymbols(
-                    std::string(request.name, static_cast<size_t>(end - request.name)), request.maxResults, entries, response.flags);
+                    std::string(request.name, static_cast<size_t>(end - request.name)), request.maxResults, entries, response.flags, base);
         }
         response.count = static_cast<uint32_t>(entries.size());
         std::vector<uint8_t> bytes(sizeof(response) + entries.size() * sizeof(FindSymbolEntry));
@@ -3262,7 +3297,8 @@ void PipeServer::HandleLifecycleCommand(uint32_t command, const uint8_t* payload
 			IpcCommand::GetThreads, IpcCommand::GetStackTrace, IpcCommand::GetRegisters, IpcCommand::GetModules,
 			IpcCommand::SetRegister, IpcCommand::SetRegisters, IpcCommand::IsThreadStopped, IpcCommand::FreezeThread,
 			IpcCommand::ReadMemory, IpcCommand::WriteMemory, IpcCommand::PatchCode,
-			IpcCommand::FindSymbols, IpcCommand::ResolveSourceLine, IpcCommand::ResolveFunction, IpcCommand::EnumLocals,
+			IpcCommand::FindSymbols, IpcCommand::GetModulesEx, IpcCommand::FindSymbolsInModule,
+            IpcCommand::ResolveSourceLine, IpcCommand::ResolveFunction, IpcCommand::EnumLocals,
 			IpcCommand::Symbolize, IpcCommand::DisplayType, IpcCommand::TraceCallers,
 			IpcCommand::AllocateMemory, IpcCommand::FreeMemory, IpcCommand::ExecuteShellcode,
 			IpcCommand::QueryMemoryMap, IpcCommand::SearchMemory, IpcCommand::ProtectMemory, IpcCommand::ValueScan,

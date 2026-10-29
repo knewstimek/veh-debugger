@@ -55,6 +55,29 @@ json McpServer::ToolExceptionInfo(const json& args) {
 	};
 }
 
+json McpServer::SymbolCandidates(const std::vector<FindSymbolEntry>& entries) {
+    json matches = json::array();
+    const auto modules = entries.empty() ? std::vector<ModuleEntry>{} : session_.GetModules();
+    for (const auto& entry : entries) {
+        json row = {{"address", entry.address ? json(HexAddr(entry.address)) : json(nullptr)},
+            {"module", entry.moduleName}, {"moduleBase", HexAddr(entry.moduleBase)},
+            {"function", entry.functionName}, {"symbol", std::string(entry.moduleName) + "!" + entry.functionName},
+            {"forwarded", bool(entry.flags & kFindSymbolForwarder)},
+            {"source", (entry.flags & kFindSymbolExport) ? "export" : "symbol"},
+            {"modulePath", nullptr}, {"addressBits", nullptr}, {"bitness", "unknown"},
+            {"selector", HexAddr(entry.moduleBase) + "!" + entry.functionName}};
+        for (const auto& module : modules) if (module.baseAddress == entry.moduleBase &&
+                _stricmp(module.name.c_str(), entry.moduleName) == 0) {
+            row["modulePath"] = module.path;
+            row["addressBits"] = module.addressBits ? json(module.addressBits) : json(nullptr);
+            row["bitness"] = ModuleIdentity(module)["bitness"];
+            break;
+        }
+        matches.push_back(std::move(row));
+    }
+    return matches;
+}
+
 json McpServer::ToolSymbolize(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
     if (args.contains("name")) {
@@ -66,15 +89,19 @@ json McpServer::ToolSymbolize(const json& args) {
                 args["max_results"] > kFindSymbolsMaxResults) return {{"error", "max_results must be 1-10"}};
             maximum = args["max_results"].get<uint32_t>();
         }
-        const auto result = session_.FindSymbols(args["name"].get<std::string>(), maximum);
+        auto name = args["name"].get<std::string>();
+        uint64_t base = 0;
+        if (args.contains("module_base")) {
+            if (!args["module_base"].is_string()) return {{"error", "module_base must be a 0x-prefixed base address"}};
+            const auto text = args["module_base"].get<std::string>();
+            if (text.size() <= 2 || text.substr(0, 2) != "0x" || text.find_first_not_of("0123456789abcdefABCDEF", 2) != std::string::npos)
+                return {{"error", "module_base must be a 0x-prefixed base address"}};
+            try { base = std::stoull(text.substr(2), nullptr, 16); } catch (...) { return {{"error", "module_base overflow"}}; }
+            if (!base) return {{"error", "module_base must be nonzero"}};
+        }
+        const auto result = session_.FindSymbols(name, maximum, base);
         if (!result.ok) return {{"error", result.error}};
-        json matches = json::array();
-        for (const auto& entry : result.matches) matches.push_back({
-            {"address", entry.address ? json(HexAddr(entry.address)) : json(nullptr)},
-            {"module", entry.moduleName}, {"moduleBase", HexAddr(entry.moduleBase)},
-            {"function", entry.functionName}, {"symbol", std::string(entry.moduleName) + "!" + entry.functionName},
-            {"forwarded", bool(entry.flags & kFindSymbolForwarder)},
-            {"source", (entry.flags & kFindSymbolExport) ? "export" : "symbol"}});
+        json matches = SymbolCandidates(result.matches);
         const bool unique = result.matches.size() == 1 && !result.truncated && !result.incomplete &&
             result.matches[0].address != 0;
         json out = {{"query", args["name"]}, {"matches", matches}, {"count", matches.size()},
@@ -83,7 +110,7 @@ json McpServer::ToolSymbolize(const json& args) {
         if (unique) out["address"] = HexAddr(result.matches[0].address);
         return out;
     }
-    if (args.contains("max_results")) return {{"error", "max_results applies to name searches"}};
+    if (args.contains("max_results") || args.contains("module_base")) return {{"error", "max_results/module_base apply to name searches"}};
 
 
 	json inputs = json::array();
@@ -321,12 +348,8 @@ json McpServer::ToolModules(const json& args) {
 		char baseBuf[20], sizeBuf[20];
 		snprintf(baseBuf, sizeof(baseBuf), "0x%llX", m.baseAddress);
 		snprintf(sizeBuf, sizeof(sizeBuf), "0x%X", m.size);
-		arr.push_back({
-			{"name", m.name},
-			{"path", m.path},
-			{"baseAddress", baseBuf},
-			{"size", sizeBuf}
-		});
+        auto row = ModuleIdentity(m); row["size"] = sizeBuf;
+        arr.push_back(std::move(row));
 	}
 	return {{"modules", arr}, {"count", arr.size()}};
 }

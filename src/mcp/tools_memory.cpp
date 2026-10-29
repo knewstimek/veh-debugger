@@ -174,7 +174,8 @@ json McpServer::ToolWriteMemory(const json& args) {
                 }
             } catch (const AddressResolutionError& error) {
                 failed++;
-                errors.push_back({{"address", pAddr}, {"error", error.what()}, {"code", error.code}});
+                auto receipt = error.details; receipt["address"] = pAddr; receipt["error"] = error.what();
+                receipt["code"] = error.code; errors.push_back(std::move(receipt));
                 continue;
             }
 			std::vector<uint8_t> bytes;

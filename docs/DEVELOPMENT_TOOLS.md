@@ -81,6 +81,30 @@ Multi-patch writes keep per-item address errors and successful writes in the
 usual partial-result receipt. Resolution observes the current loaded namespace; it is not an
 atomic guarantee that another thread cannot unload/change code afterwards.
 
+Module identity: `veh_modules` and name candidates expose `addressBits` (32/64,
+otherwise null) and `bitness` (`32-bit`/`64-bit`/`unknown`), with paths and bases.
+The backend reads the loaded PE optional-header magic; neither the path nor the
+virtual address is used to guess image width. Legacy backends report unknown.
+Ambiguous module or symbol address expressions return at most ten candidates.
+Use `veh_symbolize(name="Function", module_base="0x...")` (unqualified name)
+or `0xBASE!Function` in a direct address expression; `0xBASE+0xRVA` also works.
+Module/symbol selection shares direct, batch and breakpoint-action semantics.
+A module base is current-session identity, not an unload/reload-stable handle;
+selection does not switch CPU mode or bypass the session's address-width checks.
+Paths are runtime target metadata and should be redacted before public sharing.
+
+Additional packed, little-endian contracts (advertise only when implemented):
+- `GetModulesEx=0x0046`: empty request; existing GetModulesResponse header followed
+  by count ModuleInfoEx records (ModuleInfo's 780 bytes + uint32 addressBits,
+  784 bytes total). Bits must be 0/32/64; 0 means unknown. No capability report
+  or no bit means use legacy GetModules; an advertised malformed reply is an
+  error, never silently retried through legacy enumeration.
+- `FindSymbolsInModule=0x0047`: 268-byte request, uint64 moduleBase followed by
+  the 260-byte FindSymbolsRequest. Base must identify the exact loaded image;
+  name is unqualified, maxResults is 1..10. Filter by base before enumeration
+  and truncation. Response is identical to FindSymbols. Returned bases must
+  match the requested base. Missing capability fails without global lookup.
+
 Backend contract: advertise `FindSymbols=0x0045` only when implemented.
 Packed request260bytes: `char name[256]`, `uint32 maxResults` (1..10).
 Response12bytes: status/count/flags, followed by count*404byte entries.

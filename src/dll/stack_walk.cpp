@@ -326,13 +326,14 @@ bool StackWalker::RefreshModules() {
 }
 
 IpcStatus StackWalker::FindSymbols(const std::string& name, uint32_t maximum,
-        std::vector<FindSymbolEntry>& entries, uint32_t& flags) {
+        std::vector<FindSymbolEntry>& entries, uint32_t& flags, uint64_t moduleBase) {
     entries.clear(); flags = 0;
     if (name.empty() || name.size() >= sizeof(FindSymbolsRequest::name) ||
         !maximum || maximum > kFindSymbolsMaxResults) return IpcStatus::InvalidArgs;
     if (!initialized_) return IpcStatus::InvalidState;
     std::lock_guard<std::mutex> lock(dbghelpMutex_);
     const auto bang = name.find('!');
+    if (moduleBase && bang != std::string::npos) return IpcStatus::InvalidArgs;
     std::string modulePattern, symbolPattern = name;
     if (bang != std::string::npos) {
         if (!bang || bang + 1 == name.size() || name.find('!', bang + 1) != std::string::npos)
@@ -348,7 +349,13 @@ IpcStatus StackWalker::FindSymbols(const std::string& name, uint32_t maximum,
     if (!RefreshModulesLocked(true)) return IpcStatus::Error;
     const auto epoch = refreshedEpoch_.load(std::memory_order_acquire);
     NameSearch search{}; search.maximum = maximum;
-    if (filename) {
+    if (moduleBase) {
+        IMAGEHLP_MODULE64 module{}; module.SizeOfStruct = sizeof(module);
+        if (!SymGetModuleInfo64(process, moduleBase, &module) || module.BaseOfImage != moduleBase)
+            return IpcStatus::InvalidArgs;
+        if (!SymEnumSymbols(process, moduleBase, symbolPattern.c_str(), CollectNamedSymbol, &search) && !search.flags)
+            return IpcStatus::Error;
+    } else if (filename) {
         // Choose eligible image bases BEFORE counting symbols. Prefix aliases or
         // unrelated modules must never consume the user's candidate budget.
         SymbolModules modules{};

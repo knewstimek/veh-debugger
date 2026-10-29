@@ -238,9 +238,11 @@ private:
 	// Helper
     struct AddressResolutionError : std::runtime_error {
         std::string code;
-        AddressResolutionError(std::string message, std::string value)
-            : std::runtime_error(std::move(message)), code(std::move(value)) {}
+        json details;
+        AddressResolutionError(std::string message, std::string value, json extra = json::object())
+            : std::runtime_error(std::move(message)), code(std::move(value)), details(std::move(extra)) {}
     };
+    json SymbolCandidates(const std::vector<FindSymbolEntry>& entries);
 	bool ParseAddress(const std::string& addrStr, uint64_t& out);
 	std::string NotAttachedMessage();
 	std::string IpcErrorMessage();
