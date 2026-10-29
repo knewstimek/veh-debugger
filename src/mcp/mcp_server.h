@@ -138,8 +138,10 @@ private:
 	json ToolEnumLocals(const json& args);
 	json ToolSymbolize(const json& args);
     json ToolAnalysis(const json& args);
-    std::string AnnotationEpoch();
-    void AddAnnotations(json& rows, bool codeAvailable, const std::string& beforeEpoch);
+    std::string AnnotationEpoch(bool labelsOnly = false);
+    void AddAnnotations(json& rows, bool codeAvailable, const std::string& beforeEpoch, bool labelsOnly = false);
+    void AddAnnotationLabels(json& rows, const std::string& beforeEpoch);
+    void AddStopAnnotation(json& result, const json& args);
     json AnnotationContext(uint64_t address, const std::vector<ModuleEntry>& modules);
 	json ToolDisplayType(const json& args);
 	json ToolAssemble(const json& args);

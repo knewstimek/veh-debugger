@@ -74,6 +74,7 @@ json McpServer::ToolStackTrace(const json& args) {
 	if (maxFrames <= 0 || maxFrames > 200) maxFrames = 20;
 
 	std::string error;
+	const auto annotationEpoch = JsonBool(args, "include_annotations", true) ? AnnotationEpoch(true) : std::string{};
 	auto frames = session_.GetStackTrace(threadId, maxFrames, &error);
 	if (!error.empty()) return {{"error", error}};
 	json arr = json::array();
@@ -93,7 +94,12 @@ json McpServer::ToolStackTrace(const json& args) {
 		arr.push_back(frame);
 	}
 
-	return {{"frames", arr}, {"count", arr.size()}, {"totalFrames", arr.size()}};
+    AddAnnotationLabels(arr, annotationEpoch);
+    const bool truncated = !arr.empty() && arr[0].value("analysis_annotations_truncated", false);
+    if (!arr.empty()) arr[0].erase("analysis_annotations_truncated");
+    json out = {{"frames", arr}, {"count", arr.size()}, {"totalFrames", arr.size()}};
+    if (truncated) out["annotations_truncated"] = true;
+    return out;
 }
 
 json McpServer::ToolTraceRegister(const json& args) {

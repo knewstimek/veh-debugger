@@ -266,6 +266,7 @@ json McpServer::ToolSetFunctionBreakpoint(const json& args) {
 }
 
 json McpServer::ToolListBreakpoints(const json& args) {
+    const auto annotationEpoch = JsonBool(args, "include_annotations", true) ? AnnotationEpoch(true) : std::string{};
 	json swList = json::array();
 	{
 		std::lock_guard<std::mutex> lock(session_.GetBpMutex());
@@ -290,7 +291,20 @@ json McpServer::ToolListBreakpoints(const json& args) {
 			hwList.push_back({{"id", bp.id}, {"address", buf}, {"type", typeStr}, {"size", bp.size}});
 		}
 	}
-	return {{"software", swList}, {"hardware", hwList}};
+    // One shared lookup/preview budget for both lists; no backend IPC while the BP mutex is held.
+    const auto softwareCount = swList.size();
+    json combined = swList;
+    for (const auto& entry : hwList) combined.push_back(entry);
+    AddAnnotationLabels(combined, annotationEpoch);
+    const bool truncated = !combined.empty() && combined[0].value("analysis_annotations_truncated", false);
+    if (!combined.empty()) combined[0].erase("analysis_annotations_truncated");
+    for (size_t i = 0; i < combined.size(); ++i) {
+        if (i < softwareCount) swList[i] = std::move(combined[i]);
+        else hwList[i - softwareCount] = std::move(combined[i]);
+    }
+    json out = {{"software", swList}, {"hardware", hwList}};
+    if (truncated) out["annotations_truncated"] = true;
+    return out;
 }
 
 json McpServer::ToolSetDataBreakpoint(const json& args) {

@@ -10,6 +10,7 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 
 | Tool | Purpose |
 |---|---|
+| `test/test_analysis_surfaces.py` | Native stop/step comment previews, exact-address stack/software/hardware labels, pending/comment-only exclusion, opt-out and direct/batch/action parity. |
 | `test/test_analysis.py` | Native x64/x86 JSON annotation persistence, build/RVA identity, explicit unbound notes, code-change markers, concurrent-writer revisions, corrupt/oversized input preservation, failed writes, loader-lock stops, and direct/batch/action parity. See [analysis notes](ANALYSIS_NOTES.md). |
 | `tools/run_tests.py` | Runs every `test/test_*.py` file in parallel (`--jobs`, longest first from `test/.test_durations.json`) with a per-file timeout, prints durations, flags exit-0 runs that report FAIL, skips `# requires: x64` files on an x86 build and `# slow` files with `--quick`, and cleans up exactly the processes each file started (parent chain + creation time, so reused pids are never adopted). |
 | `test/test_remote_transport.py` | Exercises resident TCP/TLS authentication, IPC routing, late/missing detach replies, dead-agent recovery, startup exit/Win32 and structured common error diagnostics (including invalid-record fallback), launch width/initial-thread metadata and retry recovery, and real DLL lifecycle reply draining; removes its owned certificate, secret and processes. See [remote transport](REMOTE_TRANSPORT.md). |

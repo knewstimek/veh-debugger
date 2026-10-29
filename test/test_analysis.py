@@ -26,8 +26,8 @@ def analysis(client, operation, **kwargs):
 
 
 @contextmanager
-def native(root, *, project=True):
-    with OwnedMcpClient(env=environment(root)) as client:
+def native(root, *, project=True, client_args=None):
+    with OwnedMcpClient(env=environment(root), args=client_args) as client:
         client.initialize("analysis-test")
         launched = client.tool("veh_launch", {"program": str(BIN / "test_target.exe"), "args": ["--interval", "10"], "stopOnEntry": True})
         assert launched.get("success"), launched

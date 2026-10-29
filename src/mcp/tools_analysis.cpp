@@ -202,17 +202,19 @@ json McpServer::ToolAnalysis(const json& args) {
       catch (const std::exception& error) { return {{"error", error.what()}, {"code", "analysis_error"}}; }
 }
 
-std::string McpServer::AnnotationEpoch() {
+std::string McpServer::AnnotationEpoch(bool labelsOnly) {
     try {
         const auto doc = analysisStore_.Snapshot();
         if (doc.is_null() || doc["entries"].empty()) return {};
+        if (labelsOnly && std::none_of(doc["entries"].begin(), doc["entries"].end(),
+                [](const json& entry) { return !entry.value("label", "").empty(); })) return {};
         GetModuleIdentityResponse epoch{}; std::string error;
         if (session_.GetModuleIdentity(0, epoch, error)) return std::to_string(epoch.moduleEpoch);
     } catch (...) {}
     return {};
 }
 
-void McpServer::AddAnnotations(json& output, bool codeAvailable, const std::string& beforeEpoch) {
+void McpServer::AddAnnotations(json& output, bool codeAvailable, const std::string& beforeEpoch, bool labelsOnly) {
     auto rows = output; // Commit enrichment only after the complete observation is validated.
     if (rows.empty()) return;
     try {
@@ -238,13 +240,14 @@ void McpServer::AddAnnotations(json& output, bool codeAvailable, const std::stri
             const auto rva = HexAddr(address - base);
             size_t candidates = 0, moduleRecords = 0;
             for (const auto& entry : doc["entries"])
-                if (!_stricmp(entry["module"].get_ref<const std::string&>().c_str(), selected->name.c_str())) {
+                if ((!labelsOnly || !entry.value("label", "").empty()) &&
+                        !_stricmp(entry["module"].get_ref<const std::string&>().c_str(), selected->name.c_str())) {
                     ++moduleRecords; if (entry["rva"] == rva) ++candidates;
                 }
             if (!moduleRecords) continue;
             if (previews >= 20) { rows[0]["analysis_annotations_truncated"] = true; continue; }
             if (!contexts.count(base)) {
-                if (contexts.size() >= 16) { row["analysis_warning"] = "Module annotation lookup budget exhausted"; continue; }
+                if (contexts.size() >= 16) { rows[0]["analysis_annotations_truncated"] = true; row["analysis_warning"] = "Module annotation lookup budget exhausted"; continue; }
                 contexts[base] = AnnotationContext(address, modules);
                 if (contexts[base].value("module_epoch", "") != beforeEpoch)
                     throw AnalysisError("analysis_target_changed", "Target modules changed or identity became unavailable; notes were not applied. Retry the lookup");
@@ -259,7 +262,9 @@ void McpServer::AddAnnotations(json& output, bool codeAvailable, const std::stri
             if (!candidates) continue;
             const auto id = context["build_id"].get<std::string>() + "@" + rva;
             if (context["persistent_identity"].get<bool>() && doc["entries"].contains(id)) {
-                const auto& entry = doc["entries"][id]; row["annotation"] = Preview(entry);
+                const auto& entry = doc["entries"][id];
+                if (labelsOnly && entry.value("label", "").empty()) continue;
+                row["annotation"] = labelsOnly ? json{{"label", entry["label"]}} : Preview(entry);
                 if (codeAvailable) row["annotation"]["stale"] = entry["original_bytes"] != Bytes(row["bytes"].get<std::string>());
                 else row["annotation"]["code_validation"] = "not_checked";
                 ++previews;
@@ -270,5 +275,45 @@ void McpServer::AddAnnotations(json& output, bool codeAvailable, const std::stri
             throw AnalysisError("analysis_target_changed", "Target modules changed during inspection; notes were not applied. Retry the lookup");
         output = std::move(rows);
     } catch (const std::exception& error) { output[0]["analysis_warning"] = error.what(); }
+}
+
+void McpServer::AddAnnotationLabels(json& rows, const std::string& beforeEpoch) {
+    if (beforeEpoch.empty() || rows.empty()) return;
+    // Never enrich pending breakpoints or synthesize function-start annotations
+    // for a stack return address. Only the exact returned address is eligible.
+    json candidates = json::array(); std::vector<size_t> indexes;
+    for (size_t i = 0; i < rows.size(); ++i) if (rows[i].contains("address") &&
+            rows[i]["address"].is_string() && rows[i].value("status", "") != "pending") {
+        candidates.push_back({{"address", rows[i]["address"]}}); indexes.push_back(i);
+    }
+    AddAnnotations(candidates, false, beforeEpoch, true);
+    for (size_t i = 0; i < candidates.size(); ++i) if (candidates[i].contains("annotation"))
+        rows[indexes[i]]["annotation"] = candidates[i]["annotation"];
+    if (!candidates.empty() && candidates[0].value("analysis_annotations_truncated", false))
+        rows[0]["analysis_annotations_truncated"] = true;
+}
+
+void McpServer::AddStopAnnotation(json& result, const json& args) {
+    if (!JsonBool(args, "include_annotations", true) || result.contains("error") || !session_.IsAttached()) return;
+    const bool stopped = result.value("stopped", false) || (result.value("success", false) && result.contains("instructionPointer"));
+    if (!stopped || !result.contains("threadId") || !result["threadId"].is_number_unsigned()) return;
+    const auto reason = result.value("reason", "");
+    if (reason == "exit" || reason == "module-load") return; // module base is not an instruction pointer
+    const auto field = result.contains("instructionPointer") ? "instructionPointer" : "address";
+    if (!result.contains(field) || !result[field].is_string()) return;
+    try {
+        const auto epoch = AnnotationEpoch();
+        if (epoch.empty()) return;
+        const auto thread = result["threadId"].get<uint32_t>();
+        const auto address = HexValue(result[field].get<std::string>());
+        if (session_.QueryThreadStopped(thread) != std::optional<bool>(true)) return;
+        const auto regs = session_.GetRegisters(thread);
+        if (!regs || (regs->is32bit ? (regs->rip & UINT32_MAX) : regs->rip) != address) return;
+        const auto code = session_.Disassemble(address, 1);
+        if (code.empty()) return;
+        json row = json::array({{{"address", result[field]}, {"bytes", code[0].bytes}}});
+        AddAnnotations(row, true, epoch);
+        if (row[0].contains("annotation")) result["annotation"] = row[0]["annotation"];
+    } catch (...) { /* Optional notes cannot turn a valid stop into a tool failure. */ }
 }
 } // namespace veh

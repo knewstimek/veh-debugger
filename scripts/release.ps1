@@ -262,6 +262,7 @@ function Invoke-ReleaseTests {
         'test/test_assemble.py',
         'test/test_symbolize.py',
         'test/test_analysis.py',
+        'test/test_analysis_surfaces.py',
         'test/test_instrumentation.py',
         'test/test_session_receipts.py',
         'test/test_system_receipts.py',

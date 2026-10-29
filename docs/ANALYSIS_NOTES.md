@@ -80,6 +80,23 @@ results include short previews; `include_annotations:false` disables enrichment.
 Full comments/evidence are fetched explicitly. Labels remain separate from real
 symbols and do not silently change address-expression resolution.
 
+Confirmed `veh_continue(wait=true)` and completed `veh_step_in`/`veh_step_over`/
+`veh_step_out` replies can include the same short preview. The frontend verifies
+the thread is currently stopped and its current IP equals the returned stop IP;
+it then checks instruction bytes and the module epoch before adding a note.
+Module-load/exit events, unavailable state, and stops already resumed by actions
+do not receive instruction comments. This enrichment does not change stop state.
+
+`veh_stack_trace` and `veh_list_breakpoints` include only
+`annotation={label,code_validation:"not_checked"}` for exact matching addresses.
+A stack return address never borrows a function-entry label; real function names
+remain unchanged. Pending breakpoints are excluded. Software and hardware lists
+share one 20-preview budget. Reaching the preview/module budget reports `annotations_truncated:true` rather than implying the remaining addresses have no saved labels. Comment-only notes do not expand these lists, and
+full comments/evidence/history are never repeated per frame/breakpoint.
+`include_annotations:false` disables these additions as well as stop previews.
+Unavailable annotations leave the existing navigation result intact. No new
+background queries or per-trace-event annotation output is added.
+
 Direct calls, batches and breakpoint actions share the same record operations.
 Opening/closing a project is direct-only because it changes frontend project
 ownership. Existing batch session requirements still apply; direct offline

@@ -139,6 +139,7 @@ int wmain(int argc, wchar_t** argv) {
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::TraceVirtualCpu);
             }
             if (symbolsMode) {
+                if (mode == L"symbols-analysis-stack-many") veh::SetCommandSupported(caps.commands, veh::IpcCommand::GetStackTrace);
                 if (mode.rfind(L"symbols-analysis-", 0) == 0) veh::SetCommandSupported(caps.commands, veh::IpcCommand::GetModuleIdentity);
                 if (mode == L"ops-action-symbols") veh::SetCommandSupported(caps.commands, veh::IpcCommand::FindSymbolsInModule);
                 if (mode.rfind(L"symbols-images", 0) == 0)
@@ -252,6 +253,20 @@ int wmain(int argc, wchar_t** argv) {
             std::vector<unsigned char> result(sizeof(response) + response.eventCount * sizeof(events[0]));
             std::memcpy(result.data(), &response, sizeof(response));
             if (response.eventCount) std::memcpy(result.data() + sizeof(response), events, sizeof(events));
+            if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
+        } else if (mode == L"symbols-analysis-stack-many" && command == veh::IpcCommand::GetStackTrace) {
+            veh::GetStackTraceRequest request{};
+            if (bytes.size() != sizeof(request)) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
+            std::memcpy(&request, bytes.data(), sizeof(request));
+            const uint32_t count = (std::min)(request.maxFrames, 25u);
+            veh::GetStackTraceResponse response{veh::IpcStatus::Ok, 25, count};
+            std::vector<unsigned char> result(sizeof(response) + count * sizeof(veh::StackFrameInfo));
+            std::memcpy(result.data(), &response, sizeof(response));
+            for (uint32_t i = 0; i < count; ++i) {
+                veh::StackFrameInfo frame{}; frame.address = 0x1100; frame.moduleBase = 0x1000; frame.frameBase = 0x8000 + i * 16;
+                strcpy_s(frame.moduleName, "probe_a.dll"); strcpy_s(frame.functionName, "recursive_fixture");
+                std::memcpy(result.data() + sizeof(response) + i * sizeof(frame), &frame, sizeof(frame));
+            }
             if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
         } else if (symbolsMode && command == veh::IpcCommand::GetModuleIdentity) {
             if (mode == L"symbols-analysis-unavailable") { if (!reply(pipe, header.command, veh::IpcStatus::InvalidState)) break; continue; }

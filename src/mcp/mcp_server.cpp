@@ -1973,6 +1973,12 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"schema_handle", {{"type", "string"}, {"description", "Handle from an earlier describe"}}},
 			{"manifest_handle", {{"type", "string"}}}
 		}}}}}));
+    for (auto& tool : tools) {
+        if (tool.name == "veh_list_breakpoints" || tool.name == "veh_stack_trace" || tool.name == "veh_continue" ||
+                tool.name == "veh_step_in" || tool.name == "veh_step_over" || tool.name == "veh_step_out")
+            tool.definition["inputSchema"]["properties"]["include_annotations"] = {{"type", "boolean"}, {"default", true},
+                {"description", "Include available saved analysis notes; lists/stacks use exact-address labels only"}};
+    }
 	return tools;
 }
 
@@ -2018,6 +2024,8 @@ json McpServer::DispatchTool(const std::string& name, const json& args, bool* kn
         return {{"error", "Conditional breakpoint evaluation is not supported by this remote path"}};
     try {
         auto result = (this->*tool->handler)(args);
+        if (name == "veh_continue" || name == "veh_step_in" || name == "veh_step_over" || name == "veh_step_out")
+            AddStopAnnotation(result, args);
         operation.release();
         return result;
     } catch (const AddressResolutionError& error) {
