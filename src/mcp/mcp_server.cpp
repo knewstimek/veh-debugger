@@ -211,7 +211,7 @@ void McpServer::OnInitialize(const json& id, const json& params) {
 		}},
 		{"serverInfo", {
 			{"name", "veh-debugger"},
-			{"version", "1.2.2"}
+			{"version", "1.2.3"}
 		}},
 			{"instructions",
 				"Windows x86/x64 debugger. Lite exposes common session tools; use one veh_toolbox manifest for several schemas, or discover/describe/call others. veh_batch calls most tools by name. Inspection requires a stopped target."
