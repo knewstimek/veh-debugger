@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <mutex>
+#include <atomic>
 #include <windows.h>
 #include "../common/ipc_protocol.h"
 
@@ -33,6 +34,9 @@ public:
 	static StackWalker& Instance();
 
 	void Initialize();
+    // Loader callbacks only publish an epoch; never enter DbgHelp or its mutex.
+    void NotifyModulesChanged(uint64_t base) noexcept;
+    bool RefreshModules();
 	std::vector<StackFrame> Walk(uint32_t threadId, uint32_t startFrame = 0, uint32_t maxFrames = 50);
 
 	// Module/function/line for arbitrary addresses (same resolution as stack frames)
@@ -50,6 +54,10 @@ public:
 private:
 	bool initialized_ = false;
 	std::mutex dbghelpMutex_;
+    std::atomic<uint64_t> moduleEpoch_{0}, refreshedEpoch_{0};
+    std::atomic<uint64_t> invalidatedModules_[256]{};
+    std::atomic<bool> invalidateAllModules_{false};
+    bool RefreshModulesLocked(bool force = false);
 };
 
 } // namespace veh

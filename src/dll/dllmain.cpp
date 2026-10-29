@@ -80,10 +80,9 @@ VOID CALLBACK DllNotificationCallback(
 		CopyUnicodeToUtf8(d.BaseDllName, evt.module.name, sizeof(evt.module.name));
 		CopyUnicodeToUtf8(d.FullDllName, evt.module.path, sizeof(evt.module.path));
 
-		// DbgHelp에 새 모듈 심볼 로드
-		SymLoadModuleEx(GetCurrentProcess(), nullptr,
-			evt.module.path, evt.module.name,
-			(DWORD64)d.DllBase, d.SizeOfImage, nullptr, 0);
+        // This callback runs under the loader lock. Defer all DbgHelp work
+        // to the serialized pipe/StackWalker path; no symbol-lock inversion.
+        veh::StackWalker::Instance().NotifyModulesChanged(evt.module.baseAddress);
 
 		pipe.SendEvent(static_cast<uint32_t>(veh::IpcEvent::ModuleLoaded),
 		               &evt, sizeof(evt));
@@ -107,8 +106,7 @@ VOID CALLBACK DllNotificationCallback(
 		CopyUnicodeToUtf8(d.BaseDllName, evt.module.name, sizeof(evt.module.name));
 		CopyUnicodeToUtf8(d.FullDllName, evt.module.path, sizeof(evt.module.path));
 
-		// DbgHelp에서 모듈 심볼 제거
-		SymUnloadModule64(GetCurrentProcess(), (DWORD64)d.DllBase);
+        veh::StackWalker::Instance().NotifyModulesChanged(evt.module.baseAddress);
 
 		pipe.SendEvent(static_cast<uint32_t>(veh::IpcEvent::ModuleUnloaded),
 		               &evt, sizeof(evt));

@@ -56,7 +56,7 @@ int wmain(int argc, wchar_t** argv) {
     uint32_t fixtureBreakpointId = 0, shellcodeRequests=0, localThreadQueries=0;
     const bool scanMode=mode.rfind(L"scan-",0)==0;
     uint32_t symbolLookupRequests = 0;
-    const bool symbolsMode = mode.rfind(L"symbols-", 0) == 0 || mode == L"ops-action-symbols";
+    const bool symbolsMode = mode.rfind(L"symbols-", 0) == 0 || mode.rfind(L"ops-action-symbol", 0) == 0;
     const bool instrumentationMode = mode.rfind(L"inst-", 0) == 0 || mode == L"ops-action-inst";
     bool captureActive[3]{}, captureCreated[3]{};
     uint64_t captureIds[3]{}, nextCaptureId = 9007199254740993ULL;
@@ -278,11 +278,15 @@ int wmain(int argc, wchar_t** argv) {
         } else if (symbolsMode && command == veh::IpcCommand::ResolveFunction) {
             if (!reply(pipe, header.command, veh::ResolveFunctionResponse{veh::IpcStatus::Ok, 0x1100})) break;
         } else if (symbolsMode && command == veh::IpcCommand::GetModules) {
-            struct { veh::GetModulesResponse head; veh::ModuleInfo module; } response{};
-            response.head = {veh::IpcStatus::Ok, 1};
-            response.module.baseAddress = 0x1000; response.module.size = 0x10000;
-            strcpy_s(response.module.name, "probe_a.dll");
-            if (!reply(pipe, header.command, response)) break;
+            struct { veh::GetModulesResponse head; veh::ModuleInfo modules[2]; } response{};
+            response.head = {veh::IpcStatus::Ok, mode == L"symbols-duplicate-module" ? 2u : 1u};
+            for (uint32_t i = 0; i < response.head.count; ++i) {
+                response.modules[i].baseAddress = 0x1000 + i * 0x1000;
+                response.modules[i].size = 0x10000;
+                strcpy_s(response.modules[i].name, "probe_a.dll");
+            }
+            if (!send(pipe, header.command, &response, static_cast<uint32_t>(sizeof(response.head) +
+                response.head.count * sizeof(veh::ModuleInfo)))) break;
         } else if (instrumentationMode && command == veh::IpcCommand::QueryBranchTrace) {
             veh::QueryBranchTraceResponse response{};
             response.status = veh::IpcStatus::Ok; response.lastBranches = 1; response.fullPath = 1;

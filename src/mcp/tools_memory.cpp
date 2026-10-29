@@ -166,11 +166,17 @@ json McpServer::ToolWriteMemory(const json& args) {
 			std::string pAddr = patch.value("address", "");
 			std::string pData = patch.value("data", "");
 			uint64_t addr;
-			if (pAddr.empty() || !ParseAddress(pAddr, addr)) {
-				failed++;
-				errors.push_back({{"address", pAddr}, {"error", "invalid address"}});
-				continue;
-			}
+            try {
+                if (pAddr.empty() || !ParseAddress(pAddr, addr)) {
+                    failed++;
+                    errors.push_back({{"address", pAddr}, {"error", "invalid address"}});
+                    continue;
+                }
+            } catch (const AddressResolutionError& error) {
+                failed++;
+                errors.push_back({{"address", pAddr}, {"error", error.what()}, {"code", error.code}});
+                continue;
+            }
 			std::vector<uint8_t> bytes;
 			if (!ParseHexBytes(pData, bytes) || bytes.empty()) {
 				failed++;

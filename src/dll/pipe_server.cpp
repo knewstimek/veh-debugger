@@ -1722,6 +1722,11 @@ void PipeServer::HandleMemoryCommand(uint32_t command, const uint8_t* payload, u
 
 void PipeServer::HandleSymbolCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize) {
 	auto cmd = static_cast<IpcCommand>(command);
+    if (cmd != IpcCommand::FindSymbols && !StackWalker::Instance().RefreshModules()) {
+        const IpcStatus status = IpcStatus::Error;
+        SendResponse(command, &status, sizeof(status));
+        return;
+    }
 
 	switch (cmd) {
 
@@ -2345,7 +2350,8 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 					SYMBOL_INFO* sym = reinterpret_cast<SYMBOL_INFO*>(symBuf);
 					sym->SizeOfStruct = sizeof(SYMBOL_INFO);
 					sym->MaxNameLen = MAX_SYM_NAME;
-					bool hasSym = SymFromAddr(GetCurrentProcess(), rip, &displacement, sym);
+					bool hasSym = StackWalker::Instance().RefreshModules() &&
+                        SymFromAddr(GetCurrentProcess(), rip, &displacement, sym);
 					if (hasSym && displacement <= 0x100) {
 						// Valid function entry -- resolved!
 						entries[i].resolved = 1;
@@ -2641,7 +2647,7 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 			char symBuf[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
 			SYMBOL_INFO* sym = reinterpret_cast<SYMBOL_INFO*>(symBuf);
 			sym->SizeOfStruct = sizeof(SYMBOL_INFO); sym->MaxNameLen = MAX_SYM_NAME;
-			if (SymFromAddr(GetCurrentProcess(), pair.second, &disp, sym))
+			if (StackWalker::Instance().RefreshModules() && SymFromAddr(GetCurrentProcess(), pair.second, &disp, sym))
 				strncpy_s(entries[idx].functionName, sym->Name, sizeof(entries[idx].functionName) - 1);
 			IMAGEHLP_MODULE64 modInfo = {}; modInfo.SizeOfStruct = sizeof(modInfo);
 			if (SymGetModuleInfo64(GetCurrentProcess(), pair.second, &modInfo))

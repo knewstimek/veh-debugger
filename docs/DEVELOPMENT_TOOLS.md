@@ -75,7 +75,10 @@ Standalone digit-only literals and literal arithmetic retain existing parsing;
 digit-leading literals containing A-F also accept prefix-free hexadecimal.
 Letter-leading names remain symbols: write `0xADD` for an address instead of
 the possible function name `Add`. Overflow, underflow and negative literals
-are rejected. Resolution observes the current loaded namespace; it is not an
+are rejected. Known 32-bit target bounds apply to every successful expression
+path; duplicate module basenames reject automatic module+RVA selection.
+Multi-patch writes keep per-item address errors and successful writes in the
+usual partial-result receipt. Resolution observes the current loaded namespace; it is not an
 atomic guarantee that another thread cannot unload/change code afterwards.
 
 Backend contract: advertise `FindSymbols=0x0045` only when implemented.
@@ -87,13 +90,22 @@ functionName[256]. Header flags1=truncated,2=incomplete; entry flags1=forwarder,
 addresses. No successful short/oversized response is accepted. Name lookup
 does not fall back to the legacy first-match ResolveFunction command.
 The in-process implementation serializes DbgHelp through StackWalker's mutex,
-uses a bounded callback/table and returns only module basenames.
+uses a bounded callback/table and returns only module basenames. Qualified
+filename eligibility is established before the candidate limit is applied.
+Loader callbacks publish bounded base invalidations and an epoch, without taking
+the symbol mutex or entering DbgHelp. Lookup-side processing unloads stale
+symbol metadata before refresh; a namespace change during search marks it
+incomplete. Invalidation overflow conservatively resets bounded cached module
+symbols; failures do not claim a complete search.
 
-`test/test_symbolize.py` covers x64/x86 real PDB/export lookup, two independently
-loaded DLLs exporting SharedProbe, prefix-free RVA input, caps/incomplete/
+`test/test_symbolize.py` covers x64/x86 real PDB/export lookup, independently
+loaded duplicate/prefix-colliding DLL exports, prefix-free RVA input, caps/incomplete/
 malformed receipts, no unsafe legacy fallback, and direct/batch/action parity.
 Use `test_target --symbol-lookup` only through the owned harness; the normal
-synthetic target does not load the two probe DLLs.
+synthetic target does not load these probe DLLs. `--symbol-reload` provides
+marker-controlled load/unload phases for stale-cache regression, without dwell
+sleeps. Native tests also resolve symbols while a module-load stop holds the
+loader lock and verify partial-write receipts through direct/batch/actions.
 
 ## Explicit instrumentation
 

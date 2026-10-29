@@ -219,7 +219,39 @@ void ResolveAddressSymbol(HANDLE hProcess, uint64_t address, SYMBOL_INFO* symInf
 } // anonymous namespace
 
 
+
+void StackWalker::NotifyModulesChanged(uint64_t base) noexcept {
+    bool queued = false;
+    if (base) for (auto& slot : invalidatedModules_) {
+        uint64_t empty = 0;
+        if (slot.compare_exchange_strong(empty, base, std::memory_order_release, std::memory_order_relaxed) || empty == base) {
+            queued = true; break;
+        }
+    }
+    if (!queued) invalidateAllModules_.store(true, std::memory_order_release);
+    moduleEpoch_.fetch_add(1, std::memory_order_release);
+}
+
 namespace {
+
+struct SymbolModules {
+    uint64_t bases[4096]{};
+    uint32_t count = 0;
+    bool truncated = false;
+};
+BOOL CALLBACK CollectSymbolModule(PCSTR, DWORD64 base, PVOID opaque) {
+    auto& modules = *static_cast<SymbolModules*>(opaque);
+    if (modules.count == 4096) { modules.truncated = true; return FALSE; }
+    modules.bases[modules.count++] = base;
+    return TRUE;
+}
+std::string SymbolModuleFile(const IMAGEHLP_MODULE64& module) {
+    std::string file(module.ImageName, strnlen(module.ImageName, sizeof(module.ImageName)));
+    if (file.empty()) file.assign(module.ModuleName, strnlen(module.ModuleName, sizeof(module.ModuleName)));
+    const auto slash = file.find_last_of("/\\");
+    if (slash != std::string::npos) file.erase(0, slash + 1);
+    return file;
+}
 struct NameSearch {
     FindSymbolEntry entries[kFindSymbolsMaxResults]{};
     uint32_t count = 0, maximum = 0, flags = 0, visited = 0;
@@ -254,6 +286,45 @@ BOOL CALLBACK CollectNamedSymbol(PSYMBOL_INFO symbol, ULONG, PVOID opaque) {
 }
 }
 
+
+bool StackWalker::RefreshModulesLocked(bool force) {
+    const auto epoch = moduleEpoch_.load(std::memory_order_acquire);
+    if (!force && refreshedEpoch_.load(std::memory_order_acquire) == epoch) return true;
+    const auto process = GetCurrentProcess();
+    // Refresh adds loaded modules but is not a replacement for invalidating
+    // symbols of unloaded/replaced images. Both load and unload publish bases.
+    if (invalidateAllModules_.exchange(false, std::memory_order_acq_rel)) {
+        SymbolModules cached{};
+        if (!SymEnumerateModules64(process, CollectSymbolModule, &cached) && !cached.truncated) {
+            invalidateAllModules_.store(true, std::memory_order_release); return false;
+        }
+        for (uint32_t i = 0; i < cached.count; ++i)
+            if (!SymUnloadModule64(process, cached.bases[i])) {
+                invalidateAllModules_.store(true, std::memory_order_release); return false;
+            }
+        if (cached.truncated) { invalidateAllModules_.store(true, std::memory_order_release); return false; }
+    }
+    for (auto& slot : invalidatedModules_) {
+        const auto base = slot.exchange(0, std::memory_order_acq_rel);
+        if (!base) continue;
+        IMAGEHLP_MODULE64 previous{}; previous.SizeOfStruct = sizeof(previous);
+        if (SymGetModuleInfo64(process, base, &previous) && previous.BaseOfImage == base &&
+            !SymUnloadModule64(process, base)) {
+            invalidateAllModules_.store(true, std::memory_order_release); return false;
+        }
+    }
+    if (!SymRefreshModuleList(process)) return false;
+    // A callback during refresh leaves a newer epoch pending for the next lookup.
+    refreshedEpoch_.store(epoch, std::memory_order_release);
+    return true;
+}
+bool StackWalker::RefreshModules() {
+    if (!initialized_) return false;
+    if (moduleEpoch_.load(std::memory_order_acquire) == refreshedEpoch_.load(std::memory_order_acquire)) return true;
+    std::lock_guard<std::mutex> lock(dbghelpMutex_);
+    return RefreshModulesLocked();
+}
+
 IpcStatus StackWalker::FindSymbols(const std::string& name, uint32_t maximum,
         std::vector<FindSymbolEntry>& entries, uint32_t& flags) {
     entries.clear(); flags = 0;
@@ -261,51 +332,60 @@ IpcStatus StackWalker::FindSymbols(const std::string& name, uint32_t maximum,
         !maximum || maximum > kFindSymbolsMaxResults) return IpcStatus::InvalidArgs;
     if (!initialized_) return IpcStatus::InvalidState;
     std::lock_guard<std::mutex> lock(dbghelpMutex_);
-    auto mask = name;
-    std::string qualifiedModule;
-    const auto bang = mask.find('!');
-    if (bang == std::string::npos) mask = "*!" + mask;
-    else {
-        if (!bang || bang + 1 == mask.size() || mask.find('!', bang + 1) != std::string::npos)
+    const auto bang = name.find('!');
+    std::string modulePattern, symbolPattern = name;
+    if (bang != std::string::npos) {
+        if (!bang || bang + 1 == name.size() || name.find('!', bang + 1) != std::string::npos)
             return IpcStatus::InvalidArgs;
-        // DbgHelp module aliases normally omit the file extension.
-        const auto module = mask.substr(0, bang);
-        const auto dot = module.rfind('.');
-        if (dot != std::string::npos) {
-            auto suffix = module.substr(dot);
-            std::transform(suffix.begin(), suffix.end(), suffix.begin(),
-                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (suffix == ".dll" || suffix == ".exe" || suffix == ".sys") {
-                qualifiedModule = module;
-                // Include DbgHelp aliases for another image with the same basename;
-                // the full filename is filtered after enumeration.
-                mask.erase(dot, bang - dot); mask.insert(dot, "*");
-            }
-        }
+        modulePattern = name.substr(0, bang); symbolPattern = name.substr(bang + 1);
     }
+    auto lower = modulePattern;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const bool filename = lower.size() >= 4 && (lower.substr(lower.size() - 4) == ".dll" ||
+        lower.substr(lower.size() - 4) == ".exe" || lower.substr(lower.size() - 4) == ".sys");
     const auto process = GetCurrentProcess();
-    if (!SymRefreshModuleList(process)) return IpcStatus::Error;
+    if (!RefreshModulesLocked(true)) return IpcStatus::Error;
+    const auto epoch = refreshedEpoch_.load(std::memory_order_acquire);
     NameSearch search{}; search.maximum = maximum;
-    SetLastError(ERROR_SUCCESS);
-    const bool enumerated = SymEnumSymbols(process, 0, mask.c_str(), CollectNamedSymbol, &search) != FALSE;
-    if (!enumerated && !search.flags) return IpcStatus::Error;
+    if (filename) {
+        // Choose eligible image bases BEFORE counting symbols. Prefix aliases or
+        // unrelated modules must never consume the user's candidate budget.
+        SymbolModules modules{};
+        if (!SymEnumerateModules64(process, CollectSymbolModule, &modules) && !modules.truncated)
+            return IpcStatus::Error;
+        if (modules.truncated) search.flags |= kFindSymbolsIncomplete;
+        for (uint32_t i = 0; i < modules.count; ++i) {
+            IMAGEHLP_MODULE64 module{}; module.SizeOfStruct = sizeof(module);
+            if (!SymGetModuleInfo64(process, modules.bases[i], &module)) {
+                search.flags |= kFindSymbolsIncomplete; continue;
+            }
+            const auto file = SymbolModuleFile(module);
+            if (file.empty()) { search.flags |= kFindSymbolsIncomplete; continue; }
+            if (!SymMatchString(file.c_str(), modulePattern.c_str(), FALSE)) continue;
+            if (!SymEnumSymbols(process, modules.bases[i], symbolPattern.c_str(), CollectNamedSymbol, &search) &&
+                !(search.flags & (kFindSymbolsTruncated | kFindSymbolsIncomplete)))
+                return IpcStatus::Error;
+            if (search.flags & kFindSymbolsTruncated) break;
+        }
+    } else {
+        const auto mask = (modulePattern.empty() ? "*" : modulePattern) + "!" + symbolPattern;
+        if (!SymEnumSymbols(process, 0, mask.c_str(), CollectNamedSymbol, &search) && !search.flags)
+            return IpcStatus::Error;
+    }
     for (uint32_t i = 0; i < search.count; ++i) {
         auto entry = search.entries[i];
         IMAGEHLP_MODULE64 module{}; module.SizeOfStruct = sizeof(module);
-        if (!SymGetModuleInfo64(process, entry.moduleBase, &module)) {
-            search.flags |= kFindSymbolsIncomplete;
-        } else {
-            std::string file(module.ImageName, strnlen(module.ImageName, sizeof(module.ImageName)));
-            if (file.empty()) file.assign(module.ModuleName, strnlen(module.ModuleName, sizeof(module.ModuleName)));
-            const auto slash = file.find_last_of("/\\");
-            if (slash != std::string::npos) file.erase(0, slash + 1);
-            if (!qualifiedModule.empty() && !SymMatchString(file.c_str(), qualifiedModule.c_str(), FALSE)) continue;
+        if (!SymGetModuleInfo64(process, entry.moduleBase, &module)) search.flags |= kFindSymbolsIncomplete;
+        else {
+            const auto file = SymbolModuleFile(module);
             const auto length = std::min(file.size(), sizeof(entry.moduleName) - 1);
             std::memcpy(entry.moduleName, file.data(), length);
             if (length != file.size() || file.empty()) search.flags |= kFindSymbolsIncomplete;
         }
         entries.push_back(entry);
     }
+    if (moduleEpoch_.load(std::memory_order_acquire) != epoch) search.flags |= kFindSymbolsIncomplete;
     flags = search.flags;
     return IpcStatus::Ok;
 }
@@ -314,6 +394,7 @@ std::vector<AddressSymbol> StackWalker::Symbolize(const std::vector<uint64_t>& a
 	std::vector<AddressSymbol> result(addresses.size());
 	if (!initialized_) return result;
 	std::lock_guard<std::mutex> lock(dbghelpMutex_);
+    if (!RefreshModulesLocked()) return result;
 	constexpr size_t kSymBufSize = sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(TCHAR);
 	uint8_t symBuf[kSymBufSize];
 	auto* symInfo = reinterpret_cast<SYMBOL_INFO*>(symBuf);
@@ -334,6 +415,7 @@ std::vector<StackFrame> StackWalker::Walk(uint32_t threadId, uint32_t startFrame
 	}
 
 	std::lock_guard<std::mutex> lock(dbghelpMutex_);
+    if (!RefreshModulesLocked()) return frames;
 
 	// 대상 스레드의 컨텍스트 획득
 	// VEH에서 정지된 스레드면 저장된 예외 컨텍스트 사용
@@ -654,6 +736,7 @@ bool StackWalker::DisplayType(const DisplayTypeRequest& req, DisplayTypeResponse
                               std::vector<DisplayTypeMember>& members) {
 	if (!initialized_) return false;
 	std::lock_guard<std::mutex> lock(dbghelpMutex_);
+    if (!RefreshModulesLocked()) return false;
 	HANDLE process = GetCurrentProcess();
 
 	std::string typeName(req.typeName, strnlen(req.typeName, sizeof(req.typeName)));
@@ -789,6 +872,7 @@ std::vector<LocalVariableInfo> StackWalker::EnumLocals(uint32_t threadId, uint64
 	}
 
 	std::lock_guard<std::mutex> lock(dbghelpMutex_);
+    if (!RefreshModulesLocked()) return results;
 
 	HANDLE hProcess = GetCurrentProcess();
 

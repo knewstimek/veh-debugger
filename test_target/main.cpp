@@ -119,6 +119,11 @@ __declspec(noinline) int TraceMidBlockTarget() {
 	return reinterpret_cast<int (*)()>(code)();
 }
 
+__declspec(noinline) void SymbolReloadMarker(int phase) {
+    volatile int observed = phase;
+    (void)observed;
+}
+
 int main(int argc, char* argv[]) {
 	printf("=== VEH Debugger Test Target ===\n");
 	printf("PID: %u\n", GetCurrentProcessId());
@@ -140,10 +145,27 @@ int main(int argc, char* argv[]) {
         char* slash = strrchr(path, '\\');
         if (!slash) return 3;
         *(slash + 1) = 0;
-        const char* symbolProbes[] = {"symbol_lookup_a.dll", "symbol_lookup_b.dll"};
+        const char* symbolProbes[] = {"symbol_lookup_a.dll", "symbol_lookup_b.dll", "symbol_lookup_a_extra.dll"};
         for (const auto* name : symbolProbes) {
             char full[MAX_PATH]{};
             if (sprintf_s(full, "%s%s", path, name) < 0 || !LoadLibraryA(full)) return 3;
+        }
+    }
+    for (int i = 1; i < argc; ++i) if (strcmp(argv[i], "--symbol-reload") == 0) {
+        char path[MAX_PATH]{};
+        const DWORD length = GetModuleFileNameA(nullptr, path, MAX_PATH);
+        if (!length || length >= MAX_PATH) return 3;
+        auto* slash = strrchr(path, '\\');
+        if (!slash) return 3;
+        *(slash + 1) = 0;
+        char full[MAX_PATH]{};
+        if (sprintf_s(full, "%ssymbol_lookup_reload.dll", path) < 0) return 3;
+        for (int phase = 0; phase < 2; ++phase) {
+            const auto module = LoadLibraryA(full);
+            if (!module) return 3;
+            SymbolReloadMarker(phase * 2 + 1);
+            if (!FreeLibrary(module)) return 3;
+            SymbolReloadMarker(phase * 2 + 2);
         }
     }
 	printf("Press Ctrl+C to exit.\n\n");

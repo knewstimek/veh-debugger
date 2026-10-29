@@ -1089,7 +1089,10 @@ bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
             throw AddressResolutionError("This symbol is a forwarded export; select its implementation module with veh_symbolize(name=...)", "forwarded_symbol");
         address = found.matches[0].address;
     };
-    if (literal(text, out)) return true;
+    const auto inTargetWidth = [&](uint64_t address) {
+        return !session_.IsAttached() || session_.TargetAddressBits() != 32 || address <= UINT32_MAX;
+    };
+    if (literal(text, out)) return inTargetWidth(out);
     const auto plus = text.find('+');
     if (plus != std::string::npos && plus) {
         const auto left = trim(text.substr(0, plus));
@@ -1104,7 +1107,10 @@ bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
             if (left.find('!') == std::string::npos) {
                 const auto modules = session_.GetModules();
                 for (const auto& module : modules) if (_stricmp(module.name.c_str(), left.c_str()) == 0) {
-                    base = module.baseAddress; moduleFound = true; break;
+                    if (moduleFound && base != module.baseAddress)
+                        throw AddressResolutionError("Module basename '" + left +
+                            "' matches multiple loaded images; use an explicit base address", "ambiguous_module");
+                    base = module.baseAddress; moduleFound = true;
                 }
                 auto lower = left;
                 std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1117,20 +1123,20 @@ bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
         }
         if (offset > UINT64_MAX - base) return false;
         out = base + offset;
-        return session_.TargetAddressBits() != 32 || out <= UINT32_MAX;
+        return inTargetWidth(out);
     }
     const auto minus = text.find('-', 1);
     if (minus != std::string::npos) {
         uint64_t left = 0, right = 0;
         if (literal(trim(text.substr(0, minus)), left) && literal(trim(text.substr(minus + 1)), right)) {
             if (right > left) return false;
-            out = left - right; return true;
+            out = left - right; return inTargetWidth(out);
         }
     }
     if (!session_.IsAttached() || text.front() == '-' || text.front() == '+' ||
         (text.front() >= '0' && text.front() <= '9')) return false;
     resolve(text, out);
-    return true;
+    return inTargetWidth(out);
 }
 
 // --- Tool List Definition ---
