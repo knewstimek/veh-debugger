@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- **Persistent analysis notes (MCP)** -- existing `veh_symbolize(analysis=...)` opens a user-selected JSON analysis directory and saves instruction comments, labels, context and evidence references without a database dependency. The selected directory is remembered for restart. Disassembly and symbol results include bounded previews; full notes/history are explicit. Build identities and RVAs preserve notes across ASLR while different builds stay isolated; changed instruction bytes are marked stale. Revision-checked atomic saves prevent cooperating writers from overwriting newer edits. Backends without stable image identity can save unbound notes for explicit ID lookup, never automatic address application. Project open/close are direct-only; record operations share direct/batch/action behavior. See `docs/ANALYSIS_NOTES.md`.
+
 ## 1.2.2 - 2026-10-30
 
 ### Added

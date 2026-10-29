@@ -14,6 +14,7 @@
 #include <tuple>
 #include "adapter/transport.h"
 #include "debug_session.h"
+#include "analysis_store.h"
 #include "kernel_debug_client.h"
 #include "common/ipc_protocol.h"
 #include <nlohmann/json.hpp>
@@ -136,6 +137,10 @@ private:
 	json ToolDisassemble(const json& args);
 	json ToolEnumLocals(const json& args);
 	json ToolSymbolize(const json& args);
+    json ToolAnalysis(const json& args);
+    std::string AnnotationEpoch();
+    void AddAnnotations(json& rows, bool codeAvailable, const std::string& beforeEpoch);
+    json AnnotationContext(uint64_t address, const std::vector<ModuleEntry>& modules);
 	json ToolDisplayType(const json& args);
 	json ToolAssemble(const json& args);
 	json ToolEvaluate(const json& args);
@@ -251,6 +256,8 @@ private:
 
 	dap::Transport* transport_ = nullptr;
 	DebugSession session_;
+    AnalysisStore analysisStore_;
+    const std::string annotationSession_ = AnalysisStore::Nonce();
 	std::unique_ptr<KernelDebugClient> kd_;
 	std::set<std::tuple<uint64_t, char, uint32_t>> kd_breakpoints_;
 	bool kd_dbgc_ = false; // VirtualBox's DBGC stub: registers are written through its console

@@ -8,6 +8,8 @@ An in-process Windows debugger built on **VEH (Vectored Exception Handler)**. Br
 
 Use `veh_symbolize(name="Function", max_results=10)` to list symbol candidates. Candidates and `veh_modules` include image paths, bases and available 32/64-bit widths; unavailable widths remain unknown. Select duplicate images with `module_base="0x..."` or use `0xBASE!Function` in address expressions. Ambiguous names are never resolved by choosing the first match. External backends must support these queries; selecting an image does not switch the session's execution mode.
 
+Persistent comments and labels use the existing `veh_symbolize(analysis=...)` interface and appear in MCP disassembly/symbol results. A chosen local directory holds JSON notes with build isolation, code-change markers and revision-checked edits. See [analysis notes](docs/ANALYSIS_NOTES.md).
+
 ## Why VEH
 
 It doesn't use the Windows Debug API. Instead of `DebugActiveProcess` / `NtSetInformationThread`, it catches exceptions from inside the target via VEH, so `PEB.BeingDebugged` stays 0. The PEB/NtQuery-based anti-debug checks in Themida and VMProtect don't see the debugger. (Kernel anti-cheats that scan for VEH registration itself, like EAC, are the exception.)

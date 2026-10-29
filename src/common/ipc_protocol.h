@@ -81,6 +81,7 @@ enum class IpcCommand : uint32_t {
     FindSymbols            = 0x0045,  // bounded name -> candidate addresses; no first-match selection
     GetModulesEx           = 0x0046,  // GetModulesResponse + ModuleInfoEx[count]; empty request
     FindSymbolsInModule    = 0x0047,  // explicit image base, filter BEFORE candidate limit
+    GetModuleIdentity      = 0x0048,  // optional stable image identity for frontend annotations
 	DisplayType            = 0x0044,  // PDB struct layout (+ values) at an address
 
 	// Tracing
@@ -452,6 +453,23 @@ struct GetModulesResponse {
 	uint32_t  count;
 	// followed by `count` ModuleInfo structs
 };
+
+// Backend-owned file hashing, never read a remote/guest path on the frontend.
+// Ok requires a coherent loaded-image epoch, matching loaded/file PE headers
+// (normalizing ASLR ImageBase), and SHA256 of the backing file. Do not acquire
+// loader locks in this command. Cache only within image lifetime/file identity.
+// Unknown/unverifiable identities must fail, never synthesize a build hash.
+struct GetModuleIdentityRequest { uint64_t moduleBase; };
+struct GetModuleIdentityResponse {
+    IpcStatus status;
+    uint64_t moduleBase;
+    uint32_t addressBits, imageSize;
+    uint8_t sha256[32];
+    uint64_t moduleEpoch; // opaque module-map lifetime counter; changes on load/unload
+};
+// base=0 requests only moduleEpoch (Ok, other fields zero); no file I/O/hash.
+// Callers bracket address/code/symbol observation and reject epoch changes.
+static_assert(sizeof(GetModuleIdentityResponse) == 60);
 
 // Events
 struct BreakpointHitEvent {

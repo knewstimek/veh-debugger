@@ -1264,6 +1264,23 @@ std::vector<ModuleEntry> DebugSession::GetModules(std::string* error) {
 	return result;
 }
 
+bool DebugSession::GetModuleIdentity(uint64_t base, GetModuleIdentityResponse& identity, std::string& error) {
+    identity = {};
+    if (!backendInfo_.reported || !backendInfo_.Supports(IpcCommand::GetModuleIdentity)) {
+        error = "Backend does not advertise stable module identity (GetModuleIdentity 0x48)"; return false;
+    }
+    GetModuleIdentityRequest request{base}; std::vector<uint8_t> bytes;
+    if (!ReceiveBackendReply(IpcCommand::GetModuleIdentity, &request, sizeof(request), bytes, "GetModuleIdentity", error, 10000)) return false;
+    if (bytes.size() != sizeof(identity)) { error = "GetModuleIdentity: malformed response"; return false; }
+    std::memcpy(&identity, bytes.data(), sizeof(identity));
+    bool nonzero = false; for (auto value : identity.sha256) nonzero |= value != 0;
+    if (identity.moduleBase != base || (base ? (!identity.imageSize || !nonzero ||
+            (identity.addressBits != 32 && identity.addressBits != 64)) : (identity.imageSize || identity.addressBits || nonzero))) {
+        error = "GetModuleIdentity: invalid metadata"; return false;
+    }
+    return true;
+}
+
 std::vector<SymbolizeEntry> DebugSession::Symbolize(const std::vector<uint64_t>& addresses) {
 	std::vector<SymbolizeEntry> result;
 	if (addresses.empty() || addresses.size() > kSymbolizeMaxAddresses) return result;

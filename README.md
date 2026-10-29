@@ -8,6 +8,8 @@ Windows 프로세스를 VEH(Vectored Exception Handler)로 디버깅하는 인-�
 
 `veh_symbolize(name="Function", max_results=10)`으로 심볼 후보를 조회할 수 있습니다. 후보와 `veh_modules`는 모듈 경로·베이스·확인 가능한 32/64비트를 표시하며, 알 수 없는 비트수는 unknown입니다. 동명 모듈은 `module_base="0x..."`로 지정하거나 주소에 `0xBASE!Function`을 사용합니다. 이름만으로 모호한 후보를 자동 선택하지 않습니다. 외부 백엔드는 해당 조회 기능을 지원해야 하며, 모듈 선택이 세션의 실행 모드를 바꾸지는 않습니다.
 
+분석 코멘트·라벨은 기존 `veh_symbolize(analysis=...)`로 관리하고 MCP 디스어셈블·심볼 결과에서 확인합니다. 지정한 폴더의 JSON에 자동 저장하며, 빌드 변경·코드 변경·수정 충돌을 구분합니다. [분석 메모 사용법](docs/ANALYSIS_NOTES.md).
+
 ## 왜 VEH인가
 
 Windows Debug API를 쓰지 않는다. `DebugActiveProcess` / `NtSetInformationThread` 대신 타겟 안에서 VEH로 예외를 잡으므로 `PEB.BeingDebugged`가 0으로 유지된다. Themida, VMProtect의 PEB/NtQuery 기반 안티디버그 체크에 디버거가 보이지 않는다. (VEH 등록 자체를 스캔하는 EAC류 커널 안티치트는 예외.)

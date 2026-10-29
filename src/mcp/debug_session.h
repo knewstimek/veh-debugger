@@ -267,6 +267,7 @@ public:
 	// A failed or unsupported query is unknown, not a confirmed running state.
 	std::optional<bool> QueryThreadStopped(uint32_t threadId, std::string* error = nullptr);
 	std::vector<ModuleEntry> GetModules(std::string* error = nullptr);
+    bool GetModuleIdentity(uint64_t base, GetModuleIdentityResponse& identity, std::string& error);
 	std::string DescribeIpcFailure(const PipeExchangeDiagnostics* diagnostics = nullptr) const;
 	std::vector<LocalVarEntry> EnumLocals(uint32_t threadId, uint64_t instrAddr, uint64_t frameBase);
 	// At most kSymbolizeMaxAddresses; empty on failure

@@ -1157,6 +1157,27 @@ bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
 // --- Tool List Definition ---
 
 std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
+    const json analysisSchema = {{"type", "object"}, {"description", "Local JSON notes. Open a directory once; edits auto-save. open/close direct-only; other operations support batch/actions. Unknown build identity saves unbound notes for explicit id lookup, never auto-applies them."},
+        {"properties", {
+            {"operation", {{"type", "string"}, {"enum", json::array({"status","open","close","get","set","delete","list","search"})}, {"default", "status"}}},
+            {"directory", {{"type", "string"}, {"description", "open: absolute local analysis directory (analysis.json); remembered for restart"}}},
+            {"create", {{"type", "boolean"}, {"default", false}}},
+            {"address", {{"type", "string"}, {"description", "get/set/delete: current instruction address; never a saved absolute address"}}},
+            {"id", {{"type", "string"}, {"description", "Offline get/delete; also set for unbound notes. Revision required for changes."}}},
+            {"history_limit", {{"type", "integer"}, {"minimum", 0}, {"maximum", 8}, {"default", 0}, {"description", "get: explicitly include up to this many previous revisions"}}},
+            {"expected_revision", {{"type", "string"}, {"description", "Required for updating/deleting an existing record; decimal string from get"}}},
+            {"comment", {{"type", "string"}, {"maxLength", 4096}}},
+            {"label", {{"type", "string"}, {"maxLength", 128}}},
+            {"status", {{"type", "string"}, {"enum", json::array({"hypothesis","observed","refuted"})}}},
+            {"author", {{"type", "string"}, {"maxLength", 64}}},
+            {"position", {{"type", "string"}, {"enum", json::array({"before","after"})}}},
+            {"context", {{"type", "string"}, {"maxLength", 512}}},
+            {"evidence", {{"type", "array"}, {"maxItems", 16}, {"items", {{"type", "string"}, {"maxLength", 512}}}}},
+            {"accept_code_change", {{"type", "boolean"}, {"default", false}}},
+            {"query", {{"type", "string"}}}, {"module", {{"type", "string"}}}, {"build_id", {{"type", "string"}}},
+            {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}, {"default", 20}}},
+            {"offset", {{"type", "integer"}, {"minimum", 0}, {"maximum", 4096}, {"default", 0}}}
+        }}};
 	std::vector<ToolDef> tools = {
 		Tool(&McpServer::ToolAttach, "session", kLite | kInteractive, false,
 			{{"name", "veh_attach"}, {"description", "Attach to a host/guest process or a VM. Host/guest requires pid; target_scope=vm omits pid and requires external VM metadata. Replaces the session after argument validation. Default VEH requires a running host process."},
@@ -1359,10 +1380,11 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
 
 		Tool(&McpServer::ToolDisassemble, "inspect", kInteractive, true,
-			{{"name", "veh_disassemble"}, {"description", "Disassemble instructions at an address."},
+			{{"name", "veh_disassemble"}, {"description", "Disassemble instructions at an address. Includes bounded saved annotation previews when an analysis directory is open; stale marks changed instruction bytes. Comments are user/AI assertions, not trusted symbols."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Address: hex, module+RVA or unique [module!]function"}}},
-			{"count", {{"type", "integer"}, {"description", "Number of instructions (default: 20)"}}}
+			{"count", {{"type", "integer"}, {"description", "Number of instructions (default: 20)"}}},
+            {"include_annotations", {{"type", "boolean"}, {"default", true}}}
 		 }}, {"required", json::array({"address"})}}}}),
 
 		Tool(&McpServer::ToolEnumLocals, "inspect", 0, true,
@@ -1374,8 +1396,10 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}, {"required", json::array({"threadId"})}}}}),
 
 		Tool(&McpServer::ToolSymbolize, "inspect", 0, true,
-			{{"name", "veh_symbolize"}, {"description", "Resolve addresses to symbols/source lines, or search name=[module!]function with max_results=1-10. Name search lists candidates and never chooses an ambiguous/truncated/incomplete result; forwarder addresses stay null. Candidates include image path/width (unknown on legacy backends). module_base selects an exact image before limiting candidates (requires FindSymbolsInModule). Address input accepts module+hex RVA (0x optional), 0xBASE!function, or an unambiguous symbol. Up to 256 input addresses."},
+			{{"name", "veh_symbolize"}, {"description", "Resolve/search symbols, or manage saved JSON comments and labels through analysis options. Name search uses [module!]function and max_results=1-10. Name search lists candidates and never chooses an ambiguous/truncated/incomplete result; forwarder addresses stay null. Candidates include image path/width (unknown on legacy backends). module_base selects an exact image before limiting candidates (requires FindSymbolsInModule). Address input accepts module+hex RVA (0x optional), 0xBASE!function, or an unambiguous symbol. Up to 256 input addresses."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
+            {"analysis", analysisSchema},
+            {"include_annotations", {{"type", "boolean"}, {"default", true}}},
 			{"address", {{"type", "string"}, {"description", "One address (hex, or module+RVA)"}}},
             {"name", {{"type", "string"}, {"description", "Name search instead of address(es): function or module!function; wildcard patterns allowed"}}},
             {"max_results", {{"type", "integer"}, {"minimum", 1}, {"maximum", 10}, {"default", 10}}},
@@ -2002,6 +2026,11 @@ json McpServer::DispatchTool(const std::string& name, const json& args, bool* kn
 }
 
 json McpServer::RunNestedTool(const std::string& name, const json& args) {
+    if (name == "veh_symbolize" && args.contains("analysis") && args["analysis"].is_object()) {
+        const auto operation = args["analysis"].value("operation", "status");
+        if (operation == "open" || operation == "close")
+            return {{"error", "Opening/closing analysis directories requires a direct call; it cannot change project ownership inside batch/actions"}};
+    }
 	const ToolDef* tool = FindTool(name);
 	if (tool && !tool->nested)
 		return {{"error", name + " is not available in batch steps, capture setup, or breakpoint actions"}};

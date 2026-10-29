@@ -79,6 +79,10 @@ json McpServer::SymbolCandidates(const std::vector<FindSymbolEntry>& entries) {
 }
 
 json McpServer::ToolSymbolize(const json& args) {
+    if (args.contains("analysis")) {
+        if (args.size() != 1) return {{"error", "Use analysis OR symbol/address arguments"}};
+        return ToolAnalysis(args["analysis"]);
+    }
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
     if (args.contains("name")) {
         if (!args["name"].is_string() || args.contains("address") || args.contains("addresses"))
@@ -99,9 +103,11 @@ json McpServer::ToolSymbolize(const json& args) {
             try { base = std::stoull(text.substr(2), nullptr, 16); } catch (...) { return {{"error", "module_base overflow"}}; }
             if (!base) return {{"error", "module_base must be nonzero"}};
         }
+        const auto annotationEpoch = JsonBool(args, "include_annotations", true) ? AnnotationEpoch() : std::string{};
         const auto result = session_.FindSymbols(name, maximum, base);
         if (!result.ok) return {{"error", result.error}};
         json matches = SymbolCandidates(result.matches);
+        if (JsonBool(args, "include_annotations", true)) AddAnnotations(matches, false, annotationEpoch);
         const bool unique = result.matches.size() == 1 && !result.truncated && !result.incomplete &&
             result.matches[0].address != 0;
         json out = {{"query", args["name"]}, {"matches", matches}, {"count", matches.size()},
@@ -129,6 +135,7 @@ json McpServer::ToolSymbolize(const json& args) {
 		addresses.push_back(value);
 	}
 
+    const auto annotationEpoch = JsonBool(args, "include_annotations", true) ? AnnotationEpoch() : std::string{};
 	auto entries = session_.Symbolize(addresses);
 	if (entries.size() != addresses.size()) return {{"error", "symbolize failed in target"}};
 
@@ -154,6 +161,7 @@ json McpServer::ToolSymbolize(const json& args) {
 		}
 		symbols.push_back(std::move(item));
 	}
+    if (JsonBool(args, "include_annotations", true)) AddAnnotations(symbols, false, annotationEpoch);
 	return {{"symbols", symbols}, {"count", symbols.size()}};
 }
 
@@ -367,6 +375,7 @@ json McpServer::ToolDisassemble(const json& args) {
 		return {{"error", "invalid address format"}};
 	}
 
+    const auto annotationEpoch = JsonBool(args, "include_annotations", true) ? AnnotationEpoch() : std::string{};
 	auto insns = session_.Disassemble(addr, static_cast<uint32_t>(count));
 	if (insns.empty()) {
 		return {{"error", "Disassembly failed (address may be invalid or inaccessible)"}};
@@ -383,6 +392,7 @@ json McpServer::ToolDisassemble(const json& args) {
 		});
 	}
 
+    if (JsonBool(args, "include_annotations", true)) AddAnnotations(result, true, annotationEpoch);
 	return {{"instructions", result}, {"count", result.size()}};
 }
 

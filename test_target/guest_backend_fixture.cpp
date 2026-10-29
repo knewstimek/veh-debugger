@@ -56,6 +56,8 @@ int wmain(int argc, wchar_t** argv) {
     uint32_t fixtureBreakpointId = 0, shellcodeRequests=0, localThreadQueries=0;
     const bool scanMode=mode.rfind(L"scan-",0)==0;
     uint32_t symbolLookupRequests = 0;
+    uint64_t annotationEpoch = 1;
+    bool annotationRace = false;
     const bool symbolsMode = mode.rfind(L"symbols-", 0) == 0 || mode.rfind(L"ops-action-symbol", 0) == 0;
     const bool instrumentationMode = mode.rfind(L"inst-", 0) == 0 || mode == L"ops-action-inst";
     bool captureActive[3]{}, captureCreated[3]{};
@@ -137,6 +139,7 @@ int wmain(int argc, wchar_t** argv) {
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::TraceVirtualCpu);
             }
             if (symbolsMode) {
+                if (mode.rfind(L"symbols-analysis-", 0) == 0) veh::SetCommandSupported(caps.commands, veh::IpcCommand::GetModuleIdentity);
                 if (mode == L"ops-action-symbols") veh::SetCommandSupported(caps.commands, veh::IpcCommand::FindSymbolsInModule);
                 if (mode.rfind(L"symbols-images", 0) == 0)
                     for (auto op : {veh::IpcCommand::GetModulesEx, veh::IpcCommand::FindSymbolsInModule})
@@ -250,6 +253,25 @@ int wmain(int argc, wchar_t** argv) {
             std::memcpy(result.data(), &response, sizeof(response));
             if (response.eventCount) std::memcpy(result.data() + sizeof(response), events, sizeof(events));
             if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
+        } else if (symbolsMode && command == veh::IpcCommand::GetModuleIdentity) {
+            if (mode == L"symbols-analysis-unavailable") { if (!reply(pipe, header.command, veh::IpcStatus::InvalidState)) break; continue; }
+            veh::GetModuleIdentityRequest request{};
+            if (bytes.size() != sizeof(request)) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
+            std::memcpy(&request, bytes.data(), sizeof(request));
+            veh::GetModuleIdentityResponse response{}; response.status = veh::IpcStatus::Ok;
+            response.moduleBase = request.moduleBase; response.moduleEpoch = annotationEpoch;
+            if (request.moduleBase) {
+                response.addressBits = 32; response.imageSize = 0x10000;
+                const bool secondBuild = mode == L"symbols-analysis-v2" ||
+                    (mode == L"symbols-analysis-race-set" && annotationRace) ||
+                    (mode == L"symbols-analysis-race-preview" && !annotationRace);
+                std::memset(response.sha256, secondBuild ? 0x22 : 0x11, sizeof(response.sha256));
+            }
+            if (mode == L"symbols-analysis-invalid") response.moduleBase += 1;
+            if (!reply(pipe, header.command, response)) break;
+            if (mode == L"symbols-analysis-race-set" && request.moduleBase && !annotationRace) {
+                annotationRace = true; ++annotationEpoch;
+            }
         } else if (symbolsMode && command == veh::IpcCommand::GetModulesEx) {
             struct { veh::GetModulesResponse head; veh::ModuleInfoEx modules[2]; } response{};
             response.head = {veh::IpcStatus::Ok, 2};
@@ -313,7 +335,7 @@ int wmain(int argc, wchar_t** argv) {
             struct { veh::GetModulesResponse head; veh::ModuleInfo modules[2]; } response{};
             response.head = {veh::IpcStatus::Ok, mode == L"symbols-duplicate-module" ? 2u : 1u};
             for (uint32_t i = 0; i < response.head.count; ++i) {
-                response.modules[i].baseAddress = 0x1000 + i * 0x1000;
+                response.modules[i].baseAddress = (mode == L"symbols-analysis-moved" ? 0x4000 : 0x1000) + i * 0x1000;
                 response.modules[i].size = 0x10000;
                 strcpy_s(response.modules[i].name, "probe_a.dll");
             }
@@ -948,6 +970,7 @@ int wmain(int argc, wchar_t** argv) {
                 std::memset(modules.module.name,'A',sizeof(modules.module.name));
             if(!reply(pipe,header.command,modules))break;
         } else if (command == veh::IpcCommand::ReadMemory && bytes.size() == sizeof(veh::ReadMemoryRequest)) {
+            if (mode == L"symbols-analysis-race-preview" && !annotationRace) { annotationRace = true; ++annotationEpoch; }
             veh::ReadMemoryRequest request{}; memcpy(&request, bytes.data(), sizeof(request));
             if (request.size > 4096) { reply(pipe, header.command, veh::IpcStatus::InvalidArgs); continue; }
             std::vector<unsigned char> response(sizeof(veh::IpcStatus) + request.size, 0x90);

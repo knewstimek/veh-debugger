@@ -7,6 +7,7 @@ set(DLL_SOURCES
     value_scan.cpp
     threads.cpp
     stack_walk.cpp
+    module_identity.cpp
     pipe_server.cpp
     syscall_resolver.cpp
 )

@@ -6,6 +6,8 @@ Windows debugger based on **VEH (Vectored Exception Handler)** instead of the Wi
 
 MCP symbol search lists up to ten candidates with image bases, paths and available address widths. Use `veh_symbolize(name="Function", module_base="0x...")` or `0xBASE!Function` in address expressions to select a duplicate image. Unknown widths stay unknown; external backend support is required for the new queries. See [the changelog](CHANGELOG.md) for upgrade notes.
 
+Persistent MCP comments and labels are managed through `veh_symbolize(analysis=...)` and saved as JSON in a selected local folder. Builds stay isolated and changed code is marked for review; unavailable build identities never auto-apply notes. See the repository's [analysis notes guide](https://github.com/knewstimek/veh-debugger/blob/master/docs/ANALYSIS_NOTES.md).
+
 ## Features
 
 - **Anti-debug friendly** — Uses VEH instead of `ntdll!DbgUiRemoteBreakin`, bypasses common anti-debug checks

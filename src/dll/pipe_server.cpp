@@ -8,6 +8,7 @@
 #include "stack_walk.h"
 #include "memory.h"
 #include "value_scan.h"
+#include "module_identity.h"
 #include "syscall_resolver.h"
 #include "../common/ipc_protocol.h"
 #include "../common/logger.h"
@@ -693,6 +694,7 @@ void PipeServer::ServerThread() {
 
 	// DbgHelp 심볼 엔진 초기화
 	StackWalker::Instance().Initialize();
+    PrepareModuleIdentity();
 
 	// 외부 루프: running_ 동안 클라이언트 연결을 반복 수락한다.
 	// Detach 시 내부 커맨드 루프만 탈출하고 여기서 새 클라이언트를 기다린다.
@@ -856,6 +858,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 	case IpcCommand::GetRegisters:
 	case IpcCommand::GetModules:
     case IpcCommand::GetModulesEx:
+    case IpcCommand::GetModuleIdentity:
 		HandleThreadCommand(command, payload, payloadSize);
 		break;
 
@@ -1437,6 +1440,14 @@ void PipeServer::HandleThreadCommand(uint32_t command, const uint8_t* payload, u
 		SendResponse(command, &resp, sizeof(resp));
 		break;
 	}
+    case IpcCommand::GetModuleIdentity: {
+        GetModuleIdentityResponse response{}; response.status = IpcStatus::InvalidArgs;
+        if (payloadSize == sizeof(GetModuleIdentityRequest)) {
+            GetModuleIdentityRequest request{}; std::memcpy(&request, payload, sizeof(request));
+            response = InspectModuleIdentity(request.moduleBase);
+        }
+        SendResponse(command, &response, sizeof(response)); break;
+    }
 	case IpcCommand::GetModules:
     case IpcCommand::GetModulesEx: {
         const bool extended = static_cast<IpcCommand>(command) == IpcCommand::GetModulesEx;
@@ -3298,6 +3309,7 @@ void PipeServer::HandleLifecycleCommand(uint32_t command, const uint8_t* payload
 			IpcCommand::SetRegister, IpcCommand::SetRegisters, IpcCommand::IsThreadStopped, IpcCommand::FreezeThread,
 			IpcCommand::ReadMemory, IpcCommand::WriteMemory, IpcCommand::PatchCode,
 			IpcCommand::FindSymbols, IpcCommand::GetModulesEx, IpcCommand::FindSymbolsInModule,
+            IpcCommand::GetModuleIdentity,
             IpcCommand::ResolveSourceLine, IpcCommand::ResolveFunction, IpcCommand::EnumLocals,
 			IpcCommand::Symbolize, IpcCommand::DisplayType, IpcCommand::TraceCallers,
 			IpcCommand::AllocateMemory, IpcCommand::FreeMemory, IpcCommand::ExecuteShellcode,

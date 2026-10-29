@@ -38,6 +38,8 @@ void PrintUsage() {
         "  Tool help: veh_toolbox(operation=describe, tool=veh_attach or veh_launch).\n"
         "  Trace help: describe veh_trace_basic_blocks for snapshot/ordered-path options.\n"
         "  Scan help: describe veh_value_scan for async disk/undo and push completion (no polling).\n"
+        "  Analysis notes: veh_symbolize(analysis={operation:open,directory:<absolute local dir>,create:true}).\n"
+        "  Notes auto-save to analysis.json; the last directory is remembered. VEH_ANALYSIS_DIR overrides it.\n"
         "\n"
 		"This server communicates via stdin/stdout using MCP (JSON-RPC 2.0).\n"
 	);

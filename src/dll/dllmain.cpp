@@ -1,4 +1,5 @@
 #include <windows.h>
+#include "module_identity.h"
 #include <winternl.h>
 #include <dbghelp.h>
 #include "veh_handler.h"
@@ -265,6 +266,7 @@ DWORD WINAPI InitThread(LPVOID) {
 		if (pRegister) {
 			LONG status = pRegister(0, DllNotificationCallback, &pipe, &g_dllNotifCookie);
 			if (status == 0) {
+                veh::SetModuleIdentityTracking(true);
 				LOG_INFO("LdrRegisterDllNotification succeeded");
 			} else {
 				LOG_WARN("LdrRegisterDllNotification failed: 0x%08X", status);
@@ -279,6 +281,7 @@ DWORD WINAPI InitThread(LPVOID) {
 }
 
 void Cleanup() {
+    veh::SetModuleIdentityTracking(false);
 	// 모듈 알림 해제
 	if (g_dllNotifCookie) {
 		HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");

@@ -8,6 +8,8 @@ An adapter EXE communicates with the DLL over Named Pipe IPC and speaks DAP to V
 
 Module enumeration and named-symbol candidates expose image bases, paths and PE address widths when reported by the backend. Unknown widths remain unknown. Bounded searches refuse ambiguous automatic selection; `module_base` or `0xBASE!Function` selects an exact current image. Legacy module records remain compatible, while extended metadata and scoped searches require explicit backend capabilities. Image selection does not change the session address width or execution mode.
 
+Analysis annotations are frontend-owned JSON metadata managed through existing MCP inspection tools. A selected directory is remembered, edits use lock/revision/atomic replacement, and backing-image identity plus RVA controls automatic binding. Unverifiable identities remain explicit unbound records. See [analysis notes](docs/ANALYSIS_NOTES.md).
+
 ## Architecture
 
 ```

@@ -1,4 +1,9 @@
 # Build
+# Local analysis metadata (contains private target findings)
+/analysis.json
+/analysis.lock
+/.analysis-*.tmp
+/.veh-analysis/
 build/
 build32/
 out/
