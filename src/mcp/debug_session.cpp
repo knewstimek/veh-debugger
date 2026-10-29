@@ -1443,6 +1443,43 @@ DebugSession::ValueScanResult DebugSession::ValueScan(const ValueScanRequest& re
 	return result;
 }
 
+DebugSession::ValueScanResultV2 DebugSession::ValueScanV2(const ValueScanRequestV2& request) {
+    ValueScanResultV2 result;
+    if(!backendInfo_.reported || !(backendInfo_.flags&kCapValueScanV2)) {
+        result.error="Backend does not support value scan protocol 2";return result;
+    }
+    std::vector<uint8_t> bytes;
+    // Async admission/status/cancel are short exchanges, not scan-duration waits.
+    const int timeout=(request.flags&kValueScanAsync) || request.scan.operation>=ValueScanOperation::Status ? 10000 : 120000;
+    if(!ipcTransport_->SendAndReceive(IpcCommand::ValueScan,&request,sizeof(request),bytes,timeout)) {
+        result.error="Value scan control response lost; operation outcome is unknown; do not retry start blindly";return result;
+    }
+    if(bytes.size()<sizeof(ValueScanResponseV2)) { result.error="Short value scan v2 response";return result; }
+    memcpy(&result.header,bytes.data(),sizeof(result.header));
+    const auto& h=result.header;
+    if(h.version!=2 || h.headerSize!=sizeof(h) || h.scan.count>request.scan.maxResults ||
+        bytes.size()!=sizeof(h)+size_t(h.scan.count)*sizeof(ValueScanEntry) ||
+        h.state>ValueScanJobState::Failed || h.phase>ValueScanPhase::Finished ||
+        h.storage>ValueScanStorage::File || h.scan.mode>ValueScanMode::Disk ||
+        h.scan.valueType>ValueScanType::F64 || h.reserved || h.scan.reserved || h.undoAvailable>8 ||
+        h.scan.failure>ValueScanFailure::StaleJob || h.scan.count>h.scan.candidates ||
+        (h.scan.count&&(!h.generationId||!h.sessionId||!h.jobId||h.scan.valueType==ValueScanType::None)) ||
+        (h.scan.status==IpcStatus::Ok&&
+         ((h.state==ValueScanJobState::Completed&&h.scan.failure!=ValueScanFailure::None)||
+          (h.state==ValueScanJobState::Failed&&h.scan.failure==ValueScanFailure::None))) ||
+        (h.total && h.processed>h.total) ||
+        ((h.state==ValueScanJobState::Running||h.state==ValueScanJobState::Cancelling) && (!h.jobId||!h.sessionId))) {
+        result.error="Malformed value scan v2 receipt";return result;
+    }
+    if(request.jobId && h.scan.status==IpcStatus::Ok && h.jobId!=request.jobId) {
+        result.error="Value scan job identity mismatch";return result;
+    }
+    const auto* entries=reinterpret_cast<const ValueScanEntry*>(bytes.data()+sizeof(h));
+    result.entries.assign(entries,entries+h.scan.count);
+    result.ok=h.scan.status==IpcStatus::Ok;
+    return result;
+}
+
 bool DebugSession::WriteMemory(uint64_t address, const uint8_t* data, uint32_t size) {
 	std::vector<uint8_t> payload(sizeof(WriteMemoryRequest) + size);
 	auto* req = reinterpret_cast<WriteMemoryRequest*>(payload.data());

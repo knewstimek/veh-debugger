@@ -109,6 +109,15 @@ post-access. External backends must implement the collection command; capability
 flags do not report numeric breakpoint capacities. Backends may return `LimitReached`
 when full; breakpoint tools then report no free slot so an existing breakpoint can be removed.
 
+`veh_value_scan` reuses the existing MCP tool for async first/next, disk-backed
+candidates and undo of both addresses and comparison values. Large sets return counts;
+up to 32 candidates are listed automatically. Completion/progress uses
+`notifications/veh/value_scan`, with no status polling. Clients must consume that
+notification; use explicit status/results or bounded async:false when needed.
+Reset/detach release owned temporary files; baseline/undo files survive a single scan.
+External backends require v2 capability support. See `docs/VALUE_SCAN.md` in the
+repository for storage budgets, batch/action sequencing and adoption checks.
+
 `veh_trace_basic_blocks` supports x86/x64 ordered memory and register provenance,
 self-modifying code versions, dispatcher occurrence windows, and file-backed
 JSON/JSONL, `.vtc` code or `.vte` ordered-event artifacts. Direct calls, `veh_batch`, and breakpoint actions

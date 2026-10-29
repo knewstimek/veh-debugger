@@ -70,6 +70,28 @@ class McpClient:
             if "method" in message:
                 self.notifications.append(message)
 
+    def wait_notification(self, method, predicate=lambda params: True, timeout=20):
+        """Wait on incoming messages without sending status requests."""
+        deadline = time.monotonic() + timeout
+        while True:
+            for event in list(self.notifications):
+                if event.get("method") == method and predicate(event.get("params", {})):
+                    self.notifications.remove(event)
+                    return event["params"]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"notification {method} timed out")
+            try:
+                message = self.responses.get(timeout=remaining)
+            except queue.Empty as error:
+                raise TimeoutError(f"notification {method} timed out") from error
+            if message is None:
+                raise RuntimeError(f"MCP exited while waiting for {method}: {self.stderr_tail()}")
+            if "method" in message:
+                self.notifications.append(message)
+            else:
+                raise RuntimeError(f"unexpected message while waiting for notification: {message}")
+
     def initialize(self, name="veh-test-client"):
         return self.call("initialize", {
             "protocolVersion": "2024-11-05",

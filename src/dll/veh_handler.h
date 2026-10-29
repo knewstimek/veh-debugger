@@ -506,6 +506,8 @@ public:
 	// 내부 스레드 등록 (pipe server 등) -- BP 투명 스킵 + trace_callers 스킵
 	void SetInternalThread(uint32_t tid) { internalTid_.store(tid, std::memory_order_relaxed); }
 	uint32_t GetInternalThread() const { return internalTid_.load(std::memory_order_relaxed); }
+	void SetScanWorkerThread(uint32_t tid) { scanWorkerTid_.store(tid, std::memory_order_relaxed); }
+	bool IsInternalWorker(uint32_t tid) const { return tid == internalTid_.load(std::memory_order_relaxed) || tid == scanWorkerTid_.load(std::memory_order_relaxed); }
 
 	// Module-load breakpoints: freeze the loading thread when a matching module loads.
 	// Matching runs in the loader-notification callback (dllmain); the stop reuses
@@ -622,6 +624,7 @@ private:
 	std::atomic<uint32_t> traceWriteIdx_{0};
 	uint64_t traceBuffer_[kTraceBufferSize];   // lock-free ring buffer
 	std::atomic<uint32_t> traceTotalHits_{0};
+	std::atomic<uint32_t> scanWorkerTid_{0};
 	std::atomic<uint32_t> internalTid_{0};  // pipe server tid (trace skip)
 
 	// Module-load breakpoint patterns (matched case-insensitively as substrings)

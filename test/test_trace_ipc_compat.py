@@ -13,6 +13,32 @@ TARGET = os.environ.get(
 )
 
 
+def scan_compat(client, launch):
+    v2=launch.get("backend",{}).get("valueScan",{}).get("protocol")=="veh-value-scan/2"
+    allocated=client.tool("veh_allocate_memory",{"size":4096})
+    assert allocated.get("success"),allocated
+    address=int(allocated["address"],16)
+    def scan(args):
+        result=client.tool("veh_value_scan",args)
+        if result.get("state")=="running":
+            result=client.wait_notification("notifications/veh/value_scan",
+                lambda p:p.get("jobId")==result["jobId"] and p.get("state") in ("completed","failed"),timeout=10)
+        assert "error" not in result,result
+        return result
+    first=scan({"operation":"first","start":hex(address),"end":hex(address+4096),"compare":"unknown"})
+    assert first["candidates"]==1024,first
+    page=scan({"operation":"results","offset":1023,"max_results":1})
+    assert len(page["results"])==1 and int(page["results"][0]["address"],16)==address+4092,page
+    assert client.tool("veh_write_memory",{"address":hex(address),"data":"01 00 00 00"}).get("success")
+    next_result=scan({"operation":"next","compare":"increased"})
+    assert next_result["candidates"]==1,next_result
+    if v2:
+        assert scan({"operation":"undo"})["candidates"]==1024
+    assert scan({"operation":"reset"})["candidates"]==0
+    assert client.tool("veh_free_memory",{"address":hex(address)}).get("success")
+    print(json.dumps({"suite":"scan","v2":v2,"candidates":first["candidates"]}))
+
+
 def main():
     client = McpClient()
     try:
@@ -23,6 +49,9 @@ def main():
         })
         launch = client.tool("veh_launch", {"program": TARGET, "stopOnEntry": True})
         assert launch.get("success"), launch
+        if os.environ.get("VEH_TEST_SCAN_COMPAT")=="1":
+            scan_compat(client,launch)
+            return
         bp = client.tool("veh_set_function_breakpoint", {"name": "TraceCoverageTarget"})
         assert bp.get("success") and bp.get("address"), bp
         stop = client.tool("veh_continue", {"wait": True, "timeout": 10}, timeout=15)

@@ -163,6 +163,7 @@ enum class IpcEvent : uint32_t {
 	ModuleUnloaded         = 0x1007,
 	ProcessExited          = 0x1008,
 	Paused                 = 0x1009,
+	ValueScanProgress      = 0x100B,  // ValueScanResponseV2 + bounded optional entries
 	ModuleLoadStopped      = 0x100A,  // stopped at a matching module load
 	HeartbeatAck           = 0x10FE,
 	// Non-terminal backend diagnostic: not detach, target exit, or a stop event.
@@ -1410,7 +1411,7 @@ struct SearchMemoryResponse {
 	// followed by uint64_t addresses[count]
 };
 
-enum class ValueScanOperation : uint8_t { First = 0, Next = 1, Results = 2, Reset = 3 };
+enum class ValueScanOperation : uint8_t { First = 0, Next = 1, Results = 2, Reset = 3, Status = 4, Cancel = 5, Undo = 6 };
 enum class ValueScanType : uint8_t {
 	None = 0, I8 = 1, U8 = 2, I16 = 3, U16 = 4, I32 = 5, U32 = 6,
 	I64 = 7, U64 = 8, F32 = 9, F64 = 10
@@ -1420,7 +1421,7 @@ enum class ValueScanCompare : uint8_t {
 	Changed = 5, Unchanged = 6, Increased = 7, Decreased = 8,
 	IncreasedBy = 9, DecreasedBy = 10
 };
-enum class ValueScanMode : uint8_t { None = 0, List = 1, Snapshot = 2 };
+enum class ValueScanMode : uint8_t { None = 0, List = 1, Snapshot = 2, Disk = 3 };
 enum class ValueScanFailure : uint8_t {
 	None = 0,
 	NoSession = 1,
@@ -1428,7 +1429,8 @@ enum class ValueScanFailure : uint8_t {
 	TypeMismatch = 3,
 	TooManyResults = 4,
 	SnapshotTooLarge = 5,
-	AllocationFailed = 6
+	AllocationFailed = 6,
+	Busy = 7, Cancelled = 8, BudgetExceeded = 9, StorageFailed = 10, NoHistory = 11, StaleJob = 12
 };
 
 struct ValueScanRequest {
@@ -1465,6 +1467,34 @@ struct ValueScanResponse {
 	// followed by ValueScanEntry[count]
 };
 
+// ValueScan v2 is explicitly capability gated. Legacy request/response bytes
+// remain unchanged. IDs are connection-scoped opaque integers, JSON strings.
+enum class ValueScanStorage : uint8_t { Auto = 0, Ram = 1, File = 2 };
+enum class ValueScanJobState : uint8_t { Idle = 0, Running = 1, Cancelling = 2, Completed = 3, Cancelled = 4, Failed = 5 };
+enum class ValueScanPhase : uint8_t { Idle = 0, Discovering = 1, Capturing = 2, Filtering = 3, Committing = 4, Finished = 5 };
+constexpr uint32_t kValueScanAsync = 1, kValueScanNotify = 2, kValueScanSummary = 4, kValueScanList = 8;
+struct ValueScanRequestV2 {
+    ValueScanRequest scan;
+    uint32_t version, flags;
+    uint64_t jobId;
+    uint64_t ramBudgetBytes, diskBudgetBytes;
+    uint32_t undoDepth, summaryThreshold;
+    ValueScanStorage storage;
+    uint8_t reserved[7];
+};
+struct ValueScanResponseV2 {
+    ValueScanResponse scan;
+    uint32_t version, headerSize;
+    uint64_t sessionId, jobId, generationId, sequence;
+    ValueScanJobState state;
+    ValueScanPhase phase;
+    ValueScanStorage storage;
+    uint8_t reserved;
+    uint32_t undoAvailable;
+    uint64_t processed, total, matched, estimatedBytes, retainedRamBytes, retainedDiskBytes, elapsedMs, unreadableBytes;
+};
+static_assert(sizeof(ValueScanRequest)==56 && sizeof(ValueScanResponse)==28 && sizeof(ValueScanEntry)==16);
+static_assert(sizeof(ValueScanRequestV2)==104 && sizeof(ValueScanResponseV2)==140);
 struct ExecuteShellcodeRequest {
 	uint32_t size;        // shellcode byte count (follows this struct)
 	uint32_t timeoutMs;   // max wait time (0 = fire-and-forget)
@@ -1939,6 +1969,7 @@ static_assert(sizeof(VirtualCpuInstructionRecord)==96);
 // everything it knows".
 enum class IpcBackend : uint32_t { VehDll = 0, Hypervisor = 1 };
 
+constexpr uint32_t kCapValueScanV2 = 1u << 7; // transactional disk/undo and event-driven async value scans
 constexpr uint32_t kCapBasicTracePolicies  = 1u << 6;  // wire11 snapshot suppression and path compression
 constexpr uint32_t kCapStopsThreads        = 1u << 0;  // breakpoints/steps can hold a thread stopped
 constexpr uint32_t kCapHiddenBreakpoints   = 1u << 1;  // breakpoints do not modify target code bytes

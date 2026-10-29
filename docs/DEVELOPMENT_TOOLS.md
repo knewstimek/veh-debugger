@@ -24,10 +24,21 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 | `tools/validate_trace_output.py` | Validates exported trace JSON/JSONL ordering, thread ownership, counts, hashes, and optional `.vtc` code-version references. |
 | `tools/read_trace_event_stream.py` | Validates a portable `.vte` ordered-event artifact and converts its interleaved block/edge, memory, and register records to JSON Lines. |
 | `tools/run_trace_parity.py` | Runs the basic-block and synthetic memory-access integration suites against one or more build roots to cover direct, `veh_batch`, and breakpoint-action semantics, including inline/file compare-exchange writes and conditional dependencies. |
-| `tools/run_ipc_compat_matrix.py` | Stages old-MCP/new-DLL and new-MCP/old-DLL pairs in a temporary directory and runs bounded compatibility smoke tests. |
+| `tools/run_ipc_compat_matrix.py` | Stages old-MCP/new-DLL and new-MCP/old-DLL pairs in a temporary directory and runs bounded compatibility smoke tests (default trace; --suite scan for value scans). |
 | `tools/measure_mcp_schema.py` | Measures bounded initialize and `tools/list` bytes, input-schema bytes, output-schema count, and eager names for every exposure profile. |
 
 All process-launching helpers use finite timeouts and wait for their children during cleanup. The compatibility runner stages copies under an OS temporary directory and removes them when complete.
+
+## Value scan generations
+
+Reuse `test/test_value_scan.py` and `test/test_value_scan_protocol.py` through
+`tools/run_tests.py`, then repeat with `--build-dir build32`. These bounded tests
+cover forced disk storage, summary/pages, undo baselines (including unaligned
+overlap), stage failure/cancel retention, push completion without status polling,
+direct/batch/action parity, exact IDs and malformed/legacy backend receipts.
+They create only small synthetic allocations, not billion-candidate artifacts.
+See [value scan contract](VALUE_SCAN.md) for usage, budgets, cleanup and the full
+backend adoption checklist. Reuse the existing IPC matrix and schema-size helpers.
 
 ## Explicit instrumentation
 

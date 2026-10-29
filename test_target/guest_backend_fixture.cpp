@@ -54,6 +54,7 @@ int wmain(int argc, wchar_t** argv) {
     const bool vmMode=mode.rfind(L"vm",0)==0||machineMode;uint32_t vmState=2,detachFailures=0;
     uint32_t continueRequests = 0, pauseRequests = 0, resolveRequests = 0;
     uint32_t fixtureBreakpointId = 0, shellcodeRequests=0, localThreadQueries=0;
+    const bool scanMode=mode.rfind(L"scan-",0)==0;
     const bool instrumentationMode = mode.rfind(L"inst-", 0) == 0 || mode == L"ops-action-inst";
     bool captureActive[3]{}, captureCreated[3]{};
     uint64_t captureIds[3]{}, nextCaptureId = 9007199254740993ULL;
@@ -117,6 +118,7 @@ int wmain(int argc, wchar_t** argv) {
             veh::GetCapabilitiesResponse caps{};
             caps.status = veh::IpcStatus::Ok; caps.backend = veh::IpcBackend::Hypervisor;
             caps.flags = veh::kCapNoTargetFootprint | (mode == L"host-cap" ? 0 : machineMode ? veh::kCapVirtualMachineTarget : veh::kCapGuestTarget);
+            if(scanMode){veh::SetCommandSupported(caps.commands,veh::IpcCommand::ValueScan);if(mode!=L"scan-legacy")caps.flags|=veh::kCapValueScanV2;}
             if(mode==L"machine-guest-cap")caps.flags=veh::kCapNoTargetFootprint|veh::kCapGuestTarget;
             for (auto op : {veh::IpcCommand::GetCapabilities, veh::IpcCommand::GetTargetInfo, veh::IpcCommand::GetThreads,
                             veh::IpcCommand::ReadMemory, veh::IpcCommand::Heartbeat, veh::IpcCommand::Detach})
@@ -249,6 +251,39 @@ int wmain(int argc, wchar_t** argv) {
             const struct { veh::ReadBranchTraceResponse head; veh::BranchRecord branch; } response{
                 {veh::IpcStatus::Ok, request.kind, 1, 0}, {0x1000, 0x2000}};
             if (!reply(pipe, header.command, response)) break;
+        } else if(scanMode && command==veh::IpcCommand::ValueScan) {
+            if(mode==L"scan-legacy") {
+                if(bytes.size()!=sizeof(veh::ValueScanRequest))break;
+                veh::ValueScanResponse response{};response.status=veh::IpcStatus::Ok;
+                response.mode=veh::ValueScanMode::List;response.valueType=veh::ValueScanType::I32;
+                response.candidates=100; // No entries: tests exercise suppression and capability gating.
+                if(!reply(pipe,header.command,response))break;
+                continue;
+            }
+            veh::ValueScanRequestV2 request{};
+            if(bytes.size()!=sizeof(request))break;
+            memcpy(&request,bytes.data(),sizeof(request));
+            veh::ValueScanResponseV2 response{};response.version=2;response.headerSize=sizeof(response);
+            response.scan.status=veh::IpcStatus::Ok;response.sessionId=9007199254740993ull;
+            response.jobId=request.jobId?request.jobId:9007199254740995ull;
+            response.generationId=9007199254740997ull;response.sequence=1;
+            response.state=veh::ValueScanJobState::Completed;response.phase=veh::ValueScanPhase::Finished;
+            response.scan.valueType=veh::ValueScanType::I32;response.scan.mode=veh::ValueScanMode::Disk;
+            response.storage=veh::ValueScanStorage::File;response.scan.candidates=100;
+            if(mode==L"scan-short"){if(!send(pipe,header.command,&response,sizeof(response)-1))break;continue;}
+            if(mode==L"scan-version")response.version=3;
+            if(mode==L"scan-count")response.scan.count=1001;
+            if(mode==L"scan-job")++response.jobId;
+            if(mode==L"scan-progress"){response.processed=2;response.total=1;}
+            if(mode==L"scan-state")response.state=static_cast<veh::ValueScanJobState>(99);
+            if(mode==L"scan-reserved")response.scan.reserved=1;
+            if(mode==L"scan-notify-error"||mode==L"scan-notify-count") {
+                auto event=response;event.sequence=2;
+                if(mode==L"scan-notify-error")event.scan.status=veh::IpcStatus::Error;
+                else event.scan.count=101;
+                if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ValueScanProgress),event))break;
+            }
+            if(!reply(pipe,header.command,response))break;
         } else if (instrumentationMode && command == veh::IpcCommand::QueryInstrumentation) {
             veh::QueryInstrumentationRequest request{};
             if (bytes.size() != sizeof(request)) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }

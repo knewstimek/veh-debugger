@@ -223,6 +223,8 @@ private:
 
 	// IPC event handler (breakpoint hit, etc.)
 	void OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t size);
+    json RenderValueScanV2(const ValueScanResponseV2& header,
+        const std::vector<ValueScanEntry>& entries, uint64_t offset);
 
 	// StepOver CALL skip helpers
 	bool IsCallInstruction(uint32_t threadId, uint64_t& nextInsnAddr);
@@ -308,6 +310,8 @@ private:
 	struct PendingBreakpointAction { uint32_t threadId; json steps; };
 	std::queue<PendingBreakpointAction> pendingBreakpointActions_;
 	std::mutex eventMutex_;
+    json pendingScan_=nullptr; // one coalesced progress event, bounded independently of scan size
+    uint64_t pendingScanGeneration_=0,scanSession_=0,scanJob_=0,scanCoalesced_=0;
 	HANDLE eventsReady_ = nullptr; // set with every push to the queues above; the main loop waits on it
 	void FlushEvents();
 	void StoreBreakpointAction(uint32_t breakpointId, const json& action);

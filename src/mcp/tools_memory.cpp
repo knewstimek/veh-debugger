@@ -790,21 +790,57 @@ static std::string ValueScanFailureText(ValueScanFailure failure) {
 	case ValueScanFailure::SnapshotTooLarge:
 		return "SnapshotTooLarge: snapshot exceeds 512MB; specify module, start, or end";
 	case ValueScanFailure::AllocationFailed: return "value scan storage allocation failed";
+    case ValueScanFailure::Busy: return "value scan is busy; wait for its completion notification or cancel by job_id";
+    case ValueScanFailure::Cancelled: return "value scan cancelled; previous generation retained";
+    case ValueScanFailure::BudgetExceeded: return "scan storage budget exceeded; previous generation retained";
+    case ValueScanFailure::StorageFailed: return "temporary scan storage failed; previous generation retained";
+    case ValueScanFailure::NoHistory: return "no undo generation available";
+    case ValueScanFailure::StaleJob: return "job_id does not identify the current scan job";
 	default: return "value scan failed (timeout or target error)";
 	}
 }
 
+
+json McpServer::RenderValueScanV2(const ValueScanResponseV2& h,
+    const std::vector<ValueScanEntry>& values,uint64_t offset) {
+    static const char* states[]={"idle","running","cancelling","completed","cancelled","failed"};
+    static const char* phases[]={"idle","discovering","capturing","filtering","committing","finished"};
+    json entries=json::array();
+    for(const auto& e:values)entries.push_back({{"address",HexAddr(e.address)},{"value",FormatScanValue(e.value,h.scan.valueType)}});
+    json out={{"protocol","veh-value-scan/2"},{"sessionId",std::to_string(h.sessionId)},
+        {"jobId",std::to_string(h.jobId)},{"generationId",std::to_string(h.generationId)},
+        {"sequence",std::to_string(h.sequence)},{"state",states[static_cast<unsigned>(h.state)]},
+        {"phase",phases[static_cast<unsigned>(h.phase)]},{"candidates",h.scan.candidates},
+        {"matched",h.matched},{"processed",h.processed},{"total",h.total?json(h.total):json(nullptr)},
+        {"progressUnit",h.phase==ValueScanPhase::Discovering?"address_bytes":"candidate_slots"},
+        {"results",entries},{"offset",offset},{"summaryOnly",entries.empty()&&h.scan.candidates>0},
+        {"scannedBytes",h.scan.scannedBytes},{"estimatedBytes",h.estimatedBytes},
+        {"retainedRamBytes",h.retainedRamBytes},{"retainedDiskBytes",h.retainedDiskBytes},
+        {"unreadableBytes",h.unreadableBytes},{"undoAvailable",h.undoAvailable},{"elapsedMs",h.elapsedMs},
+        {"valueType",ValueScanTypeName(h.scan.valueType)},
+        {"mode",h.scan.mode==ValueScanMode::Disk?"disk":h.scan.mode==ValueScanMode::List?"list":h.scan.mode==ValueScanMode::Snapshot?"snapshot":"none"},
+        {"storage",h.storage==ValueScanStorage::File?"file":h.storage==ValueScanStorage::Ram?"ram":"auto"}};
+    if(h.state==ValueScanJobState::Failed)out["error"]=ValueScanFailureText(h.scan.failure);
+    return out;
+}
+
 json McpServer::ToolValueScan(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+    const std::string resultMode=args.value("result_mode","auto");
+    if(resultMode!="auto"&&resultMode!="summary"&&resultMode!="list")
+        return {{"error","result_mode must be auto, summary, or list"}};
 	const std::string operationName = args.value("operation", "");
 	ValueScanRequest request{};
 	if (operationName == "first") request.operation = ValueScanOperation::First;
 	else if (operationName == "next") request.operation = ValueScanOperation::Next;
 	else if (operationName == "results") request.operation = ValueScanOperation::Results;
 	else if (operationName == "reset") request.operation = ValueScanOperation::Reset;
-	else return {{"error", "operation must be first, next, results, or reset"}};
+	else if (operationName == "status") request.operation = ValueScanOperation::Status;
+    else if (operationName == "cancel") request.operation = ValueScanOperation::Cancel;
+    else if (operationName == "undo") request.operation = ValueScanOperation::Undo;
+    else return {{"error", "operation must be first, next, results, reset, status, cancel, or undo"}};
 
-	request.maxResults = JsonUint32(args, "max_results", 20);
+	request.maxResults = JsonUint32(args, "max_results", 32);
 	if (request.maxResults == 0 || request.maxResults > 1000)
 		return {{"error", "max_results must be 1-1000"}};
 	if (request.operation == ValueScanOperation::Results && args.contains("offset")) {
@@ -878,9 +914,60 @@ json McpServer::ToolValueScan(const json& args) {
 		request.alignment = valueSize;
 	}
 
-	auto scan = session_.ValueScan(request);
+    const auto& backend=session_.GetBackendInfo();
+    const bool v2=backend.reported && (backend.flags&kCapValueScanV2);
+    const char* extended[]={"async","notifications","storage","ram_budget_mb","disk_budget_mb","undo_depth","job_id"};
+    if(!v2) {
+        if(request.operation>ValueScanOperation::Reset)
+            return {{"error","Backend does not support value scan protocol 2"},{"code","unsupported"}};
+        for(const char* key:extended) if(args.contains(key))
+            return {{"error","Backend does not support value scan protocol 2"},{"code","unsupported"}};
+    } else {
+        ValueScanRequestV2 req{};req.scan=request;req.version=2;req.summaryThreshold=32;
+        if(resultMode=="summary")req.flags|=kValueScanSummary;
+        else if(resultMode=="list")req.flags|=kValueScanList;
+        else if(resultMode!="auto")return {{"error","result_mode must be auto, summary, or list"}};
+        const bool start=request.operation==ValueScanOperation::First || request.operation==ValueScanOperation::Next;
+        if(start && args.value("async",true)) {
+            req.flags|=kValueScanAsync;
+            if(args.value("notifications",true))req.flags|=kValueScanNotify;
+        }
+        const std::string storage=args.value("storage","auto");
+        if(storage=="file")req.storage=ValueScanStorage::File;
+        else if(storage=="ram")req.storage=ValueScanStorage::Ram;
+        else if(storage!="auto")return {{"error","storage must be auto, ram, or file"}};
+        const uint32_t ram=JsonUint32(args,"ram_budget_mb",128),disk=JsonUint32(args,"disk_budget_mb",16384);
+        if(ram<1||ram>1024||disk<1||disk>1048576)
+            return {{"error","ram_budget_mb must be 1-1024 and disk_budget_mb 1-1048576"}};
+        req.ramBudgetBytes=uint64_t(ram)*1024*1024;req.diskBudgetBytes=uint64_t(disk)*1024*1024;
+        req.undoDepth=JsonUint32(args,"undo_depth",1);
+        if(req.undoDepth>8)return {{"error","undo_depth must be 0-8"}};
+        if(args.contains("job_id") && request.operation!=ValueScanOperation::Status && request.operation!=ValueScanOperation::Cancel)
+            return {{"error","job_id is supported only by status and cancel"}};
+        if(args.contains("job_id")) {
+            if(!args["job_id"].is_string())return {{"error","job_id must be an exact decimal string"}};
+            try {const auto s=args["job_id"].get<std::string>();size_t used=0;
+                if(s.empty()||s.find_first_not_of("0123456789")!=std::string::npos)throw std::invalid_argument("job");
+                req.jobId=std::stoull(s,&used,10);if(!req.jobId||used!=s.size())throw std::invalid_argument("job");
+            } catch(...) {return {{"error","job_id must be a nonzero uint64 decimal string"}};}
+        }
+        if(request.operation==ValueScanOperation::Cancel&&!req.jobId)return {{"error","cancel requires job_id"}};
+        auto result=session_.ValueScanV2(req);
+        if(!result.error.empty())return {{"error",result.error}};
+        auto output=RenderValueScanV2(result.header,result.entries,request.offset);
+        if(!result.ok)output["error"]=ValueScanFailureText(result.header.scan.failure);
+        if(result.ok) {
+            std::lock_guard<std::mutex> lock(eventMutex_);
+            scanSession_=result.header.sessionId;scanJob_=result.header.jobId;
+            if(request.operation==ValueScanOperation::Reset)pendingScan_=nullptr;
+        }
+        return output;
+    }
+    auto scan = session_.ValueScan(request);
 	if (!scan.ok) return {{"error", ValueScanFailureText(scan.failure)}};
-	auto modules = session_.GetModules();
+    if(resultMode=="summary" || (resultMode=="auto" && request.operation!=ValueScanOperation::Results && scan.candidates>32))
+        scan.entries.clear();
+    auto modules = scan.entries.empty()?std::vector<ModuleEntry>{}:session_.GetModules();
 	json entries = json::array();
 	for (const auto& item : scan.entries) {
 		json entry = {{"address", HexAddr(item.address)}, {"value", FormatScanValue(item.value, scan.valueType)}};

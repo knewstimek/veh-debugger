@@ -21,6 +21,14 @@ on a reader thread and the controlling test can enforce monotonic timeouts.
 Long control-channel changes should also run `test/test_trace_heartbeat_long.py`;
 it deliberately keeps one bounded trace active beyond the 30-second heartbeat window.
 
+## Value scan boundaries
+
+`py -3 tools/run_tests.py test_value_scan.py test_value_scan_protocol.py --jobs 2`
+checks small synthetic RAM/file generations, summary/page behavior, baseline undo,
+cancel/failure retention, event-driven completion and direct/batch/action routing.
+Repeat with `--build-dir build32`. See [value scan contract](../docs/VALUE_SCAN.md);
+these tests do not measure or promise billion-candidate throughput.
+
 ## Core integration coverage
 
 ```powershell

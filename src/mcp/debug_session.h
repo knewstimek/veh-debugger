@@ -326,6 +326,8 @@ public:
 		std::vector<ValueScanEntry> entries;
 	};
 	ValueScanResult ValueScan(const ValueScanRequest& request);
+	struct ValueScanResultV2 { bool ok=false; std::string error; ValueScanResponseV2 header{}; std::vector<ValueScanEntry> entries; };
+	ValueScanResultV2 ValueScanV2(const ValueScanRequestV2& request);
 
 	// --- Analysis ---
 	std::vector<DisasmInsn> Disassemble(uint64_t address, uint32_t count);

@@ -414,7 +414,7 @@ DAP의 게스트 연결 설정은 추가하지 않습니다. 실행 중 서버�
 | `veh_memory_map` | `start?, end?, module?, include_free?, max_regions?` | 가상 메모리 영역 목록 (상태/보호/타입/소유 모듈). 잘리면 `next_start`로 이어서 조회 |
 | `veh_protect_memory` | `address, size, protection, method?` | 타겟 내부에서 페이지 보호를 변경하고 이전 보호를 반환. `api`(기본값), `nt`, `syscall` 방식 지원; syscall을 사용할 수 없으면 nt로 폴백 |
 | `veh_search_memory` | `pattern` 또는 `string` 또는 `value`, `start?, end?, module?, writable?, executable?, type?, alignment?, max_results?` | 타겟 내부에서 메모리 검색. AOB(`??`, `4?` 와일드카드), 문자열(ascii/utf8/utf16), 숫자 값. BP 바이트는 원본으로 비교 |
-| `veh_value_scan` | `operation, value_type?, compare?, value?, value2?, ...` | 치트엔진식 값 스캔 세션 (`first`/`next`/`results`/`reset`). exact/between/greater/less/unknown 첫 스캔, changed/unchanged/increased/decreased 다음 스캔. 후보는 타겟 DLL 안에 유지 |
+| `veh_value_scan` | `operation, value_type?, compare?, value?, value2?, ...` | 값 스캔 `first`/`next`·`undo`·`results`·`status`·`cancel`·`reset`. v2는 비동기 이벤트 완료, 32개 초과 개수 위주 출력, 예산 내 임시 디스크 저장과 기준값 undo 지원. [사용법·백엔드 규약](docs/VALUE_SCAN.md) |
 | `veh_assemble` | `code, address?, arch?, write?` | Intel 문법 x86/x64 어셈블 (AsmJit+AsmTK). 주소 기준으로 상대 jmp/call/rip 오프셋 계산, `;`/줄바꿈 구분, 레이블 지원, 디코딩 목록 반환. `write:true`로 타겟에 패치. 타겟 없이도 동작 |
 | `veh_allocate_memory` | `size?, protection?` | 타겟 프로세스에 메모리 할당 (VirtualAlloc) |
 | `veh_free_memory` | `address` | 할당된 메모리 해제 (VirtualFree) |

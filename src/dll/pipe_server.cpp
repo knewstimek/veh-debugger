@@ -651,6 +651,7 @@ void PipeServer::Stop() {
 	if (serverThread_.joinable()) {
 		serverThread_.join();
 	}
+	ValueScanner::Instance().Reset();
 	serverTid_ = 0;
 
 	if (connected_) {
@@ -808,6 +809,7 @@ void PipeServer::ServerThread() {
 			lastCommandTime_ = GetTickCount64();
 		}
 
+		ValueScanner::Instance().Reset(); // Also release staging/history on abrupt pipe loss.
 		// Detach 후: 파이프 연결만 끊고 외부 루프에서 새 클라이언트 대기
 		// Shutdown 후: running_=false이므로 외부 루프도 종료
 		if (running_) {
@@ -1642,6 +1644,17 @@ void PipeServer::HandleMemoryCommand(uint32_t command, const uint8_t* payload, u
 		break;
 	}
 	case IpcCommand::ValueScan: {
+        if(payloadSize==sizeof(ValueScanRequestV2)) {
+            ValueScanRequestV2 request{};memcpy(&request,payload,sizeof(request));
+            ValueScanResponseV2 response{};std::vector<ValueScanEntry> entries;
+            const uint64_t requestStart=reinterpret_cast<uint64_t>(payload);
+            ValueScanner::Instance().ScanV2(request,response,entries,requestStart,requestStart+payloadSize);
+            std::vector<uint8_t> result(sizeof(response)+entries.size()*sizeof(ValueScanEntry));
+            memcpy(result.data(),&response,sizeof(response));
+            if(!entries.empty())memcpy(result.data()+sizeof(response),entries.data(),entries.size()*sizeof(ValueScanEntry));
+            SendResponse(command,result.data(),static_cast<uint32_t>(result.size()));
+            break;
+        }
 		ValueScanResponse resp{};
 		if (payloadSize != sizeof(ValueScanRequest)) {
 			resp.status = IpcStatus::InvalidArgs;
@@ -1657,6 +1670,10 @@ void PipeServer::HandleMemoryCommand(uint32_t command, const uint8_t* payload, u
 			resp.failure = ValueScanFailure::InvalidRequest;
 			SendResponse(command, &resp, sizeof(resp));
 			return;
+		}
+		if(req->operation!=ValueScanOperation::Reset && ValueScanner::Instance().ExtendedBusy()) {
+			resp.status=IpcStatus::InvalidState;resp.failure=ValueScanFailure::Busy;
+			SendResponse(command,&resp,sizeof(resp));return;
 		}
 		std::vector<ValueScanEntry> entries(req->maxResults);
 		const uint64_t payloadStart = reinterpret_cast<uint64_t>(payload);
@@ -3210,7 +3227,7 @@ void PipeServer::HandleLifecycleCommand(uint32_t command, const uint8_t* payload
 		GetCapabilitiesResponse resp{};
 		resp.status = IpcStatus::Ok;
 		resp.backend = IpcBackend::VehDll;
-		resp.flags = kCapStopsThreads | kCapBasicTracePolicies;
+		resp.flags = kCapStopsThreads | kCapBasicTracePolicies | kCapValueScanV2;
 		strcpy_s(resp.name, "veh-dll");
 		// Every command HandleCommand routes to a handler.
 		static constexpr IpcCommand kImplemented[] = {

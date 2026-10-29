@@ -289,6 +289,7 @@ void McpServer::ResetSessionEventState() {
 		session_.GetBpMutex());
 	session_.ResetStopState();
 	pendingEvents_ = {};
+    pendingScan_=nullptr;scanSession_=scanJob_=scanCoalesced_=0;
 	pendingAutoContinue_ = {};
 	pendingBreakpointActions_ = {};
     executionNotices_ = {};
@@ -396,12 +397,20 @@ void McpServer::FlushEvents() {
 	std::queue<std::pair<std::string, json>> events;
 	std::queue<uint32_t> autoContinues;
 	std::queue<PendingBreakpointAction> actions;
+    json scan=nullptr;
 	{
 		std::lock_guard<std::mutex> lock(eventMutex_);
 		std::swap(events, pendingEvents_);
 		std::swap(autoContinues, pendingAutoContinue_);
 		std::swap(actions, pendingBreakpointActions_);
+        if(!pendingScan_.is_null() && pendingScanGeneration_==session_.GetSessionGeneration() &&
+            pendingScan_["sessionId"]==std::to_string(scanSession_) &&
+            pendingScan_["jobId"]==std::to_string(scanJob_)) {
+            scan=std::move(pendingScan_);scan["coalescedUpdates"]=scanCoalesced_;
+        }
+        pendingScan_=nullptr;scanCoalesced_=0;
 	}
+    if(!scan.is_null())SendNotification("notifications/veh/value_scan",scan);
 	while (!events.empty()) {
 		auto& [method, params] = events.front();
 		SendNotification(method, params);
@@ -739,6 +748,29 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 	auto evt = static_cast<IpcEvent>(eventId);
 
 	switch (evt) {
+    case IpcEvent::ValueScanProgress: {
+        if(!(session_.GetBackendInfo().flags&kCapValueScanV2) || size<sizeof(ValueScanResponseV2))break;
+        ValueScanResponseV2 h{};memcpy(&h,payload,sizeof(h));
+        if(h.version!=2 || h.headerSize!=sizeof(h) || h.scan.count>32 ||
+            size!=sizeof(h)+h.scan.count*sizeof(ValueScanEntry) ||
+            !h.sessionId || !h.jobId || !h.sequence || h.state>ValueScanJobState::Failed ||
+            h.phase>ValueScanPhase::Finished || h.storage>ValueScanStorage::File ||
+            h.scan.mode>ValueScanMode::Disk || h.scan.valueType>ValueScanType::F64 ||
+            h.reserved || h.scan.reserved || h.scan.status!=IpcStatus::Ok ||
+            h.scan.count>h.scan.candidates || (h.scan.count&&(!h.generationId||h.scan.valueType==ValueScanType::None)) ||
+            (h.state==ValueScanJobState::Completed&&h.scan.failure!=ValueScanFailure::None) ||
+            (h.state==ValueScanJobState::Failed&&h.scan.failure==ValueScanFailure::None) ||
+            h.scan.failure>ValueScanFailure::StaleJob ||
+            h.undoAvailable>8 || (h.total&&h.processed>h.total))break;
+        std::vector<ValueScanEntry> entries(h.scan.count);
+        if(h.scan.count)memcpy(entries.data(),payload+sizeof(h),entries.size()*sizeof(ValueScanEntry));
+        auto output=RenderValueScanV2(h,entries,0); // local formatting only; never issue IPC from reader
+        std::lock_guard<std::mutex> lock(eventMutex_);
+        if(!pendingScan_.is_null())++scanCoalesced_;
+        pendingScan_=std::move(output);pendingScanGeneration_=session_.GetSessionGeneration();
+        if(eventsReady_)SetEvent(eventsReady_);
+        break;
+    }
 	case IpcEvent::BreakpointHit: {
 		if (size >= sizeof(BreakpointHitEvent)) {
 			auto* e = reinterpret_cast<const BreakpointHitEvent*>(payload);
@@ -1745,9 +1777,9 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}}}}),
 
 		Tool(&McpServer::ToolValueScan, "memory", 0, true,
-			{{"name", "veh_value_scan"}, {"description", "Cheat Engine style target-side value scan session. Start with first, repeatedly filter with next, page candidates with results, and release all scan storage with reset. Candidate state and snapshots stay inside the target DLL."},
+			{{"name", "veh_value_scan"}, {"description", "Target-side value scan: first/next return async job receipts; progress/completion arrives via notifications/veh/value_scan (no polling). Large sets return counts; results pages are explicit. Disk spill, undo and cancel require backend v2. Reset releases temporary storage."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"operation", {{"type", "string"}, {"enum", json::array({"first", "next", "results", "reset"})}}},
+			{"operation", {{"type", "string"}, {"enum", json::array({"first", "next", "results", "reset", "status", "cancel", "undo"})}}},
 			{"value_type", {{"type", "string"}, {"enum", json::array({"i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "f32", "f64"})}, {"description", "Stored value type (default: i32)"}}},
 			{"compare", {{"type", "string"}, {"enum", json::array({"exact", "between", "greater", "less", "unknown", "changed", "unchanged", "increased", "decreased", "increased_by", "decreased_by"})}, {"description", "Comparison (default: exact). Change comparisons are next-only."}}},
 			{"value", {{"description", "Comparison value, or delta for increased_by/decreased_by"}}},
@@ -1759,8 +1791,16 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"executable", {{"description", "First scan filter: true, false, or \"any\" (default: any)"}}},
 			{"type", {{"description", "First scan region type: image, private, mapped, or an array"}}},
 			{"alignment", {{"type", "integer"}, {"description", "First scan address alignment (default: value size, max: 4096)"}}},
-			{"offset", {{"type", "integer"}, {"description", "Candidate offset for results paging (default: 0)"}}},
-			{"max_results", {{"type", "integer"}, {"description", "Maximum returned entries (default: 20, max: 1000)"}}}
+			{"offset", {{"description", "Candidate offset for results paging, integer or exact string (default: 0)"}}},
+            {"async", {{"type","boolean"},{"description","First/next: return job receipt immediately (default true on v2). false waits."}}},
+            {"notifications", {{"type","boolean"},{"description","Push real progress/completion for async scans (default true); never auto-poll."}}},
+            {"job_id", {{"type","string"},{"description","Exact decimal job ID; required for cancel, optional stale guard for status."}}},
+            {"storage", {{"type","string"},{"enum",json::array({"auto","ram","file"})},{"description","v2 storage policy (default auto)"} }},
+            {"ram_budget_mb", {{"type","integer"},{"minimum",1},{"maximum",1024},{"description","v2 retained/staging budget, default 128 MiB"} }},
+            {"disk_budget_mb", {{"type","integer"},{"minimum",1},{"maximum",1048576},{"description","v2 total current/history/staging budget, default 16384 MiB"} }},
+            {"undo_depth", {{"type","integer"},{"minimum",0},{"maximum",8},{"description","v2 prior generations retained after next (default 1)"} }},
+            {"result_mode", {{"type","string"},{"enum",json::array({"auto","summary","list"})},{"description","auto lists only <=32 candidates; results explicitly pages"} }},
+			{"max_results", {{"type", "integer"}, {"description", "Maximum entries (default: 32, max: 1000); auto suppresses sets above 32"}}}
 		 }}, {"required", json::array({"operation"})}}}}),
 
 		Tool(&McpServer::ToolFreeMemory, "memory", 0, true,

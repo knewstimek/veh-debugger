@@ -2497,7 +2497,7 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		// TraceCallers 모드: caller 수집 후 자동 continue (멈추지 않음)
 		if (traceAddress_.load(std::memory_order_relaxed) == addr) {
 			// 내부 스레드(pipe server)는 스킵 -- IPC 처리 지연/데드락 방지
-			if (tid != internalTid_.load(std::memory_order_relaxed)) {
+			if (!IsInternalWorker(tid)) {
 				uint64_t caller = ReadCallerFromStack(info->ContextRecord);
 				// Lock-free ring buffer write (no mutex, no heap alloc in VEH)
 				uint32_t idx = traceWriteIdx_.fetch_add(1, std::memory_order_relaxed);
@@ -2515,7 +2515,7 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		// 내부 스레드(pipe server) BP 투명 스킵 -- 데드락 방지
 		// 원본 바이트 복원 + TF는 이미 위에서 완료. rearm으로 single-step 후 BP 자동 재설치.
 		// callback/wait 없이 바로 실행 재개하여 IPC 파이프가 블록되지 않도록 함.
-		if (tid == internalTid_.load(std::memory_order_relaxed)) {
+		if (IsInternalWorker(tid)) {
 			LOG_DEBUG("Internal thread %u hit BP #%u at 0x%llX -- transparent skip", tid, bp->id, addr);
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
@@ -2843,7 +2843,7 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		// memory. Never surface those recoverable exceptions as debugger stops: the
 		// server thread is also the only thread that could service a continue, so
 		// parking it in NotifyAndWait would deadlock the control pipe.
-		if (tid == internalTid_.load(std::memory_order_relaxed)) {
+		if (IsInternalWorker(tid)) {
 			return EXCEPTION_CONTINUE_SEARCH;
 		}
 

@@ -13,7 +13,8 @@ TEST = os.path.join(ROOT, "test", "test_trace_ipc_compat.py")
 
 
 def release_dir(build):
-    path = os.path.join(os.path.abspath(build), "bin", "Release")
+    root=os.path.abspath(build)
+    path=root if os.path.isfile(os.path.join(root,"veh-mcp-server.exe")) else os.path.join(root,"bin","Release")
     if not os.path.isdir(path):
         raise ValueError(f"missing Release directory: {path}")
     return path
@@ -38,10 +39,11 @@ def stage(root, name, mcp_build, dll_build):
 def run_case(name, build, target, timeout, expect_file_unsupported=False,
              expect_occurrence_unsupported=False,
              expect_function_scope_unsupported=False,
-             expect_target_window_unsupported=False, expect_policies_unsupported=False):
+             expect_target_window_unsupported=False, expect_policies_unsupported=False, suite="trace"):
     env = os.environ.copy()
     env["VEH_TEST_BUILD_DIR"] = build
     env["VEH_TEST_TARGET"] = os.path.abspath(target)
+    if suite=="scan": env["VEH_TEST_SCAN_COMPAT"]="1"
     if expect_file_unsupported:
         env["VEH_TEST_EXPECT_FILE_UNSUPPORTED"] = "1"
     if expect_occurrence_unsupported:
@@ -89,19 +91,20 @@ def main():
     parser.add_argument("--old-supports-existing-extensions", action="store_true",
                         help="Old build already supports occurrence/function/target windows")
     parser.add_argument("--expect-old-no-collection-policies", action="store_true")
+    parser.add_argument("--suite", choices=("trace","scan"), default="trace")
     parser.add_argument("--timeout", type=int, default=90)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="veh-ipc-compat-") as temporary:
         old_mcp_new_dll = stage(temporary, "old-mcp-new-dll", args.old_build_dir, args.new_build_dir)
         new_mcp_old_dll = stage(temporary, "new-mcp-old-dll", args.new_build_dir, args.old_build_dir)
         results = [
-            run_case("old-mcp-new-dll", old_mcp_new_dll, args.target, args.timeout),
+            run_case("old-mcp-new-dll", old_mcp_new_dll, args.target, args.timeout,suite=args.suite),
             run_case("new-mcp-old-dll", new_mcp_old_dll, args.target, args.timeout,
                      args.expect_old_no_file_mode,
                      not args.old_supports_existing_extensions,
                      not args.old_supports_existing_extensions,
                      not args.old_supports_existing_extensions,
-                     args.expect_old_no_collection_policies),
+                     args.expect_old_no_collection_policies,suite=args.suite),
         ]
     print(json.dumps({"results": results}, separators=(",", ":")))
     if any(result["status"] != "ok" for result in results):

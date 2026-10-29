@@ -52,7 +52,7 @@ host VM, outside the inner guest. Guest launch remains unsupported. See
 | `src/dll/dllmain.cpp` | DLL entry, LdrRegisterDllNotification for module events |
 | `src/dll/stack_walk.cpp/h` | StackWalk64, local variables, address symbolization, and PDB type layout (DisplayType) |
 | `src/dll/memory.cpp/h` | Memory read/write/alloc, memory map, masked pattern search |
-| `src/dll/value_scan.cpp/h` | Value scan sessions (candidate lists or region snapshots kept in the target) |
+| `src/dll/value_scan.cpp/h` | Value scan sessions: immutable RAM/file generations, baseline undo and backend worker events (see docs/VALUE_SCAN.md) |
 | `src/dll/threads.cpp/h` | Thread enumeration, pause/resume, freeze/thaw |
 | `src/mcp/assembler.cpp/h` | Text assembler for `veh_assemble` (AsmJit + AsmTK, x86 back end) |
 | `src/common/ipc_protocol.h` | All IPC command/event/struct definitions (shared) |
