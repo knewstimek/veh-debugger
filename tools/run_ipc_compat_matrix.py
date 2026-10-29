@@ -38,7 +38,7 @@ def stage(root, name, mcp_build, dll_build):
 def run_case(name, build, target, timeout, expect_file_unsupported=False,
              expect_occurrence_unsupported=False,
              expect_function_scope_unsupported=False,
-             expect_target_window_unsupported=False):
+             expect_target_window_unsupported=False, expect_policies_unsupported=False):
     env = os.environ.copy()
     env["VEH_TEST_BUILD_DIR"] = build
     env["VEH_TEST_TARGET"] = os.path.abspath(target)
@@ -50,6 +50,8 @@ def run_case(name, build, target, timeout, expect_file_unsupported=False,
         env["VEH_TEST_EXPECT_FUNCTION_SCOPE_UNSUPPORTED"] = "1"
     if expect_target_window_unsupported:
         env["VEH_TEST_EXPECT_TARGET_WINDOW_UNSUPPORTED"] = "1"
+    if expect_policies_unsupported:
+        env["VEH_TEST_EXPECT_POLICIES_UNSUPPORTED"] = "1"
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     process = subprocess.Popen([sys.executable, TEST], cwd=ROOT, env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -64,6 +66,14 @@ def run_case(name, build, target, timeout, expect_file_unsupported=False,
             process.kill()
         stdout, stderr = process.communicate(timeout=15)
         return {"case": name, "status": "timeout", "stderr_tail": stderr[-4000:]}
+    finally:
+        if process.poll() is None:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+            else:
+                process.kill()
+            process.wait(timeout=15)
     return {"case": name, "status": "ok" if process.returncode == 0 else "failed",
             "exit_code": process.returncode,
             "summary": stdout.strip().splitlines()[-1] if stdout.strip() else None,
@@ -76,6 +86,9 @@ def main():
     parser.add_argument("--new-build-dir", required=True)
     parser.add_argument("--target", required=True)
     parser.add_argument("--expect-old-no-file-mode", action="store_true")
+    parser.add_argument("--old-supports-existing-extensions", action="store_true",
+                        help="Old build already supports occurrence/function/target windows")
+    parser.add_argument("--expect-old-no-collection-policies", action="store_true")
     parser.add_argument("--timeout", type=int, default=90)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="veh-ipc-compat-") as temporary:
@@ -84,7 +97,11 @@ def main():
         results = [
             run_case("old-mcp-new-dll", old_mcp_new_dll, args.target, args.timeout),
             run_case("new-mcp-old-dll", new_mcp_old_dll, args.target, args.timeout,
-                     args.expect_old_no_file_mode, True, True, True),
+                     args.expect_old_no_file_mode,
+                     not args.old_supports_existing_extensions,
+                     not args.old_supports_existing_extensions,
+                     not args.old_supports_existing_extensions,
+                     args.expect_old_no_collection_policies),
         ]
     print(json.dumps({"results": results}, separators=(",", ":")))
     if any(result["status"] != "ok" for result in results):

@@ -438,6 +438,9 @@ public:
 		uint64_t targetCaptureStartSequence = 0;
 		uint64_t targetCaptureEndSequence = 0;
 		bool targetMatched = false;
+		uint32_t appliedCollectionFlags = 0;
+		bool decodeIncomplete = false;
+		uint64_t expandedEventCount = 0;
 		TraceBasicBlockStopReason stopReason = TraceBasicBlockStopReason::Completed;
 		bool truncated = false;
 		uint32_t exceptionsFollowed = 0;
@@ -504,7 +507,7 @@ public:
 		const TraceCondition& collectCondition = {},
 		const TraceOccurrenceWindow& occurrenceWindow = {},
 		bool stopOnReturn = false,
-		const TraceTargetWindow& targetWindow = {});
+		const TraceTargetWindow& targetWindow = {}, uint32_t collectionFlags = 0);
 
 	// --- Resolve (PDB) ---
 	uint64_t ResolveSourceLine(const std::string& file, uint32_t line);

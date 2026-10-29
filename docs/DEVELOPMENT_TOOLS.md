@@ -267,6 +267,81 @@ Schema 1 is packed little-endian and independent of target pointer width. The fi
 
 Each following record has an 8-byte header: `type:u16`, `reserved:u16`, and `payload_size:u32`. Type 1 contains the 48-byte `TraceBasicBlockEventEntry`, type 2 the 84-byte `TraceBasicBlockMemoryEventEntry`, and type 3 the 320-byte `TraceBasicBlockRegisterEventEntry`, as defined in `src/common/ipc_protocol.h`. Records remain interleaved in capture order and share the trace-step `sequence`; multiple records may have the same sequence. Readers must use `payload_size`, reject unknown types or nonzero reserved fields for schema 1, and stop at exactly `header_size + record_bytes`. A truncated size-limited file ends after a complete record, never in a record header or payload. The supplied reader performs these checks and emits a manifest followed by one JSON object per record.
 
+## Basic-block collection policies and repeated paths
+
+`veh_trace_basic_blocks` retains its defaults. Set `collect_snapshots=false`
+to skip snapshot allocation, GPR/flags copying and stack reads for first
+block/edge and exception snapshots. Snapshot arrays are empty and references are omitted;
+instruction register events remain a separate opt-in collector. Conditions and
+precise execution control still use the exception CONTEXT. A path-only capture
+can also leave memory reads/writes/events, register events and dependency sources
+disabled; the backend then skips their operand/dependency preparation.
+
+Set `compress_paths=true, collect_code=true` to encode consecutive observed
+repeated paths. Inline and `events_output="file"` use the same bounded encoder
+with a maximum32-event raw template and at most32 pending events. This reduces
+event records and transfer bytes, **not TF single-step exceptions**. Code capture
+still copies/hashes runtime block bytes and can outweigh record savings for
+some workloads; no speedup factor is promised.
+
+Compression initially excludes `target_window` and ordered memory/register
+events. Aggregated memory observations remain available. Unknown code versions,
+exceptions, collection gaps, external-call gaps and observed per-block version
+changes flush the pending run. A partial final cycle is emitted raw. Templates
+never contain another repeat. Overflow retains a decodable prefix and drops
+later records; aggregates continue. The collector traces one selected thread,
+not a process-wide order. It does not validate known instruction metadata on
+every execution or guarantee fidelity under arbitrary concurrent self-modifying
+code. Missing code/decode metadata is reported as incomplete, never reconstructed
+as an observed path.
+
+New policies require explicitly reported `kCapBasicTracePolicies` (bit6) before
+any trace effects. Wire11 appends `collectionFlags:u32` to the fixed wire10
+request prefix. Bits0/1 mean suppress snapshots/compress paths. The new response
+appends applied flags, decode-incomplete and retained expanded-event count;
+MCP validates the exact policy receipt. Requests without a new policy still
+send wire10 for old-backend compatibility. Enhanced captures refuse enabled
+managed HW breakpoints and active DR7 slots before changing TF or resuming:
+the legacy TF dispatcher cannot safely promise simultaneous hardware stops.
+
+Ordered event schema3 adds `type="repeat"` with `pattern_events` (1..32),
+`additional_repetitions` and `sequence_stride`. The immediately preceding
+N raw edge records are the template, already counted once. For extra cycle
+r=1..additional_repetitions, each template event has
+`sequence = template.sequence + r * sequence_stride`; every other semantic
+field is preserved. The marker sequence is the first event of extra cycle1.
+The decoder checks reference bounds, thread, ordering and integer overflow.
+
+Compressed `.vte` artifacts/transport frames use schema2; uncompressed files
+retain schema1. Record framing and 48-byte basic-event payload sizes do not
+change. Payload event type2 is Repeat: `source=N`,
+`sourceInstruction=additional_repetitions`, `target=sequence_stride`,
+`codeVersion=UINT32_MAX`, zero exception/indirect/reserved and fallthrough
+edgeKind. Header event counts and `max_events` count physical records.
+`ordering.expanded_events_captured` counts retained logical events;
+`events_dropped` counts logical events, including suppressed cycles if a
+whole marker cannot fit. Compression never continues across a dropped record.
+
+Use the existing artifact reader to validate references or expand them:
+
+```powershell
+py -3 tools/read_trace_event_stream.py trace.vte --expand-paths --output expanded.jsonl
+```
+
+Expansion is streaming and capped at5,000,001 logical events. The JSON validator
+checks schema3 references and expanded counts without materializing repeats.
+The existing basic-block integration suite invokes `trace_path_regression`
+(33 template widths, branch/stride changes, barriers, incomplete tails and
+overflow arithmetic), then compares raw and expanded real VEH paths in x64/x86,
+inline/file and direct/batch/action modes. Build that CMake target with the
+normal debugger targets before running `veh.trace.parity`. The existing
+`test_backend_results.py` guest fixture also checks malformed repeats, logical
+count/thread mismatches, unacknowledged policies and structured backend refusals.
+For a retained wire10 build that already supports the existing windows, the IPC
+matrix accepts `--old-supports-existing-extensions` and
+`--expect-old-no-collection-policies`; it verifies policy refusal before target
+execution as well as default old/new compatibility.
+
 ## Occurrence-scoped collection
 
 Use `occurrence_window` to collect one or more dispatcher/instruction cycles:

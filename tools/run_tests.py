@@ -133,6 +133,9 @@ def main():
         with lock:
             results.append((name, status, elapsed, leaked))
             print(f"{status:9} {elapsed:6.1f}s  {name:38} {tail}", flush=True)
+            if status.startswith(("fail", "timeout")):
+                detail = "\n".join(line[:800] for line in text.strip().splitlines()[-10:])
+                print(detail[-4000:], flush=True)
             if not status.startswith("skip"):
                 durations[name] = round(elapsed, 1)
         if args.log_dir:

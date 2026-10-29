@@ -80,7 +80,186 @@ def read_code_artifact(path):
     return artifact
 
 
+def check_path_policies(client, thread_id, ip_name, address, output_path):
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    from read_trace_event_stream import expand_path_events, read_header, iter_records, _decode_basic, BASIC_BLOCK
+    # Corrupt wire fields must not disappear during JSON conversion.
+    marker_fields = [2, 1, 2, 1, 77, 0, 0xFFFFFFFF, 2, 0, 0, 0]
+    for field, value in ((5, 1), (6, 0), (8, 1), (9, 1), (10, 1)):
+        invalid = marker_fields.copy()
+        invalid[field] = value
+        try:
+            _decode_basic(BASIC_BLOCK.pack(*invalid))
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(("accepted malformed repeat field", field))
+    code = bytes.fromhex("FF C0 83 F8 03 72 F9 31 C0 EB F5")
+    assert client.tool("veh_write_memory", {"address": hex(address), "data": code.hex(" ")}).get("success")
+    accumulator = "eax" if ip_name == "eip" else "rax"
+    def reset():
+        for name, value in ((accumulator, "0"), (ip_name, hex(address))):
+            assert client.tool("veh_set_register", {
+                "threadId": thread_id, "name": name, "value": value,
+            }).get("success")
+    arguments = {
+        "threadId": thread_id, "start": hex(address), "end": hex(address + len(code)),
+        "max_steps": 203, "timeout_ms": 5000, "stack_bytes": 0,
+        "collect_code": True, "max_code_bytes": 4096, "max_code_versions": 32,
+        "max_events": 512,
+    }
+    reset()
+    raw = client.tool("veh_trace_basic_blocks", arguments, timeout=15)
+    assert "error" not in raw and raw["snapshots"], raw
+    enhanced = dict(arguments, collect_snapshots=False, compress_paths=True)
+    reset()
+    compressed = client.tool("veh_trace_basic_blocks", enhanced, timeout=15)
+    assert "error" not in compressed, compressed
+    assert compressed["collection"] == {"snapshots": False, "compressed_paths": True}, compressed
+    assert compressed["snapshots"] == [], compressed
+    assert all("snapshot" not in edge for edge in compressed["edges"]), compressed
+    assert all("first_snapshot" not in block for block in compressed["blocks"]), compressed
+    assert any(e["type"] == "repeat" for e in compressed["events"]), compressed
+    assert len(compressed["events"]) < len(raw["events"]), compressed
+    assert list(expand_path_events(compressed["events"])) == raw["events"], compressed
+    assert compressed["ordering"]["expanded_events_captured"] == len(raw["events"]), compressed
+    assert compressed["steps_executed"] == raw["steps_executed"] == 203, compressed
+    assert compressed["final_address"] == raw["final_address"], compressed
+
+    reset()
+    batch = client.tool("veh_batch", {"steps": [
+        {"tool": "veh_trace_basic_blocks", "args": enhanced},
+    ]}, timeout=15)
+    assert batch["failed"] == 0, batch
+    assert batch["results"][0]["result"]["events"] == compressed["events"], batch
+
+    reset()
+    file_path = output_path("compressed-events", "vte")
+    file_trace = client.tool("veh_trace_basic_blocks", dict(enhanced,
+        events_output="file", events_output_path=file_path), timeout=15)
+    assert "error" not in file_trace and file_trace["event_file"]["schema_version"] == 2, file_trace
+    with open(file_path, "rb") as source:
+        header = read_header(source)
+        file_events = [dict(e) for e in iter_records(source, header)]
+    for e in file_events:
+        e.pop("record")
+    assert file_events == compressed["events"], file_trace
+
+    reset()
+    limited = client.tool("veh_trace_basic_blocks", dict(enhanced, max_events=3), timeout=15)
+    expanded = list(expand_path_events(limited["events"]))
+    assert limited["events_truncated"] is True and limited["events_dropped"] > 0, limited
+    assert expanded == raw["events"][:len(expanded)], limited
+    assert len(expanded) + limited["events_dropped"] == len(raw["events"]), limited
+
+    reset()
+    short_file = output_path("compressed-limit", "vte")
+    short = client.tool("veh_trace_basic_blocks", dict(enhanced, events_output="file",
+        events_output_path=short_file, max_event_file_bytes=88 + 3 * 56), timeout=15)
+    assert short["event_file"]["truncated"] is True, short
+    with open(short_file, "rb") as source:
+        short_header = read_header(source)
+        short_records = list(iter_records(source, short_header))
+    for e in short_records:
+        e.pop("record")
+    expanded_short = list(expand_path_events(short_records))
+    assert expanded_short == raw["events"][:len(expanded_short)], short
+    assert len(expanded_short) + short["events_dropped"] == len(raw["events"]), short
+
+    # Collection gaps are explicit barriers even when subsequent edge choices match.
+    gap_args = dict(arguments, collect_condition=f"{accumulator} == 1")
+    reset()
+    gap_raw = client.tool("veh_trace_basic_blocks", gap_args, timeout=15)
+    reset()
+    gap_encoded = client.tool("veh_trace_basic_blocks", dict(gap_args,
+        collect_snapshots=False, compress_paths=True), timeout=15)
+    assert gap_encoded["filtered_steps"] > 0, gap_encoded
+    assert list(expand_path_events(gap_encoded["events"])) == gap_raw["events"], gap_encoded
+
+    reset()
+    target = client.tool("veh_trace_basic_blocks", dict(arguments,
+        collect_snapshots=False, max_events=2, target_window={"address": hex(address), "occurrence": 12,
+            "before_steps": 3, "after_steps": 4}), timeout=15)
+    assert target["ordering"]["expanded_events_captured"] == len(target["events"]), target
+    assert target["snapshots"] == [], target
+    assert target["events"] and target["events"][-1]["sequence"] >= target["target_window"]["trigger_sequence"], target
+
+    # Alternating bytes at the same block address must not be merged into a run.
+    mutation = (bytes.fromhex("80 35") +
+        ((address + 8).to_bytes(4, "little") if ip_name == "eip" else bytes.fromhex("01 00 00 00")) +
+        bytes.fromhex("01 B8 00 00 00 00 EB F2"))
+    mutation_args = dict(arguments, end=hex(address + len(mutation)), max_steps=90)
+    mutation_results = []
+    for compress in (False, True):
+        assert client.tool("veh_write_memory", {"address": hex(address), "data": mutation.hex(" ")}).get("success")
+        reset()
+        mutation_results.append(client.tool("veh_trace_basic_blocks",
+            dict(mutation_args, collect_snapshots=False, compress_paths=compress), timeout=15))
+    assert len(mutation_results[1]["code_versions"]) > 1, mutation_results[1]
+    assert not any(e["type"] == "repeat" for e in mutation_results[1]["events"]), mutation_results[1]
+    assert mutation_results[0]["events"] == mutation_results[1]["events"], mutation_results[1]
+    assert client.tool("veh_write_memory", {"address": hex(address), "data": code.hex(" ")}).get("success")
+
+    # Unknown code versions preserve raw observations and mark incompleteness.
+    reset()
+    unknown = client.tool("veh_trace_basic_blocks", dict(enhanced, max_code_bytes=1), timeout=15)
+    assert unknown["code_truncated"] and not unknown["ordering"]["complete"], unknown
+    assert not any(e["type"] == "repeat" for e in unknown["events"]), unknown
+
+    # Enhanced mode refuses HW ownership conflicts without resuming the target.
+    for kind, size in (("execute", 1), ("write", 4)):
+        reset()
+        hw = client.tool("veh_set_data_breakpoint", {"address": hex(address), "type": kind, "size": size})
+        assert hw.get("success"), hw
+        before = client.tool("veh_registers", {"threadId": thread_id})
+        refused = client.tool("veh_trace_basic_blocks", enhanced, timeout=15)
+        assert refused.get("failure", {}).get("reason") == "hardware_breakpoint_conflict", refused
+        after = client.tool("veh_registers", {"threadId": thread_id})
+        assert before == after, (before, after)
+        assert client.tool("veh_remove_data_breakpoint", {"id": hw["id"]}).get("success")
+
+    # A software stop remains a real stop and an entry action uses the same encoder.
+    entry = address + 64
+    assert client.tool("veh_write_memory", {"address": hex(entry),
+        "data": (bytes([0xE9]) + struct.pack("<i", address - entry - 5)).hex(" ")}).get("success")
+    action_args = dict(enhanced, end=hex(entry + 5))
+    reset()
+    assert client.tool("veh_set_register", {"threadId": thread_id, "name": ip_name,
+        "value": hex(entry)}).get("success")
+    action_reference = client.tool("veh_trace_basic_blocks", action_args, timeout=15)
+    reset()
+    assert client.tool("veh_set_register", {"threadId": thread_id, "name": ip_name,
+        "value": hex(entry)}).get("success")
+    action_path = output_path("compressed-action")
+    action_bp = client.tool("veh_set_breakpoint", {
+        "address": hex(entry), "action": [
+            {"tool": "veh_trace_basic_blocks", "args": dict(action_args, output_file=action_path)},
+            {"tool": "veh_set_breakpoint", "args": {"address": "$0.final_address"}},
+        ],
+    })
+    assert action_bp.get("success"), action_bp
+    action_stop = client.tool("veh_continue", {"wait": True, "timeout": 10}, timeout=20)
+    assert action_stop.get("reason") == "breakpoint", action_stop
+    with open(action_path, encoding="utf-8") as source:
+        action = json.load(source)
+    # A one-shot entry prefix permits the full loop capture through an action.
+    assert action["collection"]["snapshots"] is False, action
+    assert action["stop_reason"] == "max_steps", action
+    assert action["events"] == action_reference["events"], action
+    if action_stop.get("breakpointId") != action_bp["id"]:
+        assert client.tool("veh_remove_breakpoint", {"id": action_stop["breakpointId"]}).get("success")
+    assert client.tool("veh_remove_breakpoint", {"id": action_bp["id"]}).get("success")
+
+    reset()
+    rejected = client.tool("veh_trace_basic_blocks", dict(enhanced, collect_register_events=True))
+    assert "cannot combine" in rejected.get("error", ""), rejected
+    return {"raw_records": len(raw["events"]), "encoded_records": len(compressed["events"])}
+
+
 def main():
+    codec = subprocess.run([os.path.join(BUILD_DIR, "bin", "Release", "trace_path_regression.exe")],
+                           capture_output=True, text=True, timeout=15)
+    assert codec.returncode == 0, codec.stderr
     client = Client(args=["--profile=full"])
     artifact_paths = []
     artifact_dirs = []
@@ -373,12 +552,15 @@ def main():
             {"tool": "veh_trace_basic_blocks", "args": {
                 "threadId": "$0.threadId", "start": hex(function_start),
                 "end": hex(function_start + 0x100), "stop_on_return": True,
+                "collect_snapshots": False,
                 "max_steps": 20000, "timeout_ms": 10000,
             }},
         ]}, timeout=25)
         batch_function_trace = function_batch["results"][1]["result"]
         assert batch_function_trace.get("stop_reason") == "function_return", function_batch
         assert batch_function_trace["function_scope"]["returned"] is True, function_batch
+        assert batch_function_trace["snapshots"] == [], function_batch
+        assert "return_snapshot" not in batch_function_trace["function_scope"], function_batch
         assert client.tool("veh_remove_breakpoint", {
             "id": batch_function_bp["id"],
         }).get("success"), batch_function_bp
@@ -1220,6 +1402,7 @@ def main():
         assert multi_artifact["code_bytes"] == large_size, multi_artifact
         assert multi_artifact["records"][0]["bytes"] == large_code, multi_artifact
         assert multi_trace["code_capture"]["chunk_count"] == 5, multi_trace
+        path_policies = check_path_policies(client, checkpoint_thread, ip_name, smc_start, output_path)
         assert client.tool("veh_set_register", {
             "threadId": checkpoint_thread, "name": ip_name, "value": saved[ip_name],
         }).get("success")
@@ -1240,6 +1423,8 @@ def main():
         stop = client.tool("veh_continue", {"wait": True, "timeout": 10}, timeout=15)
         assert stop.get("reason") == "breakpoint", stop
         exception_start = int(exception_bp["address"], 0)
+        exception_checkpoint = client.tool("veh_checkpoint_create", {"threadId": stop["threadId"]})
+        assert exception_checkpoint.get("id"), exception_checkpoint
         exception_trace = client.tool("veh_trace_basic_blocks", {
             "threadId": stop["threadId"], "start": hex(exception_start),
             "end": hex(exception_start + 0x100), "max_steps": 1000,
@@ -1252,6 +1437,18 @@ def main():
         assert exception_event["type"] == "illegal_instruction", exception_event
         assert "fault_snapshot" in exception_event and "continuation_snapshot" in exception_event, exception_event
         assert int(exception_event["continuation"], 0) > int(exception_event["fault_rip"], 0), exception_event
+        assert client.tool("veh_checkpoint_restore", {"id": exception_checkpoint["id"]}).get("restored")
+        no_exception_snapshots = client.tool("veh_trace_basic_blocks", {
+            "threadId": stop["threadId"], "start": hex(exception_start),
+            "end": hex(exception_start + 0x100), "max_steps": 1000,
+            "timeout_ms": 5000, "collect_snapshots": False, "follow_exceptions": True,
+        }, timeout=15)
+        assert no_exception_snapshots["exceptions_followed"] == exception_trace["exceptions_followed"], no_exception_snapshots
+        assert no_exception_snapshots["filtered_steps"] == exception_trace["filtered_steps"], no_exception_snapshots
+        assert no_exception_snapshots["snapshots"] == [], no_exception_snapshots
+        assert all("fault_snapshot" not in e and "continuation_snapshot" not in e
+                   for e in no_exception_snapshots["exceptions"]), no_exception_snapshots
+        assert client.tool("veh_checkpoint_delete", {"id": exception_checkpoint["id"]}).get("deleted")
 
         # Run the high-level matrix last so repeated synthetic inputs cannot
         # perturb the state expected by the other integration cases.
@@ -1460,6 +1657,7 @@ def main():
             "checkpoint_restored": True,
             "targeted_inputs": matrix["succeeded"],
             "targeted_parity": True,
+            "path_policies": path_policies,
         }))
     finally:
         client.close()

@@ -1388,6 +1388,8 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"max_edges", {{"type", "integer"}, {"description", "Maximum unique observed edges (default 8192, max 32768)"}}},
 			{"max_steps", {{"type", "integer"}, {"description", "Maximum instruction/exception events (default 100000, max 5000000)"}}},
 			{"timeout_ms", {{"type", "integer"}, {"description", "Wall-clock limit (default 10000, max 60000)"}}},
+			{"collect_snapshots", {{"type", "boolean"}, {"description", "Collect first block/edge and exception register/stack snapshots (default true). False skips capture and snapshot buffers; requires backend policy support."}}},
+			{"compress_paths", {{"type", "boolean"}, {"description", "Encode observed consecutive repeated paths losslessly (default false). Requires collect_code, no ordered memory/register events or target_window. Preserves sequence stride; reduces records, not TF exceptions."}}},
 			{"stack_bytes", {{"type", "integer"}, {"description", "Bytes to capture from SP per snapshot (default 128, max 256; 0 disables stack bytes)"}}},
 			{"stop_on_return", {{"type", "boolean"}, {"description", "Record entry SP/return address, exclude external call execution from collection, and stop with function_return plus the return register snapshot (default false)"}}},
 			{"follow_exceptions", {{"type", "boolean"}, {"description", "Pass target exceptions to its handlers and record handled continuations as edges (default true)"}}},

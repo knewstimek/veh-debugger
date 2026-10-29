@@ -49,6 +49,16 @@ def main():
             assert next_stop.get("reason") == "breakpoint", next_stop
             assert int(next_stop.get("address", "0"), 0) == start, next_stop
             return next_stop
+        if os.environ.get("VEH_TEST_EXPECT_POLICIES_UNSUPPORTED") == "1":
+            policy_stop = stop_at_start()
+            before = client.tool("veh_registers", {"threadId": policy_stop["threadId"]})
+            refused = client.tool("veh_trace_basic_blocks", {
+                "threadId": policy_stop["threadId"], "start": hex(start), "end": hex(start + 0x100),
+                "collect_snapshots": False,
+            })
+            assert "backend_does_not_support_trace_collection_policies" in str(refused), refused
+            after = client.tool("veh_registers", {"threadId": policy_stop["threadId"]})
+            assert before == after, (before, after)
         if os.environ.get("VEH_TEST_EXPECT_FILE_UNSUPPORTED") == "1":
             extension_stop = stop_at_start()
             file_trace = client.tool("veh_trace_basic_blocks", {

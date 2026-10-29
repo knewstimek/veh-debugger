@@ -2624,7 +2624,9 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 		}
 		TraceBasicBlocksRequest req{};
 		memcpy(&req, payload, std::min<size_t>(payloadSize, sizeof(req)));
-		const bool explicitV10Wire = req.wireVersion >= kTraceBasicBlocksWireVersion &&
+		const bool explicitV11Wire = req.wireVersion == 11 &&
+			req.requestSize == kTraceBasicBlocksRequestV11Size && req.requestSize <= payloadSize;
+		const bool explicitV10Wire = (req.wireVersion == 10 || explicitV11Wire) &&
 			req.requestSize >= kTraceBasicBlocksRequestV10Size && req.requestSize <= payloadSize;
 		const bool explicitV9Wire = req.wireVersion == 9 &&
 			req.requestSize >= kTraceBasicBlocksRequestV9Size && req.requestSize <= payloadSize;
@@ -2638,7 +2640,8 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 			req.requestSize >= kTraceBasicBlocksRequestV4Size && req.requestSize <= payloadSize;
 		const bool explicitKnownWire = explicitV10Wire || explicitV9Wire || explicitV8Wire ||
 			explicitV7Wire || explicitV6Wire || explicitV5Wire;
-		const uint16_t responseHeaderSize = (explicitV10Wire || explicitV9Wire) ? kTraceBasicBlocksResponseV8Size :
+		const uint16_t responseHeaderSize = explicitV11Wire ? kTraceBasicBlocksResponseV9Size :
+			(explicitV10Wire || explicitV9Wire) ? kTraceBasicBlocksResponseV8Size :
 			(explicitV8Wire ? kTraceBasicBlocksResponseV7Size :
 			(explicitV7Wire ? kTraceBasicBlocksResponseV6Size :
 			(explicitKnownWire ? kTraceBasicBlocksResponseV5Size :
@@ -2695,6 +2698,7 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 			req.eventStreamToken = 0;
 			req.maxEventFileBytes = 0;
 		}
+		if (!explicitV11Wire) req.collectionFlags = 0;
 		if (req.threadId == 0 || req.rangeStart >= req.rangeEnd ||
 			req.rangeEnd - req.rangeStart > 4ULL * 1024 * 1024) {
 			sendTraceFailure(IpcStatus::InvalidArgs, TraceBasicBlocksStartFailure::InvalidArguments, false, 0);
@@ -2717,7 +2721,10 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 		const bool fileEventOutput = req.eventOutputMode == static_cast<uint8_t>(TraceEventOutputMode::File);
 		const uint32_t maxCodeBytes = fileCodeOutput ?
 			kTraceBasicBlockMaxFileCodeBytes : kTraceBasicBlockMaxCodeBytes;
-		if (req.maxBlocks > 16384 || req.maxEdges > 32768 || req.maxSteps > 5000000 ||
+		if ((req.collectionFlags & ~(kTraceSuppressSnapshots | kTraceCompressPaths)) ||
+			((req.collectionFlags & kTraceCompressPaths) && (!req.collectCode ||
+				req.collectMemoryEvents || req.collectRegisterEvents || req.targetWindow.enabled)) ||
+			req.maxBlocks > 16384 || req.maxEdges > 32768 || req.maxSteps > 5000000 ||
 			(req.collectMemoryWrites && req.maxMemoryWrites > 16384) ||
 			(req.collectMemoryReads && req.maxMemoryReads > 16384) ||
 			(req.collectEvents && !fileEventOutput && req.maxEvents > 32768) ||
@@ -2753,6 +2760,21 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 			return;
 		}
 
+		// Enhanced collection must not consume an existing precise hardware stop.
+		// Legacy requests keep their historical behavior.
+		if (req.collectionFlags) {
+			if (hasStoppedContext && (stoppedContext.Dr7 & 0xFF)) {
+				sendTraceFailure(IpcStatus::Error, TraceBasicBlocksStartFailure::HardwareBreakpointConflict, false, 0);
+				return;
+			}
+			for (uint8_t slot = 0; slot < 4; ++slot) {
+				auto bp = HwBreakpointManager::Instance().FindBySlot(slot);
+				if (bp && bp->enabled) {
+					sendTraceFailure(IpcStatus::Error, TraceBasicBlocksStartFailure::HardwareBreakpointConflict, false, 0);
+					return;
+				}
+			}
+		}
 		std::vector<VehHandler::TraceBasicBlocksState::Instruction> instructions;
 		std::vector<uint64_t> staticBlockStarts;
 		instructions.reserve(static_cast<size_t>(req.rangeEnd - req.rangeStart) / 2);
@@ -2832,7 +2854,7 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 				req.dependencySources, req.dependencySourceCount,
 				req.startCondition, req.stopCondition, req.collectCondition, req.occurrenceWindow,
 				req.stopOnReturn != 0, req.targetWindow,
-				std::move(instructions), std::move(staticBlockStarts))) {
+				std::move(instructions), std::move(staticBlockStarts), req.collectionFlags)) {
 			TraceBasicBlocksStartFailure reason = TraceBasicBlocksStartFailure::StartRejected;
 			if (!stopped || !hasStoppedContext) reason = TraceBasicBlocksStartFailure::ThreadNotStopped;
 			else if (normalizedIp < req.rangeStart || normalizedIp >= req.rangeEnd)
@@ -3120,6 +3142,13 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 			header->targetMatched = tb.targetMatched ? 1 : 0;
 		}
 		if (req.collectCode) header->eventSchemaVersion = 2;
+		if (responseHeaderSize >= kTraceBasicBlocksResponseV9Size) {
+			header->appliedCollectionFlags = tb.collectionFlags;
+			header->decodeIncomplete = tb.dynamicDecodeExhausted ? 1 : 0;
+			header->expandedEventCount = (tb.collectionFlags & kTraceCompressPaths) ? tb.expandedEventCount :
+				(fileEventOutput ? tb.streamedEventCount : tb.eventCount);
+			if (req.collectionFlags & kTraceCompressPaths) header->eventSchemaVersion = 3;
+		}
 
 		uint8_t* out = response.data() + responseHeaderSize;
 		for (const auto& block : blocks) {
@@ -3181,7 +3210,7 @@ void PipeServer::HandleLifecycleCommand(uint32_t command, const uint8_t* payload
 		GetCapabilitiesResponse resp{};
 		resp.status = IpcStatus::Ok;
 		resp.backend = IpcBackend::VehDll;
-		resp.flags = kCapStopsThreads;
+		resp.flags = kCapStopsThreads | kCapBasicTracePolicies;
 		strcpy_s(resp.name, "veh-dll");
 		// Every command HandleCommand routes to a handler.
 		static constexpr IpcCommand kImplemented[] = {

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import struct
+from read_trace_event_stream import PathDecoder
 
 
 def load_trace(path):
@@ -67,6 +68,14 @@ def validate(trace, trace_path, code_artifact_override=None):
             raise ValueError(f"{section} sequences are not ordered")
         if any(item.get("thread_id") != thread_id for item in events):
             raise ValueError(f"{section} contains another thread")
+    paths = PathDecoder()
+    for event in trace.get("events", []):
+        if event.get("type") == "repeat" and trace.get("ordering", {}).get("event_schema_version") != 3:
+            raise ValueError("repeat requires event schema 3")
+        paths.accept(event)
+    expected_expanded = trace.get("ordering", {}).get("expanded_events_captured")
+    if expected_expanded is not None and "events" in trace and expected_expanded != paths.expanded_count:
+        raise ValueError("expanded event count mismatch")
     version_ids = {item["id"] for item in trace.get("code_versions", [])}
     capture = trace.get("code_capture", {})
     if capture.get("storage") == "file" and capture.get("path"):

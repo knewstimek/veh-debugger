@@ -1,4 +1,5 @@
 #include "trace_event_artifact.h"
+#include "common/trace_path_compressor.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -64,11 +65,11 @@ TraceEventArtifactReceiver::~TraceEventArtifactReceiver() {
 }
 
 bool TraceEventArtifactReceiver::Start(const std::string& requestedPath, uint32_t chunkBytes,
-		uint64_t maxFileBytes) {
+		uint64_t maxFileBytes, uint32_t schemaVersion) {
 	result_ = {};
 	result_.requested = true;
 	result_.chunkBytes = chunkBytes;
-	result_.schemaVersion = kTraceEventArtifactSchemaVersion;
+	result_.schemaVersion = schemaVersion;
 	chunkBytes_ = chunkBytes;
 	if (maxFileBytes < sizeof(TraceEventArtifactHeader) ||
 		maxFileBytes > kTraceEventMaxFileBytes) {
@@ -163,6 +164,7 @@ bool TraceEventArtifactReceiver::ValidateRecords(const TraceEventStreamComplete&
 	if (!SetFilePointerEx(file_, position, nullptr, FILE_BEGIN)) return false;
 	uint64_t cursor = 0;
 	uint64_t counts[3]{};
+	TracePathValidator validator;
 	while (cursor < complete.committedRecordBytes) {
 		TraceEventArtifactRecordHeader record{};
 		DWORD read = 0;
@@ -178,10 +180,19 @@ bool TraceEventArtifactReceiver::ValidateRecords(const TraceEventStreamComplete&
 		} else return false;
 			if (record.reserved || record.payloadSize != expected ||
 			complete.committedRecordBytes - cursor - sizeof(record) < record.payloadSize) return false;
-		position.QuadPart = record.payloadSize;
-		if (!SetFilePointerEx(file_, position, nullptr, FILE_CURRENT)) return false;
+		if (result_.schemaVersion == 2) {
+			if (record.type != static_cast<uint16_t>(TraceEventRecordType::BasicBlock)) return false;
+			TraceBasicBlockEventEntry event{};
+			if (!ReadFile(file_, &event, sizeof(event), &read, nullptr) || read != sizeof(event) ||
+				!validator.Accept(event)) return false;
+			result_.threadId = event.threadId;
+		} else {
+			position.QuadPart = record.payloadSize;
+			if (!SetFilePointerEx(file_, position, nullptr, FILE_CURRENT)) return false;
+		}
 		cursor += sizeof(record) + record.payloadSize;
 	}
+	result_.expandedEvents = result_.schemaVersion == 2 ? validator.ExpandedCount() : counts[0];
 	return cursor == complete.committedRecordBytes &&
 		counts[0] == complete.basicBlockEventCount &&
 		counts[1] == complete.memoryEventCount &&
@@ -219,7 +230,7 @@ void TraceEventArtifactReceiver::ReaderThread() {
 		TraceEventStreamFrameHeader frame{};
 		if (!ReadExact(&frame, sizeof(frame))) { Fail("event artifact stream ended before completion"); break; }
 		if (frame.magic != kTraceEventStreamMagic || frame.reserved ||
-			frame.schemaVersion != kTraceEventArtifactSchemaVersion || frame.token != token_) {
+			frame.schemaVersion != result_.schemaVersion || frame.token != token_) {
 			Fail("invalid event artifact stream frame"); break;
 		}
 		if (frame.type == static_cast<uint16_t>(TraceEventStreamFrameType::Data)) {
@@ -265,7 +276,7 @@ void TraceEventArtifactReceiver::ReaderThread() {
 			}
 			TraceEventArtifactHeader header{};
 			header.magic = kTraceEventArtifactMagic;
-			header.schemaVersion = kTraceEventArtifactSchemaVersion;
+			header.schemaVersion = result_.schemaVersion;
 			header.headerSize = sizeof(header);
 			header.flags = kTraceEventArtifactFlagComplete |
 				(complete.truncated ? kTraceEventArtifactFlagTruncated : 0);

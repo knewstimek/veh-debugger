@@ -1,4 +1,5 @@
 #include "debug_session.h"
+#include "common/trace_path_compressor.h"
 #include "adapter/expr_eval.h"
 #include "adapter/pipe_client.h"
 #include "common/logger.h"
@@ -1924,8 +1925,12 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		const std::vector<TraceDependencySource>& dependencySources,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition, const TraceOccurrenceWindow& occurrenceWindow,
-		bool stopOnReturn, const TraceTargetWindow& targetWindow) {
+		bool stopOnReturn, const TraceTargetWindow& targetWindow, uint32_t collectionFlags) {
 	TraceBasicBlocksResult result;
+	if (collectionFlags && (!backendInfo_.reported || !(backendInfo_.flags & kCapBasicTracePolicies))) {
+		result.controlFailure = "backend_does_not_support_trace_collection_policies";
+		return result;
+	}
 	TraceCodeArtifactReceiver codeArtifactReceiver;
 	TraceEventArtifactReceiver eventArtifactReceiver;
 	const bool fileCodeOutput = collectCode && codeOutputMode == TraceCodeOutputMode::File;
@@ -1936,14 +1941,15 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		return result;
 	}
 	if (fileEventOutput && !eventArtifactReceiver.Start(eventOutputPath,
-			kTraceEventDefaultChunkBytes, maxEventFileBytes)) {
+			kTraceEventDefaultChunkBytes, maxEventFileBytes, (collectionFlags & kTraceCompressPaths) ? 2 : 1)) {
 		result.eventArtifact = eventArtifactReceiver.Finish(false);
 		if (fileCodeOutput) result.codeArtifact = codeArtifactReceiver.Finish(false);
 		return result;
 	}
 	TraceBasicBlocksRequest req{};
-	req.wireVersion = kTraceBasicBlocksWireVersion;
-	req.requestSize = sizeof(req);
+	req.wireVersion = collectionFlags ? kTraceBasicBlocksWireVersion : 10;
+	req.requestSize = collectionFlags ? sizeof(req) : kTraceBasicBlocksRequestV10Size;
+	req.collectionFlags = collectionFlags;
 	req.threadId = threadId;
 	req.rangeStart = rangeStart;
 	req.rangeEnd = rangeEnd;
@@ -1987,7 +1993,7 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 
 	std::vector<uint8_t> data;
 	PipeExchangeDiagnostics exchangeDiagnostics;
-	const bool received = ipcTransport_->SendAndReceive(IpcCommand::TraceBasicBlocks, &req, sizeof(req), data,
+	const bool received = ipcTransport_->SendAndReceive(IpcCommand::TraceBasicBlocks, &req, req.requestSize, data,
 		static_cast<int>(timeoutMs) + 15000, &exchangeDiagnostics);
 	result.controlResponseReceived = received;
 	result.controlResponseBytes = static_cast<uint32_t>(std::min<size_t>(data.size(), UINT32_MAX));
@@ -2074,6 +2080,17 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		result.controlFailure = "response_size_mismatch";
 		return result;
 	}
+	if (result.status == IpcStatus::Ok && collectionFlags && (headerSize < kTraceBasicBlocksResponseV9Size ||
+		header->appliedCollectionFlags != collectionFlags ||
+		((collectionFlags & kTraceCompressPaths) && header->eventSchemaVersion != 3))) {
+		result.controlFailure = "trace_collection_policy_not_acknowledged";
+		return result;
+	}
+	if (headerSize >= kTraceBasicBlocksResponseV9Size) {
+		result.appliedCollectionFlags = header->appliedCollectionFlags;
+		result.decodeIncomplete = header->decodeIncomplete != 0;
+		result.expandedEventCount = header->expandedEventCount;
+	}
 	result.stopReason = header->stopReason;
 	result.truncated = header->truncated != 0;
 	result.elapsedMs = header->elapsedMs;
@@ -2122,7 +2139,6 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		return result;
 	}
 
-	result.ok = true;
 	result.exceptionsFollowed = header->exceptionsFollowed;
 	result.unsupportedMemoryWrites = header->unsupportedMemoryWrites;
 	result.memoryWritesTruncated = header->memoryWritesTruncated != 0;
@@ -2171,6 +2187,28 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	cursor += static_cast<size_t>(header->exceptionEventCount) * sizeof(*exceptionEvents);
 	auto* events = reinterpret_cast<const TraceBasicBlockEventEntry*>(cursor);
 	result.events.assign(events, events + header->eventCount);
+	if (collectionFlags & kTraceCompressPaths) {
+		if (fileEventOutput && result.eventArtifact.success &&
+			(result.eventArtifact.expandedEvents != result.expandedEventCount ||
+			(result.eventArtifact.basicBlockEvents && result.eventArtifact.threadId != threadId))) {
+			result.status = IpcStatus::Error;
+			result.controlFailure = "compressed_file_count_mismatch";
+			return result;
+		}
+		TracePathValidator validator;
+		for (const auto& event : result.events) {
+			if (event.threadId != threadId || !validator.Accept(event)) {
+				result.status = IpcStatus::Error;
+				result.controlFailure = "invalid_compressed_path";
+				return result;
+			}
+		}
+		if (!fileEventOutput && validator.ExpandedCount() != result.expandedEventCount) {
+			result.status = IpcStatus::Error;
+			result.controlFailure = "compressed_path_count_mismatch";
+			return result;
+		}
+	}
 	cursor += static_cast<size_t>(header->eventCount) * sizeof(*events);
 	auto* memoryEvents = reinterpret_cast<const TraceBasicBlockMemoryEventEntry*>(cursor);
 	result.memoryEvents.assign(memoryEvents, memoryEvents + header->memoryEventCount);
@@ -2184,6 +2222,7 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	result.codeVersions.assign(codeVersions, codeVersions + header->codeVersionCount);
 	cursor += static_cast<size_t>(header->codeVersionCount) * sizeof(*codeVersions);
 	result.codeBytes.assign(cursor, cursor + header->codeByteCount);
+	result.ok = true;
 	return result;
 }
 

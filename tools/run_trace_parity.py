@@ -43,6 +43,7 @@ def run(build_dir, timeout):
             "status": "ok" if process.returncode == 0 else "failed",
             "exit_code": process.returncode,
             "summary": stdout.strip().splitlines()[-1] if stdout.strip() else None,
+            "stdout_tail": stdout[-4000:] if process.returncode else "",
             "stderr_tail": stderr[-4000:] if process.returncode else ""}
 
 

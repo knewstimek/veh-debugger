@@ -302,6 +302,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	bool collectMemoryReads = TraceJsonBool(args, "collect_memory_reads", false);
 	int maxMemoryReads = TraceJsonInt(args, "max_memory_reads", 4096);
 	bool collectEvents = TraceJsonBool(args, "collect_events", false);
+	bool collectSnapshots = TraceJsonBool(args, "collect_snapshots", true);
+	bool compressPaths = TraceJsonBool(args, "compress_paths", false);
 	int maxEvents = TraceJsonInt(args, "max_events", 8192);
 	bool collectCode = TraceJsonBool(args, "collect_code", false);
 	std::string codeOutput = args.value("code_output", "inline");
@@ -482,6 +484,10 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		targetWindow.enabled = 1;
 	}
 
+	if (compressPaths && (!collectCode || collectMemoryEvents || collectRegisterEvents || targetWindow.enabled))
+		return {{"error", "compress_paths requires collect_code=true and cannot combine with ordered memory/register events or target_window"}};
+	const uint32_t collectionFlags = (collectSnapshots ? 0 : kTraceSuppressSnapshots) |
+		(compressPaths ? kTraceCompressPaths : 0);
 	auto result = session.TraceBasicBlocks(threadId, start, end,
 		static_cast<uint32_t>(maxBlocks), static_cast<uint32_t>(maxEdges),
 		static_cast<uint32_t>(maxSteps), static_cast<uint32_t>(timeoutMs),
@@ -497,7 +503,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		collectMemoryEvents, static_cast<uint32_t>(maxMemoryEvents),
 		collectRegisterEvents, static_cast<uint32_t>(maxRegisterEvents),
 		dependencySources, startCondition, stopCondition, collectCondition, occurrenceWindow,
-		stopOnReturn, targetWindow);
+		stopOnReturn, targetWindow, collectionFlags);
 	auto hex = [](uint64_t value) {
 		char buffer[24]; snprintf(buffer, sizeof(buffer), "0x%llX", value);
 		return std::string(buffer);
@@ -534,6 +540,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 			case TraceBasicBlocksStartFailure::CodeStreamUnavailable: return "code_stream_unavailable";
 			case TraceBasicBlocksStartFailure::ReturnAddressUnavailable: return "return_address_unavailable";
 			case TraceBasicBlocksStartFailure::EventStreamUnavailable: return "event_stream_unavailable";
+			case TraceBasicBlocksStartFailure::HardwareBreakpointConflict: return "hardware_breakpoint_conflict";
 			default: return "";
 			}
 		};
@@ -625,7 +632,8 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	static const char* registerNames32[10] = {
 		"eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp", "eip", "eflags"
 	};
-	bool snapshotsAre32Bit = !result.snapshots.empty() && result.snapshots.front().is32bit != 0;
+	bool snapshotsAre32Bit = result.snapshots.empty() ? session.TargetAddressBits() == 32 :
+		result.snapshots.front().is32bit != 0;
 	json registerOrder = json::array();
 	if (snapshotsAre32Bit) {
 		for (const char* name : registerNames32) registerOrder.push_back(name);
@@ -840,7 +848,12 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	for (const auto& event : result.events) {
 		json value = {{"sequence", event.sequence}, {"thread_id", event.threadId}};
 		if (event.codeVersion != UINT32_MAX) value["code_version"] = event.codeVersion;
-		if (event.type == TraceBasicBlockEventType::BlockEntry) {
+		if (event.type == TraceBasicBlockEventType::Repeat) {
+			value["type"] = "repeat";
+			value["pattern_events"] = event.source;
+			value["additional_repetitions"] = event.sourceInstruction;
+			value["sequence_stride"] = event.target;
+		} else if (event.type == TraceBasicBlockEventType::BlockEntry) {
 			value["type"] = "block_entry";
 			value["block"] = hex(event.target);
 		} else {
@@ -894,6 +907,14 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		{"complete", result.eventCollectionEnabled && !eventsTruncated},
 		{"events_captured", capturedEvents}, {"events_dropped", result.eventsDropped}};
 	if (fileEventOutput) ordering["storage"] = "file";
+	if (collectionFlags) {
+		ordering["compressed"] = compressPaths;
+		ordering["expanded_events_captured"] = result.expandedEventCount;
+		ordering["decode_incomplete"] = result.decodeIncomplete;
+		ordering["scope"] = "collected_segments";
+		if (compressPaths) ordering["code_versions_complete"] = !result.codeTruncated;
+		if (result.decodeIncomplete || (compressPaths && result.codeTruncated)) ordering["complete"] = false;
+	}
 	json memoryEvents = json::array();
 	for (const auto& event : result.memoryEvents) {
 		json value = {{"sequence", event.sequence}, {"thread_id", event.threadId},
@@ -1023,6 +1044,9 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		{"final_dependencies", std::move(finalDependencies)},
 		{"exceptions", std::move(exceptions)},
 		{"register_order", std::move(registerOrder)}, {"snapshots", std::move(snapshots)}};
+	if (collectionFlags) fullResult["collection"] = {
+		{"snapshots", !(result.appliedCollectionFlags & kTraceSuppressSnapshots)},
+		{"compressed_paths", (result.appliedCollectionFlags & kTraceCompressPaths) != 0}};
 	if (targetWindow.enabled) {
 		fullResult["mode"] = "targeted";
 		fullResult["aggregate_scope"] = "trigger_and_post_trigger";
@@ -1056,6 +1080,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		{"code", fullResult["code_truncated"]},
 		{"memory_writes", fullResult["memory_writes_truncated"]},
 		{"memory_reads", fullResult["memory_reads_truncated"]}};
+	if (collectionFlags) truncation["decode"] = result.decodeIncomplete;
 	bool complete = true;
 	for (const auto& value : truncation.items()) if (value.value().get<bool>()) complete = false;
 	json compact = {{"schema_version", 4}, {"mode", "file"},
@@ -1070,6 +1095,7 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		{"truncation", std::move(truncation)}, {"occurrence_window", fullResult["occurrence_window"]},
 		{"output_file", {{"path", exported.path}, {"format", exported.format},
 			{"size", exported.size}, {"sha256", exported.sha256}, {"complete", complete}}}};
+	if (collectionFlags) compact["collection"] = fullResult["collection"];
 	if (fileCodeOutput) compact["code_artifact"] = fullResult["code_capture"];
 	if (fileEventOutput) compact["event_file"] = eventFile;
 	return compact;

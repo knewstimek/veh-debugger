@@ -1,4 +1,5 @@
 #pragma once
+#include "../common/trace_path_compressor.h"
 #include <windows.h>
 #include <cstdint>
 #include <functional>
@@ -112,6 +113,7 @@ public:
 			uint64_t staticBlockStart = 0;
 			uint64_t hitCount = 0;
 			uint64_t lastHitStep = 0;
+			uint32_t lastCodeVersion = UINT32_MAX;
 			uint8_t terminal = 0;
 			uint8_t indirect = 0;
 			uint8_t writeOperandCount = 0;
@@ -278,6 +280,9 @@ public:
 		std::vector<MemoryTaintSlot> memoryTaintTable;
 		std::vector<TraceBasicBlockSnapshot> snapshots;
 		std::vector<TraceBasicBlockEventEntry> events;
+		uint32_t collectionFlags = 0;
+		uint64_t expandedEventCount = 0;
+		TracePathCompressor pathCompressor;
 		std::vector<TraceBasicBlockMemoryEventEntry> memoryEvents;
 		std::vector<TraceBasicBlockRegisterEventEntry> registerEvents;
 		std::vector<CodeVersionSlot> codeVersionTable;
@@ -403,7 +408,7 @@ public:
 		const TraceCondition& collectCondition, const TraceOccurrenceWindow& occurrenceWindow,
 		bool stopOnReturn, const TraceTargetWindow& targetWindow,
 		std::vector<TraceBasicBlocksState::Instruction>&& instructions,
-		std::vector<uint64_t>&& staticBlockStarts);
+		std::vector<uint64_t>&& staticBlockStarts, uint32_t collectionFlags);
 	void CancelTraceBasicBlocks(TraceBasicBlockStopReason reason);
 	void FinalizeTraceBasicBlocksStreams();
 
@@ -539,6 +544,8 @@ private:
 		TraceBasicBlockEdgeKind kind, uint32_t exceptionCode, bool indirect, const CONTEXT* ctx,
 		uint32_t* snapshotOut = nullptr, uint64_t faultAddress = 0,
 		const TraceBasicBlockSnapshot* faultSnapshot = nullptr);
+	void EmitBasicTraceEvent(const TraceBasicBlockEventEntry& event);
+	void FlushBasicTracePath();
 	void PrepareBasicTraceMemoryWrites(const TraceBasicBlocksState::Instruction* instruction,
 		const CONTEXT* ctx);
 	void CompleteBasicTraceMemoryWrites();

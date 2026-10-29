@@ -175,6 +175,10 @@ int wmain(int argc, wchar_t** argv) {
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::GetRegisters);
             }
             if(mode==L"address-delay")veh::SetCommandSupported(caps.commands,veh::IpcCommand::ResolveAddressSpace);
+            if (mode.rfind(L"path-", 0) == 0) {
+                caps.flags |= veh::kCapBasicTracePolicies;
+                veh::SetCommandSupported(caps.commands, veh::IpcCommand::TraceBasicBlocks);
+            }
             if (mode == L"trace") {
                 for (auto op : {veh::IpcCommand::Continue, veh::IpcCommand::Pause, veh::IpcCommand::TraceCallers})
                     veh::SetCommandSupported(caps.commands, op);
@@ -188,6 +192,47 @@ int wmain(int argc, wchar_t** argv) {
             if (mode == L"delayed-trace") veh::SetCommandSupported(caps.commands, veh::IpcCommand::TraceCallers);
             strcpy_s(caps.name, "synthetic-guest");
             if (!reply(pipe, header.command, caps)) break;
+        } else if (mode.rfind(L"path-", 0) == 0 && command == veh::IpcCommand::TraceBasicBlocks) {
+            veh::TraceBasicBlocksRequest request{};
+            if (bytes.size() != sizeof(request)) {
+                if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break;
+                continue;
+            }
+            std::memcpy(&request, bytes.data(), sizeof(request));
+            veh::TraceBasicBlocksResponse response{};
+            response.status = veh::IpcStatus::Ok;
+            response.headerSize = sizeof(response);
+            response.threadId = request.threadId;
+            response.appliedCollectionFlags = request.collectionFlags;
+            response.eventSchemaVersion = 3;
+            response.eventCollectionEnabled = 1;
+            response.eventCount = 2;
+            response.expandedEventCount = 3;
+            response.returnSnapshot = UINT32_MAX;
+            veh::TraceBasicBlockEventEntry events[2]{};
+            events[0].sequence = 1; events[0].source = 0x1000;
+            events[0].sourceInstruction = 0x1001; events[0].target = 0x1000;
+            events[0].threadId = request.threadId; events[0].codeVersion = 0;
+            events[0].type = veh::TraceBasicBlockEventType::Edge;
+            events[0].edgeKind = veh::TraceBasicBlockEdgeKind::Branch;
+            events[1].sequence = 2; events[1].source = 1;
+            events[1].sourceInstruction = 2; events[1].target = 1;
+            events[1].threadId = request.threadId; events[1].codeVersion = UINT32_MAX;
+            events[1].type = veh::TraceBasicBlockEventType::Repeat;
+            if (mode == L"path-bad-repeat") events[1].source = 2;
+            if (mode == L"path-bad-count") response.expandedEventCount = 99;
+            if (mode == L"path-bad-thread") events[1].threadId++;
+            if (mode == L"path-bad-policy") response.appliedCollectionFlags = 0;
+            if (mode == L"path-refused") {
+                response.status = veh::IpcStatus::Error;
+                response.startFailureReason = static_cast<uint8_t>(veh::TraceBasicBlocksStartFailure::HardwareBreakpointConflict);
+                response.eventCount = 0; response.expandedEventCount = 0;
+                response.appliedCollectionFlags = 0;
+            }
+            std::vector<unsigned char> result(sizeof(response) + response.eventCount * sizeof(events[0]));
+            std::memcpy(result.data(), &response, sizeof(response));
+            if (response.eventCount) std::memcpy(result.data() + sizeof(response), events, sizeof(events));
+            if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
         } else if (instrumentationMode && command == veh::IpcCommand::QueryBranchTrace) {
             veh::QueryBranchTraceResponse response{};
             response.status = veh::IpcStatus::Ok; response.lastBranches = 1; response.fullPath = 1;

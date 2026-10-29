@@ -866,9 +866,12 @@ struct TraceBasicBlocksRequest {
 	uint32_t reserved10;
 	uint64_t eventStreamToken;
 	uint64_t maxEventFileBytes;   // includes the artifact header
+	uint32_t collectionFlags;    // TraceBasicBlockCollectionFlags, wire 11
 };
+constexpr uint32_t kTraceSuppressSnapshots = 1u << 0;
+constexpr uint32_t kTraceCompressPaths = 1u << 1;
 
-static constexpr uint16_t kTraceBasicBlocksWireVersion = 10;
+static constexpr uint16_t kTraceBasicBlocksWireVersion = 11;
 static constexpr uint16_t kTraceBasicBlocksMinimumExplicitWireVersion = 5;
 static constexpr uint16_t kTraceBasicBlocksRequestV3Size =
 	static_cast<uint16_t>(offsetof(TraceBasicBlocksRequest, collectRegisterEvents));
@@ -883,7 +886,8 @@ static constexpr uint16_t kTraceBasicBlocksRequestV8Size =
 static constexpr uint16_t kTraceBasicBlocksRequestV9Size =
 	static_cast<uint16_t>(offsetof(TraceBasicBlocksRequest, eventOutputMode));
 static constexpr uint16_t kTraceBasicBlocksRequestV10Size =
-	static_cast<uint16_t>(sizeof(TraceBasicBlocksRequest));
+	static_cast<uint16_t>(offsetof(TraceBasicBlocksRequest, collectionFlags));
+static constexpr uint16_t kTraceBasicBlocksRequestV11Size = sizeof(TraceBasicBlocksRequest);
 static_assert(kTraceBasicBlocksRequestV3Size < kTraceBasicBlocksRequestV4Size);
 static_assert(kTraceBasicBlocksRequestV4Size < kTraceBasicBlocksRequestV6Size);
 static_assert(kTraceBasicBlocksRequestV6Size < kTraceBasicBlocksRequestV7Size);
@@ -1039,6 +1043,10 @@ struct TraceBasicBlockExceptionEntry {
 enum class TraceBasicBlockEventType : uint8_t {
 	BlockEntry = 0,
 	Edge = 1,
+	// Schema 3: immediately preceding source raw records form the template.
+	// sourceInstruction = additional complete cycles; target = sequence stride.
+	// sequence = template[0].sequence + stride. No nested repeats.
+	Repeat = 2,
 };
 
 // Version 1 ordered-event record. Sequence is the trace step number and every
@@ -1267,6 +1275,9 @@ struct TraceBasicBlocksResponse {
 	uint64_t  eventsDropped;
 	uint8_t   targetMatched;
 	uint8_t   reservedTarget[7];
+	uint32_t  appliedCollectionFlags; // wire 11, exact requested policy receipt
+	uint32_t  decodeIncomplete;
+	uint64_t  expandedEventCount; // retained logical events, not physical records
 	// followed by TraceBasicBlockEntry[blockCount],
 	// TraceBasicBlockEdgeEntry[edgeCount], TraceBasicBlockSnapshot[snapshotCount],
 	// TraceBasicBlockMemoryWriteEntry[memoryWriteCount],
@@ -1289,6 +1300,7 @@ enum class TraceBasicBlocksStartFailure : uint8_t {
 	CodeStreamUnavailable = 7,
 	ReturnAddressUnavailable = 8,
 	EventStreamUnavailable = 9,
+	HardwareBreakpointConflict = 10,
 };
 
 static constexpr uint16_t kTraceBasicBlocksResponseV3Size =
@@ -1302,7 +1314,8 @@ static constexpr uint16_t kTraceBasicBlocksResponseV6Size =
 static constexpr uint16_t kTraceBasicBlocksResponseV7Size =
 	static_cast<uint16_t>(offsetof(TraceBasicBlocksResponse, targetWindow));
 static constexpr uint16_t kTraceBasicBlocksResponseV8Size =
-	static_cast<uint16_t>(sizeof(TraceBasicBlocksResponse));
+	static_cast<uint16_t>(offsetof(TraceBasicBlocksResponse, appliedCollectionFlags));
+static constexpr uint16_t kTraceBasicBlocksResponseV9Size = sizeof(TraceBasicBlocksResponse);
 static_assert(kTraceBasicBlocksResponseV3Size < kTraceBasicBlocksResponseV4Size);
 static_assert(kTraceBasicBlocksResponseV4Size < kTraceBasicBlocksResponseV5Size);
 static_assert(kTraceBasicBlocksResponseV5Size < kTraceBasicBlocksResponseV6Size);
@@ -1926,6 +1939,7 @@ static_assert(sizeof(VirtualCpuInstructionRecord)==96);
 // everything it knows".
 enum class IpcBackend : uint32_t { VehDll = 0, Hypervisor = 1 };
 
+constexpr uint32_t kCapBasicTracePolicies  = 1u << 6;  // wire11 snapshot suppression and path compression
 constexpr uint32_t kCapStopsThreads        = 1u << 0;  // breakpoints/steps can hold a thread stopped
 constexpr uint32_t kCapHiddenBreakpoints   = 1u << 1;  // breakpoints do not modify target code bytes
 constexpr uint32_t kCapNoTargetFootprint   = 1u << 2;  // nothing is injected into the target process

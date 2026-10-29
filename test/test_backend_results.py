@@ -5,6 +5,7 @@ from pathlib import Path
 from build_paths import RELEASE
 from dap_test_client import DapClient
 from mcp_test_client import McpClient
+from owned_mcp_client import OwnedMcpClient
 
 
 ADAPTER = str(Path(RELEASE) / "veh-debug-adapter.exe")
@@ -37,6 +38,36 @@ def no_stop(client):
     except TimeoutError:
         return
     raise AssertionError(("Invented stopped event", unexpected))
+
+
+def check_trace_policy_results():
+    client = OwnedMcpClient()
+    try:
+        client.initialize("trace-policy-receipts")
+        for mode, expected in (
+            ("path-ok", None),
+            ("path-bad-repeat", "invalid_compressed_path"),
+            ("path-bad-count", "compressed_path_count_mismatch"),
+            ("path-bad-thread", "invalid_compressed_path"),
+            ("path-bad-policy", "trace_collection_policy_not_acknowledged"),
+            ("path-refused", "hardware_breakpoint_conflict"),
+        ):
+            attached = client.tool("veh_attach", {"pid": 4242, "target_scope": "guest",
+                "agent": AGENT, "agent_args": ["--metadata", mode]})
+            assert attached.get("success"), attached
+            args = {"threadId": 77, "start": "0x1000", "end": "0x1100",
+                    "collect_code": True, "collect_snapshots": False, "compress_paths": True}
+            result = client.tool("veh_trace_basic_blocks", args)
+            if expected is None:
+                assert "error" not in result and result["ordering"]["expanded_events_captured"] == 3, result
+            else:
+                assert "error" in result and result["failure"]["reason"] == expected, (mode, result)
+            batch = client.tool("veh_batch", {"steps": [{"tool": "veh_trace_basic_blocks", "args": args}]})
+            assert batch["results"][0]["result"] == result, (mode, batch)
+            assert batch["failed"] == (0 if expected is None else 1), batch
+            assert client.tool("veh_detach").get("success")
+    finally:
+        client.close(terminate_target=False)
 
 
 def run():
@@ -110,7 +141,8 @@ def run():
                 assert result == stack, (mode, batch, stack)
                 assert batch["failed"] == (0 if mode in ("stack-ok", "stack-empty") else 1), batch
                 assert client.tool("veh_detach").get("success")
-    print("PASS backend acknowledgements, pause identity, exception filters and MCP/DAP stack errors")
+    check_trace_policy_results()
+    print("PASS backend acknowledgements, pause identity, exception filters, MCP/DAP stack errors and trace policy receipts")
 
 
 if __name__ == "__main__":

@@ -19,6 +19,8 @@ struct TraceEventArtifactResult {
 	uint64_t fileSize = 0;
 	uint64_t recordBytes = 0;
 	uint64_t basicBlockEvents = 0;
+	uint64_t expandedEvents = 0;
+	uint32_t threadId = 0;
 	uint64_t memoryEvents = 0;
 	uint64_t registerEvents = 0;
 	uint64_t waitTimeNs = 0;
@@ -35,7 +37,7 @@ public:
 	TraceEventArtifactReceiver(const TraceEventArtifactReceiver&) = delete;
 	TraceEventArtifactReceiver& operator=(const TraceEventArtifactReceiver&) = delete;
 
-	bool Start(const std::string& requestedPath, uint32_t chunkBytes, uint64_t maxFileBytes);
+	bool Start(const std::string& requestedPath, uint32_t chunkBytes, uint64_t maxFileBytes, uint32_t schemaVersion = 1);
 	TraceEventArtifactResult Finish(bool controlResponseReceived);
 	uint64_t Token() const { return token_; }
 	uint32_t OwnerPid() const { return GetCurrentProcessId(); }

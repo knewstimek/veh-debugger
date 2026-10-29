@@ -1,5 +1,5 @@
 id: veh.trace.parity
-revision: 1
+revision: 2
 summary: Run direct, veh_batch, and breakpoint-action trace parity checks for x64 and x86 builds
 use_when:
   - verifying architecture-sensitive trace behavior before a release
@@ -17,7 +17,9 @@ execution:
     - {id: python.version, kind: executable, ref: py, requirement: required, argv: [-3, --version]}
     - {id: x64.mcp, kind: file, ref: build/bin/Release/veh-mcp-server.exe, requirement: required}
     - {id: x86.mcp, kind: file, ref: build32/bin/Release/veh-mcp-server.exe, requirement: required}
-inputs: [tools/run_trace_parity.py, tools/run_tests.py, tools/read_trace_event_stream.py, test/test_trace_basic_blocks.py, test/test_trace_memory_access.py, test/build_paths.py, test/mcp_test_client.py, build/bin/Release/**, build32/bin/Release/**]
+    - {id: x64.codec, kind: file, ref: build/bin/Release/trace_path_regression.exe, requirement: required}
+    - {id: x86.codec, kind: file, ref: build32/bin/Release/trace_path_regression.exe, requirement: required}
+inputs: [src/common/trace_path_compressor.h, test_target/trace_path_regression.cpp, tools/run_trace_parity.py, tools/run_tests.py, tools/read_trace_event_stream.py, test/test_trace_basic_blocks.py, test/test_trace_memory_access.py, test/build_paths.py, test/mcp_test_client.py, build/bin/Release/**, build32/bin/Release/**]
 checks: [veh.trace.direct-batch-action-parity, veh.trace.x64-x86-parity]
 docs: [docs/DEVELOPMENT_TOOLS.md, test/TEST_GUIDE.md]
 cache_policy: disabled
