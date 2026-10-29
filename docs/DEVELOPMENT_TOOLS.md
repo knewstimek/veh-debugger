@@ -389,6 +389,28 @@ Qualification starts with the existing `veh.trace.parity`, IPC matrix and
 working with a wire10 peer; new policies must fail before execution when bit6 is
 absent. See the collection-policy section above for the exact current limits.
 
+This is the trace-policy migration checklist, not a declaration that every
+external backend is synchronized with the entire frontend. Backend-wide adoption
+must first identify that backend's common-header baseline and compare all command,
+capability and result-contract changes since it. Instrumentation and other
+interfaces have separate requirements in their applicable sections/documents.
+
+Before declaring this migration complete, retain a concise local evidence record
+for each backend with:
+
+- backend/header revisions, x86/x64 target width and supported host/guest/VM scope;
+- the supported flag and inline/file combinations, deliberate exclusions and
+  old/new-peer compatibility results;
+- exact stop ownership, cancellation/timeout behavior, detach/reconnect cleanup,
+  bounded buffers/backpressure and partial-transfer/overflow results;
+- real collection-gap, indirect-branch, exception and code-version boundary
+  results, with unknown identity/loss/completeness kept explicit;
+- measured exception counts, collection/transfer sizes and relevant timings if
+  performance is claimed. Record reduction alone does not prove fewer exceptions.
+
+Use synthetic fixtures and keep private paths/targets out of shared evidence.
+Frontend fixture parity is one part of this record, not backend qualification.
+
 ## Occurrence-scoped collection
 
 Use `occurrence_window` to collect one or more dispatcher/instruction cycles:
