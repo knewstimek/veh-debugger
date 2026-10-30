@@ -376,6 +376,28 @@ PID와 32·64비트 정보는 백엔드가 검증하며, 게스트 연결은 호
 DAP의 게스트 연결 설정은 추가하지 않습니다. 실행 중 서버의 도구 설명은
 `veh_toolbox(operation="describe", tool="veh_attach")`로 확인할 수 있습니다.
 
+### VM 전체 연결과 제어 (MCP)
+
+백엔드가 지원하면 `veh_virtual_machine(operation="status"|"pause"|"resume"|"trace")`로
+VM 전체 상태 조회·정지·재개와 제한된 가상 CPU 트레이스를 요청할 수 있습니다.
+트레이스는 다른 CPU가 멈춘 상태에서 선택한 CPU만 실행하며 CR3/CPL/RIP 경계,
+실행·시간 한도, 인터프리터 엔진과 손실 개수를 보고합니다. 연결한 게스트 PID와
+별개로 VM 전체에 영향을 줍니다. 선택한 OS 스레드만 정지시키는 기능은 아닙니다.
+`veh_toolbox`에서 설명을 조회하고 수동 호출할 수 있습니다. 프로세스 범위 자동화가
+VM 전체를 재개하지 않도록 batch·capture setup·브레이크포인트 actions에서는 제외합니다.
+
+VM 자체에 연결할 때는 외부 백엔드를 VM 범위로 등록한 뒤
+`veh_attach(target_scope="vm", backend="machine")`을 호출하고 `pid`는 생략합니다.
+백엔드는 PID0/addressBits0인 VM 메타데이터를 확인해 줘야 합니다. VM 세션에는
+호스트 대상 프로세스·OS 스레드 ID·단일 프로세스 주소 폭이 없습니다. VM agent는
+`--pipe`와 설정 인자를 받고, 프로세스 agent에만 `--pid`도 전달됩니다.
+`veh_virtual_machine`으로 VM 전체 제어와 제한된 가상 CPU 기록을 요청합니다.
+물리 메모리 읽기·쓰기는 capability에 따라 제공하며 VM 범위 검색·덤프는 미지원입니다.
+지원 백엔드에 VM 범위로 연결한 뒤 `veh_processes`로 게스트 PID를 찾고,
+`veh_attach(target_scope="guest", pid=...)`로 해당 프로세스에 연결합니다.
+짧은 이미지명에 포함된 비 ASCII 바이트는 `\\xNN`으로 표시합니다.
+게스트 프로세스에 연결하는 기존 `target_scope="guest"`는 검증된 비영 PID를 사용합니다.
+
 **MCP 도구 목록**
 
 아래 표는 전체 공개 도구를 설명합니다. 실행 중인 서버의 현재 eager 목록은 MCP `tools/list` 응답을 기준으로 확인하세요.
@@ -616,25 +638,3 @@ Windows 디버거의 "실행하며 디버깅" 기능과 동일. DAP(`launch` 요
 ## 라이선스
 
 MIT License
-
-
-백엔드가 지원하면 `veh_virtual_machine(operation="status"|"pause"|"resume"|"trace")`로
-VM 전체 상태 조회·정지·재개와 제한된 가상 CPU 트레이스를 요청할 수 있습니다.
-트레이스는 다른 CPU가 멈춘 상태에서 선택한 CPU만 실행하며 CR3/CPL/RIP 경계,
-실행·시간 한도, 인터프리터 엔진과 손실 개수를 보고합니다. 연결한 게스트 PID와
-별개로 VM 전체에 영향을 줍니다. 선택한 OS 스레드만 정지시키는 기능은 아닙니다.
-`veh_toolbox`에서 설명을 조회하고 수동 호출할 수 있습니다. 프로세스 범위 자동화가
-VM 전체를 재개하지 않도록 batch·capture setup·브레이크포인트 actions에서는 제외합니다.
-
-
-VM 자체에 연결할 때는 외부 백엔드를 VM 범위로 등록한 뒤
-`veh_attach(target_scope="vm", backend="machine")`을 호출하고 `pid`는 생략합니다.
-백엔드는 PID0/addressBits0인 VM 메타데이터를 확인해 줘야 합니다. VM 세션에는
-호스트 대상 프로세스·OS 스레드 ID·단일 프로세스 주소 폭이 없습니다. VM agent는
-`--pipe`와 설정 인자를 받고, 프로세스 agent에만 `--pid`도 전달됩니다.
-`veh_virtual_machine`으로 VM 전체 제어와 제한된 가상 CPU 기록을 요청합니다.
-물리 메모리 읽기·쓰기는 capability에 따라 제공하며 VM 범위 검색·덤프는 미지원입니다.
-지원 백엔드에 VM 범위로 연결한 뒤 `veh_processes`로 게스트 PID를 찾고,
-`veh_attach(target_scope="guest", pid=...)`로 해당 프로세스에 연결합니다.
-짧은 이미지명에 포함된 비 ASCII 바이트는 `\\xNN`으로 표시합니다.
-게스트 프로세스에 연결하는 기존 `target_scope="guest"`는 검증된 비영 PID를 사용합니다.

@@ -345,6 +345,27 @@ to MCP and do not add guest configuration to the VSCode DAP launch schema.
 Inspect live tool help with
 `veh_toolbox(operation="describe", tool="veh_attach")`.
 
+### Whole-VM attachment and control (MCP)
+
+`veh_virtual_machine(operation="status"|"pause"|"resume"|"trace")` provides
+explicit VM-wide control when the backend advertises it. Trace executes one
+selected vCPU while the VM remains paused, with CR3/CPL/RIP stop boundaries,
+an instruction/time budget, interpreter identification and explicit lost records.
+This scope is independent of the attached guest PID. It does not provide a
+selective OS-thread stop. The tool is available through `veh_toolbox` discovery
+and manual calls; batch/capture setup/breakpoint actions intentionally exclude
+it because their process-scoped automation must not resume the entire VM.
+
+VM attachment uses `veh_attach(target_scope="vm", backend="machine")`, with
+an external backend registered for that scope, and no `pid`. The backend must
+declare VM metadata with PID0/addressBits0. This session has no host process
+target, OS thread identity or single process address width. VM agents receive
+`--pipe` and configured arguments; process agents also receive `--pid`.
+Use `veh_virtual_machine` for explicit whole-VM control and bounded vCPU records.
+Physical memory read/write is available when advertised; search/dump needs a
+server operation and is unavailable in VM scope. Guest process attachment still
+uses `target_scope="guest"` and a validated nonzero guest PID.
+
 **MCP Tools**
 
 The table below documents the complete public tool surface. Treat the running server's MCP `tools/list` response as the authoritative eager inventory for its active profile.
@@ -530,24 +551,3 @@ Supported injection methods (auto-selected):
 ## License
 
 MIT License
-
-
-`veh_virtual_machine(operation="status"|"pause"|"resume"|"trace")` provides
-explicit VM-wide control when the backend advertises it. Trace executes one
-selected vCPU while the VM remains paused, with CR3/CPL/RIP stop boundaries,
-an instruction/time budget, interpreter identification and explicit lost records.
-This scope is independent of the attached guest PID. It does not provide a
-selective OS-thread stop. The tool is available through `veh_toolbox` discovery
-and manual calls; batch/capture setup/breakpoint actions intentionally exclude
-it because their process-scoped automation must not resume the entire VM.
-
-
-VM attachment uses `veh_attach(target_scope="vm", backend="machine")`, with
-an external backend registered for that scope, and no `pid`. The backend must
-declare VM metadata with PID0/addressBits0. This session has no host process
-target, OS thread identity or single process address width. VM agents receive
-`--pipe` and configured arguments; process agents also receive `--pid`.
-Use `veh_virtual_machine` for explicit whole-VM control and bounded vCPU records.
-Physical memory read/write is available when advertised; search/dump needs a
-server operation and is unavailable in VM scope. Guest process attachment still
-uses `target_scope="guest"` and a validated nonzero guest PID.

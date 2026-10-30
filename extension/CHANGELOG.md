@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- Moved whole-VM attachment and control instructions out of the license section into dedicated usage sections in the Korean, English and extension READMEs.
+
 ## 1.2.3 - 2026-10-30
 
 ### Added

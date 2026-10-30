@@ -183,6 +183,29 @@ target threads. Such a stop is not a general-purpose safe call point.
 DAP exception filtering currently supports only `all`. Empty, uncaught-only
 and advanced filters return an error rather than claiming they were applied.
 
+## Whole-VM attachment and control (MCP)
+
+`veh_virtual_machine(operation="status"|"pause"|"resume"|"trace")` provides
+explicit VM-wide control when the backend advertises it. Trace executes one
+selected vCPU while the VM remains paused, with CR3/CPL/RIP stop boundaries,
+an instruction/time budget, interpreter identification and explicit lost records.
+This scope is independent of the attached guest PID. It does not provide a
+selective OS-thread stop. The tool is available through `veh_toolbox` discovery
+and manual calls; batch/capture setup/breakpoint actions intentionally exclude
+it because their process-scoped automation must not resume the entire VM.
+
+VM attachment uses `veh_attach(target_scope="vm", backend="machine")`, with
+an external backend registered for that scope, and no `pid`. The backend must
+declare VM metadata with PID0/addressBits0. This session has no host process
+target, OS thread identity or single process address width. VM agents receive
+`--pipe` and configured arguments; process agents also receive `--pid`.
+Use `veh_virtual_machine` for explicit whole-VM control and bounded vCPU records.
+Physical memory read/write is available when advertised; search/dump needs a
+server operation and is unavailable in VM scope. A capable backend exposes
+`veh_processes` for one guest OS process snapshot; use a returned PID with
+`veh_attach(target_scope="guest")`. Short image names escape non-ASCII bytes as
+`\\xNN`. Guest process attachment still uses a validated nonzero guest PID.
+
 ## Requirements
 
 - Windows 10 or later (x64)
@@ -207,26 +230,3 @@ and advanced filters return an error rather than claiming they were applied.
 ## License
 
 MIT
-
-
-`veh_virtual_machine(operation="status"|"pause"|"resume"|"trace")` provides
-explicit VM-wide control when the backend advertises it. Trace executes one
-selected vCPU while the VM remains paused, with CR3/CPL/RIP stop boundaries,
-an instruction/time budget, interpreter identification and explicit lost records.
-This scope is independent of the attached guest PID. It does not provide a
-selective OS-thread stop. The tool is available through `veh_toolbox` discovery
-and manual calls; batch/capture setup/breakpoint actions intentionally exclude
-it because their process-scoped automation must not resume the entire VM.
-
-
-VM attachment uses `veh_attach(target_scope="vm", backend="machine")`, with
-an external backend registered for that scope, and no `pid`. The backend must
-declare VM metadata with PID0/addressBits0. This session has no host process
-target, OS thread identity or single process address width. VM agents receive
-`--pipe` and configured arguments; process agents also receive `--pid`.
-Use `veh_virtual_machine` for explicit whole-VM control and bounded vCPU records.
-Physical memory read/write is available when advertised; search/dump needs a
-server operation and is unavailable in VM scope. A capable backend exposes
-`veh_processes` for one guest OS process snapshot; use a returned PID with
-`veh_attach(target_scope="guest")`. Short image names escape non-ASCII bytes as
-`\\xNN`. Guest process attachment still uses a validated nonzero guest PID.
