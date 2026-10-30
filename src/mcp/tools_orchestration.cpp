@@ -242,7 +242,7 @@ json McpServer::ToolToolbox(const json& args) {
 	const std::string operation = args.value("operation", "list");
 	if (operation == "profiles") {
 		json profiles = json::array();
-		for (const char* profile : {"lite", "interactive", "capture", "full"}) {
+		for (const char* profile : {"lite", "interactive", "capture", "analysis", "vmguest", "full"}) {
 			const unsigned mask = ProfileMask(profile);
 			profiles.push_back({{"name", profile}, {"eager_tools", std::count_if(tools_.begin(), tools_.end(),
 				[mask](const ToolDef& tool) { return tool.InProfile(mask); })}});
@@ -253,7 +253,7 @@ json McpServer::ToolToolbox(const json& args) {
 	if (operation == "list") {
 		const std::string profile = args.value("profile", "full");
 		const unsigned mask = ProfileMask(profile);
-		if (!mask) return {{"error", "profile must be lite, interactive, capture, or full"}};
+		if (!mask) return {{"error", "profile must be lite, interactive, capture, analysis, vmguest, or full"}};
 		std::string query = args.value("query", "");
 		std::transform(query.begin(), query.end(), query.begin(),
 			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -289,7 +289,7 @@ json McpServer::ToolToolbox(const json& args) {
 		} else {
 			const std::string profile = args.value("profile", "full");
 			const unsigned mask = ProfileMask(profile);
-			if (!mask) return {{"error", "profile must be lite, interactive, capture, or full"}};
+			if (!mask) return {{"error", "profile must be lite, interactive, capture, analysis, vmguest, or full"}};
 			std::string query = args.value("query", "");
 			std::transform(query.begin(), query.end(), query.begin(),
 				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });

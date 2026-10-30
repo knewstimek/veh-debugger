@@ -1,4 +1,5 @@
 #include "mcp_server.h"
+#include "tools_common.h"
 #include "installer.h"
 #include "adapter/transport.h"
 #include "common/logger.h"
@@ -19,7 +20,7 @@ void PrintUsage() {
 		"  --uninstall [AGENT]  Uninstall from AI agent config\n"
 		"  --log=FILE           Log to file\n"
 		"  --log-level=LEVEL    Log level: debug, info, warn, error (default: info)\n"
-		"  --profile=PROFILE    MCP exposure: lite, interactive, capture, full (default: lite)\n"
+		"  --profile=PROFILE    MCP exposure: lite, interactive, capture, analysis, vmguest, full (default: lite)\n"
 		"  --help               Show this help\n"
 		"\n"
 		"Agents: claude-code, claude-desktop, cursor, windsurf, codex, all\n"
@@ -152,8 +153,7 @@ int main(int argc, char* argv[]) {
 			else if (level == "error") logLevel = veh::LogLevel::Error;
 		} else if (arg.substr(0, 10) == "--profile=") {
 			toolProfile = arg.substr(10);
-			if (toolProfile != "lite" && toolProfile != "interactive" &&
-				toolProfile != "capture" && toolProfile != "full") {
+			if (!veh::ProfileMask(toolProfile)) {
 				fprintf(stderr, "Unknown MCP profile: %s\n", toolProfile.c_str());
 				return 1;
 			}

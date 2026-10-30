@@ -3,6 +3,10 @@
 
 namespace veh {
 
+// Eager exposure only; backend capability checks remain independent.
+inline constexpr unsigned kLite = 1, kInteractive = 2, kCapture = 4,
+    kAnalysis = 8, kVmGuest = 16, kFullProfile = ~0u;
+
 uint32_t JsonUint32(const json& args, const char* key, uint32_t defaultVal = 0);
 int JsonInt(const json& args, const char* key, int defaultVal = 0);
 bool JsonBool(const json& args, const char* key, bool defaultVal = false);

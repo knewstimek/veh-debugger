@@ -290,7 +290,13 @@ The server defaults to `--profile=lite`. Keep `lite`, `interactive` and `capture
 | `lite` | Launch/attach/continue/batch/terminate/registers plus lazy discovery |
 | `interactive` | Attach, breakpoints, registers, disassembly, and memory inspection |
 | `capture` | Process traces, targeted input capture, and checkpoint restore loops |
+| `analysis` | Advanced process analysis: 41 shared inspection, execution, patch, search and trace tools |
+| `vmguest` | All `analysis` tools plus `veh_processes` and `veh_virtual_machine` (43 total) |
 | `full` | Clients that require the complete eager inventory |
+
+`analysis` and `vmguest` are broader opt-in profiles, not subject to the small-profile ten-tool budget. Their shared inventory includes attach/detach, threads/modules, memory/register/stack/disassembly inspection, execution state and stop notifications, software/data/function/module breakpoints, symbol/analysis-note lookup, memory maps and exception details, memory/register writes, assembly patches, expressions, dumps, batch execution, memory/value searches, pointer chains, basic-block/call/caller/register/memory traces, import resolution and targeted input capture. They do not eagerly expose host launch/termination, source-line breakpoints, allocation/protection changes, checkpoints, kernel-debugger or hardware-management tools; those remain discoverable through the toolbox.
+
+`vmguest` includes VM-wide control even in a guest PID session. `veh_pause` targets a selected guest thread; `veh_virtual_machine.pause/resume` affects the whole VM and its trace selects a vCPU, not a PID. VM control remains excluded from batch, capture setup and breakpoint actions. Profiles neither select a backend nor grant capabilities. Targeted-capture windows, value-scan generations, patching and newer trace policies must be supported by the connected backend; exposing them is not evidence of WHPX support or real-VM validation. Check the backend's own qualification results and known limitations before enabling optional policies.
 
 Use `veh_toolbox(operation="profiles")` for current counts and `tools/list` for
 the active eager inventory; counts are not fixed documentation contracts.
@@ -310,7 +316,7 @@ Batch steps, targeted-capture setup steps, and breakpoint actions call the same 
 no eager-profile or gateway-schema expansion. Direct breakpoint failures and
 `veh_toolbox` calls retain the error and MCP `isError`; batch steps retain the
 same error in their failed step result. `test/test_data_bp_slots.py` checks these
-paths across all four profiles against the VEH slot limit.
+paths across all six profiles against the VEH slot limit.
 
 Measure the current executable rather than estimating token counts from source:
 

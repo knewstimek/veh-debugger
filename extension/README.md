@@ -84,7 +84,7 @@ This is equivalent to Cheat Engine's "Find out what writes to this address" / "F
 
 ## MCP Tool Server (AI Integration)
 
-The bundled `veh-mcp-server.exe` exposes debugging operations through the Model Context Protocol, allowing AI agents to directly control the debugger. Its default token-bounded `lite` profile exposes a small common set plus the `veh_toolbox` lazy gateway; use `--profile=interactive`, `--profile=capture`, or `--profile=full` when a larger eager inventory is preferable. Known hidden tool names remain directly callable. The running server's MCP `tools/list` response is the authoritative eager inventory.
+The bundled `veh-mcp-server.exe` exposes debugging operations through the Model Context Protocol, allowing AI agents to directly control the debugger. Its default token-bounded `lite` profile exposes a small common set plus the `veh_toolbox` lazy gateway; use `--profile=interactive` or `--profile=capture` for small workflow inventories, `--profile=analysis` for 41 advanced analysis tools, `--profile=vmguest` for those tools plus guest process discovery and whole-VM control (43), or `--profile=full` for the complete inventory. Profiles select exposure only; actual operations still require backend support. Known hidden tool names remain directly callable. The running server's MCP `tools/list` response is the authoritative eager inventory.
 
 MCP can also attach through an external backend with `backend` or `agent`.
 For VM guest PIDs, register `target_scope: "guest"` in `veh-backends.json`

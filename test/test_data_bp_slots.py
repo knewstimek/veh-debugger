@@ -7,7 +7,7 @@ from mcp_test_client import McpClient
 
 MCP_EXE = os.path.join(RELEASE, "veh-mcp-server.exe")
 TARGET = os.path.join(RELEASE, "test_target.exe")
-PROFILES = ("lite", "interactive", "capture", "full")
+PROFILES = ("lite", "interactive", "capture", "analysis", "vmguest", "full")
 
 
 def check_profile(profile):
@@ -17,8 +17,8 @@ def check_profile(profile):
         exposed = c.call("tools/list", {})["result"]["tools"]
         names = {tool["name"] for tool in exposed}
         assert "veh_toolbox" in names, names
-        assert ("veh_set_data_breakpoint" in names) == (profile in ("interactive", "full")), names
-        if profile != "full":
+        assert ("veh_set_data_breakpoint" in names) == (profile in ("interactive", "analysis", "vmguest", "full")), names
+        if profile in ("lite", "interactive", "capture"):
             assert len(names) <= 10, (profile, len(names))
         catalog = c.tool("veh_toolbox", {"operation": "profiles"})
         counts = {entry["name"]: entry["eager_tools"] for entry in catalog["profiles"]}
@@ -63,7 +63,7 @@ def check_profile(profile):
 def main():
     for profile in PROFILES:
         check_profile(profile)
-    print("Results: 12 profile/dispatch cases passed")
+    print(f"Results: {len(PROFILES) * 3} profile/dispatch cases passed")
 
 
 if __name__ == "__main__":

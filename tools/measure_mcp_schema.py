@@ -66,12 +66,12 @@ def main():
     )
     parser.add_argument(
         "--profile", action="append",
-        choices=("lite", "interactive", "capture", "full"),
+        choices=("lite", "interactive", "capture", "analysis", "vmguest", "full"),
     )
     parser.add_argument("--output")
     args = parser.parse_args()
 
-    profiles = args.profile or ["lite", "interactive", "capture", "full"]
+    profiles = args.profile or ["lite", "interactive", "capture", "analysis", "vmguest", "full"]
     report = {
         "schema_version": 2,
         "executable": os.path.abspath(args.executable),

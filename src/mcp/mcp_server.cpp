@@ -35,9 +35,6 @@ namespace veh {
 
 
 
-// Eager-profile bits for McpServer::ToolDef::profiles
-constexpr unsigned kLite = 1, kInteractive = 2, kCapture = 4, kFullProfile = ~0u;
-
 McpServer::McpServer(std::string toolProfile, std::function<uint64_t()> monotonicClock)
 	: operationClock_(monotonicClock ? std::move(monotonicClock) : [] { return static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()); }),
@@ -1967,13 +1964,61 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"tool", {{"type", "string"}, {"description", "Tool name for describe or call"}}},
 			{"tools", {{"type", "array"}, {"minItems", 1}, {"maxItems", 64}, {"items", {{"type", "string"}}}, {"description", "Manifest tool names"}}},
 			{"arguments", {{"type", "object"}, {"description", "Arguments for call"}}},
-			{"profile", {{"type", "string"}, {"enum", json::array({"lite", "interactive", "capture", "full"})}, {"description", "Filter list by profile"}}},
+			{"profile", {{"type", "string"}, {"enum", json::array({"lite", "interactive", "capture", "analysis", "vmguest", "full"})}, {"description", "Filter list by profile"}}},
 			{"query", {{"type", "string"}, {"description", "Case-insensitive list filter"}}},
 			{"compact", {{"type", "boolean"}, {"description", "Compact manifest descriptions (default true)"}}},
 			{"schema_handle", {{"type", "string"}, {"description", "Handle from an earlier describe"}}},
 			{"manifest_handle", {{"type", "string"}}}
 		}}}}}));
+    // VM guest analysis inherits every common analysis tool. Keep one shared set.
+    static const char* analysisTools[] = {
+        "veh_attach",
+        "veh_detach",
+        "veh_threads",
+        "veh_modules",
+        "veh_read_memory",
+        "veh_registers",
+        "veh_stack_trace",
+        "veh_set_breakpoint",
+        "veh_remove_breakpoint",
+        "veh_continue",
+        "veh_pause",
+        "veh_step_in",
+        "veh_step_over",
+        "veh_step_out",
+        "veh_toolbox",
+        "veh_disassemble",
+        "veh_list_breakpoints",
+        "veh_execution",
+        "veh_symbolize",
+        "veh_memory_map",
+        "veh_exception_info",
+        "veh_set_data_breakpoint",
+        "veh_remove_data_breakpoint",
+        "veh_trace_basic_blocks",
+        "veh_trace_calls",
+        "veh_trace_callers",
+        "veh_trace_register",
+        "veh_trace_memory",
+        "veh_search_memory",
+        "veh_read_pointer_chain",
+        "veh_targeted_capture",
+        "veh_value_scan",
+        "veh_write_memory",
+        "veh_set_register",
+        "veh_batch",
+        "veh_evaluate",
+        "veh_set_function_breakpoint",
+        "veh_set_module_breakpoint",
+        "veh_assemble",
+        "veh_dump_memory",
+        "veh_resolve_imports"
+    };
     for (auto& tool : tools) {
+        if (std::find(std::begin(analysisTools), std::end(analysisTools), tool.name) != std::end(analysisTools))
+            tool.profiles |= kAnalysis;
+        if (tool.name == "veh_processes" || tool.name == "veh_virtual_machine")
+            tool.profiles |= kVmGuest;
         if (tool.name == "veh_list_breakpoints" || tool.name == "veh_stack_trace" || tool.name == "veh_continue" ||
                 tool.name == "veh_step_in" || tool.name == "veh_step_over" || tool.name == "veh_step_out")
             tool.definition["inputSchema"]["properties"]["include_annotations"] = {{"type", "boolean"}, {"default", true}};

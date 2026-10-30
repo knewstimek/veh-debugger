@@ -302,7 +302,7 @@ enabled = true
 
 Restart the agent/IDE after configuring to activate.
 
-The default `lite` profile eagerly exposes only `veh_toolbox` plus launch/attach/continue/batch/terminate/registers, reducing the tool-schema cost on each request. Use `veh_toolbox` to search, describe, then call other tools; automation that already knows a hidden tool name can still call it directly. Select `--profile=interactive` for breakpoint/inspection work, `--profile=capture` for VM trace/checkpoint work, or `--profile=full` for the legacy complete inventory.
+The default `lite` profile eagerly exposes only `veh_toolbox` plus launch/attach/continue/batch/terminate/registers, reducing the tool-schema cost on each request. Use `veh_toolbox` to search, describe, then call other tools; automation that already knows a hidden tool name can still call it directly. Select `--profile=interactive` for breakpoint/inspection work or `--profile=capture` for trace/checkpoint work. Use `--profile=analysis` for 41 advanced analysis tools, `--profile=vmguest` for the same tools plus guest process discovery and whole-VM control (43), or `--profile=full` for the complete inventory. See [profile contents and limits](docs/DEVELOPMENT_TOOLS.md#mcp-exposure-profiles-and-lazy-toolbox). Exposure does not imply backend support.
 
 ### External backends and VM guest attachment (MCP)
 
@@ -465,7 +465,7 @@ This is VEH hardware-breakpoint collection; external backends must implement
 |--------|-------------|
 | `--install [AGENT]` | Register the MCP server in AI agent configs (all or specific) |
 | `--uninstall [AGENT]` | Remove the MCP server from AI agent configs |
-| `--profile=PROFILE` | Eager tool exposure: `lite` (default), `interactive`, `capture`, or `full` |
+| `--profile=PROFILE` | Eager tool exposure: `lite` (default), `interactive`, `capture`, `analysis`, `vmguest`, or `full` |
 | `--log=FILE` | Log file path |
 | `--log-level=LEVEL` | Log level: debug, info, warn, error |
 | `--help` | Print help |

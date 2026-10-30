@@ -4,8 +4,6 @@
 
 namespace veh {
 
-constexpr unsigned kLite = 1, kInteractive = 2, kCapture = 4, kFullProfile = ~0u;
-
 uint32_t JsonUint32(const json& args, const char* key, uint32_t defaultVal) {
 	if (!args.contains(key)) return defaultVal;
 	const auto& v = args[key];
@@ -60,6 +58,8 @@ unsigned ProfileMask(const std::string& profile) {
 	if (profile == "lite") return kLite;
 	if (profile == "interactive") return kInteractive;
 	if (profile == "capture") return kCapture;
+	if (profile == "analysis") return kAnalysis;
+	if (profile == "vmguest") return kAnalysis | kVmGuest;
 	if (profile == "full") return kFullProfile;
 	return 0;
 }

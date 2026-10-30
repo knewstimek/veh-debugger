@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- **Advanced MCP profiles** -- `--profile=analysis` exposes 41 common process-analysis tools, including state changes, watchpoints, value scans, traces and targeted capture. `--profile=vmguest` inherits that set and adds guest process discovery and explicit whole-VM control (43 tools). CLI help, toolbox discovery/manifests and schema measurements support both profiles; existing profiles and backend capability checks remain in place.
+
 ### Fixed
 - Moved whole-VM attachment and control instructions out of the license section into dedicated usage sections in the Korean, English and extension READMEs.
 
