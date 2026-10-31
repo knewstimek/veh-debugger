@@ -124,6 +124,12 @@ Reset/detach release owned temporary files; baseline/undo files survive a single
 External backends require v2 capability support. See `docs/VALUE_SCAN.md` in the
 repository for storage budgets, batch/action sequencing and adoption checks.
 
+KD `veh_trace_basic_blocks(execution_context="kd", run_peer_cpus=true)` can
+explicitly enable peer execution after separate v2 policy negotiation. It defaults
+off, still collects only the selected CPU and ends incomplete on uncertain code or
+completion. Saved facts remain available without guessing instructions or paths;
+see `docs/KD_TRACE_PROTOCOL.md` for the contract and backend qualification limits.
+
 `veh_trace_basic_blocks` supports x86/x64 ordered memory and register provenance,
 self-modifying code versions, dispatcher occurrence windows, and file-backed
 JSON/JSONL, `.vtc` code or `.vte` ordered-event artifacts. Direct calls, `veh_batch`, and breakpoint actions

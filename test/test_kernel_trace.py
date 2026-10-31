@@ -69,6 +69,9 @@ def run():
         assert result.get("steps_executed")==2 and result.get("final_address")=="0x1008",result
         assert result.get("halted") and len(result["blocks"])==1 and result["blocks"][0]["end"]=="0x1008",result
         assert result["events"][0]["thread_id"] is None and result["collection"]["snapshots"],result
+        default_policy=client.tool("veh_trace_basic_blocks",{**args,"run_peer_cpus":False})
+        assert default_policy.get("steps_executed")==2 and default_policy["applied_flags"]==1,default_policy
+        assert "qTraceBB:policies2" not in stub.commands
         with tempfile.TemporaryDirectory(prefix="veh-kd-legacy-export-") as temporary:
             output=Path(temporary)/"trace.json"
             exported=client.tool("veh_trace_basic_blocks",{**args,"output_file":str(output)})
@@ -78,7 +81,7 @@ def run():
             assert metadata["size"]==len(raw) and metadata["sha256"]==hashlib.sha256(raw).hexdigest()
             assert json.loads(raw)["steps_executed"]==2
         starts=sum(p.startswith("vTraceBB:") for p in stub.commands)
-        for key,value in (("compress_paths",True),("stack_bytes",8),("threadId",1),("collect_code","yes"),("max_steps",4097),("dependency_sources",["rax"]),("max_event_file_bytes",88)):
+        for key,value in (("run_peer_cpus",True),("run_peer_cpus","true"),("compress_paths",True),("stack_bytes",8),("threadId",1),("collect_code","yes"),("max_steps",4097),("dependency_sources",["rax"]),("max_event_file_bytes",88)):
             rejected=client.tool("veh_trace_basic_blocks",{**args,key:value})
             assert "error" in rejected,(key,rejected)
         assert sum(p.startswith("vTraceBB:") for p in stub.commands)==starts

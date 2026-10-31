@@ -33,6 +33,17 @@ bool Number(const json& a,const char* key,uint32_t def,uint32_t lo,uint32_t hi,u
     const auto v=a[key].get<int64_t>();
     if(v<lo || v>hi)return false;n=static_cast<uint32_t>(v);return true;
 }
+bool PeerPolicySupported(const std::string& reply,uint32_t requestedFlags) {
+    const auto comma=reply.find(',');
+    if(comma==std::string::npos||!comma||comma+1==reply.size()||
+        reply.find_first_not_of("0123456789abcdefABCDEF")!=comma||
+        reply.find_first_not_of("0123456789abcdefABCDEF",comma+1)!=std::string::npos)return false;
+    try{
+        const auto version=std::stoull(reply.substr(0,comma),nullptr,16);
+        const auto flags=std::stoull(reply.substr(comma+1),nullptr,16);
+        return version==2&&(flags&requestedFlags)==requestedFlags;
+    }catch(...){return false;}
+}
 bool Unhex(const std::string& s,void* output,size_t bytes) {
     if(s.size()!=bytes*2)return false;
     auto digit=[](char c)->int {if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;if(c>='A'&&c<='F')return c-'A'+10;return -1;};
@@ -54,6 +65,7 @@ json Shape(const Records& records,const kdtrace::Header& h,const json& args) {
     std::map<Key,Decoded> cache;
     auto dis64=CreateDisassembler(true),dis32=CreateDisassembler(false);
     const auto decode=[&](const kdtrace::Record& r) {
+        if(r.reserved&kdtrace::kCodeUncertainRecord)return Decoded{};
         std::array<uint8_t,16> bytes={};std::copy(r.code,r.code+16,bytes.begin());
         const Key key={r.address,r.addressBits,r.codeSize,bytes};
         const auto found=cache.find(key);if(found!=cache.end())return found->second;
@@ -139,7 +151,9 @@ json Shape(const Records& records,const kdtrace::Header& h,const json& args) {
     const char* reason="incomplete";
     switch(h.end){case kdtrace::Budget:reason="max_steps";break;case kdtrace::Range:reason="range_exit";break;
         case kdtrace::Interrupted:reason="interrupted";break;case kdtrace::Exception:reason="exception";break;
-        case kdtrace::CodeUnavailable:reason="code_unavailable";break;case kdtrace::UnsupportedInstruction:reason="unsupported_instruction";break;case kdtrace::OtherStop:reason="debug_stop";break;}
+        case kdtrace::CodeUnavailable:reason="code_unavailable";break;case kdtrace::UnsupportedInstruction:reason="unsupported_instruction";break;case kdtrace::OtherStop:reason="debug_stop";break;
+        case kdtrace::kCodeUncertain:reason="code_uncertain";break;
+        case kdtrace::kCompletionUncertain:reason="completion_uncertain";break;}
     const bool metadataIncomplete=incomplete||first<records.size();
     const bool captureIncomplete=h.end!=kdtrace::Budget&&h.end!=kdtrace::Range;
     json orderJson=json::array();for(auto name:names)orderJson.push_back(name);
@@ -148,12 +162,16 @@ json Shape(const Records& records,const kdtrace::Header& h,const json& args) {
         {"final_address",Hex(h.finalAddress)},{"stop_reason",reason},{"halted",true},
         {"truncated",metadataIncomplete||captureIncomplete},{"decode_incomplete",metadataIncomplete||captureIncomplete},
         {"capture_incomplete",captureIncomplete},{"analysis_incomplete",metadataIncomplete},
+        {"execution_count_incomplete",h.end==kdtrace::kCompletionUncertain},
+        {"steps_executed_lower_bound",h.steps},{"applied_flags",h.flags},
+        {"run_peer_cpus",(h.flags&kdtrace::kRunPeerCpus)!=0},
+        {"execution_gap",h.end==kdtrace::kCompletionUncertain},
         {"blocks",blocks},{"edges",edges},{"snapshots",snapshots},{"register_order",orderJson},
         {"events",events},{"code_versions",versions},{"events_dropped",eventCount-events.size()},
         {"events_truncated",eventCount>events.size()||metadataIncomplete},
         {"code_truncated",collectCode&&versions.size()<blocks.size()},
         {"collection",{{"snapshots",collectSnapshots},{"compressed_paths",false},{"stack_bytes",0}}},
-        {"backend_records",h.steps},{"lost_records",0},{"decoded_instruction_count",decodedCount},
+        {"backend_records",h.steps},{"lost_records",h.end==kdtrace::kCompletionUncertain?json(nullptr):json(0)},{"decoded_instruction_count",decodedCount},
         {"analysis_steps",first},{"analysis_steps_omitted",records.size()-first}};
 }
 }
@@ -165,7 +183,7 @@ json McpServer::ToolKdTraceBasicBlocks(const json& args) {
     const std::set<std::string> accepted={"operation","execution_context","cpu","threadId","start","end","max_steps","timeout_ms",
         "stack_bytes","max_blocks","max_edges","collect_snapshots","collect_code","collect_events","output_file","output_format",
         "compress_paths","collect_memory_writes","collect_memory_reads","collect_memory_events","collect_register_events",
-        "stop_on_return","follow_exceptions","code_output","events_output"};
+        "stop_on_return","follow_exceptions","code_output","events_output","run_peer_cpus"};
     for(const auto& field:args.items())if(!accepted.count(field.key()))
         return {{"error","KD trace does not support "+field.key().substr(0,128)},{"code","unsupported_policy"}};
     // Whole-machine control never runs inside process breakpoint actions or capture setup.
@@ -182,6 +200,8 @@ json McpServer::ToolKdTraceBasicBlocks(const json& args) {
        !Number(args,"stack_bytes",0,0,0,stack)||!Number(args,"max_blocks",4096,1,16384,blocks)||
        !Number(args,"max_edges",8192,1,32768,edges)||!Number(args,"threadId",0,0,0,tid))
         return {{"error","KD trace requires hex start<end, max_steps1-5000000, timeout_ms1-600000; stack_bytes/threadId must be 0"}};
+    if(args.contains("run_peer_cpus")&&!args["run_peer_cpus"].is_boolean())return {{"error","run_peer_cpus must be boolean"}};
+    const bool runPeers=args.value("run_peer_cpus",false);
     if(args.contains("collect_snapshots")&&!args["collect_snapshots"].is_boolean())return {{"error","collect_snapshots must be boolean"}};
     if(args.contains("follow_exceptions")&&args["follow_exceptions"]!=false)
         return {{"error","KD trace stops before exception delivery; follow_exceptions=true is unsupported"},{"code","unsupported_policy"}};
@@ -218,7 +238,10 @@ json McpServer::ToolKdTraceBasicBlocks(const json& args) {
             return {{"error","This legacy KD backend is limited to4096 steps"},{"code","unsupported_backend"}};
     }else if(args.contains("max_blocks")||args.contains("max_edges"))
         return {{"error","Streamed KD capture uses bounded output aggregates; custom block/edge execution stops are unsupported"},{"code","unsupported_policy"}};
-    const uint32_t flags=args.value("collect_snapshots",true)?kdtrace::kSnapshots:0;
+    const uint32_t flags=(args.value("collect_snapshots",true)?kdtrace::kSnapshots:0)|
+        (runPeers?kdtrace::kRunPeerCpus:0);
+    if(runPeers&&(version!=kdtrace::kStreamVersion||!kd_->Request("qTraceBB:policies2",&reply)||!PeerPolicySupported(reply,flags)))
+        return {{"error","KD backend does not advertise requested v2 run_peer_cpus flags"},{"code","unsupported_policy"}};
     const auto begin=std::chrono::steady_clock::now();
     std::unique_ptr<KdCaptureStore> store;
     try{store=std::make_unique<KdCaptureStore>(steps,flags,start,end,args.value("output_file",std::string{}));}
@@ -235,9 +258,11 @@ json McpServer::ToolKdTraceBasicBlocks(const json& args) {
         result["timeout_requested"]=collected.timedOut;result["chunks"]=collected.chunks;
         result["transport_version"]=version;
         const bool exportResult=args.contains("output_file");
-        const bool compact=steps>kdtrace::kCapacity||result.dump().size()>8192||exportResult;
+        const bool captureComplete=!result["capture_incomplete"].get<bool>();
+        const bool retain=steps>kdtrace::kCapacity||result.dump().size()>8192||exportResult||!captureComplete;
         json artifact;
-        if(compact){artifact=store->Keep(true);result["capture_file"]=artifact;}
+        if(retain){artifact=store->Keep(captureComplete);result["capture_file"]=artifact;}
+        const bool compact=steps>kdtrace::kCapacity||result.dump().size()>8192||exportResult;
         TraceOutputFileResult written;
         if(exportResult){
             written=WriteTraceOutputFile(args["output_file"].get<std::string>(),args.value("output_format","json"),result);
@@ -248,7 +273,8 @@ json McpServer::ToolKdTraceBasicBlocks(const json& args) {
         for(const char* name:{"execution_context","capture_scope","cpu","generation","steps_executed","final_address",
             "stop_reason","halted","truncated","decode_incomplete","capture_incomplete","analysis_incomplete",
             "analysis_steps","analysis_steps_omitted","lost_records","events_dropped","events_truncated","code_truncated",
-            "elapsed_ms","timeout_requested","chunks","transport_version"})summary[name]=result[name];
+            "elapsed_ms","timeout_requested","chunks","transport_version","applied_flags","run_peer_cpus",
+            "execution_count_incomplete","steps_executed_lower_bound","execution_gap"})summary[name]=result[name];
         summary["capture_file"]=artifact;
         summary["counts"]={{"blocks",result["blocks"].size()},{"edges",result["edges"].size()},
             {"snapshots",result["snapshots"].size()},{"events",result["events"].size()},{"code_versions",result["code_versions"].size()}};

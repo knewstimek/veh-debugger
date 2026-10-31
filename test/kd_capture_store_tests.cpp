@@ -52,6 +52,38 @@ int main(){
         check(!saved["sha256"].is_null()&&saved["sha256_scope"]=="valid_prefix","hash covers declared prefix");
         check(std::filesystem::remove(std::filesystem::u8path(path)),"owned fixture artifact removed");
     }
-    std::printf("PASS KD artifact short-body/header writes and persistent repair recovery (%d checks)\n",checks);
+    for(uint32_t flags:{0u,kdtrace::kRunPeerCpus}){
+        for(unsigned marker:{1u,2u}){
+            auto uncertain=rows[1];uncertain.reserved=static_cast<uint8_t>(marker);
+            uncertain.codeSize=0;std::memset(uncertain.code,0,sizeof(uncertain.code));
+            std::string path;nlohmann::json saved;
+            {
+                KdCaptureStore store(2,flags,0x1000,0x1002,"");
+                check(store.Append(rows,1,124,0)&&store.Append(&uncertain,1,124,0),"write unknown-code fixture");
+                saved=store.Keep(false);path=store.Path();
+                check(saved["storage_complete"].get<bool>()&&!saved["complete"].get<bool>(),"storage independent from capture completion");
+            }
+            const auto page=ReadKdCapture({{"capture_file",path},{"offset","1"},{"limit",16}});
+            if(flags==kdtrace::kRunPeerCpus&&marker==1)
+                check(!page.contains("error")&&page["records"][0]["code_uncertain"]==true&&
+                    !page["records"][0].contains("instruction"),"offline unknown code never decoded");
+            else check(page.contains("error"),"offline reader enforces policy and exact marker");
+            check(std::filesystem::remove(std::filesystem::u8path(path)),"unknown-code artifact removed");
+        }
+    }
+    // A marker is legal only at the final raw record, never in an earlier page.
+    {
+        auto uncertain=rows[0];uncertain.reserved=kdtrace::kCodeUncertainRecord;
+        uncertain.codeSize=0;std::memset(uncertain.code,0,sizeof(uncertain.code));
+        std::string path;
+        {
+            KdCaptureStore store(2,kdtrace::kRunPeerCpus,0x1000,0x1002,"");
+            check(store.Append(&uncertain,1,125,0)&&store.Append(rows,1,125,0),"write nonfinal unknown marker");
+            store.Keep(false);path=store.Path();
+        }
+        check(ReadKdCapture({{"capture_file",path},{"limit",16}}).contains("error"),"nonfinal unknown marker rejected");
+        check(std::filesystem::remove(std::filesystem::u8path(path)),"nonfinal marker artifact removed");
+    }
+    std::printf("PASS KD artifact short-body/header recovery and unknown-code boundaries (%d checks)\n",checks);
     return 0;
 }

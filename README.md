@@ -502,6 +502,7 @@ VEH 수집은 하드웨어 데이터 중단점 슬롯 하나를 사용하며 주
 |------|-----------|------|
 | `veh_kd_connect` | `transport, address, baud?` | `pipe`(VM의 COM 포트를 연결한 호스트 named pipe), `com`, `tcp`, `udp`(디버거 전용 NIC, `ip:port`, 유실·재정렬은 재전송으로 복구). 연결하면 대상 머신의 모든 CPU가 정지 |
 | `veh_kd_continue` / `veh_kd_wait` / `veh_kd_break` | `wait?, timeout_ms?` | 재개, 다음 정지(브레이크포인트)까지 대기, 실행 중 정지(break-in) |
+| `veh_trace_basic_blocks` (`execution_context="kd"`) | `start, end, cpu?, max_steps?, run_peer_cpus?` | 기본은 다른 CPU 정지. `run_peer_cpus=true`는 별도 v2 정책 협상 후 다른 CPU 실행을 허용하며 수집은 선택 CPU만 한다. 코드·명령 완료가 불확실하면 불완전 종료하고 원시 기록을 보존한다. [규약과 백엔드 검증 범위](docs/KD_TRACE_PROTOCOL.md) 참조 |
 | `veh_kd_step` | `cpu?, count?` | 한 CPU만 한 명령씩 실행 (나머지 CPU는 정지 유지) |
 | `veh_kd_registers` / `veh_kd_set_register` | `cpu?, name, value` | 정지한 CPU의 레지스터 (스텁이 주면 cr3, GS/FS base, IDT, CPL 포함) |
 | `veh_kd_memory` | `operation, address, size?/count?/data?, cpu?` | 정지한 CPU의 페이지 테이블로 커널/유저 메모리 읽기, 쓰기, 디스어셈블 |

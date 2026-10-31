@@ -40,7 +40,7 @@ void PrintUsage() {
         "  Trace: process basic-block results default to host files plus compact receipts.\n"
         "  output_mode=inline returns full JSON; output_file chooses a new path (caller retains/cleans files).\n"
         "  events_output=file separately streams ordered events on supported local backends; caps otherwise remain.\n"
-        "  Trace help: describe veh_trace_basic_blocks for output, snapshot and ordered-path options.\n"
+        "  Trace help: describe veh_trace_basic_blocks for output, snapshots, ordered paths and KD run_peer_cpus (default false; negotiated v2).\n"
         "  Scan help: describe veh_value_scan for async disk/undo and push completion (no polling).\n"
         "  Analysis notes: veh_symbolize(analysis={operation:open,directory:<absolute local dir>,create:true}).\n"
         "  Notes auto-save to analysis.json; the last directory is remembered. VEH_ANALYSIS_DIR overrides it.\n"

@@ -1472,7 +1472,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}, {"required", json::array({"addresses"})}}}}),
 
 		Tool(&McpServer::ToolTraceBasicBlocks, "trace", kCapture, true,
-			{{"name", "veh_trace_basic_blocks"}, {"description", "Trace a stopped process thread. Default output_mode=file returns a result artifact receipt; output_mode=inline returns full JSON. Events stay bounded unless events_output=file is explicitly selected on a supported local backend. Optional snapshots, code/memory/register events, function-return scope and lossless repeated paths. Policies need backend support; VEH refuses active HW breakpoints. Compression does not reduce TF exceptions. KD uses execution_context=kd."},
+			{{"name", "veh_trace_basic_blocks"}, {"description", "Trace a stopped process thread. Default output_mode=file returns a result artifact receipt; output_mode=inline returns full JSON. Events stay bounded unless events_output=file is explicitly selected on a supported local backend. Optional snapshots, code/memory/register events, function-return scope and lossless repeated paths. Policies need backend support; VEH refuses active HW breakpoints. Compression does not reduce TF exceptions. KD uses execution_context=kd; optional run_peer_cpus requires negotiated v2 support and keeps collection on the selected CPU."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"operation", {{"type", "string"}, {"enum", {"capture", "read_capture"}}, {"description", "KD: capture (default) or bounded offline artifact page read"}}},
 			{"capture_file", {{"type", "string"}, {"description", "Saved KD capture path for operation=read_capture"}}},
@@ -1484,6 +1484,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"address_end", {{"type", "string"}, {"description", "Optional exclusive hex address filter for artifact pages"}}},
 			{"execution_context", {{"type", "string"}, {"enum", {"process", "kd"}}, {"description", "process (default) or explicit whole-machine KD CPU capture, including kernel and SYSCALL transitions. KD capture requires veh_kd_connect and a halted target; streaming peers support up to5000000 steps. Large results are artifacts plus bounded summaries."}}},
 			{"cpu", {{"type", "integer"}, {"minimum", 0}, {"description", "Selected vCPU for execution_context=kd"}}},
+			{"run_peer_cpus", {{"type", "boolean"}, {"default", false}, {"description", "KD capture only: explicitly run peer CPUs during each selected-CPU instruction; requires v2 policies2 support. All CPUs halt between chunks and at termination. Does not follow migrating threads; uncertain code/completion ends incomplete."}}},
 			{"threadId", {{"type", "integer"}, {"description", "Stopped process thread; omit or use 0 for KD CPU capture"}}},
 			{"start", {{"type", "string"}, {"description", "Inclusive range start (hex or module+RVA)"}}},
 			{"end", {{"type", "string"}, {"description", "Exclusive range end (hex or module+RVA, max range size 4 MiB)"}}},

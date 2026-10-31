@@ -6,7 +6,9 @@ after `veh_kd_connect` and an explicit whole-machine halt. Supply hexadecimal
 `collect_events` and `collect_snapshots`. Omit `threadId` or use 0.
 
 The selected CPU can start in user or kernel mode and cross SYSCALL/SYSRET;
-all other CPUs remain stopped. This observes a CPU, not a guaranteed OS thread.
+all other CPUs remain stopped by default. The optional `run_peer_cpus=true`
+policy below allows peers to run during each selected-CPU instruction. This
+observes one CPU, not a guaranteed OS thread or a migrating thread.
 This mode never attaches to a PID or changes a normal process trace into a global
 halt. Ordinary process IPC trace still omits kernel execution. KD capture is
 direct-call only: batch, breakpoint actions and capture setup refuse it because
@@ -99,6 +101,59 @@ it does not claim rollback of instructions already executed. RSP checksums
 include the trailing payload NUL, which is removed only after validation.
 Corrupt packets are never promoted to observations.
 
+## Optional peer-CPU execution policy
+
+MCP `run_peer_cpus` is a strict boolean, defaults to false and is accepted only
+for KD capture. Default requests do not query the policy extension or set bit1.
+For an explicit true request, require version 2 streaming and query
+`qTraceBB:policies2`. Reply `2,3` contains two prefix-free hexadecimal fields:
+policy version 2 and supported flags mask (bit0 snapshots, bit1 run_peer_cpus).
+Empty replies, errors, unknown versions, malformed fields or missing requested
+bits refuse the request before capture execution; never silently fall back.
+Keep `qTraceBB:cap2` and its exact `2,1000,4c4b40` reply unchanged.
+
+Use bit1 (`0x2`) in the existing v2 start flags: 2 without snapshots, 3 with
+snapshots. Version 1 never receives bit1. Unsupported flags/version combinations
+are refused by the backend with E22 before execution. Every status must echo
+the exact applied flags across start, resume and cancellation; they are retained
+as `applied_flags` and `run_peer_cpus` in results and raw-file metadata.
+
+The backend runs peer CPUs while completing one selected-CPU instruction,
+then confirms all CPUs stopped, repeating automatically. Buffer reads, chunk
+replacement and final status require confirmed all-CPU halt. A peer breakpoint
+ends capture; Header.cpu remains the selected capture CPU while the RSP stop
+reply may name the peer that stopped. Pending interrupts end with Interrupted=3,
+synchronous exceptions with Exception=4, and other confirmed debug stops with
+OtherStop=6. The frontend cannot independently prove backend all-CPU or
+code/mapping protection from a synthetic protocol test.
+
+Existing end values 1–8 and header/record sizes remain unchanged. Two additional
+terminal reasons are allowed only for v2 captures with bit1 applied:
+
+| End | Meaning and accounting |
+|---|---|
+| 9 CodeUncertain | Completion confirmed, but unchanged execution code/mapping cannot be proved. Preserve exactly one final unknown-code record; increment count and steps once. |
+| 10 CompletionUncertain | Last attempted instruction completion cannot be confirmed. Add no record or step for that attempt; steps is a lower bound. |
+
+For 9, only the last record of the terminal chunk may carry `reserved=1`,
+`codeSize=0` and sixteen zero code bytes. Its address/nextAddress are observed
+before/after PCs. All other records still require reserved=0 and codeSize 1–15.
+The final nextAddress must equal actual finalAddress. Preserve the marker in raw
+storage and pages (`code_uncertain=true`, `execution_code_verified=false`);
+never invent an instruction, block or branch from that record.
+
+For 10, retain all ordinary prefix and cross-chunk chain checks. Only its final
+nextAddress-to-finalAddress equality check is omitted, including a zero-record
+first attempt: actual finalAddress is the selected CPU RIP after all CPUs stop.
+Results set `execution_gap=true`, `execution_count_incomplete=true`,
+`steps_executed_lower_bound=Header.steps` and `lost_records=null`. This is an
+explicit unrecorded execution gap, not permission to fabricate a connecting edge.
+Both 9 and 10 set capture_incomplete/decode_incomplete and retain their raw files
+with capture_file.complete=false. If actual RIP or all-CPU halt cannot be
+confirmed, status/read must return E23 instead of a normal header. The frontend
+reports halt unconfirmed, retains any acknowledged prefix and never substitutes
+a previous PC. None of these outcomes implies rollback of target execution.
+
 ## Output and current limits
 
 The KD result uses the usual blocks/edges/snapshots/events/code_versions keys,
@@ -124,7 +179,9 @@ refused before target execution or filesystem effects.
 
 Large captures (requested steps above 4,096 or shaped JSON above 8 KiB), and explicit
 exports, retain a portable raw artifact and return a bounded summary instead of
-full arrays. The artifact uses the 64-byte `CaptureFileHeader` followed by
+full arrays. Incomplete captures always retain raw artifacts; short results keep
+the existing arrays when the full response including artifact metadata fits 8 KiB.
+The artifact uses the 64-byte `CaptureFileHeader` followed by
 canonical 200-byte version 1 layout records, regardless of wire snapshot mode.
 At 5,000,000 records this requires 1,000,000,064 bytes; the temporary storage path
 checks for the requested raw size plus 16 MiB free before starting. An explicit
@@ -136,7 +193,10 @@ Summary analysis is bounded independently of raw capture: 16,384 blocks,
 bounded code/key bytes. `capture_incomplete` describes acquisition termination;
 `analysis_incomplete`, omitted-step counts, event drops and code truncation
 describe bounded decoding. A structurally complete raw artifact does not imply
-a complete execution or full analysis. All raw records remain available for
+a complete execution or full analysis. Artifact receipts separate
+`storage_complete` (intact header, size, flush and hash) from `capture_complete`
+(acquisition completion); legacy `complete` requires both. A false complete does
+not prevent reading an intact prefix. All raw records remain available for
 later inspection. Short writes retain only the acknowledged prefix; failed
 header repair exposes an explicit recovery descriptor instead of claiming a
 valid header or complete file.
@@ -163,7 +223,8 @@ Tests: `py -3 test/test_kernel_trace.py` exercises backend collection, block
 shaping, pre-effect refusal, selected-CPU and malformed terminal/page receipts.
 `test/test_kernel_trace_stream.py` covers 100,000 logical records, compact/full
 wire modes, explicit JSON/JSONL receipts, exact offsets, timeout and malformed
-continuations, checksum failure retention, path validation and direct/batch/action
+continuations, checksum failure retention, policy negotiation, exact applied flags,
+9/10 terminal markers and accounting, E23 prefix retention, path validation and direct/batch/action
 artifact reads. `kd_capture_store_tests` covers native short-body/header writes
 and persistent header-repair recovery. These use synthetic RSP/storage fixtures;
 they do not qualify a live VM.

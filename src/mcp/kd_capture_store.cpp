@@ -41,7 +41,7 @@ std::string HashFile(HANDLE file,uint64_t remaining) {
 }
 bool HeaderValid(const kdtrace::CaptureFileHeader& h,uint64_t bytes) {
     return !std::memcmp(h.magic,"VEHKDTR2",8)&&h.version==1&&h.recordSize==sizeof(kdtrace::Record)&&
-        !h.reserved&&!(h.flags&~kdtrace::kSnapshots)&&h.cpu<64&&h.records<=kdtrace::kMaxStreamSteps&&
+        !h.reserved&&!(h.flags&~(kdtrace::kSnapshots|kdtrace::kRunPeerCpus))&&h.cpu<64&&h.records<=kdtrace::kMaxStreamSteps&&
         h.rangeStart<h.rangeEnd&&bytes>=sizeof(h)+h.records*sizeof(kdtrace::Record);
 }
 }
@@ -124,6 +124,9 @@ nlohmann::json KdCaptureStore::Keep(bool complete){
         {"records",std::to_string(header_.records)},{"bytes",validBytes},{"valid_bytes",validBytes},
         {"physical_bytes",sizeKnown?json(physical.QuadPart):json(nullptr)},{"header_repaired",repaired},
         {"sha256",hash.empty()?json(nullptr):json(hash)},{"sha256_scope","valid_prefix"},
+        {"applied_flags",header_.flags},{"run_peer_cpus",(header_.flags&kdtrace::kRunPeerCpus)!=0},
+        {"capture_complete",complete},
+        {"storage_complete",repaired&&flushed&&!hash.empty()&&sizeKnown&&uint64_t(physical.QuadPart)==validBytes},
         {"complete",complete&&repaired&&flushed&&!hash.empty()&&sizeKnown&&uint64_t(physical.QuadPart)==validBytes}};
     if(!repaired)result["recovery"]={{"records",std::to_string(header_.records)},
         {"generation",std::to_string(header_.generation)},{"flags",header_.flags},{"cpu",header_.cpu},
@@ -181,12 +184,18 @@ json ReadKdCapture(const json& args){
         if(!SetFilePointerEx(file,position,nullptr,FILE_BEGIN)||!ReadFile(file,&r,sizeof(r),&read,nullptr)||read!=sizeof(r))
             return {{"error","Capture artifact read failed"}};
         if(r.address<begin||r.address>=end)continue;
-        if(!r.codeSize||r.codeSize>15||(r.addressBits!=32&&r.addressBits!=64)||r.cpu!=header.cpu||r.cpl>3||r.reserved)
+        const bool uncertain=(header.flags&kdtrace::kRunPeerCpus)&&at+1==header.records&&
+            r.reserved==kdtrace::kCodeUncertainRecord&&r.codeSize==0&&
+            std::all_of(std::begin(r.code),std::end(r.code),[](uint8_t b){return b==0;});
+        if((!uncertain&&(r.reserved||!r.codeSize||r.codeSize>15))||
+            (r.addressBits!=32&&r.addressBits!=64)||r.cpu!=header.cpu||r.cpl>3)
             return {{"error","Malformed capture record"}};
-        auto d=(r.addressBits==64?dis64:dis32)->Disassemble(r.code,r.codeSize,r.address,1);
+        std::vector<DisasmInstruction> d;
+        if(!uncertain)d=(r.addressBits==64?dis64:dis32)->Disassemble(r.code,r.codeSize,r.address,1);
         json row={{"sequence",std::to_string(at+1)},{"address",Hex(r.address)},{"next_address",Hex(r.nextAddress)},
             {"cr3",Hex(r.cr3)},{"cpu",r.cpu},{"cpl",r.cpl},{"address_bits",r.addressBits},
             {"thread_id",r.tid?json(r.tid):json(nullptr)},{"process_id",r.pid?json(r.pid):json(nullptr)}};
+        if(uncertain){row["code_uncertain"]=true;row["execution_code_verified"]=false;}
         if(!d.empty()){row["bytes"]=d[0].bytes;row["instruction"]=d[0].mnemonic;}
         if(regs){if(!(header.flags&kdtrace::kSnapshots))row["registers_available"]=false;else{
             json values=json::array();for(auto value:r.registers)values.push_back(Hex(value));row["registers"]=std::move(values);}}
@@ -195,7 +204,8 @@ json ReadKdCapture(const json& args){
     }
     json result={{"capture_file",path},{"records",rows},{"count",rows.size()},{"total_records",std::to_string(header.records)},
         {"examined",at-offset},{"next_offset",at<header.records?json(std::to_string(at)):json(nullptr)},
-        {"scan_limited",at==stop&&at<header.records},{"generation",std::to_string(header.generation)},{"recovery_applied",recovering},{"integrity","not_checked"}};
+        {"scan_limited",at==stop&&at<header.records},{"generation",std::to_string(header.generation)},{"recovery_applied",recovering},{"integrity","not_checked"},
+        {"applied_flags",header.flags},{"run_peer_cpus",(header.flags&kdtrace::kRunPeerCpus)!=0}};
     while(result.dump().size()>8192&&!result["records"].empty()){
         auto& output=result["records"];at=std::stoull(output.back()["sequence"].get<std::string>())-1;
         output.erase(output.size()-1);result["count"]=output.size();result["examined"]=at-offset;

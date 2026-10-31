@@ -17,6 +17,7 @@ def main():
             client.initialize("trace-output-default")
             schema = client.tool("veh_toolbox", {"operation": "describe", "tool": "veh_trace_basic_blocks"})
             assert '"output_mode"' in json.dumps(schema) and '"file"' in json.dumps(schema), schema
+            assert '"run_peer_cpus"' in json.dumps(schema), schema
             attached = client.tool("veh_attach", {
                 "pid": 4242, "target_scope": "guest",
                 "agent": str(Path(RELEASE) / "guest_backend_fixture.exe"),
@@ -63,6 +64,8 @@ def main():
             verify(client.tool("veh_trace_basic_blocks", dict(args, output_file=str(explicit))))
             before = client.tool("veh_threads")["threads"][0]["name"]
             for invalid, fragment in (
+                ({"run_peer_cpus": True}, "supported only for KD"),
+                ({"run_peer_cpus": False}, "supported only for KD"),
                 ({"output_mode": 7}, "output_mode must be a string"),
                 ({"output_mode": "unknown"}, "output_mode must be file or inline"),
                 ({"output_mode": "inline", "output_file": str(root / "bad.json")}, "output_file requires"),

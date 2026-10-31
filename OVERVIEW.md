@@ -255,7 +255,10 @@ returns the full prior JSON shape. Direct, batch and breakpoint actions share th
 policy; callers own retained files. Result storage does not remove inline event
 caps or enable unsupported remote data pipes. Long ordered captures still require
 explicit, backend-supported `events_output="file"`. KD uses its separate capture
-artifact policy.
+artifact policy. KD `run_peer_cpus=true` explicitly enables a separately negotiated
+v2 policy; collection stays on the selected CPU, with peers halted between chunks
+and at termination. Unknown code/completion ends incomplete and preserves raw facts.
+See `docs/KD_TRACE_PROTOCOL.md`; backend VM qualification remains separate.
 
 Wire v10 adds opt-in `events_output="file"` streaming for all three ordered event
 kinds. In this mode the DLL omits the inline arrays and writes typed records in

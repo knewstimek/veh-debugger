@@ -459,6 +459,13 @@ This is VEH hardware-breakpoint collection; external backends must implement
 
 > **Tip**: Address arguments accept hex (`"0x401000"`), decimal (`4198400`), or **module+RVA** (`"crackme.exe+0x1000"`). Module+RVA eliminates manual ASLR base calculation.
 
+KD `veh_trace_basic_blocks(execution_context="kd", run_peer_cpus=true)` explicitly
+allows peer CPUs to run during selected-CPU instructions after separate v2 policy
+negotiation. The default remains false; collection still observes one CPU, not a
+migrating OS thread. Unknown code or completion stops capture and preserves raw
+facts with explicit incomplete metadata. See [KD trace protocol](docs/KD_TRACE_PROTOCOL.md)
+for negotiation, all-CPU halt requirements, artifacts and backend VM qualification.
+
 ### Command-line Options
 
 **veh-mcp-server.exe**

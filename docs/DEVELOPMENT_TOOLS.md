@@ -616,6 +616,13 @@ machine's CPU instead of an attached process thread. The optional backend RSP
 extension collects bounded records across user/kernel transitions; the frontend
 only decodes captured bytes. See [KD_TRACE_PROTOCOL.md](KD_TRACE_PROTOCOL.md)
 for wire layouts, supported options, precise-stop rules and current limits.
+`run_peer_cpus=true` is KD-only and requires separate `qTraceBB:policies2`
+negotiation; it defaults off. Extend `test/test_kernel_trace_stream.py` for
+policy/flags changes, unknown-code terminal 9, uncertain-completion terminal 10,
+E23 preservation and offline direct/batch/action parity. Native
+`kd_capture_store_tests` checks that incomplete captures remain readable when
+storage is intact and refuses malformed unknown-code markers. These fixtures
+verify frontend contracts, not live all-CPU halt or concurrent-code protection.
 KD capture is direct-call only and is refused inside batch, capture setup and
 breakpoint actions. It never automatically halts a machine for a process trace.
 

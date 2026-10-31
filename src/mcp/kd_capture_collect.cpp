@@ -42,7 +42,12 @@ bool CollectKdCapture(KernelDebugClient& kd,uint32_t version,uint32_t steps,uint
         }
         kdtrace::HeaderV2 stream={};auto& h=stream.base;
         if(version==kdtrace::kStreamVersion){
-            if(!kd.Request("qTraceBB:status2",&text)||!Unhex(text,&stream,sizeof(stream)))return fail("Malformed streamed KD capture status");
+            const bool statusRead=kd.Request("qTraceBB:status2",&text);
+            if(statusRead&&text=="E23"){
+                fail("KD backend cannot confirm all-CPU halt or selected final PC",false);
+                error["backend_error"]="E23";return false;
+            }
+            if(!statusRead||!Unhex(text,&stream,sizeof(stream)))return fail("Malformed streamed KD capture status");
         }else{
             if(!kd.Request("qTraceBB:status",&text)||!Unhex(text,&h,sizeof(h)))return fail("Malformed KD capture status");
             stream.recordOffset=0;stream.maxSteps=steps;
@@ -50,6 +55,9 @@ bool CollectKdCapture(KernelDebugClient& kd,uint32_t version,uint32_t steps,uint
         const uint32_t recordSize=version==kdtrace::kVersion||flags&kdtrace::kSnapshots?
             sizeof(kdtrace::Record):sizeof(kdtrace::CompactRecord);
         const bool more=version==kdtrace::kStreamVersion&&h.end==kdtrace::kBufferFull;
+        const bool peerPolicy=version==kdtrace::kStreamVersion&&(flags&kdtrace::kRunPeerCpus);
+        const bool codeUncertain=h.end==kdtrace::kCodeUncertain;
+        const bool completionUncertain=h.end==kdtrace::kCompletionUncertain;
         if(!generation)generation=h.generation;
         if(h.version!=version||h.recordSize!=recordSize||!generation||h.generation!=generation||generation==before.generation||
             h.cpu!=cpu||h.flags!=flags||h.reserved||stream.reserved||stream.recordOffset!=received||
@@ -59,7 +67,9 @@ bool CollectKdCapture(KernelDebugClient& kd,uint32_t version,uint32_t steps,uint
             (h.end==kdtrace::Budget&&h.steps!=steps)||
             (h.end==kdtrace::Range&&h.finalAddress>=start&&h.finalAddress<end)||
             (more&&(h.count!=kdtrace::kCapacity||h.steps>=steps||h.finalAddress<start||h.finalAddress>=end))||
-            h.end<kdtrace::Budget||h.end>(version==kdtrace::kStreamVersion?kdtrace::kBufferFull:kdtrace::UnsupportedInstruction))
+            ((codeUncertain||completionUncertain)&&!peerPolicy)||(codeUncertain&&!h.count)||
+            (completionUncertain&&h.steps>=steps)||
+            h.end<kdtrace::Budget||h.end>(version==kdtrace::kStreamVersion?kdtrace::kCompletionUncertain:kdtrace::UnsupportedInstruction))
             return fail("KD capture refused or returned inconsistent terminal/offset/CPU receipt");
         std::vector<kdtrace::Record> chunk(h.count);
         for(uint32_t offset=0;offset<h.count;){
@@ -68,6 +78,10 @@ bool CollectKdCapture(KernelDebugClient& kd,uint32_t version,uint32_t steps,uint
                 "qTraceBB:read,"+Field(generation)+","+Field(offset)+","+Field(count):
                 "qTraceBB:read2,"+Field(generation)+","+Field(received+offset)+","+Field(count);
             if(!kd.Request(read,&text))return fail("KD capture page read failed; current buffer retained");
+            if(text=="E23"){
+                fail("KD backend cannot confirm all-CPU halt or selected final PC",false);
+                error["backend_error"]="E23";return false;
+            }
             std::vector<uint8_t> wire(count*recordSize);
             if(!Unhex(text,wire.data(),wire.size()))return fail("Malformed KD capture page; current buffer retained");
             for(uint32_t i=0;i<count;++i){
@@ -82,8 +96,13 @@ bool CollectKdCapture(KernelDebugClient& kd,uint32_t version,uint32_t steps,uint
                     if(flags&kdtrace::kSnapshots)std::memcpy(r.registers,wire.data()+i*recordSize+sizeof(compact),sizeof(r.registers));
                 }
                 const uint64_t index=received+offset+i;
-                if(r.cpu!=cpu||r.reserved||(r.addressBits!=32&&r.addressBits!=64)||r.cpl>3||
-                    !r.codeSize||r.codeSize>15||r.address<start||r.address>=end||
+                const bool uncertainRecord=codeUncertain&&offset+i+1==h.count;
+                const bool codeValid=uncertainRecord?
+                    r.reserved==kdtrace::kCodeUncertainRecord&&r.codeSize==0&&
+                        std::all_of(std::begin(r.code),std::end(r.code),[](uint8_t b){return b==0;}):
+                    r.reserved==0&&r.codeSize>=1&&r.codeSize<=15;
+                if(r.cpu!=cpu||!codeValid||(r.addressBits!=32&&r.addressBits!=64)||r.cpl>3||
+                    r.address<start||r.address>=end||
                     (index&&r.address!=previousNext)||
                     ((offset+i+1<h.count||more)&&(r.nextAddress<start||r.nextAddress>=end)))
                     return fail("Inconsistent KD capture record chain");
@@ -91,8 +110,8 @@ bool CollectKdCapture(KernelDebugClient& kd,uint32_t version,uint32_t steps,uint
             }
             offset+=count;
         }
-        if((h.steps&&previousNext!=h.finalAddress)||
-           (!h.steps&&(h.finalAddress<start||h.finalAddress>=end)))
+        if(!completionUncertain&&((h.steps&&previousNext!=h.finalAddress)||
+           (!h.steps&&(h.finalAddress<start||h.finalAddress>=end))))
             return fail("KD capture final PC disagrees with copied records");
         if(!store.Append(chunk.data(),h.count,generation,cpu))return fail("Capture storage failed; acknowledged prefix and current buffer retained");
         received+=h.count;++result.chunks;result.final=h;
@@ -103,7 +122,12 @@ bool CollectKdCapture(KernelDebugClient& kd,uint32_t version,uint32_t steps,uint
             result.timedOut=true;
             if(!kd.Request("qTraceBB:cancel2,"+Field(generation),&text)||text!="OK")return fail("Could not cancel paused KD capture");
             kdtrace::HeaderV2 ended={};
-            if(!kd.Request("qTraceBB:status2",&text)||!Unhex(text,&ended,sizeof(ended))||
+            const bool statusRead=kd.Request("qTraceBB:status2",&text);
+            if(statusRead&&text=="E23"){
+                fail("KD backend cannot confirm all-CPU halt or selected final PC",false);
+                error["backend_error"]="E23";return false;
+            }
+            if(!statusRead||!Unhex(text,&ended,sizeof(ended))||
                 ended.base.generation!=generation||ended.base.steps!=received||ended.base.end!=kdtrace::Interrupted||
                 ended.base.finalAddress!=h.finalAddress||ended.paused||ended.reserved||
                 ended.base.version!=version||ended.base.recordSize!=recordSize||ended.base.flags!=flags||

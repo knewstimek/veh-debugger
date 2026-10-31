@@ -7,6 +7,8 @@ namespace veh::kdtrace {
 constexpr uint32_t kVersion = 1;
 constexpr uint32_t kCapacity = 4096;
 constexpr uint32_t kSnapshots = 1;
+constexpr uint32_t kRunPeerCpus = 2; // v2 only, explicitly negotiated via policies2.
+constexpr uint8_t kCodeUncertainRecord = 1;
 enum End : uint32_t { Budget = 1, Range = 2, Interrupted = 3, Exception = 4,
     CodeUnavailable = 5, OtherStop = 6, UnsupportedInstruction = 7 };
 #pragma pack(push, 1)
@@ -34,6 +36,8 @@ static_assert(sizeof(Record) == 200, "KD trace record");
 constexpr uint32_t kStreamVersion = 2;
 constexpr uint32_t kMaxStreamSteps = 5000000;
 constexpr uint32_t kBufferFull = 8;
+constexpr uint32_t kCodeUncertain = 9;
+constexpr uint32_t kCompletionUncertain = 10;
 #pragma pack(push, 1)
 struct HeaderV2 {
     Header base;
