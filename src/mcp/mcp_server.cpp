@@ -1484,7 +1484,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"address_end", {{"type", "string"}, {"description", "Optional exclusive hex address filter for artifact pages"}}},
 			{"execution_context", {{"type", "string"}, {"enum", {"process", "kd"}}, {"description", "process (default) or explicit whole-machine KD CPU capture, including kernel and SYSCALL transitions. KD capture requires veh_kd_connect and a halted target; streaming peers support up to5000000 steps. Large results are artifacts plus bounded summaries."}}},
 			{"cpu", {{"type", "integer"}, {"minimum", 0}, {"description", "Selected vCPU for execution_context=kd"}}},
-			{"run_peer_cpus", {{"type", "boolean"}, {"default", false}, {"description", "KD capture only: explicitly run peer CPUs during each selected-CPU instruction; requires v2 policies2 support. All CPUs halt between chunks and at termination. Does not follow migrating threads; uncertain code/completion ends incomplete."}}},
+			{"run_peer_cpus", {{"type", "boolean"}, {"default", false}, {"description", "KD capture only: explicitly run peer CPUs during each selected-CPU instruction; requires v2 policies2 support. Backend must confirm all CPUs halted between chunks and at termination; E23 reports halt unconfirmed. Does not follow migrating threads; uncertain code/completion ends incomplete."}}},
 			{"threadId", {{"type", "integer"}, {"description", "Stopped process thread; omit or use 0 for KD CPU capture"}}},
 			{"start", {{"type", "string"}, {"description", "Inclusive range start (hex or module+RVA)"}}},
 			{"end", {{"type", "string"}, {"description", "Exclusive range end (hex or module+RVA, max range size 4 MiB)"}}},

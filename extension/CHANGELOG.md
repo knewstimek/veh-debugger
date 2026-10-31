@@ -11,6 +11,7 @@
 - **Advanced MCP profiles** -- `--profile=analysis` exposes 41 common process-analysis tools, including state changes, watchpoints, value scans, traces and targeted capture. `--profile=vmguest` inherits that set and adds guest process discovery and explicit whole-VM control (43 tools). CLI help, toolbox discovery/manifests and schema measurements support both profiles; existing profiles and backend capability checks remain in place.
 
 ### Fixed
+- KD streaming refuses automatic continuation when an explicit peer-CPU stop conflicts with a buffer-full header, retaining the validated raw prefix instead of resuming through the debug stop.
 - Moved whole-VM attachment and control instructions out of the license section into dedicated usage sections in the Korean, English and extension READMEs.
 
 ## 1.2.3 - 2026-10-30

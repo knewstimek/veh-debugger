@@ -19,7 +19,7 @@ class StreamStub(Stub):
         self.generation=0;self.limit=0;self.offset=0;self.count=0;self.flags=0;self.end=1
         self.resumes=0;self.delivered=0;self.fail_at=None;self.bad=None;self.bad_crc_at=None
         self.policies="";self.terminal=None;self.record_fault=None;self.status_error=False;self.read_error=False
-        self.peer_stop=False;self.refuse=False;self.cancel_fault=None
+        self.peer_stop=False;self.refuse=False;self.cancel_fault=None;self.stop_reply=None
         super().__init__()
     def status(self):
         count=self.count;steps=self.offset+count;offset=self.offset;cpu=0
@@ -48,7 +48,7 @@ class StreamStub(Stub):
         elif text.startswith("vTraceBB:2,"):
             if self.refuse:self.send("E22");return
             self.generation+=1;fields=text.split(",");self.limit=int(fields[1],16);self.flags=int(fields[4],16)
-            self.offset=0;self.delivered=0;self.resumes=0;self.next_chunk();self.send("T05thread:02;" if self.peer_stop else "T05thread:01;")
+            self.offset=0;self.delivered=0;self.resumes=0;self.next_chunk();self.send(self.stop_reply or ("T05thread:02;" if self.peer_stop else "T05thread:01;"))
         elif text.startswith("qTraceBB:read2,"):
             _,generation,offset,count=text.split(",")
             offset=int(offset,16);count=int(count,16)
@@ -80,7 +80,7 @@ class StreamStub(Stub):
         elif text.startswith("vTraceBB:resume2,"):
             _,generation,offset=text.split(",")
             assert int(generation,16)==self.generation and int(offset,16)==self.offset+self.count==self.delivered
-            self.resumes+=1;self.offset+=self.count;self.next_chunk();self.send("T05thread:02;" if self.peer_stop else "T05thread:01;")
+            self.resumes+=1;self.offset+=self.count;self.next_chunk();self.send(self.stop_reply or ("T05thread:02;" if self.peer_stop else "T05thread:01;"))
         elif text.startswith("qTraceBB:cancel2,"):
             assert int(text.split(",")[1],16)==self.generation
             self.end=3;self.send("OK")
@@ -284,6 +284,24 @@ def run():
                 (fault!="E23" or (bad.get("backend_error")=="E23" and bad.get("halted") is False)),
                 "paused cancellation validates final status "+fault,bad)
         stub.cancel_fault=None
+        for stop_reply in ("T05thread:02;","T05swbreak:;thread:2;","T05thread:40;","T05thread:2"):
+            stub.stop_reply=stop_reply
+            peer_pause=capture(max_steps=4100,run_peer_cpus=True)
+            check("error" in peer_pause and stub.resumes==0 and peer_pause.get("copied_records")=="4096" and
+                peer_pause.get("stop_cpu") in (1,63) and peer_pause["capture_file"]["storage_complete"] and
+                not peer_pause["capture_file"]["complete"],
+                "peer debug stop must never be auto-resumed as buffer-full "+stop_reply,peer_pause)
+        for stop_reply in ("T05thread:0;","T05thread:41;","T05thread:xyz;","T05thread:1;thread:2;"):
+            stub.stop_reply=stop_reply
+            invalid_pause=capture(max_steps=4100,run_peer_cpus=True)
+            check("error" in invalid_pause and stub.resumes==0 and invalid_pause.get("stop_cpu") is None and
+                invalid_pause.get("copied_records")=="4096",
+                "ambiguous CPU stop never auto-resumes "+stop_reply,invalid_pause)
+        stub.stop_reply="T05swbreak:;thread:01;"
+        selected_pause=capture(max_steps=4100,run_peer_cpus=True)
+        check(selected_pause.get("steps_executed")==4100 and stub.resumes==1,
+            "selected CPU buffer pause still resumes",selected_pause)
+        stub.stop_reply=None
         for terminal in (3,4,6):
             stub.terminal=terminal;stub.peer_stop=True
             stopped=capture(max_steps=10,run_peer_cpus=True)

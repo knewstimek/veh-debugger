@@ -122,7 +122,11 @@ The backend runs peer CPUs while completing one selected-CPU instruction,
 then confirms all CPUs stopped, repeating automatically. Buffer reads, chunk
 replacement and final status require confirmed all-CPU halt. A peer breakpoint
 ends capture; Header.cpu remains the selected capture CPU while the RSP stop
-reply may name the peer that stopped. Pending interrupts end with Interrupted=3,
+reply may name the peer that stopped. If a stop reply explicitly names a peer
+but the header reports BufferFull, the frontend preserves the validated chunk
+and refuses automatic continuation instead of resuming through that debug stop.
+An explicit malformed or duplicate CPU identity also refuses continuation.
+Pending interrupts end with Interrupted=3,
 synchronous exceptions with Exception=4, and other confirmed debug stops with
 OtherStop=6. The frontend cannot independently prove backend all-CPU or
 code/mapping protection from a synthetic protocol test.

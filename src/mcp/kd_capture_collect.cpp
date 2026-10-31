@@ -1,12 +1,30 @@
 #include "kd_capture_collect.h"
 #include <algorithm>
 #include <chrono>
+#include <charconv>
 #include <cstring>
 #include <vector>
 namespace veh {
 namespace {
 using json=nlohmann::json;
 std::string Field(uint64_t n){char b[24];snprintf(b,sizeof(b),"%llx",static_cast<unsigned long long>(n));return b;}
+bool StopCpu(const std::string& stop,uint32_t& cpu,bool& present){
+    present=false;
+    if(stop.size()<3||stop[0]!='T')return false;
+    for(size_t at=3;at<stop.size();){
+        const auto separator=stop.find(';',at);
+        const auto end=separator==std::string::npos?stop.size():separator;
+        if(stop.compare(at,7,"thread:")==0){
+            if(present)return false;
+            present=true;
+            uint32_t id=0;const auto parsed=std::from_chars(stop.data()+at+7,stop.data()+end,id,16);
+            if(parsed.ec!=std::errc{}||parsed.ptr!=stop.data()+end||!id||id>64)return false;
+            cpu=id-1;
+        }
+        at=end+1;
+    }
+    return present;
+}
 bool Unhex(const std::string& text,void* output,size_t bytes){
     if(text.size()!=bytes*2)return false;
     auto digit=[](char c){if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;if(c>='A'&&c<='F')return c-'A'+10;return -1;};
@@ -116,6 +134,15 @@ bool CollectKdCapture(KernelDebugClient& kd,uint32_t version,uint32_t steps,uint
         if(!store.Append(chunk.data(),h.count,generation,cpu))return fail("Capture storage failed; acknowledged prefix and current buffer retained");
         received+=h.count;++result.chunks;result.final=h;
         if(!more)return true;
+        // A peer debug stop cannot be acknowledged as an ordinary buffer pause,
+        // even if a contradictory backend header reports BufferFull. Preserve
+        // the validated chunk, but never swallow that stop by auto-resuming.
+        uint32_t stopCpu=0;bool stopCpuPresent=false;
+        const bool validStopCpu=StopCpu(stop,stopCpu,stopCpuPresent);
+        if(stopCpuPresent&&(!validStopCpu||stopCpu!=cpu)){
+            fail("Peer or invalid CPU stop conflicts with buffer-full continuation; capture retained");
+            error["stop_cpu"]=validStopCpu?json(stopCpu):json(nullptr);return false;
+        }
         // The operation deadline is rechecked after all I/O and before the next
         // execution effect. Draining cannot reset the logical step budget.
         if(std::chrono::steady_clock::now()>=deadline){
