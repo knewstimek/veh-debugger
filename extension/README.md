@@ -26,7 +26,7 @@ Persistent MCP comments and labels are managed through `veh_symbolize(analysis=.
 - **Authenticated MCP backend connections** — Registered remote profiles use pinned TLS and a resident runner for backend startup, host launch and reconnect; the runner is included in the binary distribution
 - **MCP tool server** — Debugger operations exposed directly to AI agents (Claude, Cursor, Codex, etc.)
 - **Bounded semantic tracing** — Aggregate blocks/edges plus optional ordered block, memory-access, register-delta, and runtime-code events in one sequence space without per-instruction MCP traffic
-- **Large trace artifacts** — Stream up to 400 MiB of runtime code to portable `.vtc` files or export complete trace results as JSON/JSONL with compact path, hash, count, and truncation metadata
+- **File-backed trace results** — Process basic-block traces save JSON/JSONL results to generated host files by default and return compact path/hash/count/drop/truncation receipts. Explicit `output_mode="inline"` returns full JSON. Separately stream ordered events to `.vte` or up to 400 MiB of runtime code to `.vtc` on supported local backends
 - **Occurrence-scoped capture** — Collect selected dispatcher/instruction visits and combine them explicitly with start, stop, and collection conditions
 - **Repeatable analysis sessions** — Capture bounded thread checkpoints including TEB and FS/GS metadata, run input matrices through `veh_batch`, or write occurrence-centered code/register/memory/environment artifacts with `veh_targeted_capture`
 
@@ -127,7 +127,15 @@ repository for storage budgets, batch/action sequencing and adoption checks.
 `veh_trace_basic_blocks` supports x86/x64 ordered memory and register provenance,
 self-modifying code versions, dispatcher occurrence windows, and file-backed
 JSON/JSONL, `.vtc` code or `.vte` ordered-event artifacts. Direct calls, `veh_batch`, and breakpoint actions
-share the same trace semantics. File formats use portable integer layouts, while
+share the same trace semantics. Process results default to `output_mode="file"`:
+`output_file` optionally selects a new path, otherwise a unique file is generated
+under the MCP host temporary `veh-mcp-artifacts` directory. `output_format` selects
+JSON or JSONL for either path. Explicit `output_mode="inline"` returns full JSON
+and cannot be combined with `output_file` or `output_format`. Callers own file
+retention and cleanup. This result policy does not change collection limits:
+`events_output="file"` separately enables ordered-event streaming on supported
+local backends; remote target-side file pipes remain unsupported.
+File formats use portable integer layouts, while
 the debugger and capture transport remain Windows-hosted.
 Set `collect_snapshots=false` to skip first block/edge and exception register/stack
 capture. `compress_paths=true, collect_code=true` preserves observed path order,
@@ -135,7 +143,8 @@ branch choices and repeat counts in inline/file events, with explicit collection
 loss, exception and observed code-version barriers. It reduces records, not TF
 exceptions. Compression excludes ordered memory/register events and target windows;
 new policies require backend support and the VEH implementation refuses active
-hardware-breakpoint conflicts before execution. Defaults are unchanged.
+hardware-breakpoint conflicts before execution. These collection policies are
+independent of result-file transport.
 See the repository's `docs/DEVELOPMENT_TOOLS.md` for usage and backend adoption.
 `veh_targeted_capture` repeats bounded setup for an input matrix, retains a
 pre/post occurrence ring, embeds thread-environment evidence, and writes one

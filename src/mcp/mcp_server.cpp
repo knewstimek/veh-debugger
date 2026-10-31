@@ -1472,7 +1472,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}, {"required", json::array({"addresses"})}}}}),
 
 		Tool(&McpServer::ToolTraceBasicBlocks, "trace", kCapture, true,
-			{{"name", "veh_trace_basic_blocks"}, {"description", "Trace one stopped thread with optional snapshots and compress_paths for lossless path repeats. Optional ordered code/memory/register events and function-return scope. collect_snapshots=false skips capture; compression requires collect_code. New policies require backend support; VEH rejects active HW breakpoints. TF exception counts are unchanged."},
+			{{"name", "veh_trace_basic_blocks"}, {"description", "Trace a stopped process thread. Default output_mode=file returns a result artifact receipt; output_mode=inline returns full JSON. Events stay bounded unless events_output=file is explicitly selected on a supported local backend. Optional snapshots, code/memory/register events, function-return scope and lossless repeated paths. Policies need backend support; VEH refuses active HW breakpoints. Compression does not reduce TF exceptions. KD uses execution_context=kd."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"execution_context", {{"type", "string"}, {"enum", {"process", "kd"}}, {"description", "process (default) or explicit whole-machine KD CPU capture, including kernel and SYSCALL transitions. KD requires veh_kd_connect and a halted target; max_steps<=4096."}}},
 			{"cpu", {{"type", "integer"}, {"minimum", 0}, {"description", "Selected vCPU for execution_context=kd"}}},
@@ -1493,18 +1493,18 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			,{"collect_memory_reads", {{"type", "boolean"}, {"description", "Collect bounded memory-read address/value observations (default false)"}}}
 			,{"max_memory_reads", {{"type", "integer"}, {"description", "Maximum unique memory-read observations (default 4096, max 16384)"}}}
 			,{"collect_memory_events", {{"type", "boolean"}, {"description", "Collect bounded per-occurrence memory reads/writes with sequence, thread ID, values, and dependencies; implies collect_events (default false)"}}}
-			,{"max_memory_events", {{"type", "integer"}, {"description", "Maximum ordered memory-access events retained; further accesses increment the dropped count (default 8192, max 65536)"}}}
+			,{"max_memory_events", {{"type", "integer"}, {"description", "Inline memory-event cap (default 8192, max 65536); excess events increment dropped counts. File streaming uses max_event_file_bytes"}}}
 			,{"collect_register_events", {{"type", "boolean"}, {"description", "Collect one bounded register-delta event per completed instruction occurrence with sequence and thread ID; implies collect_events (default false)"}}}
-			,{"max_register_events", {{"type", "integer"}, {"description", "Maximum ordered instruction register-delta events retained; further occurrences increment the dropped count (default 8192, max 65536)"}}}
+			,{"max_register_events", {{"type", "integer"}, {"description", "Inline register-event cap (default 8192, max 65536); excess events increment dropped counts. File streaming uses max_event_file_bytes"}}}
 			,{"collect_events", {{"type", "boolean"}, {"description", "Collect every observed block entry/transition in execution order with sequence and thread ID (default false)"}}}
-			,{"max_events", {{"type", "integer"}, {"description", "Maximum ordered events retained without stopping aggregate collection (default 8192, max 32768)"}}}
+			,{"max_events", {{"type", "integer"}, {"description", "Inline block-event cap (default 8192, max 32768); aggregates continue after drops. File streaming uses max_event_file_bytes"}}}
 			,{"collect_code", {{"type", "boolean"}, {"description", "Capture runtime bytes for unique executed block versions and map version IDs to ordered events; implies collect_events (default false)"}}}
 			,{"max_code_bytes", {{"type", "integer"}, {"description", "Total runtime code-byte budget across unique versions (default 262144; max 16777216 inline or 419430400 file)"}}}
 			,{"max_code_versions", {{"type", "integer"}, {"description", "Maximum unique block code versions retained (default 4096, max 16384)"}}}
-			,{"code_output", {{"type", "string"}, {"enum", {"inline", "file"}}, {"description", "Return bytes inline (default) or stream a portable artifact to a file"}}}
+			,{"code_output", {{"type", "string"}, {"enum", {"inline", "file"}}, {"default", "inline"}, {"description", "Code bytes within the result (inline default) or a separate streamed artifact; independent of output_mode"}}}
 			,{"code_output_path", {{"type", "string"}, {"description", "Optional new artifact path on the MCP host for code_output=file; an existing file is never overwritten"}}}
 			,{"code_chunk_bytes", {{"type", "integer"}, {"description", "File-stream chunk size, 262144-8388608 in 65536-byte multiples (default 4194304)"}}}
-			,{"events_output", {{"type", "string"}, {"enum", {"inline", "file"}}, {"description", "Return ordered events inline (default) or stream them in execution order to a portable artifact"}}}
+			,{"events_output", {{"type", "string"}, {"enum", {"inline", "file"}}, {"default", "inline"}, {"description", "Bounded ordered events within the result (inline default) or a separate file stream. Independent of output_mode; remote file pipes unavailable"}}}
 			,{"events_output_path", {{"type", "string"}, {"description", "Optional new artifact path on the MCP host for events_output=file; an existing file is never overwritten"}}}
 			,{"max_event_file_bytes", {{"type", "integer"}, {"minimum", sizeof(TraceEventArtifactHeader)}, {"maximum", kTraceEventMaxFileBytes}, {"description", "Total event artifact size limit including its header (default and max 4294967296)"}}}
 			,{"dependency_sources", {{"type", "array"}, {"maxItems", 32}, {"description", "Conservative dependency sources: register names or {address,size,label?} memory ranges"}}}

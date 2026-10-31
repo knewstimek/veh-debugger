@@ -384,7 +384,8 @@ Each following record has an 8-byte header: `type:u16`, `reserved:u16`, and `pay
 
 ## Basic-block collection policies and repeated paths
 
-`veh_trace_basic_blocks` retains its defaults. Set `collect_snapshots=false`
+Collection defaults remain unchanged; process result transport defaults to a file
+receipt as described above. Set `collect_snapshots=false`
 to skip snapshot allocation, GPR/flags copying and stack reads for first
 block/edge and exception snapshots. Snapshot arrays are empty and references are omitted;
 instruction register events remain a separate opt-in collector. Conditions and
@@ -462,12 +463,14 @@ execution as well as default old/new compatibility.
 README and development-document text is not emitted by MCP initialization.
 The default `lite` and `interactive` tool inventories do not eagerly expose
 `veh_trace_basic_blocks`; discover it through a toolbox manifest/description.
-Its two optional fields add no new tools. Measure actual serialized bytes with
+Collection and output options reuse the same tool. Measure actual serialized bytes with
 `tools/measure_mcp_schema.py`; bytes are not a model-specific token count.
-Code collection can add inline bytes even when paths compress: use file artifacts
-and `output_file` for bounded metadata responses when large captures are needed.
-`output_file` reduces the MCP response while the server still builds the full
-JSON result; it does not skip target collection.
+Process traces return a result artifact receipt by default, so code bytes and
+inline-collected arrays reside in the saved JSON rather than the MCP response.
+Explicit `output_mode="inline"` restores the full response. Result-file output
+still builds the full JSON result and does not skip target collection or remove
+inline event caps. Long ordered capture uses separate `events_output="file"`
+streaming when supported; callers own all artifact retention.
 
 ### Backend adoption checklist
 

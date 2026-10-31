@@ -248,6 +248,15 @@ left to the exception stream because they have no normal post-instruction state.
 Exhausting `max_register_events` increments an exact dropped count while aggregate
 collection continues and marks the ordered register stream incomplete.
 
+Process MCP results default to `output_mode="file"` independently of the backend
+wire format. The host writes a generated JSON/JSONL artifact when `output_file` is
+omitted and returns the existing bounded receipt. Explicit `output_mode="inline"`
+returns the full prior JSON shape. Direct, batch and breakpoint actions share this
+policy; callers own retained files. Result storage does not remove inline event
+caps or enable unsupported remote data pipes. Long ordered captures still require
+explicit, backend-supported `events_output="file"`. KD uses its separate capture
+artifact policy.
+
 Wire v10 adds opt-in `events_output="file"` streaming for all three ordered event
 kinds. In this mode the DLL omits the inline arrays and writes typed records in
 emission order through four fixed buffers allocated at trace start. A dedicated

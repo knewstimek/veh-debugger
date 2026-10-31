@@ -92,17 +92,19 @@ veh_trace_basic_blocks(threadId=..., start="game.exe+0x12000", end="game.exe+0x1
 				       collect_memory_reads=true,
 				       collect_memory_events=true, max_memory_events=8192,
 				       collect_register_events=true, max_register_events=8192,
-				       collect_events=true, max_events=8192,
+				       collect_events=true, max_events=8192, events_output="file",
 				       collect_code=true, max_code_bytes=262144, max_code_versions=4096,
                        dependency_sources=["rcx", {"address":"game.exe+0x5000","size":4,"label":"input"}])
 ```
+프로세스 트레이스의 기본값은 `output_mode="file"`이다. 전체 결과는 MCP 호스트의 임시 `veh-mcp-artifacts` 폴더에 고유 JSON 파일로 저장하고, 응답에는 경로·SHA-256·크기·개수·중단 사유·누락 및 잘림 여부를 반환한다. 짧은 결과를 직접 받으려면 `output_mode="inline"`을 명시한다. 파일 보존·정리는 호출자가 담당한다. 위 긴 수집 예제의 `events_output="file"`은 별도의 이벤트 스트리밍 옵션이며, 지원하는 로컬 백엔드에서 inline 이벤트 개수 제한 대신 파일 용량 제한을 사용한다.
+
 명령마다 MCP로 보내지 않고 타겟 DLL 안에서 TF single-step과 bounded 집계를 수행한다. unique block/edge, register delta, hot path, indirect target profile을 반환하며, `collect_memory_writes=true`이면 명령 실행 전후의 메모리 write 값을 최대 `max_memory_writes`개 unique transition으로 압축한다. 실행 가능 페이지에 대한 write와 이후 변경 범위 실행도 연결해서 표시한다. REP 계열, 16바이트 초과 operand, FS/GS segment write처럼 정확히 모델링하지 못한 경우는 `unsupported_memory_writes`에 집계하며 누락을 숨기지 않는다. 최초 진입과 새로운 edge에서만 레지스터 및 제한된 스택 snapshot을 저장하고, 처리된 예외 continuation도 edge로 기록한다. 현재는 VEH로 정지된 단일 스레드가 대상이며 범위를 벗어나면 정지한다. `veh_batch` step과 breakpoint `action`에서도 같은 결과 형식을 사용한다.
 
 경로만 필요하면 `collect_snapshots=false`로 최초 block/edge 및 예외의 레지스터·스택 수집과 snapshot 버퍼 할당을 생략할 수 있다. `stack_bytes=0`은 스택 읽기만 끄고 레지스터 snapshot은 유지한다. 명령별 `collect_register_events`는 별도 옵션이다.
 
-`compress_paths=true, collect_code=true`는 inline 및 `events_output="file"`에서 실제 관측한 연속 반복 경로를 무손실로 압축한다. 실행 순서·분기 선택·반복 횟수·sequence 간격을 보존하며, 수집 제외·유실·예외·관측 코드 버전 변경 경계를 넘어 합치지 않는다. 코드 수집 비용은 남고 TF single-step 예외 횟수는 줄지 않는다. ordered memory/register event 및 `target_window`와 함께 사용할 수 없으며, 일반 VEH에서는 활성 HW 중단점과의 충돌을 실행 전에 거부한다. 기본 동작은 유지되며 새 옵션은 백엔드의 명시적 지원이 필요하다. [사용법·백엔드 도입 규약](docs/DEVELOPMENT_TOOLS.md#basic-block-collection-policies-and-repeated-paths)을 참고한다.
+`compress_paths=true, collect_code=true`는 inline 및 `events_output="file"`에서 실제 관측한 연속 반복 경로를 무손실로 압축한다. 실행 순서·분기 선택·반복 횟수·sequence 간격을 보존하며, 수집 제외·유실·예외·관측 코드 버전 변경 경계를 넘어 합치지 않는다. 코드 수집 비용은 남고 TF single-step 예외 횟수는 줄지 않는다. ordered memory/register event 및 `target_window`와 함께 사용할 수 없으며, 일반 VEH에서는 활성 HW 중단점과의 충돌을 실행 전에 거부한다. 이 수집 정책은 백엔드의 명시적 지원이 필요하다. [사용법·백엔드 도입 규약](docs/DEVELOPMENT_TOOLS.md#basic-block-collection-policies-and-repeated-paths)을 참고한다.
 
-기본 집계 응답은 `schema_version=4`, `mode=aggregated`, `thread_id`로 집계 의미와 스레드 범위를 명시한다. 기본 집계만으로는 실행 순서를 복원할 수 없다. `collect_events=true`를 사용하면 initial block entry와 이후 모든 block transition을 event-schema-v1의 `events` 배열에 실행 순서대로 기록하며 각 항목에 trace-step `sequence`와 OS `thread_id`가 포함된다. 이 스트림은 명령어 단위가 아닌 basic-block transition 단위이고, `max_events`를 넘으면 집계는 계속하면서 `events_truncated=true` 및 `ordering.complete=false`를 반환한다.
+파일에 저장되는 전체 결과(또는 명시적 inline 응답)는 `schema_version=4`, `mode=aggregated`, `thread_id`로 집계 의미와 스레드 범위를 명시한다. 기본 집계만으로는 실행 순서를 복원할 수 없다. `collect_events=true`를 사용하면 initial block entry와 이후 모든 block transition을 event-schema-v1의 `events` 배열에 실행 순서대로 기록하며 각 항목에 trace-step `sequence`와 OS `thread_id`가 포함된다. 이 스트림은 명령어 단위가 아닌 basic-block transition 단위이고, `max_events`를 넘으면 집계는 계속하면서 `events_truncated=true` 및 `ordering.complete=false`를 반환한다.
 
 trace IPC는 request/header size를 협상하고 legacy schema-v3/v4 및 직전 wire-v5 layout을 판별하므로 실행 중 MCP와 새로 주입된 DLL의 교체 시점이 달라도 배열 offset을 보존한다. 현재 collector가 시작을 거부하면 `failure`에 `status`, 구체적인 `reason`, stopped 판정, normalized IP/start/end, decode 성공 여부와 decoded instruction 수를 반환한다.
 
@@ -114,7 +116,7 @@ trace IPC는 request/header size를 협상하고 legacy schema-v3/v4 및 직전 
 
 큰 VM trace는 `code_output="file"`을 사용하면 된다. DLL의 VEH 경로는 사전 할당된 ring buffer에만 기록하고 별도 writer가 256 KiB~8 MiB의 `code_chunk_bytes`(기본 4 MiB)로 MCP의 one-shot data pipe에 전송한다. MCP는 portable little-endian `.vtc` artifact를 기록하고 경로, 크기, SHA-256, 실제 byte/version/chunk 수만 반환한다. 총 `max_code_bytes`는 최대 400 MiB이며 기존 파일은 덮어쓰지 않는다. `code_output_path`를 생략하면 MCP host의 임시 디렉터리에 고유 파일을 만든다. 예산 또는 backpressure 한도 초과는 집계를 중단하지 않고 `code_truncated=true`, `code_capture.complete=false`로 표시한다. artifact는 64비트 offset을 사용하므로 Windows에서 수집한 x86/x64 결과를 다른 OS의 Analyzer도 읽을 수 있다.
 
-전체 trace JSON 응답이 커지는 경우에는 별도의 `output_file`과 `output_format="json"|"jsonl"`을 지정할 수 있다. 서버가 전체 결과를 새 파일에 기록하고 MCP 응답에는 경로, SHA-256, 크기, 배열별 count, truncation/error만 반환한다. 기존 파일은 덮어쓰지 않으며 direct, `veh_batch`, breakpoint action 모두 같은 의미를 사용한다. `occurrence_window={address,from,to}`는 지정 명령의 N번째 방문 직전부터 M번째 다음 방문 직전까지 entry-to-entry로 수집한다. 이 gate는 `start_condition` 및 `collect_condition`과 AND 결합하며, `to=0`은 상한을 열어 둔다.
+기본 파일 결과에 `output_file`로 새 저장 경로를 지정하거나 `output_format="json"|"jsonl"`로 형식을 선택할 수 있다. 형식은 경로를 생략한 자동 생성 파일에도 적용된다. 기존 파일은 덮어쓰지 않으며 direct, `veh_batch`, breakpoint action 모두 같은 파일·요약 정책을 사용한다. `output_mode="inline"`은 `output_file` 또는 `output_format`과 함께 사용할 수 없다. 결과 파일 저장 자체는 백엔드 수집 방식이나 이벤트 개수 제한을 바꾸지 않는다. 원격 연결도 결과는 MCP 호스트에 저장하지만 target-side `events_output="file"` 파이프는 지원하지 않는다. `occurrence_window={address,from,to}`는 지정 명령의 N번째 방문 직전부터 M번째 다음 방문 직전까지 entry-to-entry로 수집한다. 이 gate는 `start_condition` 및 `collect_condition`과 AND 결합하며, `to=0`은 상한을 열어 둔다.
 
 handler occurrence만 필요하면 `target_window={address,occurrence,before_steps,after_steps}`로 trigger 전 ordered ring과 trigger 후 bounded 구간만 남길 수 있다. `veh_targeted_capture`는 이를 입력 matrix로 확장해 각 `$input`의 batch setup을 실행하고 TEB/FS·GS 및 선택 memory snapshot을 trace JSON에 포함한 뒤, 입력별 고유 파일 경로·SHA-256·크기·event count·정확한 drop·truncation·matched occurrence를 반환한다. 이 고수준 orchestrator는 이미 attach된 한 세션에서 직접 호출하며 `veh_batch`/breakpoint action 안에 중첩하지 않는다. 저수준 `target_window`는 direct/batch/action에서 동일하게 지원된다.
 
@@ -456,7 +458,7 @@ VM 자체에 연결할 때는 외부 백엔드를 VM 범위로 등록한 뒤
 | `veh_batch` | `steps, inputs?, input_variable?, stop_on_error?` | 다중 명령 일괄 실행 및 동일 세션의 입력별 순차 실행. 결과 참조, 제어 흐름, 입력별 status/count/첫 실패/trace artifact 요약을 반환한다. |
 | `veh_trace_callers` | `address?, duration_sec?, duration_ms?, mode?, operation?` | 기본 호출자별 횟수 수집. 명시적 `mode="detour"`는 별도 계측·요약·페이지 조회([규약](docs/INSTRUMENTATION.md), 백엔드 지원 필요). `duration_ms` 우선, 호출 0회도 정상 결과. VEH만 수집 전 재개·후 정지하며 하이퍼바이저는 실행 상태 유지. x64: unwind, x86: 함수 진입점의 [ESP] |
 | `veh_trace_calls` | `addresses, duration_sec?, duration_ms?, resolve?, system_only?` | call/jmp 명령이 런타임에 어디로 가는지 모니터링. 콜 사이트에 BP 설치 후 N초간 실행, 실제 타겟 주소 + API 이름 수집. `resolve=true`: thunk/trampoline을 자연스러운 call 컨텍스트에서 따라가 최종 API까지 추적 (예외 기반 난독화 대응). `system_only=true`: 시스템 DLL 타겟만 반환. 패킹된 바이너리의 IAT 복원용. |
-| `veh_trace_basic_blocks` | `threadId, start, end, ..., collect_snapshots?, compress_paths?, stop_on_return?, collect_events?, collect_memory_events?, collect_register_events?, collect_code?, ...` | DLL 내부 bounded trace. 선택적 function-return scope, ordered block/code/memory/register occurrence stream 및 block/edge, delta, memory, dependency, region, exception을 반환한다. |
+| `veh_trace_basic_blocks` | `threadId, start, end, ..., collect_snapshots?, compress_paths?, stop_on_return?, collect_events?, collect_memory_events?, collect_register_events?, collect_code?, output_mode?, output_file?, output_format?, events_output?, ...` | 기본은 결과 파일+요약, 명시적 `output_mode="inline"`은 전체 JSON. DLL 내부 bounded trace. 선택적 function-return scope, ordered block/code/memory/register occurrence stream 및 block/edge, delta, memory, dependency, region, exception을 반환한다. |
 | `veh_targeted_capture` | `inputs, steps?, trace, trigger, window, environment?, output_directory, stop_on_error?` | 입력별 setup 후 occurrence 전후 ordered trace와 환경 snapshot을 서버 파일에 저장한다. instruction이 1개 이상 완료되고 요청한 target-window stop으로 끝난 입력만 성공으로 집계한다. |
 | `veh_checkpoint_create` | `threadId, regions?, capture_teb?, teb_size?` | GPR/flags(x64는 XMM 포함), TEB 및 FS/GS 환경과 선택 메모리를 저장한다. TEB bytes는 비교 전용이며 stack region은 saved SP부터의 안전한 복원 범위를 표시한다. |
 | `veh_checkpoint_restore` | `id` | 동일 스레드가 VEH 정지된 상태에서 context와 선택 메모리를 복원한다. saved SP 아래의 live VEH stack frame은 보존하며 변경된 매핑은 거부하고 실패 시 rollback한다. |

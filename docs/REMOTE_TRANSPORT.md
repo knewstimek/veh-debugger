@@ -226,7 +226,11 @@ commands that a backend has not implemented.
 
 Frontend conditional breakpoint evaluation and target-side trace data pipes
 (`code_output="file"`, `events_output="file"`) are explicitly unsupported remotely.
-Use inline trace collection or the frontend's `output_file` export. Registered
+Process trace results still default to a generated file on the MCP frontend host,
+with a compact receipt; `output_file` selects a new host path and
+`output_mode="inline"` explicitly returns full JSON. Backend event collection
+remains bounded inline unless a supported local file stream is explicitly selected.
+Result-file export does not add remote target-side data-pipe support. Registered
 backend selection adds no eager MCP tools or per-command authentication fields;
 direct, toolbox, batch, and breakpoint-action calls share the existing dispatcher.
 
