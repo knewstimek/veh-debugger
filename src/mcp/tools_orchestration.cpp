@@ -157,7 +157,17 @@ json McpServer::ToolBatch(const json& args) {
 			return {{"error", "veh_launch/veh_attach can start a batch only when no session is attached"}};
 		if (args.contains("inputs"))
 			return {{"error", "veh_launch/veh_attach cannot be repeated with batch inputs"}};
-	} else if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+    } else if (!session_.IsAttached()) {
+        const bool offlineEvents = std::all_of(steps.begin(), steps.end(), [](const json& step) {
+            if (!step.is_object() || step.value("tool", "") != "veh_trace_basic_blocks" ||
+                !step.contains("args") || !step["args"].is_object()) return false;
+            const auto& readArgs = step["args"];
+            const auto operation = readArgs.value("operation", "");
+            return readArgs.value("execution_context", "process") == "process" &&
+                (operation == "read_events" || operation == "analyze_events");
+        });
+        if (!offlineEvents) return {{"error", NotAttachedMessage()}};
+    }
 	if (args.contains("stop_on_error") && !args["stop_on_error"].is_boolean())
 		return {{"error", "stop_on_error must be a boolean"}};
 	uint64_t outputLimit = 0;

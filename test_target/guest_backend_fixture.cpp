@@ -23,6 +23,8 @@ bool send(HANDLE pipe, uint32_t command, const void* bytes, uint32_t size) {
 }
 template<class T> bool reply(HANDLE pipe, uint32_t command, const T& value) { return send(pipe, command, &value, sizeof(value)); }
 
+#include "hardware_trace_fixture.h"
+
 int wmain(int argc, wchar_t** argv) {
     std::wstring name, mode, readyEvent;
     uint32_t pid = 0;bool pidProvided=false;
@@ -53,7 +55,8 @@ int wmain(int argc, wchar_t** argv) {
     const bool machineMode=mode.rfind(L"machine",0)==0;
     const bool vmMode=mode.rfind(L"vm",0)==0||machineMode;uint32_t vmState=2,detachFailures=0;
     uint32_t continueRequests = 0, pauseRequests = 0, resolveRequests = 0;
-    uint32_t pathRequests = 0;
+    uint32_t pathRequests = 0, hardwareQueries = 0;
+    const bool hardwareMode = mode.rfind(L"hardware-", 0) == 0;
     uint32_t fixtureBreakpointId = 0, shellcodeRequests=0, localThreadQueries=0;
     const bool scanMode=mode.rfind(L"scan-",0)==0;
     uint32_t symbolLookupRequests = 0;
@@ -186,7 +189,7 @@ int wmain(int argc, wchar_t** argv) {
                 if(mode!=L"deferred-unsupported")veh::SetCommandSupported(caps.commands,veh::IpcCommand::SetModuleLoadStop);
             }
             if(mode.rfind(L"shellcode-",0)==0)veh::SetCommandSupported(caps.commands,veh::IpcCommand::ExecuteShellcode);
-            if(mode==L"shellcode-action"||mode==L"path-file-output")for(auto op:{veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue})veh::SetCommandSupported(caps.commands,op);
+            if(mode==L"shellcode-action"||mode==L"path-file-output"||hardwareMode)for(auto op:{veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue})veh::SetCommandSupported(caps.commands,op);
             if(mode.rfind(L"control-",0)==0) {
                 for(auto op:{veh::IpcCommand::Continue,veh::IpcCommand::Pause,veh::IpcCommand::StepInto,
                     veh::IpcCommand::StepOver,veh::IpcCommand::StepOut,veh::IpcCommand::WriteMemory,veh::IpcCommand::TerminateThread})
@@ -214,6 +217,12 @@ int wmain(int argc, wchar_t** argv) {
             if (mode == L"delayed-trace") veh::SetCommandSupported(caps.commands, veh::IpcCommand::TraceCallers);
             strcpy_s(caps.name, "synthetic-guest");
             if (!reply(pipe, header.command, caps)) break;
+        } else if (hardwareMode && command == veh::IpcCommand::TraceHardwareCapabilities) {
+            ++hardwareQueries;
+            if (!hardwareCapabilities(pipe, header.command, mode)) break;
+        } else if (hardwareMode && command == veh::IpcCommand::TraceBasicBlocksHardware) {
+            ++pathRequests;
+            if (!hardwareCapture(pipe, header.command, bytes, mode)) break;
         } else if (mode.rfind(L"path-", 0) == 0 && command == veh::IpcCommand::TraceBasicBlocks) {
             veh::TraceBasicBlocksRequest request{};
             if (bytes.size() != sizeof(request)) {
@@ -510,7 +519,7 @@ int wmain(int argc, wchar_t** argv) {
             if (mode == L"inst-reply-long") result.push_back(0);
             if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
         } else if (command == veh::IpcCommand::GetTargetInfo) {
-            veh::GetTargetInfoResponse info{veh::IpcStatus::Ok, veh::IpcTargetScope::Guest, pid, 32};
+            veh::GetTargetInfoResponse info{veh::IpcStatus::Ok, veh::IpcTargetScope::Guest, pid, hardwareMode ? 64u : 32u};
             if(machineMode){info.scope=veh::IpcTargetScope::VirtualMachine;info.pid=0;info.addressBits=0;}
             if(mode==L"machine-wrong-pid")info.pid=1;
             if(mode==L"machine-bad-width")info.addressBits=64;
@@ -882,12 +891,12 @@ int wmain(int argc, wchar_t** argv) {
                 response.exitCode=7;
                 if(!reply(pipe,header.command,response))break;
             }
-        } else if((mode==L"shellcode-action"||mode==L"path-file-output")&&command==veh::IpcCommand::SetBreakpoint){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||hardwareMode)&&command==veh::IpcCommand::SetBreakpoint){
             fixtureBreakpointId=mode==L"path-file-output"?(fixtureBreakpointId?fixtureBreakpointId+1:9001):9001;
             if(!reply(pipe,header.command,veh::SetBreakpointResponse{veh::IpcStatus::Ok,fixtureBreakpointId}))break;
-        } else if((mode==L"shellcode-action"||mode==L"path-file-output")&&command==veh::IpcCommand::RemoveBreakpoint){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||hardwareMode)&&command==veh::IpcCommand::RemoveBreakpoint){
             if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
-        } else if((mode==L"shellcode-action"||mode==L"path-file-output")&&command==veh::IpcCommand::Continue){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||hardwareMode)&&command==veh::IpcCommand::Continue){
             veh::ContinueRequest request{};
             if(bytes.size()!=sizeof(request))break;
             std::memcpy(&request,bytes.data(),sizeof(request));
@@ -956,6 +965,7 @@ int wmain(int argc, wchar_t** argv) {
             threads.header.count = mode==L"machine-thread-short"?2:1;
             threads.thread.id = 77;
             if(mode==L"path-file-output")sprintf_s(threads.thread.name,"trace-calls:%u",pathRequests);
+            if(hardwareMode)sprintf_s(threads.thread.name,"hardware:%u:%u",hardwareQueries,pathRequests);
             if(mode==L"local-drop-live"&&++localThreadQueries==2){
                 CloseHandle(pipe);
                 HANDLE exitEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);

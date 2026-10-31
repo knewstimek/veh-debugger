@@ -1988,8 +1988,48 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		const std::vector<TraceDependencySource>& dependencySources,
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition, const TraceOccurrenceWindow& occurrenceWindow,
-		bool stopOnReturn, const TraceTargetWindow& targetWindow, uint32_t collectionFlags) {
+		bool stopOnReturn, const TraceTargetWindow& targetWindow, uint32_t collectionFlags,
+        uint32_t hardwareKinds) {
 	TraceBasicBlocksResult result;
+    result.hardwareRequested = hardwareKinds != 0;
+    hardwaretrace::CapabilitiesV1 hardwareCaps{};
+    if (hardwareKinds) {
+        auto reject = [&](const char* reason) {
+            result.status = IpcStatus::Unsupported;
+            result.controlFailure = reason;
+        };
+        if (!guestTarget_ || IsRemoteTarget() || (hardwareKinds & ~hardwaretrace::kKinds) ||
+            collectionFlags || eventOutputMode != TraceEventOutputMode::File || !collectEvents) {
+            reject("hardware_trace_requires_guest_file_wire10"); return result;
+        }
+        std::vector<uint8_t> capability;
+        if (!ipcTransport_->SendAndReceive(IpcCommand::TraceHardwareCapabilities, nullptr, 0, capability, 5000) ||
+            capability.size() != sizeof(hardwareCaps)) {
+            reject("hardware_trace_capabilities_unavailable"); return result;
+        }
+        std::memcpy(&hardwareCaps, capability.data(), sizeof(hardwareCaps));
+        const uint64_t kernelBoundary = targetAddressBits_ == 32 ? UINT64_C(0x80000000) : UINT64_C(0x8000000000000000);
+        const uint32_t modes = (rangeStart < kernelBoundary ? hardwaretrace::kUser : 0) |
+            (rangeEnd > kernelBoundary ? hardwaretrace::kKernel : 0);
+        if (hardwareCaps.status != 0 || hardwareCaps.version != hardwaretrace::kVersion ||
+            hardwareCaps.headerBytes != sizeof(hardwareCaps) ||
+            hardwareCaps.baseWireVersion != 10 ||
+            hardwareCaps.baseRequestBytes != kTraceBasicBlocksRequestV10Size ||
+            hardwareCaps.fileSchema != hardwaretrace::kSchema ||
+            hardwareCaps.eventChunkBytes != kTraceEventDefaultChunkBytes ||
+            (hardwareCaps.supportedKinds & ~hardwaretrace::kKinds) ||
+            (hardwareCaps.supportedKinds & hardwareKinds) != hardwareKinds ||
+            (hardwareCaps.modeFlags & ~(hardwaretrace::kUser | hardwaretrace::kKernel | hardwaretrace::kSingleCpu)) ||
+            (hardwareCaps.modeFlags & modes) != modes ||
+            !hardwareCaps.maxPerInstruction || hardwareCaps.maxPerInstruction > hardwaretrace::kMaxPerInstruction ||
+            !hardwareCaps.maxSteps || hardwareCaps.maxSteps > 5000000 || maxSteps > hardwareCaps.maxSteps ||
+            !hardwareCaps.maxTimeoutMs || hardwareCaps.maxTimeoutMs > 1800000 || timeoutMs > hardwareCaps.maxTimeoutMs ||
+            hardwareCaps.maxFileBytes < sizeof(TraceEventArtifactHeader) ||
+            hardwareCaps.maxFileBytes > kTraceEventMaxFileBytes || maxEventFileBytes > hardwareCaps.maxFileBytes ||
+            hardwareCaps.reserved[0] || hardwareCaps.reserved[1]) {
+            reject("hardware_trace_capabilities_mismatch_or_unsupported"); return result;
+        }
+    }
 	if (collectionFlags && (!backendInfo_.reported || !(backendInfo_.flags & kCapBasicTracePolicies))) {
 		result.controlFailure = "backend_does_not_support_trace_collection_policies";
 		return result;
@@ -2004,7 +2044,7 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		return result;
 	}
 	if (fileEventOutput && !eventArtifactReceiver.Start(eventOutputPath,
-			kTraceEventDefaultChunkBytes, maxEventFileBytes, (collectionFlags & kTraceCompressPaths) ? 2 : 1)) {
+			kTraceEventDefaultChunkBytes, maxEventFileBytes, hardwareKinds ? hardwaretrace::kSchema : ((collectionFlags & kTraceCompressPaths) ? 2 : 1))) {
 		result.eventArtifact = eventArtifactReceiver.Finish(false);
 		if (fileCodeOutput) result.codeArtifact = codeArtifactReceiver.Finish(false);
 		return result;
@@ -2056,8 +2096,24 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 
 	std::vector<uint8_t> data;
 	PipeExchangeDiagnostics exchangeDiagnostics;
-	const bool received = ipcTransport_->SendAndReceive(IpcCommand::TraceBasicBlocks, &req, req.requestSize, data,
-		static_cast<int>(timeoutMs) + 15000, &exchangeDiagnostics);
+    std::vector<uint8_t> hardwareRequest;
+    IpcCommand command = IpcCommand::TraceBasicBlocks;
+    const void* requestBytes = &req;
+    uint32_t requestSize = req.requestSize;
+    if (hardwareKinds) {
+        hardwaretrace::RequestV1 envelope;
+        envelope.baseRequestBytes = req.requestSize;
+        envelope.kinds = hardwareKinds;
+        envelope.maxPerInstruction = hardwareCaps.maxPerInstruction;
+        hardwareRequest.resize(sizeof(envelope) + req.requestSize);
+        std::memcpy(hardwareRequest.data(), &envelope, sizeof(envelope));
+        std::memcpy(hardwareRequest.data() + sizeof(envelope), &req, req.requestSize);
+        command = IpcCommand::TraceBasicBlocksHardware;
+        requestBytes = hardwareRequest.data();
+        requestSize = static_cast<uint32_t>(hardwareRequest.size());
+    }
+    const bool received = ipcTransport_->SendAndReceive(command, requestBytes, requestSize, data,
+        static_cast<int>(timeoutMs) + 15000, &exchangeDiagnostics);
 	result.controlResponseReceived = received;
 	result.controlResponseBytes = static_cast<uint32_t>(std::min<size_t>(data.size(), UINT32_MAX));
 	result.advertisedPayloadBytes = exchangeDiagnostics.advertisedPayloadSize;
@@ -2083,11 +2139,48 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 			result.codeArtifact.error = "trace control response failed";
 	}
 	if (fileEventOutput) {
-		result.eventArtifact = eventArtifactReceiver.Finish(streamExpected);
+		result.eventArtifact = eventArtifactReceiver.Finish(hardwareKinds ? received : streamExpected);
 		if (!received && result.eventArtifact.error.empty())
 			result.eventArtifact.error = "trace control response failed";
 	}
-	if (!received) return result;
+    if (!received) return result;
+    if (hardwareKinds) {
+        if (data.size() == sizeof(IpcStatus)) {
+            std::memcpy(&result.status, data.data(), sizeof(result.status));
+            result.controlFailure = "hardware_trace_status_only";
+            return result;
+        }
+        if (data.size() < sizeof(result.hardware)) {
+            result.controlFailure = "hardware_trace_response_too_small"; return result;
+        }
+        std::memcpy(&result.hardware, data.data(), sizeof(result.hardware));
+        const auto& h = result.hardware;
+        result.status = static_cast<IpcStatus>(h.status);
+        if (h.status != 0 || h.version != hardwaretrace::kVersion || h.headerBytes != sizeof(h) ||
+            h.baseResponseBytes != data.size() - sizeof(h) || h.appliedKinds != hardwareKinds ||
+            (h.resultFlags & ~hardwaretrace::kResultFlags) || !(h.resultFlags & hardwaretrace::kFinalPcValid) ||
+            h.reserved1 || h.retainedRecords > UINT32_MAX ||
+            h.uncertainRecords > h.retainedRecords || h.unknownValueFields > h.retainedRecords * 3 ||
+            ((h.resultFlags & hardwaretrace::kScopeExit) ?
+                (static_cast<uint32_t>(h.scopeExit) < 1 || static_cast<uint32_t>(h.scopeExit) > 5) :
+                h.scopeExit != hardwaretrace::ScopeExit::None) ||
+            ((h.resultFlags & hardwaretrace::kNoTargetInstructionAttempted) &&
+                (h.retainedRecords || h.droppedRecords || h.uncertainRecords ||
+                 (h.resultFlags & hardwaretrace::kCountLowerBound)))) {
+            result.controlFailure = "invalid_hardware_trace_response"; return result;
+        }
+        const auto& artifact = result.eventArtifact;
+        if (!artifact.success || artifact.hardwareEvents != h.retainedRecords ||
+            artifact.hardware.uncertainRecords != h.uncertainRecords ||
+            artifact.hardware.unknownValueFields != h.unknownValueFields ||
+            (artifact.hardware.appliedKinds & ~hardwareKinds) ||
+            (artifact.hardware.codeUncertain && !(h.resultFlags & hardwaretrace::kCodeUncertain)) ||
+            (h.uncertainRecords && !(h.resultFlags & hardwaretrace::kCountLowerBound)) ||
+            ((h.resultFlags & hardwaretrace::kNoTargetInstructionAttempted) && h.retainedRecords)) {
+            result.controlFailure = "hardware_trace_artifact_mismatch"; return result;
+        }
+        data.erase(data.begin(), data.begin() + sizeof(h));
+    }
 	if (data.size() < sizeof(IpcStatus)) {
 		result.controlFailure = "response_too_small_for_status";
 		return result;
@@ -2108,17 +2201,17 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	auto requiredSize = [&](size_t candidate) {
 		uint32_t registerEventCount = candidate >= kTraceBasicBlocksResponseV4Size &&
 			data.size() >= kTraceBasicBlocksResponseV4Size ? header->registerEventCount : 0;
-		return candidate +
-		static_cast<size_t>(header->blockCount) * sizeof(TraceBasicBlockEntry) +
-		static_cast<size_t>(header->edgeCount) * sizeof(TraceBasicBlockEdgeEntry) +
-		static_cast<size_t>(header->snapshotCount) * sizeof(TraceBasicBlockSnapshot) +
-		static_cast<size_t>(header->memoryWriteCount) * sizeof(TraceBasicBlockMemoryWriteEntry) +
-		static_cast<size_t>(header->memoryReadCount) * sizeof(TraceBasicBlockMemoryReadEntry) +
-		static_cast<size_t>(header->exceptionEventCount) * sizeof(TraceBasicBlockExceptionEntry) +
-		static_cast<size_t>(header->eventCount) * sizeof(TraceBasicBlockEventEntry) +
-		static_cast<size_t>(header->memoryEventCount) * sizeof(TraceBasicBlockMemoryEventEntry) +
-		static_cast<size_t>(registerEventCount) * sizeof(TraceBasicBlockRegisterEventEntry) +
-		static_cast<size_t>(header->codeVersionCount) * sizeof(TraceBasicBlockCodeVersionEntry) +
+		return static_cast<uint64_t>(candidate) +
+		static_cast<uint64_t>(header->blockCount) * sizeof(TraceBasicBlockEntry) +
+		static_cast<uint64_t>(header->edgeCount) * sizeof(TraceBasicBlockEdgeEntry) +
+		static_cast<uint64_t>(header->snapshotCount) * sizeof(TraceBasicBlockSnapshot) +
+		static_cast<uint64_t>(header->memoryWriteCount) * sizeof(TraceBasicBlockMemoryWriteEntry) +
+		static_cast<uint64_t>(header->memoryReadCount) * sizeof(TraceBasicBlockMemoryReadEntry) +
+		static_cast<uint64_t>(header->exceptionEventCount) * sizeof(TraceBasicBlockExceptionEntry) +
+		static_cast<uint64_t>(header->eventCount) * sizeof(TraceBasicBlockEventEntry) +
+		static_cast<uint64_t>(header->memoryEventCount) * sizeof(TraceBasicBlockMemoryEventEntry) +
+		static_cast<uint64_t>(registerEventCount) * sizeof(TraceBasicBlockRegisterEventEntry) +
+		static_cast<uint64_t>(header->codeVersionCount) * sizeof(TraceBasicBlockCodeVersionEntry) +
 		header->codeByteCount;
 	};
 	if (headerSize == 0) {
@@ -2159,6 +2252,12 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	result.elapsedMs = header->elapsedMs;
 	result.stepsExecuted = header->stepsExecuted;
 	result.finalAddress = header->finalAddress;
+    if (hardwareKinds && (header->status != IpcStatus::Ok ||
+        ((result.hardware.resultFlags & hardwaretrace::kScopeExit) && header->stopReason != TraceBasicBlockStopReason::LeftRange) ||
+        result.eventArtifact.hardware.LastSequence() > result.stepsExecuted ||
+        ((result.hardware.resultFlags & hardwaretrace::kNoTargetInstructionAttempted) && result.stepsExecuted))) {
+        result.controlFailure = "invalid_hardware_trace_base_response"; return result;
+    }
 	result.threadId = header->threadId;
 	if (headerSize >= kTraceBasicBlocksResponseV5Size) {
 		result.startFailure = static_cast<TraceBasicBlocksStartFailure>(header->startFailureReason);

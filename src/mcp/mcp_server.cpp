@@ -1474,7 +1474,10 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		Tool(&McpServer::ToolTraceBasicBlocks, "trace", kCapture, true,
 			{{"name", "veh_trace_basic_blocks"}, {"description", "Trace a stopped process thread. Default output_mode=file returns a result artifact receipt; output_mode=inline returns full JSON. Events stay bounded unless events_output=file is explicitly selected on a supported local backend. Optional snapshots, code/memory/register events, function-return scope and lossless repeated paths. Policies need backend support; VEH refuses active HW breakpoints. Compression does not reduce TF exceptions. KD uses execution_context=kd; optional run_peer_cpus requires negotiated v2 support and keeps collection on the selected CPU."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"operation", {{"type", "string"}, {"enum", {"capture", "read_capture"}}, {"description", "KD: capture (default) or bounded offline artifact page read"}}},
+			{"operation", {{"type", "string"}, {"enum", {"capture", "read_capture", "read_events", "analyze_events"}}, {"description", "capture (default); KD read_capture; process read_events/analyze_events reads saved hardware events without a session"}}},
+            {"event_file", {{"type", "string"}, {"description", "Saved .vte file for read_events/analyze_events; hardware pages are limited to8KiB"}}},
+            {"hardware_kind", {{"type", "string"}, {"enum", {"control_register", "msr", "io_port"}}, {"description", "Optional hardware event page filter"}}},
+            {"sha256", {{"type", "string"}, {"description", "Optional expected event-file SHA-256 for offline reads"}}},
 			{"capture_file", {{"type", "string"}, {"description", "Saved KD capture path for operation=read_capture"}}},
 			{"offset", {{"type", "string"}, {"description", "Exact zero-based record offset for read_capture (default 0)"}}},
 			{"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}, {"description", "Read page size; response has a separate 8KiB limit"}}},
@@ -1491,7 +1494,9 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"max_blocks", {{"type", "integer"}, {"description", "Maximum unique executed block entries (default 4096, max 16384)"}}},
 			{"max_edges", {{"type", "integer"}, {"description", "Maximum unique observed edges (default 8192, max 32768)"}}},
 			{"max_steps", {{"type", "integer"}, {"description", "Maximum instruction/exception events (default 100000, max 5000000)"}}},
-			{"timeout_ms", {{"type", "integer"}, {"description", "Wall-clock limit (default 10000, process max60000; KD max600000)"}}},
+			{"timeout_ms", {{"type", "integer"}, {"description", "Wall-clock limit (default 10000, process max60000, hardware1800000; KD max600000)"}}},
+            {"collect_hardware_events", {{"type", "boolean"}, {"default", false}, {"description", "Guest process IPC hardware trace v1. Implies collect_events and events_output=file; requires snapshots, uncompressed paths and output_mode=file. Preserves unknown/partial results."}}},
+            {"hardware_kinds", {{"type", "array"}, {"minItems", 1}, {"maxItems", 3}, {"uniqueItems", true}, {"items", {{"type", "string"}, {"enum", {"control_register", "msr", "io_port"}}}}, {"description", "Hardware kinds; omitted means all three. Requires collect_hardware_events=true"}}},
 			{"collect_snapshots", {{"type", "boolean"}, {"description", "Collect first block/edge and exception register/stack snapshots (default true). False skips capture and snapshot buffers; requires backend policy support."}}},
 			{"compress_paths", {{"type", "boolean"}, {"description", "Encode observed consecutive repeated paths losslessly (default false). Requires collect_code, no ordered memory/register events or target_window. Preserves sequence stride; reduces records, not TF exceptions."}}},
 			{"stack_bytes", {{"type", "integer"}, {"description", "Bytes to capture from SP per snapshot (default 128, max 256; 0 disables stack bytes)"}}},
@@ -1513,7 +1518,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			,{"code_output", {{"type", "string"}, {"enum", {"inline", "file"}}, {"default", "inline"}, {"description", "Code bytes within the result (inline default) or a separate streamed artifact; independent of output_mode"}}}
 			,{"code_output_path", {{"type", "string"}, {"description", "Optional new artifact path on the MCP host for code_output=file; an existing file is never overwritten"}}}
 			,{"code_chunk_bytes", {{"type", "integer"}, {"description", "File-stream chunk size, 262144-8388608 in 65536-byte multiples (default 4194304)"}}}
-			,{"events_output", {{"type", "string"}, {"enum", {"inline", "file"}}, {"default", "inline"}, {"description", "Bounded ordered events within the result (inline default) or a separate file stream. Independent of output_mode; remote file pipes unavailable"}}}
+			,{"events_output", {{"type", "string"}, {"enum", {"inline", "file"}}, {"description", "Ordered events inline by default; hardware trace defaults to and requires file. Independent of output_mode; remote file pipes unavailable"}}}
 			,{"events_output_path", {{"type", "string"}, {"description", "Optional new artifact path on the MCP host for events_output=file; an existing file is never overwritten"}}}
 			,{"max_event_file_bytes", {{"type", "integer"}, {"minimum", sizeof(TraceEventArtifactHeader)}, {"maximum", kTraceEventMaxFileBytes}, {"description", "Total event artifact size limit including its header (default and max 4294967296)"}}}
 			,{"dependency_sources", {{"type", "array"}, {"maxItems", 32}, {"description", "Conservative dependency sources: register names or {address,size,label?} memory ranges"}}}
@@ -1534,7 +1539,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			,{"output_mode", {{"type", "string"}, {"enum", {"file", "inline"}}, {"default", "file"}, {"description", "Process trace: file receipt by default; inline explicitly returns the full result. Backend collection limits and streaming are unchanged"}}}
 			,{"output_file", {{"type", "string"}, {"description", "Optional new MCP-host result path; file mode generates a temporary path when omitted. Caller owns retention"}}}
 			,{"output_format", {{"type", "string"}, {"enum", {"json", "jsonl"}}, {"description", "File encoding (default json), including generated paths; JSONL uses a manifest plus section-item records"}}}
-		 }}, {"anyOf", json::array({json{{"required",json::array({"start","end"})}},json{{"properties",{{"execution_context",{{"const","kd"}}},{"operation",{{"const","read_capture"}}}}},{"required",json::array({"execution_context","operation","capture_file"})}}})}}}}),
+		 }}, {"anyOf", json::array({json{{"required",json::array({"start","end"})}},json{{"properties",{{"operation",{{"enum",{"read_events","analyze_events"}}}}}},{"required",json::array({"operation","event_file"})}},json{{"properties",{{"execution_context",{{"const","kd"}}},{"operation",{{"const","read_capture"}}}}},{"required",json::array({"execution_context","operation","capture_file"})}}})}}}}),
 
 		Tool(&McpServer::ToolCheckpointCreate, "checkpoint", kCapture, true,
 			{{"name", "veh_checkpoint_create"}, {"description", "Capture one VEH-stopped thread's GPR/flags (plus x64 XMM), TEB and FS/GS selector/base metadata, and explicitly selected memory ranges. Stack ranges expose the safe logical restore start at the saved SP. Checkpoints are session-local and bounded; they do not capture other threads, handles, allocations, files, sockets, or kernel state."},

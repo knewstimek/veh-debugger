@@ -273,7 +273,41 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 	return {{"error", "Process trace requires process/capture context"}};
     if (args.contains("run_peer_cpus"))
         return {{"error", "run_peer_cpus is supported only for KD capture"}, {"code", "unsupported_policy"}};
-    if (session.IsRemoteTarget() && (args.value("code_output", "") == "file" || args.value("events_output", "") == "file"))
+    if (args.contains("collect_hardware_events") && !args["collect_hardware_events"].is_boolean())
+        return {{"error", "collect_hardware_events must be a boolean"}};
+    const bool hardware = args.value("collect_hardware_events", false);
+    uint32_t hardwareKinds = hardware ? hardwaretrace::kKinds : 0;
+    if (args.contains("hardware_kinds")) {
+        if (!hardware) return {{"error", "hardware_kinds requires collect_hardware_events=true"}};
+        const auto& kinds = args["hardware_kinds"];
+        if (!kinds.is_array() || kinds.empty() || kinds.size() > 3)
+            return {{"error", "hardware_kinds must be a non-empty array of unique kinds"}};
+        hardwareKinds = 0;
+        for (const auto& kind : kinds) {
+            if (!kind.is_string()) return {{"error", "hardware_kinds entries must be strings"}};
+            uint32_t bit = kind == "control_register" ? hardwaretrace::kControl :
+                kind == "msr" ? hardwaretrace::kMsr : kind == "io_port" ? hardwaretrace::kPort : 0;
+            if (!bit || (hardwareKinds & bit))
+                return {{"error", "hardware_kinds contains an unknown or duplicate kind"}};
+            hardwareKinds |= bit;
+        }
+    }
+    if (hardware) {
+        for (const char* key : {"events_output_path", "output_file", "code_output_path"})
+            if (args.contains(key) && (!args[key].is_string() ||
+                args[key].get_ref<const std::string&>().size() > 1024))
+                return {{"error", std::string(key) + " must be a path of at most 1024 UTF-8 bytes for hardware trace"}};
+        for (const char* key : {"collect_snapshots", "compress_paths"})
+            if (args.contains(key) && !args[key].is_boolean())
+                return {{"error", std::string(key) + " must be a boolean"}};
+        if (!args.value("collect_snapshots", true) || args.value("compress_paths", false))
+            return {{"error", "hardware trace requires collect_snapshots=true and compress_paths=false"}};
+        if (args.contains("events_output") && args["events_output"] != "file")
+            return {{"error", "hardware trace requires events_output=file"}};
+        if (args.contains("output_mode") && args["output_mode"] != "file")
+            return {{"error", "hardware trace requires output_mode=file for bounded summaries"}};
+    }
+    if (session.IsRemoteTarget() && (hardware || args.value("code_output", "") == "file" || args.value("events_output", "") == "file"))
         return {{"error", "Target-side file data pipes are not supported remotely; use inline collection or output_file"}};
 	uint32_t threadId = TraceJsonUint32(args, "threadId");
 	if (!threadId) return {{"error", "threadId is required"}};
@@ -305,7 +339,7 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 	int maxMemoryWrites = TraceJsonInt(args, "max_memory_writes", 4096);
 	bool collectMemoryReads = TraceJsonBool(args, "collect_memory_reads", false);
 	int maxMemoryReads = TraceJsonInt(args, "max_memory_reads", 4096);
-	bool collectEvents = TraceJsonBool(args, "collect_events", false);
+	bool collectEvents = hardware || TraceJsonBool(args, "collect_events", false);
 	bool collectSnapshots = TraceJsonBool(args, "collect_snapshots", true);
 	bool compressPaths = TraceJsonBool(args, "compress_paths", false);
 	int maxEvents = TraceJsonInt(args, "max_events", 8192);
@@ -325,7 +359,7 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		return {{"error", "events_output must be a string"}};
 	if (args.contains("events_output_path") && !args["events_output_path"].is_string())
 		return {{"error", "events_output_path must be a string"}};
-	std::string eventsOutput = args.value("events_output", "inline");
+	std::string eventsOutput = args.value("events_output", hardware ? "file" : "inline");
 	std::transform(eventsOutput.begin(), eventsOutput.end(), eventsOutput.begin(),
 		[](unsigned char value) { return static_cast<char>(std::tolower(value)); });
 	if (eventsOutput != "inline" && eventsOutput != "file")
@@ -383,7 +417,8 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 	if (maxBlocks < 1 || maxBlocks > 16384) return {{"error", "max_blocks must be 1-16384"}};
 	if (maxEdges < 1 || maxEdges > 32768) return {{"error", "max_edges must be 1-32768"}};
 	if (maxSteps < 1 || maxSteps > 5000000) return {{"error", "max_steps must be 1-5000000"}};
-	if (timeoutMs < 100 || timeoutMs > 60000) return {{"error", "timeout_ms must be 100-60000"}};
+	if (timeoutMs < 100 || timeoutMs > (hardware ? 1800000 : 60000))
+        return {{"error", hardware ? "timeout_ms must be 100-1800000" : "timeout_ms must be 100-60000"}};
 	if (stackBytes < 0 || stackBytes > static_cast<int>(kTraceBasicBlockMaxStackBytes))
 		return {{"error", "stack_bytes must be 0-256"}};
 	if (maxMemoryWrites < 1 || maxMemoryWrites > 16384)
@@ -518,7 +553,7 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		collectMemoryEvents, static_cast<uint32_t>(maxMemoryEvents),
 		collectRegisterEvents, static_cast<uint32_t>(maxRegisterEvents),
 		dependencySources, startCondition, stopCondition, collectCondition, occurrenceWindow,
-		stopOnReturn, targetWindow, collectionFlags);
+		stopOnReturn, targetWindow, collectionFlags, hardwareKinds);
 	auto hex = [](uint64_t value) {
 		char buffer[24]; snprintf(buffer, sizeof(buffer), "0x%llX", value);
 		return std::string(buffer);
@@ -540,6 +575,21 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		}
 	};
 	if (!result.ok) {
+        if (hardware) {
+            json failure = {{"error", !result.controlFailure.empty() ? result.controlFailure :
+                (!result.eventArtifact.error.empty() ? result.eventArtifact.error : "hardware_trace_failed")},
+                {"status_code", static_cast<uint32_t>(result.status)}, {"capture_complete", false},
+                {"complete", false}, {"final_address", nullptr}};
+            const auto& raw = result.eventArtifact;
+            if (!raw.error.empty()) failure["event_stream_error"] = raw.error;
+            if (!raw.path.empty()) failure["event_file"] = {
+                {"path", raw.path}, {"sha256", raw.sha256}, {"size", raw.fileSize},
+                {"record_bytes", std::to_string(raw.recordBytes)},
+                {"storage_complete", raw.success}, {"capture_complete", false}, {"complete", false},
+                {"raw_prefix", raw.rawPrefix},
+                {"hardware_events", raw.success ? json(std::to_string(raw.hardwareEvents)) : json(nullptr)}};
+            return failure;
+        }
 		if (fileCodeOutput && !result.codeArtifact.error.empty())
 			return {{"error", result.codeArtifact.error}};
 		if (fileEventOutput && !result.eventArtifact.error.empty())
@@ -605,6 +655,11 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		return {{"error", "injected DLL does not support stop_on_return"}};
 	if (targetWindow.enabled && !result.targetWindowSupported)
 		return {{"error", "injected DLL does not support target_window"}};
+    if (hardware && (result.hardware.resultFlags & hardwaretrace::kCodeUncertain)) {
+        result.blocks.clear(); result.edges.clear(); result.events.clear();
+        result.codeVersions.clear(); result.codeBytes.clear();
+        result.decodeIncomplete = true;
+    }
 	TraceRegionClassifier regions(session.GetTargetProcess());
 	auto edgeKind = [](TraceBasicBlockEdgeKind kind) {
 		switch (kind) {
@@ -1073,15 +1128,87 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		fullResult.erase("register_events");
 		fullResult["event_file"] = eventFile;
 	}
+    json hardwareSummary, hardwareCollection;
+    bool hardwareCaptureComplete = false;
+    if (hardware) {
+        const auto& h = result.hardware;
+        const auto& a = result.eventArtifact;
+        const bool lower = (h.resultFlags & hardwaretrace::kCountLowerBound) != 0;
+        hardwareCaptureComplete = !result.truncated && !a.captureTruncated && !eventsTruncated &&
+            !memoryEventsTruncated && !registerEventsTruncated && !codeTruncated &&
+            !result.memoryWritesTruncated && !result.memoryReadsTruncated && !result.decodeIncomplete &&
+            !(h.resultFlags & (hardwaretrace::kCountLowerBound | hardwaretrace::kUnsupportedAtPc |
+                hardwaretrace::kCodeUncertain | hardwaretrace::kNoTargetInstructionAttempted)) &&
+            !h.uncertainRecords && h.droppedRecords == 0 &&
+            (result.stopReason == TraceBasicBlockStopReason::Completed ||
+             result.stopReason == TraceBasicBlockStopReason::LeftRange ||
+             result.stopReason == TraceBasicBlockStopReason::Condition ||
+             result.stopReason == TraceBasicBlockStopReason::FunctionReturn ||
+             result.stopReason == TraceBasicBlockStopReason::OccurrenceWindow);
+        hardwareSummary = {{"enabled", true}, {"applied_kinds", json::array()},
+            {"counts", {{"control_register", std::to_string(a.hardware.counts[0])},
+                {"msr", std::to_string(a.hardware.counts[1])}, {"io_port", std::to_string(a.hardware.counts[2])}}},
+            {"retained_records", std::to_string(h.retainedRecords)},
+            {"lost_records", lower || h.droppedRecords == UINT64_MAX ? json(nullptr) : json(std::to_string(h.droppedRecords))},
+            {"unknown_value_fields", std::to_string(h.unknownValueFields)},
+            {"uncertain_records", std::to_string(h.uncertainRecords)},
+            {"unsupported_at_pc", (h.resultFlags & hardwaretrace::kUnsupportedAtPc) != 0},
+            {"no_target_instruction_attempted", (h.resultFlags & hardwaretrace::kNoTargetInstructionAttempted) != 0},
+            {"code_uncertain", (h.resultFlags & hardwaretrace::kCodeUncertain) != 0}};
+        const char* scopeNames[] = {nullptr, "address_space", "cpl", "thread", "rip_range", "identity_unavailable"};
+        const json scopeExit = h.scopeExit == hardwaretrace::ScopeExit::None ? json(nullptr) :
+            json(scopeNames[static_cast<unsigned>(h.scopeExit)]);
+        hardwareSummary["scope_exit"] = scopeExit;
+        const char* names[] = {"control_register", "msr", "io_port"};
+        for (unsigned i = 0; i < 3; ++i) if (hardwareKinds & (1u << i)) hardwareSummary["applied_kinds"].push_back(names[i]);
+        eventFile["counts"]["hardware_events"] = std::to_string(a.hardwareEvents);
+        eventFile["storage_complete"] = a.success;
+        eventFile["capture_complete"] = hardwareCaptureComplete;
+        eventFile["complete"] = a.success && hardwareCaptureComplete;
+        fullResult["event_file"] = eventFile;
+        fullResult["hardware"] = hardwareSummary;
+        hardwareCollection = {{"protocol_version", hardwaretrace::kVersion}, {"requested", true},
+            {"requested_kinds", hardwareSummary["applied_kinds"]},
+            {"applied_kinds", hardwareSummary["applied_kinds"]}, {"complete", hardwareCaptureComplete},
+            {"events", std::to_string(h.retainedRecords)},
+            {"dropped_records", hardwareSummary["lost_records"]},
+            {"unknown_value_fields", std::to_string(h.unknownValueFields)},
+            {"uncertain_records", std::to_string(h.uncertainRecords)}, {"scope_exit", scopeExit}};
+        fullResult["hardware_collection"] = hardwareCollection;
+        fullResult["scope_exit"] = scopeExit;
+        fullResult["steps_executed"] = lower ? json(nullptr) : json(std::to_string(result.stepsExecuted));
+        if (lower) fullResult["steps_executed_lower_bound"] = std::to_string(result.stepsExecuted);
+        fullResult["execution_count_incomplete"] = lower;
+        fullResult["capture_incomplete"] = !hardwareCaptureComplete;
+        fullResult["decode_incomplete"] = result.decodeIncomplete;
+        fullResult["storage_complete"] = true;
+        fullResult["capture_complete"] = hardwareCaptureComplete;
+        fullResult["complete"] = hardwareCaptureComplete;
+        if (h.resultFlags & hardwaretrace::kCountLowerBound) fullResult["stop_reason"] = "completion_uncertain";
+        else if (h.resultFlags & hardwaretrace::kCodeUncertain) fullResult["stop_reason"] = "code_uncertain";
+        else if (h.resultFlags & hardwaretrace::kUnsupportedAtPc) fullResult["stop_reason"] = "unsupported_hardware";
+        else if (h.resultFlags & hardwaretrace::kScopeExit) fullResult["stop_reason"] = "left_scope";
+    }
 	if (!artifactMetadata.empty()) fullResult["capture_environment"] = artifactMetadata;
 	if (outputMode == "inline") return fullResult;
 
 	auto exported = outputFile.empty() ?
 		WriteJsonArtifactInDirectory("", "trace", fullResult, outputFormat) :
 		WriteTraceOutputFile(outputFile, outputFormat, fullResult);
-	if (!exported.success)
-		return {{"error", exported.error}, {"output_file", {{"path", outputFile},
-			{"format", outputFormat}, {"complete", false}}}};
+    if (!exported.success) {
+        json failure = {{"error", exported.error}, {"output_file", {{"path", outputFile},
+            {"format", outputFormat}, {"complete", false}}}};
+        if (hardware) {
+            failure["event_file"] = eventFile;
+            failure["hardware"] = hardwareSummary;
+            failure["hardware_collection"] = hardwareCollection;
+            failure["scope_exit"] = hardwareSummary["scope_exit"];
+            failure["storage_complete"] = false;
+            failure["capture_complete"] = hardwareCaptureComplete;
+            failure["complete"] = false;
+        }
+        return failure;
+    }
 	json counts = json::object();
 	for (const char* name : {"blocks", "edges", "events", "memory_events", "register_events",
 			"code_versions", "memory_writes", "memory_reads", "exceptions", "snapshots"}) {
@@ -1113,6 +1240,23 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		{"output_file", {{"path", exported.path}, {"format", exported.format},
 			{"size", exported.size}, {"sha256", exported.sha256}, {"complete", complete}}}};
 	if (collectionFlags) compact["collection"] = fullResult["collection"];
+    if (hardware) {
+        compact["hardware"] = hardwareSummary;
+        compact["hardware_collection"] = hardwareCollection;
+        compact["scope_exit"] = hardwareSummary["scope_exit"];
+        compact["counts"]["hardware_events"] = std::to_string(result.hardware.retainedRecords);
+        for (const char* name : {"execution_count_incomplete", "capture_incomplete", "decode_incomplete",
+                "storage_complete", "capture_complete", "complete"})
+            compact[name] = fullResult[name];
+        if (fullResult.contains("steps_executed_lower_bound"))
+            compact["steps_executed_lower_bound"] = fullResult["steps_executed_lower_bound"];
+        compact["output_file"]["storage_complete"] = true;
+        compact["output_file"]["capture_complete"] = hardwareCaptureComplete;
+        compact["output_file"]["complete"] = complete && hardwareCaptureComplete;
+        compact["complete"] = complete && hardwareCaptureComplete;
+        compact["read_events"] = {{"operation", "read_events"}, {"event_file", result.eventArtifact.path},
+            {"offset", "0"}, {"limit", 16}, {"sha256", result.eventArtifact.sha256}};
+    }
 	if (fileCodeOutput) compact["code_artifact"] = fullResult["code_capture"];
 	if (fileEventOutput) compact["event_file"] = eventFile;
 	return compact;

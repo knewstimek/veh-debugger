@@ -13,10 +13,12 @@ RECORD_HEADER = struct.Struct("<HHI")
 BASIC_BLOCK = struct.Struct("<QQQQIIIBBBB")
 MEMORY = struct.Struct("<QQQIIBBBB16s16s16s")
 REGISTER = struct.Struct("<QQII18Q18QB7s")
+HARDWARE = struct.Struct("<7QIBBHIHBBBBHI")
 
 RECORD_BASIC_BLOCK = 1
 RECORD_MEMORY = 2
 RECORD_REGISTER = 3
+RECORD_HARDWARE = 4
 
 EDGE_KINDS = {
     0: "fallthrough",
@@ -70,7 +72,7 @@ def read_header(stream):
     }
     if header["magic"] != MAGIC:
         raise ValueError("invalid event artifact magic")
-    if header["schema_version"] not in (SCHEMA_VERSION, 2):
+    if header["schema_version"] not in (SCHEMA_VERSION, 2, 3):
         raise ValueError(f"unsupported event artifact schema {header['schema_version']}")
     if header["header_size"] != HEADER.size or header["record_header_size"] != RECORD_HEADER.size:
         raise ValueError("unsupported event artifact structure sizes")
@@ -79,7 +81,17 @@ def read_header(stream):
         raise ValueError("event artifact entry sizes do not match schema 1")
     if not header["flags"] & 1:
         raise ValueError("event artifact is not complete")
+    if header["flags"] & ~(7 if header["schema_version"] == 3 else 3):
+        raise ValueError("unknown artifact flags")
+    if header["schema_version"] == 3:
+        if not header["flags"] & 4:
+            raise ValueError("schema3 requires HAS_HARDWARE")
+        header["counts"]["hardware_events"] = values[15]
+    elif values[15]:
+        raise ValueError("reserved header field must be zero")
     header["truncated"] = bool(header["flags"] & 2)
+    if header["truncation_reason_code"] not in TRUNCATION_REASONS or (not header["truncated"] and header["truncation_reason_code"]):
+        raise ValueError("invalid truncation reason")
     header["truncation_reason"] = TRUNCATION_REASONS.get(
         header["truncation_reason_code"], "unknown")
     header["wait_time_ms"] = header["wait_time_ns"] / 1_000_000
@@ -174,6 +186,71 @@ def _decode_register(payload):
     }
 
 
+class HardwareDecoder:
+    """Preserve exact integers and validate confirmed versus uncertain attempts."""
+    def __init__(self):
+        self.last = None
+        self.last_sequence = 0
+
+    def decode(self, payload):
+        (sequence, attempt, pc, subject, value, before, after, index, cpl_before,
+         cpl_after, reserved, thread, cpu, kind, operation, width, completion,
+         known, flags) = HARDWARE.unpack(payload)
+        if (not attempt or index >= 16 or reserved or known & ~255 or flags & ~1 or
+                cpl_before > 3 or known & 80 != 80 or
+                (cpl_after > 3 if known & 128 else cpl_after != 255) or
+                (not thread if known & 8 else thread != 0) or
+                any(n and not known & bit for n, bit in ((value, 1), (before, 2), (after, 4))) or
+                operation not in (1, 2) or completion not in (1, 2)):
+            raise ValueError("invalid hardware event fields")
+        if completion == 1:
+            if not sequence or not known & 32 or not known & 1:
+                raise ValueError("confirmed hardware event lacks step/value")
+        elif sequence or known & 32:
+            raise ValueError("uncertain hardware event claims a completed step")
+        if kind == 1:
+            valid = width in (4, 8) and subject in (0, 2, 3, 4, 8)
+        elif kind == 2:
+            valid = width == 8 and subject <= 0xFFFFFFFF
+        elif kind == 3:
+            valid = (width in (1, 2, 4) and subject <= 0xFFFF and
+                     not known & 6 and value < (1 << (width * 8)))
+        else:
+            valid = False
+        if not valid:
+            raise ValueError("invalid hardware kind/subject/width")
+        current = (attempt, sequence, index, completion, pc, thread, cpu, cpl_before)
+        if self.last is not None:
+            old = self.last
+            if attempt < old[0] or (old[3] == 2 and attempt != old[0]):
+                raise ValueError("hardware attempts are unordered or follow an uncertain tail")
+            if attempt == old[0]:
+                if index != old[2] + 1 or current[1:2] != old[1:2] or current[3:] != old[3:]:
+                    raise ValueError("inconsistent hardware attempt")
+            elif index or (sequence and sequence <= self.last_sequence):
+                raise ValueError("invalid hardware event index/sequence")
+        elif index:
+            raise ValueError("hardware event index must start at zero")
+        self.last = current
+        if sequence:
+            self.last_sequence = sequence
+        return {
+            "record": "hardware_event",
+            "sequence": str(sequence) if known & 32 else None,
+            "attempt": str(attempt), "instruction": _hex(pc), "subject": _hex(subject),
+            "value": _hex(value) if known & 1 else None,
+            "before": _hex(before) if known & 2 else None,
+            "after": _hex(after) if known & 4 else None,
+            "event_index": index, "cpu": cpu,
+            "thread_id": str(thread) if known & 8 else None,
+            "kind": {1: "control_register", 2: "msr", 3: "io_port"}[kind],
+            "operation": "read" if operation == 1 else "write",
+            "width": width, "completion": "confirmed" if completion == 1 else "uncertain",
+            "code_verified": not bool(flags & 1), "cpl_before": cpl_before,
+            "cpl_after": cpl_after if known & 128 else None,
+        }
+
+
 class PathDecoder:
     """Validate bounded non-nested raw-suffix references without expanding runs."""
     def __init__(self):
@@ -240,12 +317,17 @@ def expand_path_events(events, max_events=5_000_001):
 def iter_records(stream, header):
     remaining = header["record_bytes"]
     paths = PathDecoder()
+    hardware = HardwareDecoder()
     counts = {"events": 0, "memory_events": 0, "register_events": 0}
+    if header["schema_version"] == 3:
+        counts["hardware_events"] = 0
     while remaining:
         raw = stream.read(RECORD_HEADER.size)
         if len(raw) != RECORD_HEADER.size or remaining < RECORD_HEADER.size:
             raise ValueError("incomplete event record header")
         record_type, reserved, payload_size = RECORD_HEADER.unpack(raw)
+        if hardware.last is not None and hardware.last[3] == 2 and record_type != RECORD_HARDWARE:
+            raise ValueError("record follows an uncertain hardware tail")
         if header["schema_version"] == 2 and record_type != RECORD_BASIC_BLOCK:
             raise ValueError("compressed artifact requires basic path records only")
         remaining -= RECORD_HEADER.size
@@ -253,6 +335,7 @@ def iter_records(stream, header):
             RECORD_BASIC_BLOCK: BASIC_BLOCK.size,
             RECORD_MEMORY: MEMORY.size,
             RECORD_REGISTER: REGISTER.size,
+            RECORD_HARDWARE: HARDWARE.size if header["schema_version"] == 3 else None,
         }.get(record_type)
         if reserved or expected is None or payload_size != expected or payload_size > remaining:
             raise ValueError("invalid event record header")
@@ -270,6 +353,9 @@ def iter_records(stream, header):
         elif record_type == RECORD_MEMORY:
             counts["memory_events"] += 1
             yield _decode_memory(payload)
+        elif record_type == RECORD_HARDWARE:
+            counts["hardware_events"] += 1
+            yield hardware.decode(payload)
         else:
             counts["register_events"] += 1
             yield _decode_register(payload)

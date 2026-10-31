@@ -107,6 +107,8 @@ enum class IpcCommand : uint32_t {
 	TraceCalls             = 0x0073,
 	TraceBasicBlocks       = 0x0074,
 	TraceMemoryCollect     = 0x0075,  // every instruction touching an address for a while, without stopping
+	TraceHardwareCapabilities = 0x0076,
+	TraceBasicBlocksHardware = 0x0077,
 
 	// System inspection: machine-wide state outside the target process. Only
 	// backends running below the OS serve these; others answer Unsupported.

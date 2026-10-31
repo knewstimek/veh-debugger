@@ -489,6 +489,8 @@ public:
 		std::vector<uint8_t> codeBytes;
 		TraceCodeArtifactResult codeArtifact;
 		TraceEventArtifactResult eventArtifact;
+        bool hardwareRequested = false;
+        hardwaretrace::ResponseV1 hardware{};
 	};
 	TraceBasicBlocksResult TraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, uint64_t rangeEnd,
 		uint32_t maxBlocks = 4096, uint32_t maxEdges = 8192, uint32_t maxSteps = 100000,
@@ -511,7 +513,8 @@ public:
 		const TraceCondition& collectCondition = {},
 		const TraceOccurrenceWindow& occurrenceWindow = {},
 		bool stopOnReturn = false,
-		const TraceTargetWindow& targetWindow = {}, uint32_t collectionFlags = 0);
+		const TraceTargetWindow& targetWindow = {}, uint32_t collectionFlags = 0,
+        uint32_t hardwareKinds = 0);
 
 	// --- Resolve (PDB) ---
 	uint64_t ResolveSourceLine(const std::string& file, uint32_t line);

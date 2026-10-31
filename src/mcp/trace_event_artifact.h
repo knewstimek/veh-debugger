@@ -4,7 +4,9 @@
 #include <cstdint>
 #include <string>
 #include <thread>
+#include <nlohmann/json.hpp>
 #include "common/ipc_protocol.h"
+#include "common/trace_hardware_protocol.h"
 
 namespace veh {
 
@@ -23,6 +25,9 @@ struct TraceEventArtifactResult {
 	uint32_t threadId = 0;
 	uint64_t memoryEvents = 0;
 	uint64_t registerEvents = 0;
+    uint64_t hardwareEvents = 0;
+    hardwaretrace::EventValidator hardware;
+    bool rawPrefix = false;
 	uint64_t waitTimeNs = 0;
 	uint32_t chunks = 0;
 	uint32_t chunkBytes = 0;
@@ -45,7 +50,7 @@ public:
 private:
 	void ReaderThread();
 	bool ReadExact(void* data, DWORD size);
-	bool ValidateRecords(const TraceEventStreamComplete& complete);
+	bool ValidateRecords(const TraceEventStreamComplete& complete, uint64_t hardwareEvents = 0);
 	void Fail(const std::string& message);
 	void CloseResources();
 
@@ -63,5 +68,7 @@ private:
 	uint32_t chunkBytes_ = 0;
 	TraceEventArtifactResult result_;
 };
+
+nlohmann::json ReadTraceHardwareArtifact(const nlohmann::json& args);
 
 } // namespace veh

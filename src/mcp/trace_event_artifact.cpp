@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <random>
 #include <sstream>
@@ -158,12 +159,14 @@ bool TraceEventArtifactReceiver::ReadExact(void* data, DWORD size) {
 	return true;
 }
 
-bool TraceEventArtifactReceiver::ValidateRecords(const TraceEventStreamComplete& complete) {
+bool TraceEventArtifactReceiver::ValidateRecords(const TraceEventStreamComplete& complete, uint64_t hardwareEvents) {
 	LARGE_INTEGER position{};
 	position.QuadPart = sizeof(TraceEventArtifactHeader);
 	if (!SetFilePointerEx(file_, position, nullptr, FILE_BEGIN)) return false;
 	uint64_t cursor = 0;
 	uint64_t counts[3]{};
+    uint64_t hardwareCount = 0;
+    hardwaretrace::EventValidator hardware;
 	TracePathValidator validator;
 	while (cursor < complete.committedRecordBytes) {
 		TraceEventArtifactRecordHeader record{};
@@ -171,16 +174,27 @@ bool TraceEventArtifactReceiver::ValidateRecords(const TraceEventStreamComplete&
 		if (complete.committedRecordBytes - cursor < sizeof(record) ||
 			!ReadFile(file_, &record, sizeof(record), &read, nullptr) || read != sizeof(record)) return false;
 		uint32_t expected = 0;
+        if (hardware.uncertainRecords && record.type != 4) return false;
 		if (record.type == static_cast<uint16_t>(TraceEventRecordType::BasicBlock)) {
 			expected = sizeof(TraceBasicBlockEventEntry); ++counts[0];
 		} else if (record.type == static_cast<uint16_t>(TraceEventRecordType::Memory)) {
 			expected = sizeof(TraceBasicBlockMemoryEventEntry); ++counts[1];
 		} else if (record.type == static_cast<uint16_t>(TraceEventRecordType::Register)) {
 			expected = sizeof(TraceBasicBlockRegisterEventEntry); ++counts[2];
-		} else return false;
+        } else if (result_.schemaVersion == hardwaretrace::kSchema && record.type == 4) {
+            expected = sizeof(hardwaretrace::EventV1); ++hardwareCount;
+        } else return false;
 			if (record.reserved || record.payloadSize != expected ||
 			complete.committedRecordBytes - cursor - sizeof(record) < record.payloadSize) return false;
-		if (result_.schemaVersion == 2) {
+        if (result_.schemaVersion == hardwaretrace::kSchema && record.type == 4) {
+            hardwaretrace::EventV1 event{};
+            if (!ReadFile(file_, &event, sizeof(event), &read, nullptr) || read != sizeof(event) ||
+                !hardware.Accept(event)) return false;
+        } else if (result_.schemaVersion == hardwaretrace::kSchema && record.type == 1) {
+            TraceBasicBlockEventEntry event{};
+            if (!ReadFile(file_, &event, sizeof(event), &read, nullptr) || read != sizeof(event) ||
+                event.type == TraceBasicBlockEventType::Repeat) return false;
+        } else if (result_.schemaVersion == 2) {
 			if (record.type != static_cast<uint16_t>(TraceEventRecordType::BasicBlock)) return false;
 			TraceBasicBlockEventEntry event{};
 			if (!ReadFile(file_, &event, sizeof(event), &read, nullptr) || read != sizeof(event) ||
@@ -193,10 +207,12 @@ bool TraceEventArtifactReceiver::ValidateRecords(const TraceEventStreamComplete&
 		cursor += sizeof(record) + record.payloadSize;
 	}
 	result_.expandedEvents = result_.schemaVersion == 2 ? validator.ExpandedCount() : counts[0];
+    result_.hardware = hardware;
+    result_.hardwareEvents = hardwareCount;
 	return cursor == complete.committedRecordBytes &&
 		counts[0] == complete.basicBlockEventCount &&
 		counts[1] == complete.memoryEventCount &&
-		counts[2] == complete.registerEventCount;
+		counts[2] == complete.registerEventCount && hardwareCount == hardwareEvents;
 }
 
 void TraceEventArtifactReceiver::Fail(const std::string& message) {
@@ -243,8 +259,26 @@ void TraceEventArtifactReceiver::ReaderThread() {
 				TraceEventPayloadHash(payload.data(), frame.payloadSize) != frame.payloadHash) {
 				Fail("event artifact chunk checksum mismatch"); break;
 			}
-			DWORD written = 0;
-			if (!WriteFile(file_, payload.data(), frame.payloadSize, &written, nullptr) ||
+                if (result_.schemaVersion == hardwaretrace::kSchema) {
+                    size_t cursor = 0;
+                    bool valid = true;
+                    while (cursor < frame.payloadSize) {
+                        TraceEventArtifactRecordHeader record{};
+                        if (frame.payloadSize - cursor < sizeof(record)) { valid = false; break; }
+                        std::memcpy(&record, payload.data() + cursor, sizeof(record));
+                        cursor += sizeof(record);
+                        const uint32_t expected = record.type == 1 ? sizeof(TraceBasicBlockEventEntry) :
+                            record.type == 2 ? sizeof(TraceBasicBlockMemoryEventEntry) :
+                            record.type == 3 ? sizeof(TraceBasicBlockRegisterEventEntry) :
+                            record.type == 4 ? sizeof(hardwaretrace::EventV1) : 0;
+                        if (!expected || record.reserved || record.payloadSize != expected ||
+                            record.payloadSize > frame.payloadSize - cursor) { valid = false; break; }
+                        cursor += record.payloadSize;
+                    }
+                    if (!valid) { Fail("event chunk splits or corrupts a record"); break; }
+                }
+				DWORD written = 0;
+				if (!WriteFile(file_, payload.data(), frame.payloadSize, &written, nullptr) ||
 				written != frame.payloadSize) {
 				Fail("event artifact file write failed"); break;
 			}
@@ -253,10 +287,15 @@ void TraceEventArtifactReceiver::ReaderThread() {
 			continue;
 		}
 		if (frame.type == static_cast<uint16_t>(TraceEventStreamFrameType::Complete)) {
-			TraceEventStreamComplete complete{};
-			DWORD written = 0;
-			if (frame.payloadSize != sizeof(complete) || !ReadExact(&complete, sizeof(complete)) ||
-				TraceEventPayloadHash(&complete, sizeof(complete)) != frame.payloadHash ||
+                struct HardwareComplete { TraceEventStreamComplete base; uint64_t hardwareEvents; } completion{};
+                static_assert(sizeof(HardwareComplete) == 64);
+                auto& complete = completion.base;
+                const uint32_t completionSize = result_.schemaVersion == hardwaretrace::kSchema ?
+                    sizeof(completion) : sizeof(complete);
+                DWORD written = 0;
+                if (frame.payloadSize != completionSize || !ReadExact(&completion, completionSize) ||
+                    TraceEventPayloadHash(&completion, completionSize) != frame.payloadHash ||
+                    std::any_of(std::begin(complete.reserved), std::end(complete.reserved), [](uint8_t b) { return b != 0; }) ||
 				frame.chunkIndex != expectedChunk_ ||
 				frame.streamOffset != complete.committedRecordBytes ||
 				complete.chunkCount != expectedChunk_ ||
@@ -271,7 +310,7 @@ void TraceEventArtifactReceiver::ReaderThread() {
 			LARGE_INTEGER end{};
 			end.QuadPart = sizeof(TraceEventArtifactHeader) + complete.committedRecordBytes;
 			if (!SetFilePointerEx(file_, end, nullptr, FILE_BEGIN) || !SetEndOfFile(file_) ||
-				!ValidateRecords(complete)) {
+				!ValidateRecords(complete, completion.hardwareEvents)) {
 				Fail("event artifact records are invalid"); break;
 			}
 			TraceEventArtifactHeader header{};
@@ -280,7 +319,12 @@ void TraceEventArtifactReceiver::ReaderThread() {
 			header.headerSize = sizeof(header);
 			header.flags = kTraceEventArtifactFlagComplete |
 				(complete.truncated ? kTraceEventArtifactFlagTruncated : 0);
-			header.recordHeaderSize = sizeof(TraceEventArtifactRecordHeader);
+                if (result_.schemaVersion == hardwaretrace::kSchema) {
+                    if (completion.hardwareEvents > UINT32_MAX) { Fail("hardware event count overflow"); break; }
+                    header.flags |= hardwaretrace::kHasHardware;
+                    header.reserved = static_cast<uint32_t>(completion.hardwareEvents);
+                }
+				header.recordHeaderSize = sizeof(TraceEventArtifactRecordHeader);
 			header.basicBlockEntrySize = sizeof(TraceBasicBlockEventEntry);
 			header.memoryEntrySize = sizeof(TraceBasicBlockMemoryEventEntry);
 			header.registerEntrySize = sizeof(TraceBasicBlockRegisterEventEntry);
@@ -297,7 +341,11 @@ void TraceEventArtifactReceiver::ReaderThread() {
 				!FlushFileBuffers(file_)) {
 				Fail("cannot write event artifact header"); break;
 			}
-			result_.success = true;
+                if (result_.schemaVersion == hardwaretrace::kSchema) {
+                    uint8_t extra = 0;
+                    if (ReadExact(&extra, 1)) { Fail("event stream has data after completion"); break; }
+                }
+				result_.success = true;
 			result_.captureTruncated = complete.truncated != 0;
 			result_.captureComplete = !result_.captureTruncated;
 			result_.recordBytes = complete.committedRecordBytes;
@@ -313,6 +361,10 @@ void TraceEventArtifactReceiver::ReaderThread() {
 		Fail("unsupported event artifact stream frame type");
 		break;
 	}
+    // A rejected frame must wake a peer blocked while draining its writes;
+    // otherwise its control response cannot arrive until the capture timeout.
+    if (result_.schemaVersion == hardwaretrace::kSchema && !result_.success)
+        DisconnectNamedPipe(pipe_);
 	SetEvent(doneEvent_);
 }
 
@@ -323,6 +375,21 @@ TraceEventArtifactResult TraceEventArtifactReceiver::Finish(bool controlResponse
 		if (pipe_ != INVALID_HANDLE_VALUE) CancelIoEx(pipe_, nullptr);
 		thread_.join();
 	}
+    // Preserve verified raw chunks when control/stream completion is unavailable.
+    // This is explicitly a raw prefix, never a complete .vte artifact.
+    if (result_.schemaVersion == hardwaretrace::kSchema && !result_.success &&
+        file_ != INVALID_HANDLE_VALUE && receivedBytes_) {
+        finalPath_ += L".prefix";
+        if (FlushFileBuffers(file_) &&
+            (CreateHardLinkW(finalPath_.c_str(), partialPath_.c_str(), nullptr) ||
+             CopyFileW(partialPath_.c_str(), finalPath_.c_str(), TRUE))) {
+            result_.rawPrefix = true;
+            result_.recordBytes = receivedBytes_;
+            result_.fileSize = sizeof(TraceEventArtifactHeader) + receivedBytes_;
+            result_.path = EventWideToUtf8(finalPath_);
+            result_.sha256 = EventFileSha256(finalPath_);
+        }
+    }
 	bool published = false;
 	if (file_ != INVALID_HANDLE_VALUE && result_.success && result_.error.empty()) {
 		published = CreateHardLinkW(finalPath_.c_str(), partialPath_.c_str(), nullptr) != FALSE;
@@ -336,6 +403,7 @@ TraceEventArtifactResult TraceEventArtifactReceiver::Finish(bool controlResponse
 	if (pipe_ != INVALID_HANDLE_VALUE) { CloseHandle(pipe_); pipe_ = INVALID_HANDLE_VALUE; }
 	if (stopEvent_) { CloseHandle(stopEvent_); stopEvent_ = nullptr; }
 	if (doneEvent_) { CloseHandle(doneEvent_); doneEvent_ = nullptr; }
+    if (result_.rawPrefix) result_.sha256 = EventFileSha256(finalPath_);
 	if (result_.success && result_.error.empty() && published) {
 		result_.path = EventWideToUtf8(finalPath_);
 		result_.sha256 = EventFileSha256(finalPath_);
@@ -357,4 +425,149 @@ void TraceEventArtifactReceiver::CloseResources() {
 	if (doneEvent_) { CloseHandle(doneEvent_); doneEvent_ = nullptr; }
 }
 
+namespace {
+using json = nlohmann::json;
+std::string HardwareHex(uint64_t value) {
+    char text[24]; snprintf(text, sizeof(text), "0x%llX", value); return text;
+}
+json HardwareJson(const hardwaretrace::EventV1& e) {
+    auto value = [&](uint16_t bit, uint64_t n) -> json {
+        return (e.known & bit) ? json(HardwareHex(n)) : json(nullptr);
+    };
+    const char* kinds[] = {"control_register", "msr", "io_port"};
+    return {{"record", "hardware_event"}, {"sequence", (e.known & hardwaretrace::Step) ? json(std::to_string(e.sequence)) : json(nullptr)},
+        {"attempt", std::to_string(e.attempt)}, {"instruction", HardwareHex(e.instruction)},
+        {"subject", HardwareHex(e.subject)}, {"value", value(hardwaretrace::Value, e.value)},
+        {"before", value(hardwaretrace::Before, e.before)}, {"after", value(hardwaretrace::After, e.after)},
+        {"event_index", e.eventIndex}, {"cpu", e.cpu},
+        {"thread_id", (e.known & hardwaretrace::Thread) ? json(std::to_string(e.threadId)) : json(nullptr)},
+        {"kind", kinds[static_cast<unsigned>(e.kind) - 1]},
+        {"operation", e.operation == hardwaretrace::Operation::Read ? "read" : "write"},
+        {"width", e.width}, {"completion", e.completion == hardwaretrace::Completion::Confirmed ? "confirmed" : "uncertain"},
+        {"code_verified", !(e.flags & 1)}, {"cpl_before", e.cplBefore},
+        {"cpl_after", (e.known & hardwaretrace::CplAfter) ? json(e.cplAfter) : json(nullptr)}};
+}
+}
+nlohmann::json ReadTraceHardwareArtifact(const nlohmann::json& args) {
+    try {
+        const auto operation = args.value("operation", std::string{});
+        if (operation != "read_events" && operation != "analyze_events")
+            return {{"error", "unknown event artifact operation"}};
+        if (!args.contains("event_file") || !args["event_file"].is_string())
+            return {{"error", "event_file must be a saved .vte path"}};
+        if (args.contains("offset") && !args["offset"].is_string())
+            return {{"error", "offset must be an exact decimal string"}};
+        const std::string offsetText = args.value("offset", "0");
+        if (offsetText.empty() || offsetText.size() > 20 ||
+            offsetText.find_first_not_of("0123456789") != std::string::npos)
+            return {{"error", "offset must be an exact decimal string"}};
+        size_t used = 0;
+        const uint64_t offset = std::stoull(offsetText, &used, 10);
+        if (used != offsetText.size()) return {{"error", "invalid offset"}};
+        if (args.contains("limit") && (!args["limit"].is_number_integer() ||
+            args["limit"].get<int64_t>() < 1 || args["limit"].get<int64_t>() > 100))
+            return {{"error", "limit must be 1-100"}};
+        const size_t limit = args.value("limit", 16u);
+        const std::string kind = args.value("hardware_kind", "");
+        if (!kind.empty() && kind != "control_register" && kind != "msr" && kind != "io_port")
+            return {{"error", "hardware_kind must be control_register, msr, or io_port"}};
+        const auto path = std::filesystem::u8path(args["event_file"].get<std::string>());
+        const auto fileSize = std::filesystem::file_size(path);
+        if (fileSize < sizeof(TraceEventArtifactHeader) || fileSize > kTraceEventMaxFileBytes)
+            return {{"error", "invalid event artifact size"}};
+        std::ifstream file(path, std::ios::binary);
+        auto read = [&](void* data, size_t size) {
+            return static_cast<bool>(file.read(static_cast<char*>(data), static_cast<std::streamsize>(size)));
+        };
+        TraceEventArtifactHeader header{};
+        if (!read(&header, sizeof(header)) || header.magic != kTraceEventArtifactMagic ||
+            header.schemaVersion < 1 || header.schemaVersion > 3 ||
+            header.headerSize != sizeof(header) || header.recordHeaderSize != sizeof(TraceEventArtifactRecordHeader) ||
+            header.basicBlockEntrySize != sizeof(TraceBasicBlockEventEntry) ||
+            header.memoryEntrySize != sizeof(TraceBasicBlockMemoryEventEntry) ||
+            header.registerEntrySize != sizeof(TraceBasicBlockRegisterEventEntry) ||
+            !(header.flags & kTraceEventArtifactFlagComplete) ||
+            (header.flags & ~(header.schemaVersion == 3 ? 7u : 3u)) ||
+            (header.schemaVersion == 3 ? !(header.flags & hardwaretrace::kHasHardware) : header.reserved != 0) ||
+            header.truncationReason > static_cast<uint32_t>(TraceEventTruncationReason::TransferFailure) ||
+            (!(header.flags & kTraceEventArtifactFlagTruncated) && header.truncationReason) ||
+            header.recordByteCount != fileSize - sizeof(header))
+            return {{"error", "invalid or incomplete event artifact header"}};
+        if (args.contains("sha256") && (!args["sha256"].is_string() ||
+            args["sha256"].get<std::string>() != EventFileSha256(path.wstring())))
+            return {{"error", "event artifact SHA-256 mismatch"}};
+        uint64_t remaining = header.recordByteCount, counts[4]{}, matched = 0, next = offset;
+        uint64_t reads[3]{}, writes[3]{};
+        hardwaretrace::EventValidator validator;
+        TracePathValidator paths;
+        json events = json::array();
+        bool full = false;
+        while (remaining) {
+            TraceEventArtifactRecordHeader record{};
+            if (remaining < sizeof(record) || !read(&record, sizeof(record)))
+                return {{"error", "incomplete event record header"}};
+            remaining -= sizeof(record);
+            const uint32_t expected = record.type == 1 ? sizeof(TraceBasicBlockEventEntry) :
+                record.type == 2 ? sizeof(TraceBasicBlockMemoryEventEntry) :
+                record.type == 3 ? sizeof(TraceBasicBlockRegisterEventEntry) :
+                record.type == 4 && header.schemaVersion == 3 ? sizeof(hardwaretrace::EventV1) : 0;
+            if (!expected || record.reserved || record.payloadSize != expected || expected > remaining ||
+                (header.schemaVersion == 2 && record.type != 1))
+                return {{"error", "invalid event record"}};
+            uint8_t payload[sizeof(TraceBasicBlockRegisterEventEntry)]{};
+            if (!read(payload, expected)) return {{"error", "incomplete event record"}};
+            remaining -= expected;
+            ++counts[record.type - 1];
+            if (validator.uncertainRecords && record.type != 4)
+                return {{"error", "record follows an uncertain hardware tail"}};
+            if (record.type == 1) {
+                TraceBasicBlockEventEntry event{}; std::memcpy(&event, payload, sizeof(event));
+                if (header.schemaVersion == 2 ? !paths.Accept(event) : event.type == TraceBasicBlockEventType::Repeat)
+                    return {{"error", "invalid path record"}};
+            }
+            if (record.type != 4) continue;
+            hardwaretrace::EventV1 event{}; std::memcpy(&event, payload, sizeof(event));
+            if (!validator.Accept(event)) return {{"error", "invalid hardware event or order"}};
+            const unsigned index = static_cast<unsigned>(event.kind) - 1;
+            if (event.operation == hardwaretrace::Operation::Read) ++reads[index]; else ++writes[index];
+            const char* names[] = {"control_register", "msr", "io_port"};
+            if (!kind.empty() && kind != names[index]) continue;
+            const uint64_t position = matched++;
+            if (operation != "read_events" || position < offset || full) continue;
+            json row = HardwareJson(event);
+            if (events.size() >= limit || events.dump().size() + row.dump().size() > 5800) {
+                full = true; continue;
+            }
+            events.push_back(std::move(row));
+            next = position + 1;
+        }
+        if (counts[0] != header.basicBlockEventCount || counts[1] != header.memoryEventCount ||
+            counts[2] != header.registerEventCount || counts[3] != (header.schemaVersion == 3 ? header.reserved : 0) ||
+            file.peek() != std::char_traits<char>::eof())
+            return {{"error", "event artifact count or EOF mismatch"}};
+        json summary = {{"counts", {{"control_register", std::to_string(validator.counts[0])},
+            {"msr", std::to_string(validator.counts[1])}, {"io_port", std::to_string(validator.counts[2])}}},
+            {"unknown_value_fields", std::to_string(validator.unknownValueFields)},
+            {"uncertain_records", std::to_string(validator.uncertainRecords)},
+            {"code_uncertain", validator.codeUncertain}};
+        const char* names[] = {"control_register", "msr", "io_port"};
+        for (unsigned i = 0; i < 3; ++i) summary["operations"][names[i]] = {
+            {"read", std::to_string(reads[i])}, {"write", std::to_string(writes[i])}};
+        json result = {{"schema_version", header.schemaVersion}, {"event_file", path.u8string()},
+            {"storage_complete", true}, {"stream_truncated", (header.flags & kTraceEventArtifactFlagTruncated) != 0},
+            {"hardware", std::move(summary)}};
+        // A raw artifact alone cannot establish the control envelope's capture completion.
+        result["capture_complete"] = nullptr;
+        if (operation == "read_events") {
+            result["events"] = std::move(events);
+            result["offset"] = std::to_string(offset);
+            result["next_offset"] = next < matched ? json(std::to_string(next)) : json(nullptr);
+            result["matched_records"] = std::to_string(matched);
+        }
+        if (result.dump().size() > 8192) return {{"error", "event page metadata exceeds 8KiB"}};
+        return result;
+    } catch (const std::exception& error) {
+        return {{"error", std::string("event artifact: ") + error.what()}};
+    }
+}
 } // namespace veh

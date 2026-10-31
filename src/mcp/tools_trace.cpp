@@ -376,6 +376,8 @@ json McpServer::ToolTraceBasicBlocks(const json& args) {
 	const auto context = args.value("execution_context", "process");
 	if (context == "kd") return ToolKdTraceBasicBlocks(args);
 	if (context != "process") return {{"error", "execution_context must be process or kd"}};
+    const auto operation = args.value("operation", "capture");
+    if (operation == "read_events" || operation == "analyze_events") return ReadTraceHardwareArtifact(args);
 	if (!args.contains("threadId")) return {{"error", "threadId is required for process trace"}};
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 	return ExecuteTraceBasicBlocksTool(session_, args,
