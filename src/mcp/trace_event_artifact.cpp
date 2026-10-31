@@ -138,25 +138,41 @@ bool TraceEventArtifactReceiver::Start(const std::string& requestedPath, uint32_
 	return true;
 }
 
-bool TraceEventArtifactReceiver::ReadExact(void* data, DWORD size) {
-	DWORD total = 0;
-	while (total < size) {
-		OVERLAPPED ov{};
-		ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-		if (!ov.hEvent) return false;
-		DWORD read = 0;
-		BOOL ok = ReadFile(pipe_, static_cast<uint8_t*>(data) + total, size - total, &read, &ov);
-		if (!ok && GetLastError() == ERROR_IO_PENDING) {
-			HANDLE waits[] = {ov.hEvent, stopEvent_};
-			DWORD wait = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
-			if (wait == WAIT_OBJECT_0) ok = GetOverlappedResult(pipe_, &ov, &read, FALSE);
-			else { CancelIoEx(pipe_, &ov); ok = FALSE; }
-		}
-		CloseHandle(ov.hEvent);
-		if (!ok || !read) return false;
-		total += read;
-	}
-	return true;
+bool TraceEventArtifactReceiver::ReadExact(void* data, DWORD size, DWORD* failure) {
+    if (failure) *failure = ERROR_SUCCESS;
+    DWORD total = 0;
+    while (total < size) {
+        OVERLAPPED ov{};
+        ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!ov.hEvent) {
+            if (failure) *failure = GetLastError();
+            return false;
+        }
+        DWORD read = 0;
+        BOOL ok = ReadFile(pipe_, static_cast<uint8_t*>(data) + total, size - total, &read, &ov);
+        DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+        if (!ok && error == ERROR_IO_PENDING) {
+            HANDLE waits[] = {ov.hEvent, stopEvent_};
+            const DWORD wait = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+            if (wait == WAIT_OBJECT_0) {
+                ok = GetOverlappedResult(pipe_, &ov, &read, FALSE);
+                error = ok ? ERROR_SUCCESS : GetLastError();
+            } else {
+                CancelIoEx(pipe_, &ov);
+                // Keep OVERLAPPED and its event alive until cancellation completes.
+                GetOverlappedResult(pipe_, &ov, &read, TRUE);
+                ok = FALSE;
+                error = ERROR_OPERATION_ABORTED;
+            }
+        }
+        CloseHandle(ov.hEvent);
+        if (!ok || !read) {
+            if (failure) *failure = ok ? ERROR_HANDLE_EOF : error;
+            return false;
+        }
+        total += read;
+    }
+    return true;
 }
 
 bool TraceEventArtifactReceiver::ValidateRecords(const TraceEventStreamComplete& complete, uint64_t hardwareEvents) {
@@ -193,7 +209,7 @@ bool TraceEventArtifactReceiver::ValidateRecords(const TraceEventStreamComplete&
         } else if (result_.schemaVersion == hardwaretrace::kSchema && record.type == 1) {
             TraceBasicBlockEventEntry event{};
             if (!ReadFile(file_, &event, sizeof(event), &read, nullptr) || read != sizeof(event) ||
-                event.type == TraceBasicBlockEventType::Repeat) return false;
+                                event.type == TraceBasicBlockEventType::Repeat || !validator.Accept(event)) return false;
         } else if (result_.schemaVersion == 2) {
 			if (record.type != static_cast<uint16_t>(TraceEventRecordType::BasicBlock)) return false;
 			TraceBasicBlockEventEntry event{};
@@ -229,7 +245,10 @@ void TraceEventArtifactReceiver::ReaderThread() {
 		DWORD wait = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
 		DWORD transferred = 0;
 		if (wait == WAIT_OBJECT_0) connected = GetOverlappedResult(pipe_, &connect, &transferred, FALSE);
-		else CancelIoEx(pipe_, &connect);
+        else {
+            CancelIoEx(pipe_, &connect);
+            GetOverlappedResult(pipe_, &connect, &transferred, TRUE);
+        }
 	} else if (!connected && error == ERROR_PIPE_CONNECTED) {
 		connected = TRUE;
 	}
@@ -313,6 +332,15 @@ void TraceEventArtifactReceiver::ReaderThread() {
 				!ValidateRecords(complete, completion.hardwareEvents)) {
 				Fail("event artifact records are invalid"); break;
 			}
+            if (result_.schemaVersion == hardwaretrace::kSchema) {
+                uint8_t extra = 0;
+                DWORD eofError = ERROR_SUCCESS;
+                if (ReadExact(&extra, 1, &eofError)) { Fail("event stream has data after completion"); break; }
+                if ((eofError != ERROR_BROKEN_PIPE && eofError != ERROR_HANDLE_EOF) ||
+                    WaitForSingleObject(stopEvent_, 0) == WAIT_OBJECT_0) {
+                    Fail("event stream EOF was not confirmed"); break;
+                }
+            }
 			TraceEventArtifactHeader header{};
 			header.magic = kTraceEventArtifactMagic;
 			header.schemaVersion = result_.schemaVersion;
@@ -341,10 +369,6 @@ void TraceEventArtifactReceiver::ReaderThread() {
 				!FlushFileBuffers(file_)) {
 				Fail("cannot write event artifact header"); break;
 			}
-                if (result_.schemaVersion == hardwaretrace::kSchema) {
-                    uint8_t extra = 0;
-                    if (ReadExact(&extra, 1)) { Fail("event stream has data after completion"); break; }
-                }
 				result_.success = true;
 			result_.captureTruncated = complete.truncated != 0;
 			result_.captureComplete = !result_.captureTruncated;
@@ -387,7 +411,6 @@ TraceEventArtifactResult TraceEventArtifactReceiver::Finish(bool controlResponse
             result_.recordBytes = receivedBytes_;
             result_.fileSize = sizeof(TraceEventArtifactHeader) + receivedBytes_;
             result_.path = EventWideToUtf8(finalPath_);
-            result_.sha256 = EventFileSha256(finalPath_);
         }
     }
 	bool published = false;
@@ -522,7 +545,7 @@ nlohmann::json ReadTraceHardwareArtifact(const nlohmann::json& args) {
                 return {{"error", "record follows an uncertain hardware tail"}};
             if (record.type == 1) {
                 TraceBasicBlockEventEntry event{}; std::memcpy(&event, payload, sizeof(event));
-                if (header.schemaVersion == 2 ? !paths.Accept(event) : event.type == TraceBasicBlockEventType::Repeat)
+                if (!paths.Accept(event) || (header.schemaVersion != 2 && event.type == TraceBasicBlockEventType::Repeat))
                     return {{"error", "invalid path record"}};
             }
             if (record.type != 4) continue;

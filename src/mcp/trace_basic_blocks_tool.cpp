@@ -417,8 +417,10 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 	if (maxBlocks < 1 || maxBlocks > 16384) return {{"error", "max_blocks must be 1-16384"}};
 	if (maxEdges < 1 || maxEdges > 32768) return {{"error", "max_edges must be 1-32768"}};
 	if (maxSteps < 1 || maxSteps > 5000000) return {{"error", "max_steps must be 1-5000000"}};
-	if (timeoutMs < 100 || timeoutMs > (hardware ? 1800000 : 60000))
-        return {{"error", hardware ? "timeout_ms must be 100-1800000" : "timeout_ms must be 100-60000"}};
+	const bool longGuestFile = session.IsGuestTarget() && fileEventOutput && !session.IsRemoteTarget();
+        const int maxTimeoutMs = (hardware || longGuestFile) ? 1800000 : 60000;
+        if (timeoutMs < 100 || timeoutMs > maxTimeoutMs)
+            return {{"error", maxTimeoutMs == 1800000 ? "timeout_ms must be 100-1800000" : "timeout_ms must be 100-60000"}};
 	if (stackBytes < 0 || stackBytes > static_cast<int>(kTraceBasicBlockMaxStackBytes))
 		return {{"error", "stack_bytes must be 0-256"}};
 	if (maxMemoryWrites < 1 || maxMemoryWrites > 16384)

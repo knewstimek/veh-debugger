@@ -129,7 +129,7 @@ int wmain(int argc, wchar_t** argv) {
             if (mode == L"cap-exit") ExitProcess(0xC0000135U);
             veh::GetCapabilitiesResponse caps{};
             caps.status = veh::IpcStatus::Ok; caps.backend = veh::IpcBackend::Hypervisor;
-            caps.flags = veh::kCapNoTargetFootprint | (mode == L"host-cap" ? 0 : machineMode ? veh::kCapVirtualMachineTarget : veh::kCapGuestTarget);
+            caps.flags = veh::kCapNoTargetFootprint | (mode == L"host-cap" || mode == L"hardware-host" ? 0 : machineMode ? veh::kCapVirtualMachineTarget : veh::kCapGuestTarget);
             if(scanMode){veh::SetCommandSupported(caps.commands,veh::IpcCommand::ValueScan);if(mode!=L"scan-legacy")caps.flags|=veh::kCapValueScanV2;}
             if(mode==L"machine-guest-cap")caps.flags=veh::kCapNoTargetFootprint|veh::kCapGuestTarget;
             for (auto op : {veh::IpcCommand::GetCapabilities, veh::IpcCommand::GetTargetInfo, veh::IpcCommand::GetThreads,
@@ -221,6 +221,9 @@ int wmain(int argc, wchar_t** argv) {
             ++hardwareQueries;
             if (!hardwareCapabilities(pipe, header.command, mode)) break;
         } else if (hardwareMode && command == veh::IpcCommand::TraceBasicBlocksHardware) {
+            ++pathRequests;
+            if (!hardwareCapture(pipe, header.command, bytes, mode)) break;
+        } else if (mode == L"hardware-legacy-file" && command == veh::IpcCommand::TraceBasicBlocks) {
             ++pathRequests;
             if (!hardwareCapture(pipe, header.command, bytes, mode)) break;
         } else if (mode.rfind(L"path-", 0) == 0 && command == veh::IpcCommand::TraceBasicBlocks) {
@@ -520,6 +523,7 @@ int wmain(int argc, wchar_t** argv) {
             if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
         } else if (command == veh::IpcCommand::GetTargetInfo) {
             veh::GetTargetInfoResponse info{veh::IpcStatus::Ok, veh::IpcTargetScope::Guest, pid, hardwareMode ? 64u : 32u};
+            if(mode == L"hardware-host") info.scope = veh::IpcTargetScope::Host;
             if(machineMode){info.scope=veh::IpcTargetScope::VirtualMachine;info.pid=0;info.addressBits=0;}
             if(mode==L"machine-wrong-pid")info.pid=1;
             if(mode==L"machine-bad-width")info.addressBits=64;

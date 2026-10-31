@@ -14,6 +14,7 @@ bool hardwareCapabilities(HANDLE pipe, uint32_t command, const std::wstring& mod
     if (mode == L"hardware-reserved") caps.reserved[1] = 1;
     if (mode == L"hardware-user-only") caps.modeFlags = 0x101;
     if (mode == L"hardware-budget") caps.maxSteps = 1;
+    if (mode == L"hardware-limit-ok" || mode == L"hardware-limit-exceeded") caps.maxPerInstruction = 1;
     if (mode == L"hardware-cap-short") return send(pipe, command, &caps, sizeof(caps) - 1);
     return reply(pipe, command, caps);
 }
@@ -23,10 +24,13 @@ bool hardwareCapture(HANDLE pipe, uint32_t command, const std::vector<unsigned c
     namespace ht = veh::hardwaretrace;
     ht::RequestV1 envelope;
     veh::TraceBasicBlocksRequest request{};
-    if (bytes.size() != sizeof(envelope) + veh::kTraceBasicBlocksRequestV10Size)
+    const bool hardware = command == static_cast<uint32_t>(veh::IpcCommand::TraceBasicBlocksHardware);
+    const size_t prefix = hardware ? sizeof(envelope) : 0;
+    if (bytes.size() != prefix + veh::kTraceBasicBlocksRequestV10Size)
         return reply(pipe, command, veh::IpcStatus::InvalidArgs);
-    std::memcpy(&envelope, bytes.data(), sizeof(envelope));
-    std::memcpy(&request, bytes.data() + sizeof(envelope), veh::kTraceBasicBlocksRequestV10Size);
+    if (hardware) std::memcpy(&envelope, bytes.data(), sizeof(envelope));
+    else { envelope.baseRequestBytes = veh::kTraceBasicBlocksRequestV10Size; envelope.kinds = 7; }
+    std::memcpy(&request, bytes.data() + prefix, veh::kTraceBasicBlocksRequestV10Size);
     if (envelope.version != 1 || envelope.headerBytes != sizeof(envelope) ||
         envelope.baseRequestBytes != veh::kTraceBasicBlocksRequestV10Size ||
         !envelope.kinds || (envelope.kinds & ~7u) || envelope.reserved0 || envelope.reserved1 ||
@@ -34,9 +38,11 @@ bool hardwareCapture(HANDLE pipe, uint32_t command, const std::vector<unsigned c
         request.eventOutputMode != 1 || !request.collectEvents || request.collectionFlags ||
         request.maxSteps > 5000000 || request.timeoutMs > 1800000)
         return reply(pipe, command, veh::IpcStatus::InvalidArgs);
+    if (mode == L"hardware-legacy-file" && request.timeoutMs != 120000)
+        return reply(pipe, command, veh::IpcStatus::InvalidArgs);
     std::vector<unsigned char> records;
     uint64_t count = 0, unknown = 0, uncertain = 0;
-    const unsigned iterations = mode == L"hardware-many" ? 75 : 3;
+    const unsigned iterations = !hardware ? 0 : mode == L"hardware-many" ? 75 : 3;
     for (unsigned i = 0; i < iterations; ++i) {
         unsigned kind = i % 3;
         if (!(envelope.kinds & (1u << kind))) continue;
@@ -59,6 +65,10 @@ bool hardwareCapture(HANDLE pipe, uint32_t command, const std::vector<unsigned c
         if (mode == L"hardware-code") e.flags = 1;
         if (mode == L"hardware-bad-known" && i == 1) { e.value = 9; e.known &= ~ht::Value; }
         if (mode == L"hardware-bad-index" && i == 1) e.eventIndex = 2;
+        if (mode == L"hardware-limit-exceeded" && i == 1) {
+            e.sequence = 1; e.attempt = UINT64_C(9007199254740993);
+            e.instruction = request.rangeStart; e.eventIndex = 1;
+        }
         if (!(e.known & ht::Value)) ++unknown;
         if (!(e.known & ht::Before)) ++unknown;
         if (!(e.known & ht::After)) ++unknown;
@@ -73,28 +83,29 @@ bool hardwareCapture(HANDLE pipe, uint32_t command, const std::vector<unsigned c
     HANDLE stream = CreateFileW(actualName.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
     if (stream == INVALID_HANDLE_VALUE) return reply(pipe, command, veh::IpcStatus::Error);
     veh::TraceEventStreamFrameHeader frame{};
-    frame.magic = veh::kTraceEventStreamMagic; frame.schemaVersion = 3; frame.token = request.eventStreamToken;
+    frame.magic = veh::kTraceEventStreamMagic; frame.schemaVersion = hardware ? 3 : 1; frame.token = request.eventStreamToken;
     frame.type = 1; frame.payloadSize = static_cast<uint32_t>(records.size());
     frame.payloadHash = veh::TraceEventPayloadHash(records.data(), records.size());
     if (mode == L"hardware-bad-hash") frame.payloadHash++;
     if (mode == L"hardware-bad-token") frame.token++;
     if (mode == L"hardware-bad-offset") frame.streamOffset = 1;
-    bool ok = transfer(stream, true, &frame, sizeof(frame)) &&
-        transfer(stream, true, records.data(), static_cast<DWORD>(records.size()));
+    bool ok = records.empty() || (transfer(stream, true, &frame, sizeof(frame)) &&
+        transfer(stream, true, records.data(), static_cast<DWORD>(records.size())));
     if (mode != L"hardware-raw-error") {
         struct Complete { veh::TraceEventStreamComplete base; uint64_t hardware; } complete{};
         static_assert(sizeof(complete) == 64);
-        complete.base.committedRecordBytes = records.size(); complete.base.chunkCount = 1;
+        complete.base.committedRecordBytes = records.size(); complete.base.chunkCount = records.empty() ? 0 : 1;
         complete.hardware = count;
         if (mode == L"hardware-bad-count") complete.hardware++;
-        frame.type = 2; frame.chunkIndex = 1; frame.streamOffset = records.size();
-        frame.payloadSize = sizeof(complete); frame.payloadHash = veh::TraceEventPayloadHash(&complete, sizeof(complete));
-        ok = ok && transfer(stream, true, &frame, sizeof(frame)) && transfer(stream, true, &complete, sizeof(complete));
+        frame.type = 2; frame.chunkIndex = complete.base.chunkCount; frame.streamOffset = records.size();
+        frame.payloadSize = hardware ? sizeof(complete) : sizeof(complete.base);
+        frame.payloadHash = veh::TraceEventPayloadHash(&complete, frame.payloadSize);
+        ok = ok && transfer(stream, true, &frame, sizeof(frame)) && transfer(stream, true, &complete, frame.payloadSize);
         if (mode == L"hardware-trailing") { unsigned char extra = 1; transfer(stream, true, &extra, 1); }
     }
     // Drain buffered writes before closing, including the connect/read race.
     FlushFileBuffers(stream);
-    CloseHandle(stream);
+    if (mode != L"hardware-no-eof") CloseHandle(stream);
     if (!ok) return reply(pipe, command, veh::IpcStatus::Error);
     if (mode == L"hardware-raw-error") return reply(pipe, command, veh::IpcStatus::Error);
     veh::TraceBasicBlocksResponse base{};
@@ -137,5 +148,12 @@ bool hardwareCapture(HANDLE pipe, uint32_t command, const std::vector<unsigned c
     #pragma pack(push, 1)
     struct PackedResult { ht::ResponseV1 hardware; veh::TraceBasicBlocksResponse base; } result{response, base};
     #pragma pack(pop)
-    return reply(pipe, command, result);
+    if (!hardware) return reply(pipe, command, base);
+    const bool replied = reply(pipe, command, result);
+    if (mode == L"hardware-no-eof") {
+        // Deliberately keep the data pipe open past the receiver's bounded drain.
+        Sleep(12000);
+        CloseHandle(stream);
+    }
+    return replied;
 }

@@ -16,6 +16,10 @@ they must not unexpectedly control the whole machine. Pure saved-artifact reads
 use the same tool with `operation="read_capture"`; they require no KD connection
 and are allowed in an attached process batch or breakpoint action.
 
+Hardware events require a separate negotiation and transport; see
+[KD hardware trace v1](KD_HARDWARE_TRACE_PROTOCOL.md). The definitions there do
+not change or enable the existing KD runtime path.
+
 ## Version 1 compatibility contract
 
 The optional RSP extension does not change process IPC layouts/capabilities.

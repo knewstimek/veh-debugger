@@ -1,4 +1,5 @@
 #include "../src/common/trace_path_compressor.h"
+#include "../src/common/kd_hardware_trace_protocol.h"
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -14,8 +15,52 @@ static TraceBasicBlockEventEntry Event(uint64_t seq, uint64_t site, uint32_t ver
 static bool Equal(const TraceBasicBlockEventEntry& a, const TraceBasicBlockEventEntry& b) {
     return std::memcmp(&a, &b, sizeof(a)) == 0;
 }
+static void CheckKdHardwareContract() {
+    namespace hw = veh::kdhardware;
+    namespace event = veh::hardwaretrace;
+    auto check = [](bool ok) { if (!ok) throw std::runtime_error("KD hardware contract failed"); };
+    check(sizeof(hw::CapabilitiesV1) == 64 && sizeof(hw::HeaderV1) == 192 &&
+        sizeof(hw::PageV1) == 64 && sizeof(hw::CaptureFileV1) == 216 &&
+        sizeof(kdtrace::HeaderV2) == 72 && sizeof(event::EventV1) == 80);
+    hw::CapabilitiesV1 caps;
+    caps.supportedKinds = 7; caps.supportedFlags = 3;
+    check(hw::ValidCapabilities(caps));
+    auto badCaps = caps; badCaps.supportedKinds = 8; check(!hw::ValidCapabilities(badCaps));
+    badCaps = caps; badCaps.hardwareCapacity = 15; check(!hw::ValidCapabilities(badCaps));
+    badCaps = caps; badCaps.reserved = 1; check(!hw::ValidCapabilities(badCaps));
+    badCaps = caps; badCaps.maxFileBytes = 1911; check(!hw::ValidCapabilities(badCaps));
+    hw::HeaderV1 h;
+    h.generation = UINT64_C(0xFEDCBA9876543210);
+    h.requestId = UINT64_C(0x123456789ABCDEF1);
+    h.appliedKinds = 7; h.maxSteps = 100; h.cpu = 3;
+    h.steps = h.attempts = h.instructionCount = 2;
+    h.hardwareCount = h.retainedHardware = 2;
+    h.resultFlags = event::kFinalPcValid; h.haltFlags = 1;
+    h.end = hw::End::Range; h.finalAddress = 0x2000;
+    check(hw::ValidHeader(h));
+    uint8_t bytes[192]{}; std::memcpy(bytes, &h, sizeof(h));
+    const uint8_t identity[16] = {0x10,0x32,0x54,0x76,0x98,0xBA,0xDC,0xFE,
+        0xF1,0xDE,0xBC,0x9A,0x78,0x56,0x34,0x12};
+    check(std::memcmp(bytes + 16, identity, sizeof(identity)) == 0);
+    auto bad = h; bad.haltFlags = 0; check(!hw::ValidHeader(bad));
+    bad = h; bad.resultFlags |= 64; check(!hw::ValidHeader(bad));
+    bad = h; bad.hardwareOffset = UINT64_MAX; check(!hw::ValidHeader(bad));
+    bad = h; bad.scopeExit = event::ScopeExit::Cpl; check(!hw::ValidHeader(bad));
+    h.end = hw::End::BufferFull; h.paused = 1; check(hw::ValidHeader(h));
+    bad = h; bad.resultFlags |= event::kCountLowerBound; check(!hw::ValidHeader(bad));
+    bad = h; bad.paused = 0; check(!hw::ValidHeader(bad));
+    h.end = hw::End::CompletionUncertain; h.paused = 0; h.attempts = 3;
+    check(!hw::ValidHeader(h));
+    h.resultFlags |= event::kCountLowerBound; h.uncertainRecords = 1;
+    check(hw::ValidHeader(h));
+    hw::CaptureFileV1 file;
+    check(std::memcmp(file.magic, "VEHKDHW1", 8) == 0 &&
+        file.headerBytes == 216 && file.recordBytes == 200 && !file.reserved);
+    std::cout << "KD hardware v1: layouts, identities, reserved flags, paired offsets and uncertainty passed\n";
+}
 int main() {
     try {
+        CheckKdHardwareContract();
         for (uint32_t width = 1; width <= 33; ++width) {
             TracePathCompressor codec;
             std::vector<TraceBasicBlockEventEntry> raw, encoded, expanded;

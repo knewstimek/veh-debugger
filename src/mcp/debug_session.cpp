@@ -1998,9 +1998,9 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
             result.status = IpcStatus::Unsupported;
             result.controlFailure = reason;
         };
-        if (!guestTarget_ || IsRemoteTarget() || (hardwareKinds & ~hardwaretrace::kKinds) ||
+        if (IsRemoteTarget() || vmTarget_ || (hardwareKinds & ~hardwaretrace::kKinds) ||
             collectionFlags || eventOutputMode != TraceEventOutputMode::File || !collectEvents) {
-            reject("hardware_trace_requires_guest_file_wire10"); return result;
+            reject("hardware_trace_requires_process_file_wire10"); return result;
         }
         std::vector<uint8_t> capability;
         if (!ipcTransport_->SendAndReceive(IpcCommand::TraceHardwareCapabilities, nullptr, 0, capability, 5000) ||
@@ -2174,6 +2174,7 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
             artifact.hardware.uncertainRecords != h.uncertainRecords ||
             artifact.hardware.unknownValueFields != h.unknownValueFields ||
             (artifact.hardware.appliedKinds & ~hardwareKinds) ||
+            artifact.hardware.maxPerInstructionObserved > hardwareCaps.maxPerInstruction ||
             (artifact.hardware.codeUncertain && !(h.resultFlags & hardwaretrace::kCodeUncertain)) ||
             (h.uncertainRecords && !(h.resultFlags & hardwaretrace::kCountLowerBound)) ||
             ((h.resultFlags & hardwaretrace::kNoTargetInstructionAttempted) && h.retainedRecords)) {

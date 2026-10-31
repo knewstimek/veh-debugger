@@ -49,7 +49,7 @@ public:
 
 private:
 	void ReaderThread();
-	bool ReadExact(void* data, DWORD size);
+	bool ReadExact(void* data, DWORD size, DWORD* failure = nullptr);
 	bool ValidateRecords(const TraceEventStreamComplete& complete, uint64_t hardwareEvents = 0);
 	void Fail(const std::string& message);
 	void CloseResources();

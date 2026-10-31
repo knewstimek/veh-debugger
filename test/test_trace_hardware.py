@@ -200,6 +200,45 @@ def main():
                     break
             assert observed == many_rows, (len(observed), len(many_rows))
             checks += 1
+            # Review regressions are collected together so every defect is visible.
+            review_failures = []
+            client.tool("veh_detach")
+            host_attached = client.tool("veh_attach", {
+                "pid": client.proc.pid, "target_scope": "host",
+                "agent": str(Path(RELEASE) / "guest_backend_fixture.exe"),
+                "agent_args": ["--metadata", "hardware-host"]})
+            assert host_attached.get("success"), host_attached
+            host_capture = trace()
+            if "error" in host_capture:
+                review_failures.append("host-scope hypervisor process refused: " + json.dumps(host_capture, separators=(",", ":")))
+            else:
+                verify(host_capture)
+                assert counters() == "hardware:1:1", counters()
+            checks += 1
+            attach("hardware-no-eof")
+            missing_eof = trace()
+            if "error" not in missing_eof or missing_eof.get("complete") is not False:
+                review_failures.append("EOF drain cancellation accepted as a complete capture")
+            else:
+                prefix = missing_eof["event_file"]
+                prefix_bytes = Path(prefix["path"]).read_bytes()
+                assert prefix["raw_prefix"] and hashlib.sha256(prefix_bytes).hexdigest() == prefix["sha256"], missing_eof
+                assert "error" in client.tool("veh_trace_basic_blocks", {
+                    "operation": "read_events", "event_file": prefix["path"]}), missing_eof
+            checks += 1
+            attach("hardware-limit-ok")
+            verify(trace())
+            attach("hardware-limit-exceeded")
+            exceeded = trace()
+            if "error" not in exceeded:
+                review_failures.append("negotiated max_per_instruction=1 accepted two records")
+            checks += 1
+            attach("hardware-legacy-file")
+            legacy_long = trace({"collect_hardware_events": False, "events_output": "file",
+                                 "collect_events": True, "timeout_ms": 120000})
+            if "error" in legacy_long or "hardware_collection" in legacy_long or counters() != "hardware:0:1":
+                review_failures.append("ordinary guest file capture rejected its 120000ms budget")
+            checks += 1
             # Offline reads do not require an attached guest.
             client.tool("veh_detach")
             offline = client.tool("veh_trace_basic_blocks", query)
@@ -222,6 +261,19 @@ def main():
                     "operation": "read_events", "event_file": str(legacy_path)})
                 assert legacy_page["events"] == [] and legacy_page["schema_version"] == version, legacy_page
                 checks += 1
+            # The native reader must reject the same malformed basic payload as Python.
+            malformed_basic = reader.BASIC_BLOCK.pack(0, 0, 0, 0, 77, 0, 0xFFFFFFFF, 255, 0, 0, 0)
+            bad_header = list(reader.HEADER.unpack(raw[:88]))
+            bad_header[8] += reader.RECORD_HEADER.size + len(malformed_basic)
+            bad_header[9] += 1
+            invalid_basic = reader.HEADER.pack(*bad_header) + reader.RECORD_HEADER.pack(1, 0, len(malformed_basic)) + malformed_basic + raw[88:]
+            invalid_path = root / "invalid-basic.vte"
+            invalid_path.write_bytes(invalid_basic)
+            native_invalid = client.tool("veh_trace_basic_blocks", {
+                "operation": "read_events", "event_file": str(invalid_path)})
+            if "error" not in native_invalid:
+                review_failures.append("native artifact reader accepted unknown basic-event type")
+            checks += 1
             # Reader rejects count, reserved, size, unknown record, truncation, and EOF corruption.
             for corrupted in (raw + b"x", raw[:-1],
                               raw[:84] + struct.pack("<I", 9) + raw[88:],
@@ -235,6 +287,7 @@ def main():
                     checks += 1
                 else:
                     raise AssertionError("reader accepted corrupted schema3 artifact")
+            assert not review_failures, review_failures
     print(f"PASS: hardware trace frontend {checks} boundaries; direct/batch/action, exact values, schema3, partial files and offline pages")
 
 

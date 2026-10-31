@@ -118,12 +118,13 @@ public:
         if (!(e.known & Before)) ++unknownValueFields;
         if (!(e.known & After)) ++unknownValueFields;
         if (e.flags & 1) codeUncertain = true;
+        if (e.eventIndex + 1 > maxPerInstructionObserved) maxPerInstructionObserved = e.eventIndex + 1;
         appliedKinds |= 1u << (static_cast<unsigned>(e.kind) - 1);
         return true;
     }
     uint64_t counts[3]{}, uncertainRecords = 0, unknownValueFields = 0;
     uint64_t LastSequence() const { return lastSequence_; }
-    uint32_t appliedKinds = 0;
+    uint32_t appliedKinds = 0, maxPerInstructionObserved = 0;
     bool codeUncertain = false;
 private:
     EventV1 last_{};

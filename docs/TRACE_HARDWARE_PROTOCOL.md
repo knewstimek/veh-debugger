@@ -1,8 +1,13 @@
 # Hardware instruction trace v1 frontend
 
 The existing `veh_trace_basic_blocks` tool supports hardware events through the
-process/guest IPC path. No extra MCP tool is added. KD/RSP policies and native
-tracing retain their existing contracts.
+process IPC path, including ordinary hypervisor process connections with
+host target scope. Support is determined by TraceHardwareCapabilities, not by
+requiring target_scope=guest. No extra MCP tool is added. KD/RSP policies and native
+tracing retain their existing contracts. Kernel execution in the current frontend
+uses whole-machine KD, so this process IPC extension alone cannot expose kernel
+hardware events. The separate [KD hardware v1 contract](KD_HARDWARE_TRACE_PROTOCOL.md)
+defines that negotiation/transport without changing existing KD v2.
 
 ```json
 {
@@ -27,7 +32,9 @@ Hardware capture implies `collect_events=true` and defaults to
 The result is a bounded receipt; raw events live in the separate artifact.
 Target windows and remote file pipes cannot be combined with this mode.
 Hardware timeout is100–1800000ms, steps1–5000000, file budget88–4294967296bytes;
-negotiated smaller limits also apply. Explicit artifact paths are limited
+ordinary guest file event capture also accepts100–1800000ms without hardware.
+Native host and inline process capture retain their60000ms limit; no request is clamped.
+Negotiated smaller limits also apply. Explicit artifact paths are limited
 to1024 UTF-8 bytes so receipts stay within8KiB. Files are never overwritten.
 
 ## IPC and compatibility
@@ -61,7 +68,11 @@ Record type4 has the80-byte EventV1 payload. Stream frames remain48bytes;
 schema3 Complete appends uint64 hardware_events to the existing56bytes.
 
 The receiver checks frame token/index/offset/hash, whole-record chunk
-boundaries, reserved fields, all four counts, event semantics and stream EOF.
+boundaries, reserved fields, all four counts, event semantics, the negotiated
+per-instruction record limit and stream EOF. Drain cancellation is an error,
+not EOF; the complete header is written only after EOF is confirmed. Native
+artifact reads validate basic path payloads using the same rules as compressed
+paths, with repeat records limited to schema2.
 Known-zero values remain zero; unknown values are null. New uint64
 sequence/attempt/count values are decimal strings and hardware values/addresses
 are hexadecimal strings. A confirmed event has a known completed sequence and
