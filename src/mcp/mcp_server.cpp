@@ -1474,7 +1474,9 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		Tool(&McpServer::ToolTraceBasicBlocks, "trace", kCapture, true,
 			{{"name", "veh_trace_basic_blocks"}, {"description", "Trace one stopped thread with optional snapshots and compress_paths for lossless path repeats. Optional ordered code/memory/register events and function-return scope. collect_snapshots=false skips capture; compression requires collect_code. New policies require backend support; VEH rejects active HW breakpoints. TF exception counts are unchanged."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"threadId", {{"type", "integer"}, {"description", "OS thread ID currently stopped by VEH; its RIP/EIP must be inside the range"}}},
+			{"execution_context", {{"type", "string"}, {"enum", {"process", "kd"}}, {"description", "process (default) or explicit whole-machine KD CPU capture, including kernel and SYSCALL transitions. KD requires veh_kd_connect and a halted target; max_steps<=4096."}}},
+			{"cpu", {{"type", "integer"}, {"minimum", 0}, {"description", "Selected vCPU for execution_context=kd"}}},
+			{"threadId", {{"type", "integer"}, {"description", "Stopped process thread; omit or use 0 for KD CPU capture"}}},
 			{"start", {{"type", "string"}, {"description", "Inclusive range start (hex or module+RVA)"}}},
 			{"end", {{"type", "string"}, {"description", "Exclusive range end (hex or module+RVA, max range size 4 MiB)"}}},
 			{"max_blocks", {{"type", "integer"}, {"description", "Maximum unique executed block entries (default 4096, max 16384)"}}},
@@ -1522,7 +1524,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			}}, {"required", json::array({"address", "occurrence", "before_steps", "after_steps"})}, {"description", "Bounded pre-trigger ring plus post-trigger capture; incompatible with occurrence_window, conditions, stop_on_return, code_output=file, and events_output=file"}}}
 			,{"output_file", {{"type", "string"}, {"description", "Write the complete trace result to a new MCP-host file and return compact path/hash/count metadata"}}}
 			,{"output_format", {{"type", "string"}, {"enum", {"json", "jsonl"}}, {"description", "output_file encoding (default json); JSONL uses a manifest plus section-item records"}}}
-		 }}, {"required", json::array({"threadId", "start", "end"})}}}}),
+		 }}, {"required", json::array({"start", "end"})}}}}),
 
 		Tool(&McpServer::ToolCheckpointCreate, "checkpoint", kCapture, true,
 			{{"name", "veh_checkpoint_create"}, {"description", "Capture one VEH-stopped thread's GPR/flags (plus x64 XMM), TEB and FS/GS selector/base metadata, and explicitly selected memory ranges. Stack ranges expose the safe logical restore start at the saved SP. Checkpoints are session-local and bounded; they do not capture other threads, handles, allocations, files, sockets, or kernel state."},
@@ -2078,6 +2080,8 @@ json McpServer::DispatchTool(const std::string& name, const json& args, bool* kn
 }
 
 json McpServer::RunNestedTool(const std::string& name, const json& args) {
+    if (name == "veh_trace_basic_blocks" && args.value("execution_context", "process") == "kd")
+        return {{"error", "Whole-machine KD capture requires a direct call; excluded from batch, capture setup and breakpoint actions"}};
     if (name == "veh_symbolize" && args.contains("analysis") && args["analysis"].is_object()) {
         const auto operation = args["analysis"].value("operation", "status");
         if (operation == "open" || operation == "close")

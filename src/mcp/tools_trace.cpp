@@ -373,6 +373,10 @@ json McpServer::ToolTraceCalls(const json& args) {
 }
 
 json McpServer::ToolTraceBasicBlocks(const json& args) {
+	const auto context = args.value("execution_context", "process");
+	if (context == "kd") return ToolKdTraceBasicBlocks(args);
+	if (context != "process") return {{"error", "execution_context must be process or kd"}};
+	if (!args.contains("threadId")) return {{"error", "threadId is required for process trace"}};
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 	return ExecuteTraceBasicBlocksTool(session_, args,
 		[this](const std::string& text, uint64_t& value) { return ParseAddress(text, value); });

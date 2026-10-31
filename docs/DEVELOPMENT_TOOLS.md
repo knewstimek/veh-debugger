@@ -595,6 +595,21 @@ register replies, interrupt fallback and safe detach of execution/data
 breakpoints. Cleanup rejection must retain the session and prevent detach;
 retry must remove each original kind/size before sending `D`. No VM is used.
 
+### Bounded kernel basic-block capture
+
+`veh_trace_basic_blocks(execution_context="kd")` explicitly selects a halted
+machine's CPU instead of an attached process thread. The optional backend RSP
+extension collects bounded records across user/kernel transitions; the frontend
+only decodes captured bytes. See [KD_TRACE_PROTOCOL.md](KD_TRACE_PROTOCOL.md)
+for wire layouts, supported options, precise-stop rules and current limits.
+KD capture is direct-call only and is refused inside batch, capture setup and
+breakpoint actions. It never automatically halts a machine for a process trace.
+
+`py -3 tools/run_tests.py test_kernel_trace.py --jobs 1 --timeout 30`
+runs the synthetic RSP capture receipt/policy/grouping regression. It checks
+pre-effect policy rejection, selected CPU, exact terminal semantics and malformed
+pages. This fixture does not qualify a real backend or hardware.
+
 ## Acknowledgements and operation deadlines
 
 DAP command success requires the backend response: status-only operations must

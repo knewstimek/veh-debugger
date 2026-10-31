@@ -94,7 +94,9 @@ bool McpServer::KdSelect(const json& args, json& error)
 		return true;
 	std::string reply;
 	const int cpu = JsonInt(args, "cpu", 0);
-	if (!kd_->Request("Hg" + std::to_string(cpu + 1), &reply) || reply != "OK") {
+	char selection[32];
+	std::snprintf(selection, sizeof(selection), "Hg%x", cpu + 1);
+	if (cpu < 0 || cpu >= 64 || !kd_->Request(selection, &reply) || reply != "OK") {
 		error = {{"error", "no such cpu"}, {"cpu", cpu}};
 		return false;
 	}

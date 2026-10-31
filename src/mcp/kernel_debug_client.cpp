@@ -462,6 +462,11 @@ bool KernelDebugClient::WaitStop(std::string* stop, uint32_t timeout_ms)
 			((*stop)[0] == 'T' || (*stop)[0] == 'S' || (*stop)[0] == 'W' || (*stop)[0] == 'X') &&
 			std::isxdigit(static_cast<unsigned char>((*stop)[1])) &&
 			std::isxdigit(static_cast<unsigned char>((*stop)[2]));
+		if (!console && stop->size() == 3 && (*stop)[0] == 'E' &&
+			std::isxdigit(static_cast<unsigned char>((*stop)[1])) && std::isxdigit(static_cast<unsigned char>((*stop)[2]))) {
+			wait_diagnostic_ = "resume refused: " + *stop;
+			return false; // QueryStop must still confirm the actual halted state.
+		}
 		if (!console && stopped) {
 			running_ = false;
 			last_stop_ = *stop;
