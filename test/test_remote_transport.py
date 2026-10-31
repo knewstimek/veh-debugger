@@ -477,6 +477,7 @@ try{$pin=([BitConverter]::ToString($hash.ComputeHash($cert.RawData))).Replace('-
                 "certificate_sha256": pin, "token_file": str(token_path),
                 "backends": {
                     "guest": {"path": backend, "target_scope": "guest", "args": ["--metadata", "delayed-trace"]},
+                    "trace-output": {"path": backend, "target_scope": "guest", "args": ["--metadata", "path-file-output"]},
                     "machine": {"path": backend, "target_scope": "vm", "args": ["--metadata", "machine"]},
                     "host": {"path": backend, "target_scope": "host", "args": ["--metadata", "host-cap"], "allow_launch": True},
                     **{alias: {"path": backend, "target_scope": "guest", "args": ["--metadata", mode]}
@@ -560,7 +561,8 @@ try{$pin=([BitConverter]::ToString($hash.ComputeHash($cert.RawData))).Replace('-
             for alias, scope in (("guest", "guest"), ("machine", "vm"), ("host", "host"),
                                  ("early", "guest"), ("ready-exit", "guest"), ("cap-exit", "guest"),
                                  ("diagnostic-driver", "guest"), ("diagnostic-abi", "guest"), ("diagnostic-invalid", "guest"),
-                                 ("scope-mismatch", "guest"), ("missing-agent", "guest"), ("state-refusal", "guest")):
+                                 ("scope-mismatch", "guest"), ("missing-agent", "guest"), ("state-refusal", "guest"),
+                                 ("trace-output", "guest")):
                 mappings[alias] = {"target_scope": scope, "remote": {
                     "address": "127.0.0.1", "port": port, "certificate_sha256": pin,
                     "token_file": str(token_path), "backend": alias, "timeout_ms": 20000}}
@@ -657,6 +659,31 @@ try{$pin=([BitConverter]::ToString($hash.ComputeHash($cert.RawData))).Replace('-
                 assert errors[0] and len(set(errors)) == 1 and fragment in errors[0], "remote rejection parity"
                 assert batch["failed"] == 1 and batch["succeeded"] == 0, "batch rejection status"
             passed("conditional breakpoint/file trace rejection agrees in direct/toolbox/batch")
+            assert client.tool("veh_attach", {"backend": "trace-output", "pid": 424244}, timeout=25).get("success")
+            trace_args = {"threadId": 77, "start": "0x1000", "end": "0x1100",
+                          "collect_code": True, "collect_snapshots": False, "compress_paths": True}
+            reference = client.tool("veh_trace_basic_blocks", dict(trace_args, output_mode="inline"))
+            assert "error" not in reference and reference["events"], reference
+            generated = []
+            try:
+                receipts = [client.tool("veh_trace_basic_blocks", trace_args)]
+                remote_batch = client.tool("veh_batch", {"steps": [
+                    {"tool": "veh_trace_basic_blocks", "args": trace_args}]})
+                receipts.append(remote_batch["results"][0]["result"])
+                for receipt in receipts:
+                    assert receipt.get("mode") == "file" and "event_file" not in receipt, receipt
+                    output = receipt["output_file"]
+                    path = Path(output["path"])
+                    generated.append(path)
+                    raw = path.read_bytes()
+                    assert hashlib.sha256(raw).hexdigest() == output["sha256"]
+                    assert json.loads(raw) == reference
+                assert remote_batch["failed"] == 0, remote_batch
+            finally:
+                for path in generated:
+                    path.unlink(missing_ok=True)
+            assert client.tool("veh_attach", {"backend": "guest", "pid": 424244}, timeout=25).get("success")
+            passed("remote trace keeps inline IPC while default direct/batch responses use host artifacts")
             rejected = client.tool("veh_launch", {"backend": "guest", "program": "synthetic.exe"})
             assert "error" in rejected, "guest process launch accepted"
             assert client.tool("veh_threads")["count"] == 1, "launch rejection lost prior guest session"

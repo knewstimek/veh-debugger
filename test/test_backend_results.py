@@ -1,4 +1,5 @@
 """Backend refusal, malformed replies and true empty stacks through MCP and DAP."""
+from mcp_test_client import inline_trace_args
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -57,12 +58,12 @@ def check_trace_policy_results():
             assert attached.get("success"), attached
             args = {"threadId": 77, "start": "0x1000", "end": "0x1100",
                     "collect_code": True, "collect_snapshots": False, "compress_paths": True}
-            result = client.tool("veh_trace_basic_blocks", args)
+            result = client.tool("veh_trace_basic_blocks", inline_trace_args(args))
             if expected is None:
                 assert "error" not in result and result["ordering"]["expanded_events_captured"] == 3, result
             else:
                 assert "error" in result and result["failure"]["reason"] == expected, (mode, result)
-            batch = client.tool("veh_batch", {"steps": [{"tool": "veh_trace_basic_blocks", "args": args}]})
+            batch = client.tool("veh_batch", {"steps": [{"tool": "veh_trace_basic_blocks", "args": inline_trace_args(args)}]})
             assert batch["results"][0]["result"] == result, (mode, batch)
             assert batch["failed"] == (0 if expected is None else 1), batch
             assert client.tool("veh_detach").get("success")

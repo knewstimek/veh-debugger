@@ -53,6 +53,7 @@ int wmain(int argc, wchar_t** argv) {
     const bool machineMode=mode.rfind(L"machine",0)==0;
     const bool vmMode=mode.rfind(L"vm",0)==0||machineMode;uint32_t vmState=2,detachFailures=0;
     uint32_t continueRequests = 0, pauseRequests = 0, resolveRequests = 0;
+    uint32_t pathRequests = 0;
     uint32_t fixtureBreakpointId = 0, shellcodeRequests=0, localThreadQueries=0;
     const bool scanMode=mode.rfind(L"scan-",0)==0;
     uint32_t symbolLookupRequests = 0;
@@ -185,7 +186,7 @@ int wmain(int argc, wchar_t** argv) {
                 if(mode!=L"deferred-unsupported")veh::SetCommandSupported(caps.commands,veh::IpcCommand::SetModuleLoadStop);
             }
             if(mode.rfind(L"shellcode-",0)==0)veh::SetCommandSupported(caps.commands,veh::IpcCommand::ExecuteShellcode);
-            if(mode==L"shellcode-action")for(auto op:{veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue})veh::SetCommandSupported(caps.commands,op);
+            if(mode==L"shellcode-action"||mode==L"path-file-output")for(auto op:{veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue})veh::SetCommandSupported(caps.commands,op);
             if(mode.rfind(L"control-",0)==0) {
                 for(auto op:{veh::IpcCommand::Continue,veh::IpcCommand::Pause,veh::IpcCommand::StepInto,
                     veh::IpcCommand::StepOver,veh::IpcCommand::StepOut,veh::IpcCommand::WriteMemory,veh::IpcCommand::TerminateThread})
@@ -220,6 +221,12 @@ int wmain(int argc, wchar_t** argv) {
                 continue;
             }
             std::memcpy(&request, bytes.data(), sizeof(request));
+            ++pathRequests;
+            // Output policy must never silently change the backend collection mode.
+            if (mode == L"path-file-output" && request.eventOutputMode != 0) {
+                if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break;
+                continue;
+            }
             veh::TraceBasicBlocksResponse response{};
             response.status = veh::IpcStatus::Ok;
             response.headerSize = sizeof(response);
@@ -875,12 +882,12 @@ int wmain(int argc, wchar_t** argv) {
                 response.exitCode=7;
                 if(!reply(pipe,header.command,response))break;
             }
-        } else if(mode==L"shellcode-action"&&command==veh::IpcCommand::SetBreakpoint){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output")&&command==veh::IpcCommand::SetBreakpoint){
             fixtureBreakpointId=9001;
             if(!reply(pipe,header.command,veh::SetBreakpointResponse{veh::IpcStatus::Ok,fixtureBreakpointId}))break;
-        } else if(mode==L"shellcode-action"&&command==veh::IpcCommand::RemoveBreakpoint){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output")&&command==veh::IpcCommand::RemoveBreakpoint){
             if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
-        } else if(mode==L"shellcode-action"&&command==veh::IpcCommand::Continue){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output")&&command==veh::IpcCommand::Continue){
             veh::ContinueRequest request{};
             if(bytes.size()!=sizeof(request))break;
             std::memcpy(&request,bytes.data(),sizeof(request));
@@ -948,6 +955,7 @@ int wmain(int argc, wchar_t** argv) {
             threads.header.status = veh::IpcStatus::Ok;
             threads.header.count = mode==L"machine-thread-short"?2:1;
             threads.thread.id = 77;
+            if(mode==L"path-file-output")sprintf_s(threads.thread.name,"trace-calls:%u",pathRequests);
             if(mode==L"local-drop-live"&&++localThreadQueries==2){
                 CloseHandle(pipe);
                 HANDLE exitEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);

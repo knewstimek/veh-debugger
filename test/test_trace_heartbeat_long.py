@@ -1,5 +1,6 @@
 # slow: the trace deliberately outlives the 30s heartbeat window
 """Regression: a synchronous trace may legitimately outlive the heartbeat window."""
+from mcp_test_client import inline_trace_args
 import ctypes
 import os
 import threading
@@ -74,10 +75,10 @@ def main():
         suspender = threading.Thread(
             target=suspend_owned_target, args=(launch["pid"], 32, suspend_errors), daemon=False)
         suspender.start()
-        trace = client.tool("veh_trace_basic_blocks", {
+        trace = client.tool("veh_trace_basic_blocks", inline_trace_args({
             "threadId": thread_id, "start": hex(loop), "end": hex(loop + 2),
             "max_steps": 5_000_000, "timeout_ms": 36_000, "stack_bytes": 0,
-        }, timeout=60)
+        }), timeout=60)
         suspender.join(timeout=40)
         assert not suspender.is_alive(), "target suspender did not finish"
         assert not suspend_errors, suspend_errors

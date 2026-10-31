@@ -348,12 +348,23 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		return {{"error", "output_file must be a string"}};
 	if (args.contains("output_format") && !args["output_format"].is_string())
 		return {{"error", "output_format must be a string"}};
+	if (args.contains("output_mode") && !args["output_mode"].is_string())
+		return {{"error", "output_mode must be a string"}};
+	std::string outputMode = args.value("output_mode", "file");
+	std::transform(outputMode.begin(), outputMode.end(), outputMode.begin(),
+		[](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+	if (outputMode != "file" && outputMode != "inline")
+		return {{"error", "output_mode must be file or inline"}};
 	std::string outputFile = args.value("output_file", "");
+	if (outputMode == "inline" && !outputFile.empty())
+		return {{"error", "output_file requires output_mode=file"}};
 	std::string outputFormat = args.value("output_format", "json");
 	std::transform(outputFormat.begin(), outputFormat.end(), outputFormat.begin(),
 		[](unsigned char value) { return static_cast<char>(std::tolower(value)); });
-	if (outputFile.empty() && args.contains("output_format"))
-		return {{"error", "output_format requires output_file"}};
+	if (outputMode == "inline" && args.contains("output_format"))
+		return {{"error", "output_format requires output_mode=file"}};
+	if (outputFormat != "json" && outputFormat != "jsonl")
+		return {{"error", "output_format must be json or jsonl"}};
 	if (!outputFile.empty()) {
 		std::string outputError = ValidateTraceOutputFile(outputFile, outputFormat);
 		if (!outputError.empty()) return {{"error", outputError}};
@@ -1059,9 +1070,11 @@ json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 		fullResult["event_file"] = eventFile;
 	}
 	if (!artifactMetadata.empty()) fullResult["capture_environment"] = artifactMetadata;
-	if (outputFile.empty()) return fullResult;
+	if (outputMode == "inline") return fullResult;
 
-	auto exported = WriteTraceOutputFile(outputFile, outputFormat, fullResult);
+	auto exported = outputFile.empty() ?
+		WriteJsonArtifactInDirectory("", "trace", fullResult, outputFormat) :
+		WriteTraceOutputFile(outputFile, outputFormat, fullResult);
 	if (!exported.success)
 		return {{"error", exported.error}, {"output_file", {{"path", outputFile},
 			{"format", outputFormat}, {"complete", false}}}};

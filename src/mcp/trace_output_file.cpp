@@ -156,9 +156,12 @@ TraceOutputFileResult WriteTraceOutputFile(const std::string& requestedPath,
 }
 
 TraceOutputFileResult WriteJsonArtifactInDirectory(const std::string& directory,
-		const std::string& stem, const nlohmann::json& value) {
+		const std::string& stem, const nlohmann::json& value, const std::string& format) {
 	TraceOutputFileResult failed;
-	failed.format = "json";
+	failed.format = format;
+	if (format != "json" && format != "jsonl") {
+		failed.error = "output_format must be json or jsonl"; return failed;
+	}
 	std::filesystem::path root;
 	try {
 		if (directory.empty()) {
@@ -190,8 +193,8 @@ TraceOutputFileResult WriteJsonArtifactInDirectory(const std::string& directory,
 		uint64_t token = (static_cast<uint64_t>(random()) << 32) ^ random() ^
 			GetTickCount64() ^ (static_cast<uint64_t>(attempt) << 56);
 		std::ostringstream name;
-		name << safeStem << '-' << GetCurrentProcessId() << '-' << std::hex << token << ".json";
-		auto written = WriteTraceOutputFile((root / std::filesystem::u8path(name.str())).u8string(), "json", value);
+		name << safeStem << '-' << GetCurrentProcessId() << '-' << std::hex << token << (format == "jsonl" ? ".jsonl" : ".json");
+		auto written = WriteTraceOutputFile((root / std::filesystem::u8path(name.str())).u8string(), format, value);
 		if (written.success) return written;
 		if (written.error != "output_file already exists" && written.error != "cannot publish output_file")
 			return written;

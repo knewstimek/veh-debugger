@@ -11,6 +11,18 @@ import time
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 
+def inline_trace_args(arguments):
+    """Opt legacy trace regressions into their original response shape explicitly.
+
+    File-path tests keep exercising file output; no production client defaults
+    are changed by this helper. New default-policy tests must use raw arguments.
+    """
+    result = dict(arguments)
+    if result.get("execution_context", "process") == "process":
+        result.setdefault("output_mode", "file" if result.get("output_file") else "inline")
+    return result
+
+
 class McpClient:
     def __init__(self, executable=None, *, args=None, cwd=None, env=None, stderr_lines=200):
         build_dir = os.environ.get("VEH_TEST_BUILD_DIR", os.path.join(ROOT, "build"))

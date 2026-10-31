@@ -1,4 +1,5 @@
 """Synthetic read/modify/write and conditional-access trace regressions."""
+from mcp_test_client import inline_trace_args
 import ctypes
 import json
 import os
@@ -172,15 +173,15 @@ def capture(client, tid, program, output, caller, mode):
     if mode == "file":
         args.update(events_output="file", events_output_path=output + ".vte")
     if caller == "direct":
-        check(client.tool("veh_trace_basic_blocks", args, timeout=15))
+        check(client.tool("veh_trace_basic_blocks", inline_trace_args(args), timeout=15))
     elif caller == "batch":
         result = check(client.tool("veh_batch", {"steps": [
-            {"tool": "veh_trace_basic_blocks", "args": args}]}))
+            {"tool": "veh_trace_basic_blocks", "args": inline_trace_args(args)}]}))
         check(result["results"][0]["result"])
     else:
         bp = check(client.tool("veh_set_breakpoint", {
             "address": hex(program.start), "action": [
-                {"tool": "veh_trace_basic_blocks", "args": args},
+                {"tool": "veh_trace_basic_blocks", "args": inline_trace_args(args)},
                 {"tool": "veh_set_breakpoint", "args": {"address": "$0.final_address"}},
             ]}))
         sentinel = None

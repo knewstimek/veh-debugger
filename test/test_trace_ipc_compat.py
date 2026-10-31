@@ -1,5 +1,8 @@
 """Mixed-version smoke test for veh_trace_basic_blocks IPC compatibility."""
+from mcp_test_client import inline_trace_args
 import json
+import hashlib
+from pathlib import Path
 from build_paths import RELEASE
 import os
 
@@ -70,6 +73,16 @@ def main():
             "max_memory_events": 256,
         }, timeout=15)
         assert "error" not in trace, trace
+        if trace.get("mode") == "file":
+            output = trace["output_file"]
+            path = Path(output["path"])
+            try:
+                raw = path.read_bytes()
+                assert len(raw) == output["size"]
+                assert hashlib.sha256(raw).hexdigest() == output["sha256"]
+                trace = json.loads(raw)
+            finally:
+                path.unlink(missing_ok=True)
         assert trace.get("schema_version") in {3, 4}, trace
         assert trace.get("blocks") and trace.get("edges"), trace
         assert trace.get("events") and trace.get("memory_events"), trace
@@ -81,49 +94,49 @@ def main():
         if os.environ.get("VEH_TEST_EXPECT_POLICIES_UNSUPPORTED") == "1":
             policy_stop = stop_at_start()
             before = client.tool("veh_registers", {"threadId": policy_stop["threadId"]})
-            refused = client.tool("veh_trace_basic_blocks", {
+            refused = client.tool("veh_trace_basic_blocks", inline_trace_args({
                 "threadId": policy_stop["threadId"], "start": hex(start), "end": hex(start + 0x100),
                 "collect_snapshots": False,
-            })
+            }))
             assert "backend_does_not_support_trace_collection_policies" in str(refused), refused
             after = client.tool("veh_registers", {"threadId": policy_stop["threadId"]})
             assert before == after, (before, after)
         if os.environ.get("VEH_TEST_EXPECT_FILE_UNSUPPORTED") == "1":
             extension_stop = stop_at_start()
-            file_trace = client.tool("veh_trace_basic_blocks", {
+            file_trace = client.tool("veh_trace_basic_blocks", inline_trace_args({
                 "threadId": extension_stop["threadId"], "start": hex(start), "end": hex(start + 0x100),
                 "collect_code": True, "code_output": "file",
                 "max_code_bytes": 400 * 1024 * 1024,
-            }, timeout=15)
+            }), timeout=15)
             assert file_trace == {
                 "error": "injected DLL does not support code_output=file",
             }, file_trace
         if os.environ.get("VEH_TEST_EXPECT_OCCURRENCE_UNSUPPORTED") == "1":
             extension_stop = stop_at_start()
-            occurrence_trace = client.tool("veh_trace_basic_blocks", {
+            occurrence_trace = client.tool("veh_trace_basic_blocks", inline_trace_args({
                 "threadId": extension_stop["threadId"], "start": hex(start), "end": hex(start + 0x100),
                 "occurrence_window": {"address": hex(start), "from": 1, "to": 1},
-            }, timeout=15)
+            }), timeout=15)
             assert occurrence_trace == {
                 "error": "injected DLL does not support occurrence_window",
             }, occurrence_trace
         if os.environ.get("VEH_TEST_EXPECT_FUNCTION_SCOPE_UNSUPPORTED") == "1":
             extension_stop = stop_at_start()
-            function_trace = client.tool("veh_trace_basic_blocks", {
+            function_trace = client.tool("veh_trace_basic_blocks", inline_trace_args({
                 "threadId": extension_stop["threadId"], "start": hex(start),
                 "end": hex(start + 0x100), "stop_on_return": True,
-            }, timeout=15)
+            }), timeout=15)
             assert function_trace == {
                 "error": "injected DLL does not support stop_on_return",
             }, function_trace
         if os.environ.get("VEH_TEST_EXPECT_TARGET_WINDOW_UNSUPPORTED") == "1":
             extension_stop = stop_at_start()
-            target_trace = client.tool("veh_trace_basic_blocks", {
+            target_trace = client.tool("veh_trace_basic_blocks", inline_trace_args({
                 "threadId": extension_stop["threadId"], "start": hex(start),
                 "end": hex(start + 0x100),
                 "target_window": {"address": hex(start), "occurrence": 1,
                                   "before_steps": 0, "after_steps": 1},
-            }, timeout=15)
+            }), timeout=15)
             assert target_trace == {
                 "error": "injected DLL does not support target_window",
             }, target_trace

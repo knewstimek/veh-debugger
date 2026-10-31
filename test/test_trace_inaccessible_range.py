@@ -1,4 +1,5 @@
 """Trace startup tolerates inaccessible gaps and internal SEH probes never self-stop."""
+from mcp_test_client import inline_trace_args
 import ctypes
 import os
 import time
@@ -71,14 +72,14 @@ def main():
         assert client.tool("veh_set_register", {
             "threadId": thread_id, "name": ip_name, "value": hex(code),
         }).get("success")
-        trace = client.tool("veh_trace_basic_blocks", {
+        trace = client.tool("veh_trace_basic_blocks", inline_trace_args({
             "threadId": thread_id,
             "start": hex(code),
             "end": hex(code + PAGE_SIZE * 3),
             "max_steps": 16,
             "timeout_ms": 5000,
             "stack_bytes": 0,
-        }, timeout=15)
+        }), timeout=15)
         assert trace.get("stop_reason") == "max_steps", trace
         assert trace.get("steps_executed") == 16, trace
         print({

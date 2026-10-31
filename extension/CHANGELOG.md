@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Changed
+- **File-backed basic-block results (MCP)** -- process `veh_trace_basic_blocks` defaults to a generated JSON artifact and compact path/hash/count/drop/truncation receipt. Set `output_mode="inline"` for the existing full response, or choose `output_file` and JSON/JSONL explicitly. Direct, batch and breakpoint actions share the policy. Backend collection and event limits are unchanged; `events_output="file"` remains explicit for supported ordered-event streaming.
+
 ### Added
 - **Kernel basic-block capture (MCP)** -- `veh_trace_basic_blocks(execution_context="kd")` uses an explicitly connected, halted-machine backend to capture one CPU across user/kernel transitions, with bounded blocks, observed edges, code and optional register snapshots. RSP version1 capture is backend-side; unsupported policies fail before execution. Other CPUs stay halted, pending exceptions prevent a second capture, and incomplete results never imply an unobserved path. KD capture is direct-only; see `docs/KD_TRACE_PROTOCOL.md`.
 - **Advanced MCP profiles** -- `--profile=analysis` exposes 41 common process-analysis tools, including state changes, watchpoints, value scans, traces and targeted capture. `--profile=vmguest` inherits that set and adds guest process discovery and explicit whole-VM control (43 tools). CLI help, toolbox discovery/manifests and schema measurements support both profiles; existing profiles and backend capability checks remain in place.

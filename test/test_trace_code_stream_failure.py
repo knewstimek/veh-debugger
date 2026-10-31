@@ -1,4 +1,5 @@
 """Failure-path integration test for file-backed trace code streaming."""
+from mcp_test_client import inline_trace_args
 import ctypes
 import glob
 import os
@@ -58,13 +59,13 @@ def main():
 
         def run_trace():
             try:
-                first.tool("veh_trace_basic_blocks", {
+                first.tool("veh_trace_basic_blocks", inline_trace_args({
                     "threadId": thread_id, "start": hex(loop_start), "end": hex(loop_start + 3),
                     "max_steps": 5000000, "timeout_ms": 1000, "stack_bytes": 0,
                     "collect_code": True, "max_code_bytes": 400 * 1024 * 1024,
                     "code_output": "file", "code_output_path": output_path,
                     "code_chunk_bytes": 256 * 1024,
-                }, timeout=20)
+                }), timeout=20)
             except Exception as error:  # expected when the MCP process is killed
                 trace_errors.append(str(error))
 

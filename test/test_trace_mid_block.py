@@ -5,6 +5,7 @@ middle of the block that the linear sweep starts right after the jmp. The nops
 between that sweep block start and the target never execute, so neither the
 edge target nor any block may claim them.
 """
+from mcp_test_client import inline_trace_args
 import os
 
 import pytest
@@ -40,11 +41,11 @@ def entry():
 
 def test_indirect_jump_target_is_not_normalized(entry):
     client, tid, code = entry
-    trace = client.tool("veh_trace_basic_blocks", {
+    trace = client.tool("veh_trace_basic_blocks", inline_trace_args({
         "threadId": tid, "start": hex(code), "end": hex(code + END),
         "stop_on_return": True, "max_steps": 1000, "timeout_ms": 5000,
         "collect_events": True, "collect_code": True,
-    }, timeout=20)
+    }), timeout=20)
     assert trace.get("stop_reason") == "function_return", trace
 
     jumps = [e for e in trace["events"] if e["type"] == "edge"

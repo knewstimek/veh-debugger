@@ -1,4 +1,5 @@
 """Integration coverage for file-backed ordered trace events."""
+from mcp_test_client import inline_trace_args
 import collections
 import json
 import os
@@ -97,7 +98,6 @@ def main():
 		# A single artifact exceeds both the old basic-event and register-event caps.
 		set_ip(client, thread_id, ip_name, loop)
 		artifact_path = temporary_path(paths, "long", "vte")
-		output_path = temporary_path(paths, "long-result", "json")
 		long_trace = client.tool("veh_trace_basic_blocks", {
 			"threadId": thread_id, "start": hex(loop), "end": hex(loop + 8),
 			"max_steps": 68000, "timeout_ms": 60000, "stack_bytes": 0,
@@ -105,9 +105,10 @@ def main():
 			"collect_memory_events": True,
 			"collect_register_events": True,
 			"events_output": "file", "events_output_path": artifact_path,
-			"output_file": output_path,
 		}, timeout=120)
 		assert long_trace.get("mode") == "file", long_trace
+		output_path = long_trace["output_file"]["path"]
+		paths.append(output_path)
 		metadata = long_trace["event_file"]
 		assert metadata["path"] == artifact_path and metadata["size"] > 0, metadata
 		assert metadata["counts"]["events"] > 32768, metadata
@@ -128,12 +129,12 @@ def main():
 		assert manifest["counts"] == metadata["counts"], manifest
 		assert manifest["record_bytes"] == metadata["record_bytes"], manifest
 		assert manifest["truncated"] is False, manifest
-		duplicate = client.tool("veh_trace_basic_blocks", {
+		duplicate = client.tool("veh_trace_basic_blocks", inline_trace_args({
 			"threadId": thread_id, "start": hex(loop), "end": hex(loop + 8),
 			"max_steps": 1, "timeout_ms": 1000, "stack_bytes": 0,
 			"collect_events": True,
 			"events_output": "file", "events_output_path": artifact_path,
-		})
+		}))
 		assert "already exists" in duplicate.get("error", ""), duplicate
 
 		# A low byte limit stops at a complete record and preserves a parseable file.
@@ -141,7 +142,7 @@ def main():
 		limited_path = temporary_path(paths, "limited", "vte")
 		limited = client.tool("veh_batch", {"steps": [{
 			"tool": "veh_trace_basic_blocks",
-			"args": {
+			"args": inline_trace_args({
 				"threadId": thread_id, "start": hex(loop), "end": hex(loop + 8),
 				"max_steps": 1000, "timeout_ms": 15000, "stack_bytes": 0,
 				"collect_events": True,
@@ -149,7 +150,7 @@ def main():
 				"collect_register_events": True,
 				"events_output": "file", "events_output_path": limited_path,
 				"max_event_file_bytes": 4096,
-			},
+			}),
 		}]}, timeout=30)
 		limited_result = limited["results"][0]["result"]
 		limited_metadata = limited_result["event_file"]
@@ -167,13 +168,13 @@ def main():
 
 		# Omitting events_output retains the legacy inline result and cap semantics.
 		set_ip(client, thread_id, ip_name, loop)
-		inline = client.tool("veh_trace_basic_blocks", {
+		inline = client.tool("veh_trace_basic_blocks", inline_trace_args({
 			"threadId": thread_id, "start": hex(loop), "end": hex(loop + 8),
 			"max_steps": 64, "timeout_ms": 5000, "stack_bytes": 0,
 			"collect_events": True, "max_events": 64,
 			"collect_memory_events": True, "max_memory_events": 64,
 			"collect_register_events": True, "max_register_events": 64,
-		})
+		}))
 		assert "event_file" not in inline, inline
 		assert all(name in inline for name in (
 			"events", "memory_events", "register_events")), inline

@@ -1522,8 +1522,9 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 				{"before_steps", {{"type", "integer"}, {"minimum", 0}, {"maximum", 100000}, {"description", "Completed instruction steps retained before the trigger"}}},
 				{"after_steps", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100000}, {"description", "Completed instruction steps retained after the trigger"}}}
 			}}, {"required", json::array({"address", "occurrence", "before_steps", "after_steps"})}, {"description", "Bounded pre-trigger ring plus post-trigger capture; incompatible with occurrence_window, conditions, stop_on_return, code_output=file, and events_output=file"}}}
-			,{"output_file", {{"type", "string"}, {"description", "Write the complete trace result to a new MCP-host file and return compact path/hash/count metadata"}}}
-			,{"output_format", {{"type", "string"}, {"enum", {"json", "jsonl"}}, {"description", "output_file encoding (default json); JSONL uses a manifest plus section-item records"}}}
+			,{"output_mode", {{"type", "string"}, {"enum", {"file", "inline"}}, {"default", "file"}, {"description", "Process trace: file receipt by default; inline explicitly returns the full result. Backend collection limits and streaming are unchanged"}}}
+			,{"output_file", {{"type", "string"}, {"description", "Optional new MCP-host result path; file mode generates a temporary path when omitted. Caller owns retention"}}}
+			,{"output_format", {{"type", "string"}, {"enum", {"json", "jsonl"}}, {"description", "File encoding (default json), including generated paths; JSONL uses a manifest plus section-item records"}}}
 		 }}, {"required", json::array({"start", "end"})}}}}),
 
 		Tool(&McpServer::ToolCheckpointCreate, "checkpoint", kCapture, true,

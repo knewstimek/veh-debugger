@@ -5,6 +5,7 @@ the range decodes +2 as one `mov eax, imm32`, while execution jumps to +3 and ru
 xor/nop/nop/ret. Those executed addresses must still get hit counts, block extents
 and captured code (obfuscated/virtualized code relies on this).
 """
+from mcp_test_client import inline_trace_args
 import os
 
 import pytest
@@ -40,11 +41,11 @@ def entry():
 
 def test_off_sweep_instructions_are_traced(entry):
     client, tid, code = entry
-    trace = client.tool("veh_trace_basic_blocks", {
+    trace = client.tool("veh_trace_basic_blocks", inline_trace_args({
         "threadId": tid, "start": hex(code), "end": hex(code + 8),
         "stop_on_return": True, "max_steps": 1000, "timeout_ms": 5000,
         "collect_code": True, "max_code_bytes": 4096, "max_code_versions": 64,
-    }, timeout=20)
+    }), timeout=20)
     assert trace.get("stop_reason") == "function_return", trace
 
     blocks = {int(block["start"], 16): block for block in trace["blocks"]}
@@ -83,12 +84,12 @@ def test_call_writes_return_address_below_stack_pointer(entry):
     assert client.tool("veh_write_memory", {"address": hex(start), "data": code.hex(" ")}).get("success")
     assert client.tool("veh_set_register", {"threadId": tid, "name": ip_name, "value": hex(start)}).get("success")
 
-    trace = client.tool("veh_trace_basic_blocks", {
+    trace = client.tool("veh_trace_basic_blocks", inline_trace_args({
         "threadId": tid, "start": hex(start), "end": hex(start + len(code)), "max_steps": 8,
         "timeout_ms": 5000, "stack_bytes": 0,
         "collect_memory_writes": True, "max_memory_writes": 8,
         "collect_memory_events": True, "max_memory_events": 8,
-    }, timeout=15)
+    }), timeout=15)
     call_write = next(event for event in trace["memory_events"]
                       if event["kind"] == "write" and int(event["instruction"], 16) == start)
     assert int(call_write["address"], 16) == stack_pointer - pointer_size, call_write
