@@ -1,5 +1,9 @@
 """Bounded KD capture receipts through the real MCP frontend; no guest execution."""
 import struct
+import hashlib
+import json
+from pathlib import Path
+import tempfile
 from mcp_test_client import McpClient
 from test_kernel_debug_protocol import Stub
 
@@ -65,6 +69,14 @@ def run():
         assert result.get("steps_executed")==2 and result.get("final_address")=="0x1008",result
         assert result.get("halted") and len(result["blocks"])==1 and result["blocks"][0]["end"]=="0x1008",result
         assert result["events"][0]["thread_id"] is None and result["collection"]["snapshots"],result
+        with tempfile.TemporaryDirectory(prefix="veh-kd-legacy-export-") as temporary:
+            output=Path(temporary)/"trace.json"
+            exported=client.tool("veh_trace_basic_blocks",{**args,"output_file":str(output)})
+            metadata=exported["output_file"]
+            assert metadata["path"]==str(output) and metadata["format"]=="json",exported
+            raw=output.read_bytes()
+            assert metadata["size"]==len(raw) and metadata["sha256"]==hashlib.sha256(raw).hexdigest()
+            assert json.loads(raw)["steps_executed"]==2
         starts=sum(p.startswith("vTraceBB:") for p in stub.commands)
         for key,value in (("compress_paths",True),("stack_bytes",8),("threadId",1),("collect_code","yes"),("max_steps",4097),("dependency_sources",["rax"]),("max_event_file_bytes",88)):
             rejected=client.tool("veh_trace_basic_blocks",{**args,key:value})

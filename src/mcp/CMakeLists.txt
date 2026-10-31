@@ -12,6 +12,8 @@ add_executable(veh-mcp-server
 	tools_system.cpp
 	tools_kernel_debug.cpp
 	tools_kd_trace.cpp
+	kd_capture_store.cpp
+	kd_capture_collect.cpp
 	kernel_debug_client.cpp
 	tools_trace.cpp
     tools_instrumentation.cpp
@@ -33,6 +35,16 @@ add_executable(veh-mcp-server
 	../adapter/disassembler.cpp
 	../adapter/zydis_disassembler.cpp
 )
+
+# Native storage fault boundaries without launching a target or KD connection.
+add_executable(kd_capture_store_tests
+    ${CMAKE_SOURCE_DIR}/test/kd_capture_store_tests.cpp
+    kd_capture_store.cpp
+    ../adapter/disassembler.cpp
+    ../adapter/zydis_disassembler.cpp)
+target_link_libraries(kd_capture_store_tests PRIVATE veh_common nlohmann_json Zydis bcrypt)
+target_include_directories(kd_capture_store_tests PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/third_party)
+target_compile_definitions(kd_capture_store_tests PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 
 target_link_libraries(veh-mcp-server PRIVATE
 	veh_common

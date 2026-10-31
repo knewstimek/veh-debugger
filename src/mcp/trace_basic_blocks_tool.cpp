@@ -269,6 +269,8 @@ static bool ParseTraceCondition(const json& args, const char* key, TraceConditio
 
 json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	const TraceAddressResolver& resolveAddress, const json& artifactMetadata) {
+if (args.value("execution_context", "process") != "process" || args.value("operation", "capture") != "capture")
+	return {{"error", "Process trace requires process/capture context"}};
     if (session.IsRemoteTarget() && (args.value("code_output", "") == "file" || args.value("events_output", "") == "file"))
         return {{"error", "Target-side file data pipes are not supported remotely; use inline collection or output_file"}};
 	uint32_t threadId = TraceJsonUint32(args, "threadId");

@@ -1474,7 +1474,15 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		Tool(&McpServer::ToolTraceBasicBlocks, "trace", kCapture, true,
 			{{"name", "veh_trace_basic_blocks"}, {"description", "Trace a stopped process thread. Default output_mode=file returns a result artifact receipt; output_mode=inline returns full JSON. Events stay bounded unless events_output=file is explicitly selected on a supported local backend. Optional snapshots, code/memory/register events, function-return scope and lossless repeated paths. Policies need backend support; VEH refuses active HW breakpoints. Compression does not reduce TF exceptions. KD uses execution_context=kd."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-			{"execution_context", {{"type", "string"}, {"enum", {"process", "kd"}}, {"description", "process (default) or explicit whole-machine KD CPU capture, including kernel and SYSCALL transitions. KD requires veh_kd_connect and a halted target; max_steps<=4096."}}},
+			{"operation", {{"type", "string"}, {"enum", {"capture", "read_capture"}}, {"description", "KD: capture (default) or bounded offline artifact page read"}}},
+			{"capture_file", {{"type", "string"}, {"description", "Saved KD capture path for operation=read_capture"}}},
+			{"offset", {{"type", "string"}, {"description", "Exact zero-based record offset for read_capture (default 0)"}}},
+			{"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100}, {"description", "Read page size; response has a separate 8KiB limit"}}},
+			{"include_registers", {{"type", "boolean"}, {"description", "Include recorded registers in an artifact page (default false)"}}},
+			{"recovery", {{"type", "object"}, {"description", "Optional committed-prefix descriptor returned after an artifact header repair failure"}}},
+			{"address_start", {{"type", "string"}, {"description", "Optional inclusive hex address filter for artifact pages"}}},
+			{"address_end", {{"type", "string"}, {"description", "Optional exclusive hex address filter for artifact pages"}}},
+			{"execution_context", {{"type", "string"}, {"enum", {"process", "kd"}}, {"description", "process (default) or explicit whole-machine KD CPU capture, including kernel and SYSCALL transitions. KD capture requires veh_kd_connect and a halted target; streaming peers support up to5000000 steps. Large results are artifacts plus bounded summaries."}}},
 			{"cpu", {{"type", "integer"}, {"minimum", 0}, {"description", "Selected vCPU for execution_context=kd"}}},
 			{"threadId", {{"type", "integer"}, {"description", "Stopped process thread; omit or use 0 for KD CPU capture"}}},
 			{"start", {{"type", "string"}, {"description", "Inclusive range start (hex or module+RVA)"}}},
@@ -1482,7 +1490,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"max_blocks", {{"type", "integer"}, {"description", "Maximum unique executed block entries (default 4096, max 16384)"}}},
 			{"max_edges", {{"type", "integer"}, {"description", "Maximum unique observed edges (default 8192, max 32768)"}}},
 			{"max_steps", {{"type", "integer"}, {"description", "Maximum instruction/exception events (default 100000, max 5000000)"}}},
-			{"timeout_ms", {{"type", "integer"}, {"description", "Wall-clock limit (default 10000, max 60000)"}}},
+			{"timeout_ms", {{"type", "integer"}, {"description", "Wall-clock limit (default 10000, process max60000; KD max600000)"}}},
 			{"collect_snapshots", {{"type", "boolean"}, {"description", "Collect first block/edge and exception register/stack snapshots (default true). False skips capture and snapshot buffers; requires backend policy support."}}},
 			{"compress_paths", {{"type", "boolean"}, {"description", "Encode observed consecutive repeated paths losslessly (default false). Requires collect_code, no ordered memory/register events or target_window. Preserves sequence stride; reduces records, not TF exceptions."}}},
 			{"stack_bytes", {{"type", "integer"}, {"description", "Bytes to capture from SP per snapshot (default 128, max 256; 0 disables stack bytes)"}}},
@@ -1525,7 +1533,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			,{"output_mode", {{"type", "string"}, {"enum", {"file", "inline"}}, {"default", "file"}, {"description", "Process trace: file receipt by default; inline explicitly returns the full result. Backend collection limits and streaming are unchanged"}}}
 			,{"output_file", {{"type", "string"}, {"description", "Optional new MCP-host result path; file mode generates a temporary path when omitted. Caller owns retention"}}}
 			,{"output_format", {{"type", "string"}, {"enum", {"json", "jsonl"}}, {"description", "File encoding (default json), including generated paths; JSONL uses a manifest plus section-item records"}}}
-		 }}, {"required", json::array({"start", "end"})}}}}),
+		 }}, {"anyOf", json::array({json{{"required",json::array({"start","end"})}},json{{"properties",{{"execution_context",{{"const","kd"}}},{"operation",{{"const","read_capture"}}}}},{"required",json::array({"execution_context","operation","capture_file"})}}})}}}}),
 
 		Tool(&McpServer::ToolCheckpointCreate, "checkpoint", kCapture, true,
 			{{"name", "veh_checkpoint_create"}, {"description", "Capture one VEH-stopped thread's GPR/flags (plus x64 XMM), TEB and FS/GS selector/base metadata, and explicitly selected memory ranges. Stack ranges expose the safe logical restore start at the saved SP. Checkpoints are session-local and bounded; they do not capture other threads, handles, allocations, files, sockets, or kernel state."},
@@ -2081,7 +2089,8 @@ json McpServer::DispatchTool(const std::string& name, const json& args, bool* kn
 }
 
 json McpServer::RunNestedTool(const std::string& name, const json& args) {
-    if (name == "veh_trace_basic_blocks" && args.value("execution_context", "process") == "kd")
+    if (name == "veh_trace_basic_blocks" && args.value("execution_context", "process") == "kd" &&
+        args.value("operation", "capture") != "read_capture")
         return {{"error", "Whole-machine KD capture requires a direct call; excluded from batch, capture setup and breakpoint actions"}};
     if (name == "veh_symbolize" && args.contains("analysis") && args["analysis"].is_object()) {
         const auto operation = args["analysis"].value("operation", "status");

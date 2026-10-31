@@ -601,6 +601,16 @@ retry must remove each original kind/size before sending `D`. No VM is used.
 
 ### Bounded kernel basic-block capture
 
+Version 2 peers stream one logical capture through fixed 4,096-record chunks,
+up to 5,000,000 steps, with file-backed raw facts and bounded summaries/pages.
+Version 1 keeps its 4,096-step contract. Pure `operation="read_capture"` reads
+work offline through direct calls and attached process batches/actions; KD
+execution remains direct-only. See [the full wire/storage contract](KD_TRACE_PROTOCOL.md).
+Run `test/test_kernel_trace_stream.py` and the native `kd_capture_store_tests`
+target in addition to the legacy test. Export receipts preserve `output_file.path`
+and `format`; path controls are rejected before effects and all read pages are
+bounded to 8 KiB.
+
 `veh_trace_basic_blocks(execution_context="kd")` explicitly selects a halted
 machine's CPU instead of an attached process thread. The optional backend RSP
 extension collects bounded records across user/kernel transitions; the frontend

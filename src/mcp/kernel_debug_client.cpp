@@ -325,8 +325,18 @@ bool KernelDebugClient::Receive(std::string* payload, uint32_t timeout_ms)
 		if (start != std::string::npos) {
 			const size_t hash = buffer_.find('#', start);
 			if (hash != std::string::npos && buffer_.size() >= hash + 3) {
-				*payload = buffer_.substr(start + 1, hash - start - 1);
-				buffer_.erase(0, hash + 3);
+                const auto hex=[](char c)->int {if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;if(c>='A'&&c<='F')return c-'A'+10;return -1;};
+                uint8_t sum=0;for(size_t i=start+1;i<hash;++i)sum=static_cast<uint8_t>(sum+static_cast<uint8_t>(buffer_[i]));
+                const int hi=hex(buffer_[hash+1]),lo=hex(buffer_[hash+2]);
+                const bool valid=hi>=0&&lo>=0&&sum==static_cast<uint8_t>(hi*16+lo);
+                *payload = buffer_.substr(start + 1, hash - start - 1);
+                buffer_.erase(0, hash + 3);
+                if(!valid){
+                    wait_diagnostic_="RSP checksum mismatch";
+                    if(!ack_)return false; // no-ack peers cannot retransmit this reply
+                    Trace('>',"-",1);if(!transport_->Write("-",1))return false;
+                    continue;
+                }
 				// VirtualBox's stub ends every payload with a NUL byte.
 				while (!payload->empty() && payload->back() == '\0')
 					payload->pop_back();

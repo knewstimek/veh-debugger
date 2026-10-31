@@ -10,9 +10,11 @@ all other CPUs remain stopped. This observes a CPU, not a guaranteed OS thread.
 This mode never attaches to a PID or changes a normal process trace into a global
 halt. Ordinary process IPC trace still omits kernel execution. KD capture is
 direct-call only: batch, breakpoint actions and capture setup refuse it because
-they must not unexpectedly control the whole machine.
+they must not unexpectedly control the whole machine. Pure saved-artifact reads
+use the same tool with `operation="read_capture"`; they require no KD connection
+and are allowed in an attached process batch or breakpoint action.
 
-## Versioned backend contract
+## Version 1 compatibility contract
 
 The optional RSP extension does not change process IPC layouts/capabilities.
 It advertises `TraceBB:1` in qSupported; `qTraceBB:cap` returns `1,1000`.
@@ -60,6 +62,43 @@ budget/range termination, address chain and code bounds before reporting success
 Blocks, edges and code versions are pure decoding/grouping of captured bytes.
 There is no frontend loop over target single-step or memory-read operations.
 
+## Optional version 2 streaming contract
+
+The version 1 negotiation and packed layouts remain unchanged. The frontend
+additionally queries `qTraceBB:cap2`; the supported reply is
+`2,1000,4c4b40` (version 2, 4,096 records per chunk, 5,000,000 logical steps).
+An unsupported reply keeps version 1 and its 4,096-step limit; no frontend loop
+over single-step or memory-read commands is used as a fallback.
+
+Start with `vTraceBB:2,<maxSteps>,<rangeStart>,<rangeEnd>,<flags>`. Fields remain
+hexadecimal. A full 4,096-record buffer ends the current execution slice with a
+normal RSP stop and end reason 8 (`BufferFull`). The VM stays halted while the
+frontend copies and validates that immutable chunk. The logical generation and
+step budget span every chunk.
+
+- `qTraceBB:status2` returns the 72-byte `HeaderV2`: the existing 48-byte header,
+  global `recordOffset` and `maxSteps` as u64, then u32 `paused` and `reserved`.
+  `paused=1` is required only for end reason 8.
+- `qTraceBB:read2,<generation>,<globalOffset>,<count>` reads the current chunk.
+  A compact record is 56 bytes; with snapshot flag bit0 it is followed by
+  eighteen u64 registers, for 200 bytes. This layout differs from version 1's
+  200-byte record, so consumers must convert explicitly.
+- `vTraceBB:resume2,<generation>,<nextGlobalOffset>` resumes only after the
+  frontend has validated and stored the entire preceding chunk. The generation
+  and next offset must match exactly; draining never resets the step budget.
+- `qTraceBB:cancel2,<generation>` cancels a paused full-buffer capture and
+  returns `OK`. A subsequent status must report interrupted with unchanged
+  generation, final PC, record offset/count and total steps, and `paused=0`.
+
+The frontend checks the logical deadline again after chunk I/O and before
+resuming. While execution is in flight it retains the ordinary RSP stop query
+and interrupt recovery. Offset, CPU, generation, count/steps, chain, code bounds
+and final PC are checked before a chunk is accepted. A page/checksum/storage
+failure preserves any acknowledged disk prefix and the halted backend buffer;
+it does not claim rollback of instructions already executed. RSP checksums
+include the trailing payload NUL, which is removed only after validation.
+Corrupt packets are never promoted to observations.
+
 ## Output and current limits
 
 The KD result uses the usual blocks/edges/snapshots/events/code_versions keys,
@@ -72,13 +111,59 @@ Unknown process/thread identities are JSON null.
 
 Register snapshots default on; stack_bytes defaults to0 in KD and any positive
 value is refused. Snapshot suppression skips register capture in the backend.
-max_blocks/max_edges must cover max_steps. Advanced process conditions/windows,
+For legacy version 1, max_blocks/max_edges must cover max_steps. Version 2
+uses bounded output aggregates and refuses custom block/edge execution-stop
+budgets. Its default `max_steps` is 100,000 (maximum 5,000,000); the legacy default is 4,096.
+KD `timeout_ms` defaults to 10,000 and accepts 1–600,000 ms. Advanced process conditions/windows,
 dependency sources, operand/register-delta collection, compressed paths, return
 scope and streamed code/event files are refused before execution. Pure result
-export through output_file remains available.
+export through output_file remains available, preserving its object response:
+`output_file={path,format,size,sha256}` for JSON or JSONL. Existing destinations
+are never overwritten. NUL/control characters and malformed UTF-8 paths are
+refused before target execution or filesystem effects.
+
+Large captures (requested steps above 4,096 or shaped JSON above 8 KiB), and explicit
+exports, retain a portable raw artifact and return a bounded summary instead of
+full arrays. The artifact uses the 64-byte `CaptureFileHeader` followed by
+canonical 200-byte version 1 layout records, regardless of wire snapshot mode.
+At 5,000,000 records this requires 1,000,000,064 bytes; the temporary storage path
+checks for the requested raw size plus 16 MiB free before starting. An explicit
+export keeps raw data beside it as `<output_file>.records`; generated paths use
+the host temporary directory. Callers own retention and cleanup.
+
+Summary analysis is bounded independently of raw capture: 16,384 blocks,
+32,768 edges, 8,192 ordered block/edge events, a 4,096-entry decode cache and
+bounded code/key bytes. `capture_incomplete` describes acquisition termination;
+`analysis_incomplete`, omitted-step counts, event drops and code truncation
+describe bounded decoding. A structurally complete raw artifact does not imply
+a complete execution or full analysis. All raw records remain available for
+later inspection. Short writes retain only the acknowledged prefix; failed
+header repair exposes an explicit recovery descriptor instead of claiming a
+valid header or complete file.
+
+For offline inspection call:
+
+```json
+{"execution_context":"kd","operation":"read_capture","capture_file":"<artifact path>","offset":"0","limit":16}
+```
+
+Offsets and generations remain exact decimal strings. Pages contain at most 100
+records and 8 KiB of serialized JSON; optional `include_registers` includes
+recorded registers, while missing snapshots remain explicit. Hexadecimal
+`address_start`/`address_end` filters examine at most 65,536 raw records per call.
+Use the returned `next_offset`, including for empty filtered pages. Reads report
+`integrity="not_checked"`: they validate layout/record fields but do not hash
+the entire artifact on each page. A caller can verify the retained prefix hash
+separately. A failed-header `recovery` descriptor is explicit and never silently
+replaces on-disk metadata.
 Exceptions stop before delivery; follow_exceptions=true is explicitly refused.
 Process-only policy capability bits are not reused to advertise this extension.
 
 Tests: `py -3 test/test_kernel_trace.py` exercises backend collection, block
 shaping, pre-effect refusal, selected-CPU and malformed terminal/page receipts.
-It uses a synthetic RSP backend and is not a hardware qualification.
+`test/test_kernel_trace_stream.py` covers 100,000 logical records, compact/full
+wire modes, explicit JSON/JSONL receipts, exact offsets, timeout and malformed
+continuations, checksum failure retention, path validation and direct/batch/action
+artifact reads. `kd_capture_store_tests` covers native short-body/header writes
+and persistent header-repair recovery. These use synthetic RSP/storage fixtures;
+they do not qualify a live VM.

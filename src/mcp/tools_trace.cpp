@@ -391,6 +391,9 @@ json McpServer::ToolTargetedCapture(const json& args) {
 		return {{"error", "trace object is required"}};
 	if (!args.contains("trigger") || !args["trigger"].is_object())
 		return {{"error", "trigger object is required"}};
+	if (args["trace"].value("execution_context", "process") != "process" ||
+		args["trace"].value("operation", "capture") != "capture")
+		return {{"error", "Targeted process capture cannot run KD control or artifact read operations"}};
 	if (!args.contains("window") || !args["window"].is_object())
 		return {{"error", "window object is required"}};
 	json setupSteps = args.value("steps", json::array());

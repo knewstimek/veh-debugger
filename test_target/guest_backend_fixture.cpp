@@ -883,7 +883,7 @@ int wmain(int argc, wchar_t** argv) {
                 if(!reply(pipe,header.command,response))break;
             }
         } else if((mode==L"shellcode-action"||mode==L"path-file-output")&&command==veh::IpcCommand::SetBreakpoint){
-            fixtureBreakpointId=9001;
+            fixtureBreakpointId=mode==L"path-file-output"?(fixtureBreakpointId?fixtureBreakpointId+1:9001):9001;
             if(!reply(pipe,header.command,veh::SetBreakpointResponse{veh::IpcStatus::Ok,fixtureBreakpointId}))break;
         } else if((mode==L"shellcode-action"||mode==L"path-file-output")&&command==veh::IpcCommand::RemoveBreakpoint){
             if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
