@@ -15,7 +15,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$logDirectory = Join-Path $repoRoot "build\release-logs\$Version"
+$logDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ("veh-release-" + $Version + "-" + [guid]::NewGuid().ToString('N'))
 $releaseNote = Join-Path $repoRoot "docs\releases\v$Version.md"
 
 function Read-Utf8File {
@@ -143,6 +143,7 @@ function Invoke-Logged {
         Get-Content -LiteralPath $logPath -Tail 30
         throw "$Name failed. Full log: $logPath"
     }
+    Remove-Item -LiteralPath $logPath -Force
     Write-Host "[$Name] passed" -ForegroundColor Green
 }
 
@@ -248,6 +249,11 @@ function Invoke-ReleaseTests {
         'test/test_trace_inaccessible_range.py',
         'test/test_trace_code_stream_failure.py',
         'test/test_mcp_profiles.py',
+        'test/test_trace_output_default.py',
+        'test/test_trace_hardware.py',
+        'test/test_kernel_trace.py',
+        'test/test_kernel_trace_stream.py',
+        'test/test_kernel_trace_hardware.py',
         'test/test_trace_heartbeat_long.py',
         'test/test_remote_transport.py',
         'test/test_guest_backend.py',
@@ -279,6 +285,8 @@ function Invoke-ReleaseTests {
     }
     Invoke-Logged 'batch-profiles-x86' 'py' @(
         '-3', 'tools/run_tests.py', 'test_batch_unified.py', 'test_mcp_profiles.py',
+        'test_trace_output_default.py', 'test_trace_hardware.py',
+        'test_kernel_trace.py', 'test_kernel_trace_stream.py', 'test_kernel_trace_hardware.py',
         '--build-dir', 'build32', '--jobs', '1', '--timeout', '180'
     )
     Invoke-Logged 'guest-protocol-x86' 'py' @(
@@ -435,7 +443,7 @@ try {
         Publish-Release
     }
     else {
-        $untracked = @(git status --porcelain | Where-Object { $_ -like '??*' })
+        $untracked = @(git status --porcelain | Where-Object { $_.StartsWith('??') })
         if ($untracked.Count -ne 0) {
             Write-Warning "$($untracked.Count) untracked path(s) remain. Publishing will refuse this worktree."
         }
@@ -444,4 +452,9 @@ try {
 }
 finally {
     Pop-Location
+    # Successful step logs are removed immediately; preserve failed diagnostics.
+    if ((Test-Path -LiteralPath $logDirectory) -and
+        @(Get-ChildItem -LiteralPath $logDirectory -Force).Count -eq 0) {
+        Remove-Item -LiteralPath $logDirectory -Force
+    }
 }
