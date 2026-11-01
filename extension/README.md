@@ -152,6 +152,12 @@ retention and cleanup. This result policy does not change collection limits:
 local backends; remote target-side file pipes remain unsupported.
 File formats use portable integer layouts, while
 the debugger and capture transport remain Windows-hosted.
+Wire12 process backends lazily decode entered blocks. `max_steps` and
+`max_decoded_instructions` independently default to 1,000,000 executions and cache
+entries. Large execution limits also accept exact strings. Check
+`backend.basicTrace` for support and `resource_limits` for applied values.
+See [options, memory limits and compatibility](https://github.com/knewstimek/veh-debugger/blob/master/docs/TRACE_LAZY_DECODE.md).
+
 Set `collect_snapshots=false` to skip first block/edge and exception register/stack
 capture. `compress_paths=true, collect_code=true` preserves observed path order,
 branch choices and repeat counts in inline/file events, with explicit collection,

@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Changed
+- **Trace guidance** -- synchronize Korean/English/extension READMEs, extension and tool descriptions, and CLI help for lazy decoding and independent execution/cache budgets; detailed limits and compatibility remain in the linked guide.
 - **Process trace resource budgets** -- capability-gated wire12 decodes entered blocks lazily, checks changed instruction bytes before reuse, accepts large ranges and 64-bit execution ceilings, and exposes an independent `max_decoded_instructions` cache budget (default1,000,000). Process execution defaults to1,000,000 steps; explicit long timeouts and event files remain independent. Cache exhaustion stops precisely before an uncached instruction. x86 retains its address-space limits; unsupported peers reject new options before execution. See [lazy trace contract](../docs/TRACE_LAZY_DECODE.md).
 
 ### Fixed

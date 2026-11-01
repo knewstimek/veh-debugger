@@ -1,7 +1,7 @@
 {
   "name": "veh-debugger",
   "displayName": "VEH Debugger",
-  "description": "Windows debugger with DAP & MCP: VEH debugging, kernel tracing, CR/MSR/I/O events on supported backends, hardware breakpoints and memory analysis.",
+  "description": "Windows debugger with DAP & MCP: VEH debugging, lazy process tracing with configurable budgets, kernel/CR/MSR/I/O tracing on supported backends, hardware breakpoints and memory analysis.",
   "version": "1.2.4",
   "icon": "images/icon.png",
   "publisher": "knewstimek",
