@@ -106,6 +106,14 @@ veh_trace_basic_blocks(threadId=..., start="game.exe+0x12000", end="game.exe+0x1
 
 파일에 저장되는 전체 결과(또는 명시적 inline 응답)는 `schema_version=4`, `mode=aggregated`, `thread_id`로 집계 의미와 스레드 범위를 명시한다. 기본 집계만으로는 실행 순서를 복원할 수 없다. `collect_events=true`를 사용하면 initial block entry와 이후 모든 block transition을 event-schema-v1의 `events` 배열에 실행 순서대로 기록하며 각 항목에 trace-step `sequence`와 OS `thread_id`가 포함된다. 이 스트림은 명령어 단위가 아닌 basic-block transition 단위이고, `max_events`를 넘으면 집계는 계속하면서 `events_truncated=true` 및 `ordering.complete=false`를 반환한다.
 
+하드웨어 명령도 함께 기록하려면 지원 백엔드에서 `collect_hardware_events=true`를 사용한다. `hardware_kinds=["control_register","msr","io_port"]`로 MOV CR, RDMSR/WRMSR, scalar IN/OUT을 선택하며 생략하면 세 종류를 모두 요청한다. 일반 VEH DLL은 이 수집을 광고하지 않는다. process 경로는 기존 attach와 별도 IPC capability를 사용하고, KD 경로는 `veh_kd_connect`로 연결해 정지한 뒤 `execution_context="kd"`를 지정한다. 커널 범위도 process 백엔드가 광고하면 기존 attach 경로로 수집할 수 있다.
+
+```json
+{"execution_context":"kd","start":"0xFFFF800000001000","end":"0xFFFF800000002000","max_steps":10000,"collect_hardware_events":true,"hardware_kinds":["control_register"],"follow_exceptions":false}
+```
+
+하드웨어 수집은 파일 결과를 사용하며 `event_file`에 schema3 이벤트를 저장한다. KD는 `capture_file`에 명령 기록도 별도로 보존한다. `operation="read_events"`/`"analyze_events"`와 `event_file`, 또는 KD `operation="read_capture"`와 `capture_file`로 연결 종료 후에도 읽을 수 있다. 알 수 없는 값은 null이고 정확한 64비트 값·개수는 문자열로 보존한다. `storage_complete`는 파일 저장, `capture_complete`는 수집 완성을 뜻하므로 `max_steps` 종료는 정상 저장된 불완전 결과일 수 있다. KD 수집은 직접 호출만 허용하고 저장 파일 읽기·분석은 batch/action에서도 지원한다. process 수집에서는 `follow_exceptions=false`와 snapshots 켜짐·경로 압축 꺼짐을 사용한다. KD는 snapshots 생략과 별도 협상된 peer 실행을 지원한다. [하드웨어 사용법](docs/TRACE_HARDWARE_PROTOCOL.md)과 [KD 하드웨어 규약](docs/KD_HARDWARE_TRACE_PROTOCOL.md)을 참고한다.
+
 trace IPC는 request/header size를 협상하고 legacy schema-v3/v4 및 직전 wire-v5 layout을 판별하므로 실행 중 MCP와 새로 주입된 DLL의 교체 시점이 달라도 배열 offset을 보존한다. 현재 collector가 시작을 거부하면 `failure`에 `status`, 구체적인 `reason`, stopped 판정, normalized IP/start/end, decode 성공 여부와 decoded instruction 수를 반환한다.
 
 `collect_memory_events=true`는 ordered block event 수집을 함께 활성화하고 동일한 trace-step sequence 공간에 per-occurrence read/write를 보존한다. 각 `memory_events` 항목은 thread/instruction/effective address/size와 logical `access_index`, read value 또는 write before/after, dependency origin을 포함한다. 별도 `max_memory_events` 예산을 넘겨도 aggregate trace는 계속되며 `memory_events_truncated`, 정확한 `memory_events_dropped`, `memory_ordering.complete=false`로 손실을 표시한다. 동일 명령에서 여러 operand 또는 read-modify-write가 발생해도 kind와 access index로 구분된다.
@@ -458,7 +466,7 @@ VM 자체에 연결할 때는 외부 백엔드를 VM 범위로 등록한 뒤
 | `veh_batch` | `steps, inputs?, input_variable?, stop_on_error?` | 다중 명령 일괄 실행 및 동일 세션의 입력별 순차 실행. 결과 참조, 제어 흐름, 입력별 status/count/첫 실패/trace artifact 요약을 반환한다. |
 | `veh_trace_callers` | `address?, duration_sec?, duration_ms?, mode?, operation?` | 기본 호출자별 횟수 수집. 명시적 `mode="detour"`는 별도 계측·요약·페이지 조회([규약](docs/INSTRUMENTATION.md), 백엔드 지원 필요). `duration_ms` 우선, 호출 0회도 정상 결과. VEH만 수집 전 재개·후 정지하며 하이퍼바이저는 실행 상태 유지. x64: unwind, x86: 함수 진입점의 [ESP] |
 | `veh_trace_calls` | `addresses, duration_sec?, duration_ms?, resolve?, system_only?` | call/jmp 명령이 런타임에 어디로 가는지 모니터링. 콜 사이트에 BP 설치 후 N초간 실행, 실제 타겟 주소 + API 이름 수집. `resolve=true`: thunk/trampoline을 자연스러운 call 컨텍스트에서 따라가 최종 API까지 추적 (예외 기반 난독화 대응). `system_only=true`: 시스템 DLL 타겟만 반환. 패킹된 바이너리의 IAT 복원용. |
-| `veh_trace_basic_blocks` | `threadId, start, end, ..., collect_snapshots?, compress_paths?, stop_on_return?, collect_events?, collect_memory_events?, collect_register_events?, collect_code?, output_mode?, output_file?, output_format?, events_output?, ...` | 기본은 결과 파일+요약, 명시적 `output_mode="inline"`은 전체 JSON. DLL 내부 bounded trace. 선택적 function-return scope, ordered block/code/memory/register occurrence stream 및 block/edge, delta, memory, dependency, region, exception을 반환한다. |
+| `veh_trace_basic_blocks` | `threadId, start, end, ..., collect_hardware_events?, hardware_kinds?, collect_snapshots?, compress_paths?, stop_on_return?, collect_events?, collect_memory_events?, collect_register_events?, collect_code?, output_mode?, output_file?, output_format?, events_output?, ...` | 기본은 결과 파일+요약, 명시적 `output_mode="inline"`은 전체 JSON. DLL 내부 bounded trace. 선택적 function-return scope, ordered block/code/memory/register occurrence stream 및 block/edge, delta, memory, dependency, region, exception을 반환한다. |
 | `veh_targeted_capture` | `inputs, steps?, trace, trigger, window, environment?, output_directory, stop_on_error?` | 입력별 setup 후 occurrence 전후 ordered trace와 환경 snapshot을 서버 파일에 저장한다. instruction이 1개 이상 완료되고 요청한 target-window stop으로 끝난 입력만 성공으로 집계한다. |
 | `veh_checkpoint_create` | `threadId, regions?, capture_teb?, teb_size?` | GPR/flags(x64는 XMM 포함), TEB 및 FS/GS 환경과 선택 메모리를 저장한다. TEB bytes는 비교 전용이며 stack region은 saved SP부터의 안전한 복원 범위를 표시한다. |
 | `veh_checkpoint_restore` | `id` | 동일 스레드가 VEH 정지된 상태에서 context와 선택 메모리를 복원한다. saved SP 아래의 live VEH stack frame은 보존하며 변경된 매핑은 거부하고 실패 시 rollback한다. |
@@ -502,7 +510,7 @@ VEH 수집은 하드웨어 데이터 중단점 슬롯 하나를 사용하며 주
 |------|-----------|------|
 | `veh_kd_connect` | `transport, address, baud?` | `pipe`(VM의 COM 포트를 연결한 호스트 named pipe), `com`, `tcp`, `udp`(디버거 전용 NIC, `ip:port`, 유실·재정렬은 재전송으로 복구). 연결하면 대상 머신의 모든 CPU가 정지 |
 | `veh_kd_continue` / `veh_kd_wait` / `veh_kd_break` | `wait?, timeout_ms?` | 재개, 다음 정지(브레이크포인트)까지 대기, 실행 중 정지(break-in) |
-| `veh_trace_basic_blocks` (`execution_context="kd"`) | `start, end, cpu?, max_steps?, run_peer_cpus?` | 기본은 다른 CPU 정지. `run_peer_cpus=true`는 별도 v2 정책 협상 후 다른 CPU 실행을 허용하며 수집은 선택 CPU만 한다. 코드·명령 완료가 불확실하면 불완전 종료하고 원시 기록을 보존한다. [규약과 백엔드 검증 범위](docs/KD_TRACE_PROTOCOL.md) 참조 |
+| `veh_trace_basic_blocks` (`execution_context="kd"`) | `start, end, cpu?, max_steps?, run_peer_cpus?, collect_hardware_events?, hardware_kinds?` | 하드웨어 옵션은 별도 [TraceHW 협상](docs/KD_HARDWARE_TRACE_PROTOCOL.md)을 사용. 기본은 다른 CPU 정지. 일반 KD 수집의 `run_peer_cpus=true`는 별도 v2 정책 협상 후 다른 CPU 실행을 허용하며 수집은 선택 CPU만 한다. 코드·명령 완료가 불확실하면 불완전 종료하고 원시 기록을 보존한다. [규약과 백엔드 검증 범위](docs/KD_TRACE_PROTOCOL.md) 참조 |
 | `veh_kd_step` | `cpu?, count?` | 한 CPU만 한 명령씩 실행 (나머지 CPU는 정지 유지) |
 | `veh_kd_registers` / `veh_kd_set_register` | `cpu?, name, value` | 정지한 CPU의 레지스터 (스텁이 주면 cr3, GS/FS base, IDT, CPL 포함) |
 | `veh_kd_memory` | `operation, address, size?/count?/data?, cpu?` | 정지한 CPU의 페이지 테이블로 커널/유저 메모리 읽기, 쓰기, 디스어셈블 |

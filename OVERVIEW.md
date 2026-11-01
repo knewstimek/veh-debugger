@@ -258,7 +258,22 @@ explicit, backend-supported `events_output="file"`. KD uses its separate capture
 artifact policy. KD `run_peer_cpus=true` explicitly enables a separately negotiated
 v2 policy; collection stays on the selected CPU, with peers halted between chunks
 and at termination. Unknown code/completion ends incomplete and preserves raw facts.
-See `docs/KD_TRACE_PROTOCOL.md`; backend VM qualification remains separate.
+See `docs/KD_TRACE_PROTOCOL.md`.
+
+Hardware collection extends the same tool with `collect_hardware_events` and
+`hardware_kinds` (CR/MSR/scalar I/O), defaulting off. The built-in VEH DLL does
+not advertise it. Process capture negotiates IPC0x76 then sends IPC0x77 with
+the exact wire10 request. Host/process HV connections also use this capability
+path; kernel-range process capture depends on the backend's advertised modes.
+KD independently negotiates `qTraceHW:cap1`; it never carries process IPC.
+`src/mcp/kd_hardware_capture.cpp` validates both paginated instruction/event
+streams and flushes both files before a paired resume ACK, then releases the
+terminal backend buffer after artifacts and a bounded receipt are ready.
+Instructions use VEHKDHW1, hardware events use schema3 .vte. Offline
+read_capture/read_events/analyze_events share direct, batch and action handlers;
+whole-machine execution stays direct-only. Exact strings, null unknowns, scope
+exits and lower bounds survive partial captures. See
+`docs/TRACE_HARDWARE_PROTOCOL.md` and `docs/KD_HARDWARE_TRACE_PROTOCOL.md`.
 
 Wire v10 adds opt-in `events_output="file"` streaming for all three ordered event
 kinds. In this mode the DLL omits the inline arrays and writes typed records in

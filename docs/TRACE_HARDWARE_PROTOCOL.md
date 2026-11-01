@@ -3,17 +3,18 @@
 The existing `veh_trace_basic_blocks` tool supports hardware events through the
 process IPC path, including ordinary hypervisor process connections with
 host target scope. Support is determined by TraceHardwareCapabilities, not by
-requiring target_scope=guest. No extra MCP tool is added. KD/RSP policies and native
-tracing retain their existing contracts. Kernel execution in the current frontend
-uses whole-machine KD, so this process IPC extension alone cannot expose kernel
-hardware events. The separate [KD hardware v1 contract](KD_HARDWARE_TRACE_PROTOCOL.md)
-defines that negotiation/transport without changing existing KD v2.
+requiring target_scope=guest. No extra MCP tool is added. Process kernel-range
+capture uses the existing attach path when the backend advertises the required
+mode. Whole-machine selected-CPU capture instead uses execution_context=kd and
+the implemented, independent [KD hardware v1 transport](KD_HARDWARE_TRACE_PROTOCOL.md).
+Process IPC is never sent over KD; existing KD v2 remains compatible.
 
 ```json
 {
   "threadId": 77,
-  "start": "0xFFFF800000001000",
-  "end": "0xFFFF800000002000",
+  "start": "0x1000",
+  "end": "0x2000",
+  "follow_exceptions": false,
   "collect_hardware_events": true,
   "hardware_kinds": ["control_register", "msr", "io_port"],
   "max_steps": 100000,

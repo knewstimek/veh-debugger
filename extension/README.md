@@ -26,6 +26,7 @@ Persistent MCP comments and labels are managed through `veh_symbolize(analysis=.
 - **Authenticated MCP backend connections** — Registered remote profiles use pinned TLS and a resident runner for backend startup, host launch and reconnect; the runner is included in the binary distribution
 - **MCP tool server** — Debugger operations exposed directly to AI agents (Claude, Cursor, Codex, etc.)
 - **Bounded semantic tracing** — Aggregate blocks/edges plus optional ordered block, memory-access, register-delta, and runtime-code events in one sequence space without per-instruction MCP traffic
+- **Kernel and hardware instruction tracing (MCP)** — Selected-CPU KD tracing and capability-negotiated CR/MSR/scalar I/O events, with portable files, exact values and offline read/analysis
 - **File-backed trace results** — Process basic-block traces save JSON/JSONL results to generated host files by default and return compact path/hash/count/drop/truncation receipts. Explicit `output_mode="inline"` returns full JSON. Separately stream ordered events to `.vte` or up to 400 MiB of runtime code to `.vtc` on supported local backends
 - **Occurrence-scoped capture** — Collect selected dispatcher/instruction visits and combine them explicitly with start, stop, and collection conditions
 - **Repeatable analysis sessions** — Capture bounded thread checkpoints including TEB and FS/GS metadata, run input matrices through `veh_batch`, or write occurrence-centered code/register/memory/environment artifacts with `veh_targeted_capture`
@@ -124,7 +125,15 @@ Reset/detach release owned temporary files; baseline/undo files survive a single
 External backends require v2 capability support. See `docs/VALUE_SCAN.md` in the
 repository for storage budgets, batch/action sequencing and adoption checks.
 
-KD `veh_trace_basic_blocks(execution_context="kd", run_peer_cpus=true)` can
+Hardware instruction events are available through `collect_hardware_events=true` on a capable backend. Select MOV CR, RDMSR/WRMSR and scalar IN/OUT with `hardware_kinds=["control_register","msr","io_port"]`; omission requests all three. The built-in VEH DLL does not advertise this collection. Process capture uses the existing attach path and independent IPC capability; KD capture requires `veh_kd_connect`, a halted target and `execution_context="kd"`. A process backend can also expose kernel-range capture through its existing attach path.
+
+```json
+{"execution_context":"kd","start":"0xFFFF800000001000","end":"0xFFFF800000002000","max_steps":10000,"collect_hardware_events":true,"hardware_kinds":["control_register"],"follow_exceptions":false}
+```
+
+Hardware capture returns file receipts with schema3 events in `event_file`; KD also preserves instructions in `capture_file`. Read saved events with `operation="read_events"` or `"analyze_events"` plus `event_file`, and saved KD instructions with `operation="read_capture"` plus `capture_file`, including after disconnect. Unknown values remain null; exact 64-bit values/counts remain strings. `storage_complete` and `capture_complete` distinguish durable files from a complete capture: reaching `max_steps` can leave a valid stored prefix. KD execution is direct-only; immutable reads and analysis support batch/actions. For process hardware capture, set `follow_exceptions=false`, keep snapshots enabled and path compression disabled. KD supports snapshot-free records and independently negotiated peer execution. See [hardware tracing](https://github.com/knewstimek/veh-debugger/blob/master/docs/TRACE_HARDWARE_PROTOCOL.md) and [KD hardware transport](https://github.com/knewstimek/veh-debugger/blob/master/docs/KD_HARDWARE_TRACE_PROTOCOL.md).
+
+Ordinary KD `veh_trace_basic_blocks(execution_context="kd", run_peer_cpus=true)` can
 explicitly enable peer execution after separate v2 policy negotiation. It defaults
 off, still collects only the selected CPU and ends incomplete on uncertain code or
 completion. Saved facts remain available without guessing instructions or paths;

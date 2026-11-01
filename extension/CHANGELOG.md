@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Changed
+- **Hardware trace discovery and usage** -- synchronize Korean/English/extension READMEs, extension description, CLI help and MCP descriptions for process/KD hardware capture, file receipts and offline read/analysis routes. Clarify independent KD negotiation and capability-based process/kernel admission.
 - **Trace stream completion and limits (MCP)** -- distinguish a confirmed EOF from a cancelled drain before publishing schema3 artifacts; preserve incomplete raw prefixes on cancellation. Enforce negotiated per-instruction hardware limits, reject malformed basic path payloads in offline reads, and allow ordinary guest file event captures to keep their requested timeout up to30minutes without enabling hardware collection.
 - **File-backed basic-block results (MCP)** -- process `veh_trace_basic_blocks` defaults to a generated JSON artifact and compact path/hash/count/drop/truncation receipt. Set `output_mode="inline"` for the existing full response, or choose `output_file` and JSON/JSONL explicitly. Direct, batch and breakpoint actions share the policy. Backend collection and event limits are unchanged; `events_output="file"` remains explicit for supported ordered-event streaming.
 
