@@ -600,6 +600,18 @@ register replies, interrupt fallback and safe detach of execution/data
 breakpoints. Cleanup rejection must retain the session and prevent detach;
 retry must remove each original kind/size before sending `D`. No VM is used.
 
+### Kernel hardware capture
+
+`veh_trace_basic_blocks(execution_context="kd", collect_hardware_events=true)`
+uses the independent `qTraceHW:*`/`vTraceHW:*` transport. See
+[KD_HARDWARE_TRACE_PROTOCOL.md](KD_HARDWARE_TRACE_PROTOCOL.md) for the common
+wire header, durable dual-stream ACKs and bounded artifact receipts. Run
+`test/test_kernel_trace_hardware.py` for runtime coverage, and retain
+`test/test_kernel_trace_stream.py` as the ordinary KD v2 compatibility check.
+The fixtures use synthetic RSP peers and require no VM. Hardware capture stays
+direct-only; saved `read_capture`, `read_events` and `analyze_events` support
+offline direct, batch and breakpoint-action routes.
+
 ### Bounded kernel basic-block capture
 
 Version 2 peers stream one logical capture through fixed 4,096-record chunks,

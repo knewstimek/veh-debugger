@@ -45,6 +45,7 @@ bool HeaderValid(const kdtrace::CaptureFileHeader& h,uint64_t bytes) {
         h.rangeStart<h.rangeEnd&&bytes>=sizeof(h)+h.records*sizeof(kdtrace::Record);
 }
 }
+std::string HashKdArtifact(HANDLE file, uint64_t bytes) { return HashFile(file, bytes); }
 std::string ValidateKdCapturePath(const std::string& path,size_t maxBytes) {
     if(path.empty()||path.size()>maxBytes)return "Invalid capture path length";
     for(unsigned char value:path)if(value<32||value==127)

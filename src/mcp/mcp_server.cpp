@@ -1495,7 +1495,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"max_edges", {{"type", "integer"}, {"description", "Maximum unique observed edges (default 8192, max 32768)"}}},
 			{"max_steps", {{"type", "integer"}, {"description", "Maximum instruction/exception events (default 100000, max 5000000)"}}},
 			{"timeout_ms", {{"type", "integer"}, {"description", "Wall-clock limit (default 10000, process max60000, guest file/hardware1800000; KD max600000)"}}},
-            {"collect_hardware_events", {{"type", "boolean"}, {"default", false}, {"description", "Process IPC hardware trace v1, including ordinary hypervisor process connections. Implies collect_events and events_output=file; requires snapshots, uncompressed paths and output_mode=file. Preserves unknown/partial results."}}},
+            {"collect_hardware_events", {{"type", "boolean"}, {"default", false}, {"description", "Hardware events through process IPC (including ordinary hypervisor process connections) or independent KD TraceHW v1 negotiation. Stores hardware events in schema3 files with output_mode=file. Process capture also requires snapshots and uncompressed paths; KD supports compact records. Preserves unknown/partial results."}}},
             {"hardware_kinds", {{"type", "array"}, {"minItems", 1}, {"maxItems", 3}, {"uniqueItems", true}, {"items", {{"type", "string"}, {"enum", {"control_register", "msr", "io_port"}}}}, {"description", "Hardware kinds; omitted means all three. Requires collect_hardware_events=true"}}},
 			{"collect_snapshots", {{"type", "boolean"}, {"description", "Collect first block/edge and exception register/stack snapshots (default true). False skips capture and snapshot buffers; requires backend policy support."}}},
 			{"compress_paths", {{"type", "boolean"}, {"description", "Encode observed consecutive repeated paths losslessly (default false). Requires collect_code, no ordered memory/register events or target_window. Preserves sequence stride; reduces records, not TF exceptions."}}},
@@ -1536,7 +1536,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 				{"before_steps", {{"type", "integer"}, {"minimum", 0}, {"maximum", 100000}, {"description", "Completed instruction steps retained before the trigger"}}},
 				{"after_steps", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100000}, {"description", "Completed instruction steps retained after the trigger"}}}
 			}}, {"required", json::array({"address", "occurrence", "before_steps", "after_steps"})}, {"description", "Bounded pre-trigger ring plus post-trigger capture; incompatible with occurrence_window, conditions, stop_on_return, code_output=file, and events_output=file"}}}
-			,{"output_mode", {{"type", "string"}, {"enum", {"file", "inline"}}, {"default", "file"}, {"description", "Process trace: file receipt by default; inline explicitly returns the full result. Backend collection limits and streaming are unchanged"}}}
+			,{"output_mode", {{"type", "string"}, {"enum", {"file", "inline"}}, {"default", "file"}, {"description", "Process trace: file receipt by default; inline explicitly returns the full result. KD hardware capture requires file. Backend collection limits and streaming are unchanged"}}}
 			,{"output_file", {{"type", "string"}, {"description", "Optional new MCP-host result path; file mode generates a temporary path when omitted. Caller owns retention"}}}
 			,{"output_format", {{"type", "string"}, {"enum", {"json", "jsonl"}}, {"description", "File encoding (default json), including generated paths; JSONL uses a manifest plus section-item records"}}}
 		 }}, {"anyOf", json::array({json{{"required",json::array({"start","end"})}},json{{"properties",{{"operation",{{"enum",{"read_events","analyze_events"}}}}}},{"required",json::array({"operation","event_file"})}},json{{"properties",{{"execution_context",{{"const","kd"}}},{"operation",{{"const","read_capture"}}}}},{"required",json::array({"execution_context","operation","capture_file"})}}})}}}}),
@@ -2096,7 +2096,8 @@ json McpServer::DispatchTool(const std::string& name, const json& args, bool* kn
 
 json McpServer::RunNestedTool(const std::string& name, const json& args) {
     if (name == "veh_trace_basic_blocks" && args.value("execution_context", "process") == "kd" &&
-        args.value("operation", "capture") != "read_capture")
+        args.value("operation", "capture") != "read_capture" &&
+        args.value("operation", "capture") != "read_events" && args.value("operation", "capture") != "analyze_events")
         return {{"error", "Whole-machine KD capture requires a direct call; excluded from batch, capture setup and breakpoint actions"}};
     if (name == "veh_symbolize" && args.contains("analysis") && args["analysis"].is_object()) {
         const auto operation = args["analysis"].value("operation", "status");

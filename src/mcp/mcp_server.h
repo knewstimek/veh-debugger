@@ -201,6 +201,7 @@ private:
 	json ToolKdBreak(const json& args);
 	json ToolKdStep(const json& args);
 	json ToolKdTraceBasicBlocks(const json& args);
+    json ToolKdTraceHardware(const json& args);
 	json ToolKdRegisters(const json& args);
 	json ToolKdSetRegister(const json& args);
 	json ToolKdMemory(const json& args);

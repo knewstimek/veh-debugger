@@ -9,14 +9,15 @@ unchanged.
 
 The definitions in `src/common/kd_hardware_trace_protocol.h` are authoritative
 for byte order, sizes and offsets. All binary structures are little endian,
-pack1, independent of host/guest pointer width. The wire contract is defined
-here; the current MCP runtime does not yet send these new KD commands.
-Do not treat the existing process hardware option as implemented KD support.
+pack1, independent of host/guest pointer width. The MCP frontend implements
+this transport through `veh_trace_basic_blocks(execution_context="kd",
+collect_hardware_events=true)`. Hardware collection is negotiated independently
+on every capture; unsupported requests fail before execution.
 
 ## Admission and negotiation
 
 Use the existing MCP tool with execution_context=kd and the same strict
-collect_hardware_events/hardware_kinds options when the KD frontend is wired.
+collect_hardware_events/hardware_kinds options.
 The hardware option defaults false; false must use exactly the existing KD
 path without new queries. True never falls back to TraceBB or process IPC.
 
@@ -218,15 +219,27 @@ Hex strings preserve addresses and hardware values; unknown values are null.
 
 Whole-machine capture stays direct-only, excluded from batch/actions/capture
 setup. Immutable offline hardware reads/analysis can share the existing
-process schema3 reader. A new instruction-artifact reader must explicitly
-recognize VEHKDHW1; existing read_capture remains unchanged.
+process schema3 reader. The instruction-artifact reader explicitly
+recognizes VEHKDHW1; legacy instruction-artifact reads remain compatible.
+The runtime writes canonical instruction records and schema3 hardware events to
+separate files, flushes both before resume, and releases the terminal backend
+buffer only after the files and bounded receipt are ready. `capture_file`,
+`event_file` and `output_file` include paths and SHA-256 hashes. Omit output paths
+for generated temporary artifacts. `collect_snapshots=false` requests compact
+wire records; hardware events remain available. `run_peer_cpus=true` requires
+its independently advertised TraceHW flag.
+
+Offline `read_capture`, `read_events` and `analyze_events` work after disconnect
+and through batch/actions. Capture itself stays direct-only.
 
 ## Required frontend contract tests
 
 The native contract checks in trace_path_regression verify independent sizes,
 offsets, little-endian generation/request IDs, reserved-bit rejection and
-buffer/uncertainty accounting. They test definitions, not an enabled KD runtime.
-When wiring the runtime, add synthetic RSP coverage for both streams, paired
-ACK/replay safety, rejected/stale pages, hash/NUL/EOF boundaries, halted-PC
-refusal, selected versus peer CPU stops, lower bounds and file-budget prefixes.
-Keep the existing KD v2 streaming tests as the compatibility boundary.
+buffer/uncertainty accounting. `test/test_kernel_trace_hardware.py` exercises
+the runtime with synthetic RSP peers: independent negotiation, compact/full
+records, paginated dual streams, paired durable ACKs, rejected identities/hashes,
+E23, selected versus peer CPU stops, lower bounds, code/scope/file-budget stops,
+deadline cancellation, export failures and terminal release retries. It also
+reads saved artifacts directly and in offline batches. Existing KD v2 streaming
+tests remain the compatibility boundary.

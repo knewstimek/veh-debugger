@@ -6,6 +6,8 @@
 #include "trace_output_file.h"
 #include "kd_capture_store.h"
 #include "kd_capture_collect.h"
+#include "kd_hardware_capture.h"
+#include "trace_event_artifact.h"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -175,7 +177,25 @@ json Shape(const Records& records,const kdtrace::Header& h,const json& args) {
         {"analysis_steps",first},{"analysis_steps_omitted",records.size()-first}};
 }
 }
+json ShapeKdHardwareRecords(const kdtrace::Record* data,size_t count,const kdtrace::Header& h,const json& args) {
+    struct View { const kdtrace::Record* data; size_t count;
+        size_t size() const { return count; }
+        const kdtrace::Record& operator[](size_t i) const { return data[i]; }
+    };
+    return Shape(View{data,count},h,args);
+}
 json McpServer::ToolKdTraceBasicBlocks(const json& args) {
+    const auto operation = args.value("operation", "capture");
+    if (operation == "read_events" || operation == "analyze_events") return ReadTraceHardwareArtifact(args);
+    if (operation == "read_capture") {
+        auto hardware = ReadKdHardwareCapture(args);
+        if (!hardware.is_null()) return hardware;
+    }
+    if (args.contains("collect_hardware_events") && !args["collect_hardware_events"].is_boolean())
+        return {{"error","collect_hardware_events must be boolean"}};
+    if (operation != "capture" && operation != "read_capture") return {{"error","Unknown KD trace operation"}};
+    if (operation == "capture" && args.value("collect_hardware_events",false)) return ToolKdTraceHardware(args);
+    if (args.contains("hardware_kinds")) return {{"error","hardware_kinds requires collect_hardware_events=true"}};
     if(args.value("operation",std::string("capture"))=="read_capture")return ReadKdCapture(args);
     if(args.value("operation",std::string("capture"))!="capture")return {{"error","Unknown KD trace operation"}};
     if(!kd_)return KdNotConnected();
@@ -183,7 +203,7 @@ json McpServer::ToolKdTraceBasicBlocks(const json& args) {
     const std::set<std::string> accepted={"operation","execution_context","cpu","threadId","start","end","max_steps","timeout_ms",
         "stack_bytes","max_blocks","max_edges","collect_snapshots","collect_code","collect_events","output_file","output_format",
         "compress_paths","collect_memory_writes","collect_memory_reads","collect_memory_events","collect_register_events",
-        "stop_on_return","follow_exceptions","code_output","events_output","run_peer_cpus"};
+        "stop_on_return","follow_exceptions","code_output","events_output","run_peer_cpus","collect_hardware_events"};
     for(const auto& field:args.items())if(!accepted.count(field.key()))
         return {{"error","KD trace does not support "+field.key().substr(0,128)},{"code","unsupported_policy"}};
     // Whole-machine control never runs inside process breakpoint actions or capture setup.

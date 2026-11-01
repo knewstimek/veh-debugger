@@ -35,6 +35,7 @@ private:
     KdCaptureWrite write_=nullptr;
 };
 // Reject Win32 path truncation/control characters before any filesystem or target effects.
+std::string HashKdArtifact(HANDLE file, uint64_t bytes);
 std::string ValidateKdCapturePath(const std::string& path, size_t maxBytes=4096);
 nlohmann::json ReadKdCapture(const nlohmann::json& args);
 } // namespace veh

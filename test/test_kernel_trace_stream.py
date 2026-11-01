@@ -120,7 +120,7 @@ def run():
         filtered=client.tool("veh_trace_basic_blocks",{**page_args,"offset":"0","address_start":"0x2000","address_end":"0x3000"})
         check(filtered.get("count")==0 and filtered.get("scan_limited") and filtered.get("next_offset")=="65536","bounded range scan",filtered)
         batch=client.tool("veh_batch",{"steps":[{"tool":"veh_trace_basic_blocks","args":page_args}]})
-        check(batch.get("error")=="Not attached","batch retains its process-attachment requirement",batch)
+        check(batch.get("failed")==0 and batch["results"][0]["result"]==page,"immutable capture batch works offline",batch)
         starts=sum(p.startswith("vTraceBB:2,") for p in stub.commands)
         rejected=client.tool("veh_batch",{"steps":[{"tool":"veh_trace_basic_blocks","args":{"execution_context":"kd","start":"0x1000","end":"0x1002"}}]})
         check("error" in rejected and sum(p.startswith("vTraceBB:2,") for p in stub.commands)==starts,"capture has no nested execution effects",rejected)

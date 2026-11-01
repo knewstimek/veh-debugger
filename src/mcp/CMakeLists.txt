@@ -12,6 +12,7 @@ add_executable(veh-mcp-server
 	tools_system.cpp
 	tools_kernel_debug.cpp
 	tools_kd_trace.cpp
+    kd_hardware_capture.cpp
 	kd_capture_store.cpp
 	kd_capture_collect.cpp
 	kernel_debug_client.cpp

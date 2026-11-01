@@ -163,8 +163,8 @@ json McpServer::ToolBatch(const json& args) {
                 !step.contains("args") || !step["args"].is_object()) return false;
             const auto& readArgs = step["args"];
             const auto operation = readArgs.value("operation", "");
-            return readArgs.value("execution_context", "process") == "process" &&
-                (operation == "read_events" || operation == "analyze_events");
+            return (operation == "read_events" || operation == "analyze_events") ||
+                (readArgs.value("execution_context", "process") == "kd" && operation == "read_capture");
         });
         if (!offlineEvents) return {{"error", NotAttachedMessage()}};
     }
