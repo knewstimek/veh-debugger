@@ -444,7 +444,19 @@ VehHandler::TraceBasicBlocksState::Instruction* VehHandler::FindBasicTraceInstru
 // block's code and later steps are covered, until a terminal instruction, the
 // range end, or realignment with an already known instruction.
 VehHandler::TraceBasicBlocksState::Instruction* VehHandler::EnsureBasicTraceInstruction(uint64_t address) {
-	if (auto* known = FindBasicTraceInstruction(address)) return known;
+	if (auto* known = FindBasicTraceInstruction(address)) {
+		if (!traceBasicBlocks_.lazyDecode || TraceInstructionBytesMatch(*known, traceBasicBlocks_.rangeEnd)) return known;
+		TraceBasicBlocksState::Instruction fresh{};
+		if (!DecodeTraceInstructionAt(address, traceBasicBlocks_.rangeEnd, fresh)) return nullptr;
+		if (fresh.next != known->next || memcmp(fresh.decodedBytes, known->decodedBytes,
+			static_cast<size_t>(fresh.next - address)) != 0) {
+			FlushBasicTracePath();
+			fresh.hitCount = known->hitCount;
+			fresh.lastHitStep = known->lastHitStep;
+			*known = fresh;
+		}
+		return known;
+	}
 	auto& tb = traceBasicBlocks_;
 	if (address < tb.rangeStart || address >= tb.rangeEnd || tb.dynamicInstructionIndex.empty()) return nullptr;
 
@@ -987,10 +999,16 @@ uint32_t VehHandler::CaptureBasicTraceCodeVersion(uint64_t blockStart, uint64_t 
 	if (!first) { tb.codeTruncated = true; return UINT32_MAX; }
 	uint64_t blockEnd = first->next;
 	for (auto* current = first; !current->terminal;) {
-		auto* next = FindBasicTraceInstruction(current->next);
+		if (tb.lazyDecode && current->next < tb.rangeEnd && current->next - blockStart >= tb.codeScratch.size()) {
+			tb.codeTruncated = true; return UINT32_MAX;
+		}
+		auto* next = tb.lazyDecode ? EnsureBasicTraceInstruction(current->next) : FindBasicTraceInstruction(current->next);
 		// Stop at a static block start; instructions decoded on execution carry no
 		// static start (0), so a run crossing between both tables stays one version.
-		if (!next || next->address != blockEnd || next->staticBlockStart == next->address) break;
+		if (!next || next->address != blockEnd || next->staticBlockStart == next->address) {
+			if (!next && tb.lazyDecode && blockEnd < tb.rangeEnd) tb.codeTruncated = true;
+			break;
+		}
 		blockEnd = next->next;
 		current = next;
 	}
@@ -1570,7 +1588,7 @@ void VehHandler::FinishBasicTrace(TraceBasicBlockStopReason reason, uint64_t fin
 }
 
 bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, uint64_t rangeEnd,
-		uint32_t maxBlocks, uint32_t maxEdges, uint32_t maxSteps, uint16_t stackBytes,
+		uint32_t maxBlocks, uint32_t maxEdges, uint64_t maxSteps, uint16_t stackBytes,
 		bool followExceptions, bool collectMemoryWrites, uint32_t maxMemoryWrites,
 		bool collectMemoryReads, uint32_t maxMemoryReads,
 		bool collectEvents, uint32_t maxEvents,
@@ -1586,7 +1604,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		const TraceCondition& collectCondition, const TraceOccurrenceWindow& occurrenceWindow,
 		bool stopOnReturn, const TraceTargetWindow& targetWindow,
 		std::vector<TraceBasicBlocksState::Instruction>&& instructions,
-		std::vector<uint64_t>&& staticBlockStarts, uint32_t collectionFlags) {
+		std::vector<uint64_t>&& staticBlockStarts, uint32_t collectionFlags, bool lazyDecode, uint32_t maxDecodedInstructions) {
 	if (traceReg_.active.load(std::memory_order_acquire) ||
 		importResolve_.active.load(std::memory_order_acquire) ||
 		traceCalls_.active.load(std::memory_order_acquire) ||
@@ -1609,7 +1627,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	uint64_t ip = ctx.Eip;
 	uint64_t entryStackPointer = ctx.Esp;
 #endif
-	if (ip < rangeStart || ip >= rangeEnd || instructions.empty()) {
+	if (ip < rangeStart || ip >= rangeEnd || (!lazyDecode && instructions.empty())) {
 		if (codeStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(codeStreamPipe);
 		if (eventStreamPipe != INVALID_HANDLE_VALUE) CloseHandle(eventStreamPipe);
 		return false;
@@ -1687,10 +1705,22 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.targetWindow = targetWindow;
 	tb.instructions = std::move(instructions);
 	tb.staticBlockStarts = std::move(staticBlockStarts);
-	tb.dynamicInstructionLimit = std::min<uint32_t>(maxSteps, TraceBasicBlocksState::kMaxDynamicInstructions);
-	tb.dynamicInstructions.clear();
+	tb.lazyDecode = lazyDecode;
+	// Lookahead is independent of the execution count. Use exact fresh capacities,
+	// so a previous capture cannot silently retain a larger cache budget.
+	tb.dynamicInstructionLimit = lazyDecode ? maxDecodedInstructions :
+		static_cast<uint32_t>(std::min<uint64_t>(maxSteps, TraceBasicBlocksState::kMaxDynamicInstructions));
+	uint64_t indexCount = 1;
+	while (indexCount < static_cast<uint64_t>(tb.dynamicInstructionLimit) * 2) indexCount <<= 1;
+	if (indexCount > SIZE_MAX / sizeof(uint32_t) ||
+		static_cast<uint64_t>(tb.dynamicInstructionLimit) > SIZE_MAX / sizeof(TraceBasicBlocksState::Instruction))
+		throw std::bad_alloc();
+	std::vector<TraceBasicBlocksState::Instruction>().swap(tb.dynamicInstructions);
+	std::vector<uint32_t>().swap(tb.dynamicInstructionIndex);
 	tb.dynamicInstructions.reserve(tb.dynamicInstructionLimit);
-	tb.dynamicInstructionIndex.assign(nextPowerOfTwo(static_cast<size_t>(tb.dynamicInstructionLimit) * 2), UINT32_MAX);
+	tb.dynamicInstructionIndex.assign(static_cast<size_t>(indexCount), UINT32_MAX);
+	tb.decodeCacheBytes = static_cast<uint64_t>(tb.dynamicInstructions.capacity()) * sizeof(TraceBasicBlocksState::Instruction) +
+		static_cast<uint64_t>(tb.dynamicInstructionIndex.capacity()) * sizeof(uint32_t);
 	tb.dynamicDecodeExhausted = false;
 	tb.blockTable.assign(nextPowerOfTwo(static_cast<size_t>(maxBlocks) * 2), {});
 	tb.edgeTable.assign(nextPowerOfTwo(static_cast<size_t>(maxEdges) * 2), {});
@@ -1951,6 +1981,18 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 	}
 	bool inRange = addr >= tb.rangeStart && addr < tb.rangeEnd;
 	auto* current = inRange ? EnsureBasicTraceInstruction(addr) : nullptr;
+	if (tb.lazyDecode && inRange && !current) {
+		// The previous instruction completed; stop before executing an undecoded one.
+		++tb.stepsExecuted;
+		if (auto* previous = FindBasicTraceInstruction(tb.previousInstruction)) {
+			++previous->hitCount; previous->lastHitStep = tb.stepsExecuted;
+		}
+		tb.dynamicDecodeExhausted = true;
+		const auto reason = !FindBasicTraceInstruction(addr) && tb.dynamicInstructions.size() >= tb.dynamicInstructionLimit ?
+			TraceBasicBlockStopReason::DecodeBudget : TraceBasicBlockStopReason::DecodeFailed;
+		FinishBasicTrace(reason, addr, true);
+		return BasicTraceStepResult::Stop;
+	}
 	if (inRange) AdvanceBasicTraceTarget(addr, tb.stepsExecuted + 1);
 	auto* previousInstruction = FindBasicTraceInstruction(tb.previousInstruction);
 	if (tb.stopOnReturn && previousInstruction &&

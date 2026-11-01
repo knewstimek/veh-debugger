@@ -236,6 +236,7 @@ static uint8_t DecodeTraceInstruction(const ZydisDecoder& decoder, ZydisMachineM
 		}
 	}
 
+	memcpy(meta.decodedBytes, bytes, length);
 	meta.next = address + length;
 	meta.terminal = terminal ? 1 : 0;
 	meta.indirect = indirect ? 1 : 0;
@@ -299,10 +300,9 @@ static bool DecodeBasicTraceRange(uint64_t start, uint64_t end,
 // Single-instruction decode used by the exception handler for addresses the
 // sweep did not produce. Reads only the committed, readable part of the page
 // run (no SEH inside the handler) and never allocates.
-bool veh::DecodeTraceInstructionAt(uint64_t address, uint64_t limit,
-		veh::VehHandler::TraceBasicBlocksState::Instruction& out) {
-	if (address >= limit) return false;
-	size_t available = static_cast<size_t>(std::min<uint64_t>(limit - address, ZYDIS_MAX_INSTRUCTION_LENGTH));
+static size_t ReadTraceInstructionBytes(uint64_t address, uint64_t limit, uint8_t* bytes, size_t capacity) {
+	if (address >= limit) return 0;
+	size_t available = static_cast<size_t>(std::min<uint64_t>(limit - address, capacity));
 	for (uint64_t cursor = address; cursor < address + available;) {
 		MEMORY_BASIC_INFORMATION region{};
 		if (!VirtualQuery(reinterpret_cast<const void*>(static_cast<uintptr_t>(cursor)), &region, sizeof(region)) ||
@@ -312,9 +312,23 @@ bool veh::DecodeTraceInstructionAt(uint64_t address, uint64_t limit,
 		}
 		cursor = reinterpret_cast<uint64_t>(region.BaseAddress) + static_cast<uint64_t>(region.RegionSize);
 	}
+	if (available) memcpy(bytes, reinterpret_cast<const void*>(static_cast<uintptr_t>(address)), available);
+	return available;
+}
+
+bool veh::TraceInstructionBytesMatch(const veh::VehHandler::TraceBasicBlocksState::Instruction& instruction, uint64_t limit) {
+	const uint64_t length = instruction.next - instruction.address;
+	if (!length || length > ZYDIS_MAX_INSTRUCTION_LENGTH) return false;
+	uint8_t bytes[ZYDIS_MAX_INSTRUCTION_LENGTH]{};
+	return ReadTraceInstructionBytes(instruction.address, limit, bytes, static_cast<size_t>(length)) == length &&
+		memcmp(bytes, instruction.decodedBytes, static_cast<size_t>(length)) == 0;
+}
+
+bool veh::DecodeTraceInstructionAt(uint64_t address, uint64_t limit,
+		veh::VehHandler::TraceBasicBlocksState::Instruction& out) {
+	uint8_t bytes[ZYDIS_MAX_INSTRUCTION_LENGTH]{};
+	const size_t available = ReadTraceInstructionBytes(address, limit, bytes, sizeof(bytes));
 	if (!available) return false;
-	uint8_t bytes[ZYDIS_MAX_INSTRUCTION_LENGTH] = {};
-	memcpy(bytes, reinterpret_cast<const void*>(static_cast<uintptr_t>(address)), available);
 	ZydisDecoder decoder;
 	ZydisMachineMode machineMode;
 	if (!InitTraceDecoder(decoder, machineMode)) return false;
@@ -2719,8 +2733,10 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 		}
 		TraceBasicBlocksRequest req{};
 		memcpy(&req, payload, std::min<size_t>(payloadSize, sizeof(req)));
-		const bool explicitV11Wire = req.wireVersion == 11 &&
-			req.requestSize == kTraceBasicBlocksRequestV11Size && req.requestSize <= payloadSize;
+		const bool explicitV12Wire = req.wireVersion == 12 &&
+			req.requestSize == kTraceBasicBlocksRequestV12Size && req.requestSize <= payloadSize;
+		const bool explicitV11Wire = explicitV12Wire || (req.wireVersion == 11 &&
+			req.requestSize == kTraceBasicBlocksRequestV11Size && req.requestSize <= payloadSize);
 		const bool explicitV10Wire = (req.wireVersion == 10 || explicitV11Wire) &&
 			req.requestSize >= kTraceBasicBlocksRequestV10Size && req.requestSize <= payloadSize;
 		const bool explicitV9Wire = req.wireVersion == 9 &&
@@ -2735,7 +2751,7 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 			req.requestSize >= kTraceBasicBlocksRequestV4Size && req.requestSize <= payloadSize;
 		const bool explicitKnownWire = explicitV10Wire || explicitV9Wire || explicitV8Wire ||
 			explicitV7Wire || explicitV6Wire || explicitV5Wire;
-		const uint16_t responseHeaderSize = explicitV11Wire ? kTraceBasicBlocksResponseV9Size :
+		const uint16_t responseHeaderSize = explicitV12Wire ? kTraceBasicBlocksResponseV10Size : explicitV11Wire ? kTraceBasicBlocksResponseV9Size :
 			(explicitV10Wire || explicitV9Wire) ? kTraceBasicBlocksResponseV8Size :
 			(explicitV8Wire ? kTraceBasicBlocksResponseV7Size :
 			(explicitV7Wire ? kTraceBasicBlocksResponseV6Size :
@@ -2795,13 +2811,18 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 		}
 		if (!explicitV11Wire) req.collectionFlags = 0;
 		if (req.threadId == 0 || req.rangeStart >= req.rangeEnd ||
-			req.rangeEnd - req.rangeStart > 4ULL * 1024 * 1024) {
+			(!explicitV12Wire && req.rangeEnd - req.rangeStart > 4ULL * 1024 * 1024)) {
 			sendTraceFailure(IpcStatus::InvalidArgs, TraceBasicBlocksStartFailure::InvalidArguments, false, 0);
 			return;
 		}
 		if (req.maxBlocks == 0) req.maxBlocks = 4096;
 		if (req.maxEdges == 0) req.maxEdges = 8192;
 		if (req.maxSteps == 0) req.maxSteps = 100000;
+		if (!explicitV12Wire) { req.maxSteps64 = req.maxSteps; req.maxDecodedInstructions = 0; }
+		else {
+			if (!req.maxSteps64) req.maxSteps64 = 1000000;
+			if (!req.maxDecodedInstructions) req.maxDecodedInstructions = kTraceDefaultDecodedInstructions;
+		}
 		if (req.timeoutMs == 0) req.timeoutMs = 10000;
 		if (req.collectMemoryWrites && req.maxMemoryWrites == 0) req.maxMemoryWrites = 4096;
 		if (req.collectMemoryReads && req.maxMemoryReads == 0) req.maxMemoryReads = 4096;
@@ -2819,7 +2840,8 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 		if ((req.collectionFlags & ~(kTraceSuppressSnapshots | kTraceCompressPaths)) ||
 			((req.collectionFlags & kTraceCompressPaths) && (!req.collectCode ||
 				req.collectMemoryEvents || req.collectRegisterEvents || req.targetWindow.enabled)) ||
-			req.maxBlocks > 16384 || req.maxEdges > 32768 || req.maxSteps > 5000000 ||
+			req.maxBlocks > 16384 || req.maxEdges > 32768 || (!explicitV12Wire && req.maxSteps > 5000000) ||
+			(explicitV12Wire && (req.maxSteps64 > kTraceMaxSteps64 || req.maxDecodedInstructions == UINT32_MAX)) ||
 			(req.collectMemoryWrites && req.maxMemoryWrites > 16384) ||
 			(req.collectMemoryReads && req.maxMemoryReads > 16384) ||
 			(req.collectEvents && !fileEventOutput && req.maxEvents > 32768) ||
@@ -2849,7 +2871,7 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 				req.startCondition.clauseCount || req.stopCondition.clauseCount ||
 				req.collectCondition.clauseCount)) ||
 			req.dependencySourceCount > kTraceDependencyMaxSources ||
-			req.timeoutMs < 100 || req.timeoutMs > 60000 ||
+			req.timeoutMs < 100 || req.timeoutMs > (explicitV12Wire ? kTraceMaxTimeoutMs : 60000u) ||
 			req.stackBytes > kTraceBasicBlockMaxStackBytes) {
 			sendTraceFailure(IpcStatus::InvalidArgs, TraceBasicBlocksStartFailure::InvalidArguments, false, 0);
 			return;
@@ -2872,9 +2894,15 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 		}
 		std::vector<VehHandler::TraceBasicBlocksState::Instruction> instructions;
 		std::vector<uint64_t> staticBlockStarts;
-		instructions.reserve(static_cast<size_t>(req.rangeEnd - req.rangeStart) / 2);
-		const bool decodeSucceeded = DecodeBasicTraceRange(
-			req.rangeStart, req.rangeEnd, instructions, staticBlockStarts);
+		// Wire12 decodes only the entered block; legacy callers retain their layout/semantics.
+		bool decodeSucceeded = true;
+		if (!explicitV12Wire) {
+			instructions.reserve(static_cast<size_t>(req.rangeEnd - req.rangeStart) / 2);
+			decodeSucceeded = DecodeBasicTraceRange(req.rangeStart, req.rangeEnd, instructions, staticBlockStarts);
+		} else if (hasStoppedContext && normalizedIp >= req.rangeStart && normalizedIp < req.rangeEnd) {
+			VehHandler::TraceBasicBlocksState::Instruction entry{};
+			decodeSucceeded = DecodeTraceInstructionAt(normalizedIp, req.rangeEnd, entry);
+		}
 		const uint32_t decodedInstructionCount = static_cast<uint32_t>(instructions.size());
 		if (!decodeSucceeded) {
 			sendTraceFailure(IpcStatus::Error, TraceBasicBlocksStartFailure::DecodeFailed,
@@ -2934,8 +2962,11 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 		}
 
 		auto startTick = GetTickCount64();
-		if (!VehHandler::Instance().StartTraceBasicBlocks(req.threadId, req.rangeStart, req.rangeEnd,
-				req.maxBlocks, req.maxEdges, req.maxSteps, req.stackBytes,
+		bool started = false;
+		bool allocationFailed = false;
+		try {
+		started = VehHandler::Instance().StartTraceBasicBlocks(req.threadId, req.rangeStart, req.rangeEnd,
+				req.maxBlocks, req.maxEdges, req.maxSteps64, req.stackBytes,
 				req.followExceptions != 0, req.collectMemoryWrites != 0, req.maxMemoryWrites,
 				req.collectMemoryReads != 0, req.maxMemoryReads,
 				req.collectEvents != 0, req.maxEvents,
@@ -2949,8 +2980,14 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 				req.dependencySources, req.dependencySourceCount,
 				req.startCondition, req.stopCondition, req.collectCondition, req.occurrenceWindow,
 				req.stopOnReturn != 0, req.targetWindow,
-				std::move(instructions), std::move(staticBlockStarts), req.collectionFlags)) {
-			TraceBasicBlocksStartFailure reason = TraceBasicBlocksStartFailure::StartRejected;
+				std::move(instructions), std::move(staticBlockStarts), req.collectionFlags, explicitV12Wire, req.maxDecodedInstructions);
+		} catch (const std::exception&) {
+			allocationFailed = true;
+			VehHandler::Instance().FinalizeTraceBasicBlocksStreams();
+		}
+		if (!started) {
+			TraceBasicBlocksStartFailure reason = allocationFailed ? TraceBasicBlocksStartFailure::AllocationFailed :
+				TraceBasicBlocksStartFailure::StartRejected;
 			if (!stopped || !hasStoppedContext) reason = TraceBasicBlocksStartFailure::ThreadNotStopped;
 			else if (normalizedIp < req.rangeStart || normalizedIp >= req.rangeEnd)
 				reason = TraceBasicBlocksStartFailure::InstructionPointerOutsideRange;
@@ -3071,12 +3108,12 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 			if (IsExecutableAddr(slot.address)) {
 				entry.flags |= kTraceMemoryExecutable;
 				uint64_t executedAddress = 0;
-				auto instruction = std::lower_bound(tb.instructions.begin(), tb.instructions.end(), slot.address,
-					[](const auto& item, uint64_t address) { return item.address < address; });
-				if (instruction != tb.instructions.end() &&
-					instruction->address - slot.address < slot.size &&
-					instruction->lastHitStep > slot.firstStep)
-					executedAddress = instruction->address;
+				for (uint8_t offset = 0; offset < slot.size; ++offset) {
+					auto* instruction = VehHandler::Instance().FindBasicTraceInstruction(slot.address + offset);
+					if (instruction && instruction->lastHitStep > slot.firstStep) {
+						executedAddress = instruction->address; break;
+					}
+				}
 				if (!executedAddress) {
 					for (uint8_t offset = 0; offset < slot.size; ++offset) {
 						auto target = targetLastSteps.find(slot.address + offset);
@@ -3164,13 +3201,13 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 		header->edgeCount = static_cast<uint32_t>(edges.size());
 		header->snapshotCount = tb.snapshotCount;
 		header->memoryWriteCount = static_cast<uint32_t>(memoryWrites.size());
-		header->unsupportedMemoryWrites = tb.unsupportedMemoryWrites;
+		header->unsupportedMemoryWrites = static_cast<uint32_t>(std::min<uint64_t>(tb.unsupportedMemoryWrites, UINT32_MAX));
 		header->memoryWritesTruncated = tb.memoryWritesTruncated ? 1 : 0;
 		header->exceptionEventCount = static_cast<uint32_t>(exceptionEvents.size());
-		header->filteredSteps = tb.filteredSteps;
+		header->filteredSteps = static_cast<uint32_t>(std::min<uint64_t>(tb.filteredSteps, UINT32_MAX));
 		header->startConditionMet = tb.startConditionMet ? 1 : 0;
 		header->memoryReadCount = static_cast<uint32_t>(memoryReads.size());
-		header->unsupportedMemoryReads = tb.unsupportedMemoryReads;
+		header->unsupportedMemoryReads = static_cast<uint32_t>(std::min<uint64_t>(tb.unsupportedMemoryReads, UINT32_MAX));
 		header->memoryReadsTruncated = tb.memoryReadsTruncated ? 1 : 0;
 		header->dependencyIncomplete = tb.dependencyIncomplete ? 1 : 0;
 		memcpy(header->finalRegisterDependencies, tb.registerDependencies,
@@ -3208,7 +3245,7 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 			header->stopped = stopped && hasStoppedContext ? 1 : 0;
 			header->ipInRange = 1;
 			header->decodeSucceeded = 1;
-			header->decodedInstructionCount = decodedInstructionCount;
+			header->decodedInstructionCount = explicitV12Wire ? static_cast<uint32_t>(tb.dynamicInstructions.size()) : decodedInstructionCount;
 			header->normalizedIp = normalizedIp;
 			header->normalizedRangeStart = req.rangeStart;
 			header->normalizedRangeEnd = req.rangeEnd;
@@ -3238,6 +3275,14 @@ void PipeServer::HandleTraceCommand(uint32_t command, const uint8_t* payload, ui
 		}
 		if (req.collectCode) header->eventSchemaVersion = 2;
 		if (responseHeaderSize >= kTraceBasicBlocksResponseV9Size) {
+			if (explicitV12Wire) {
+				header->appliedMaxSteps = tb.maxSteps;
+				header->appliedMaxDecodedInstructions = req.maxDecodedInstructions;
+				header->decodeCacheBytes = tb.decodeCacheBytes;
+				header->filteredSteps64 = tb.filteredSteps;
+				header->unsupportedMemoryWrites64 = tb.unsupportedMemoryWrites;
+				header->unsupportedMemoryReads64 = tb.unsupportedMemoryReads;
+			}
 			header->appliedCollectionFlags = tb.collectionFlags;
 			header->decodeIncomplete = tb.dynamicDecodeExhausted ? 1 : 0;
 			header->expandedEventCount = (tb.collectionFlags & kTraceCompressPaths) ? tb.expandedEventCount :
@@ -3305,7 +3350,7 @@ void PipeServer::HandleLifecycleCommand(uint32_t command, const uint8_t* payload
 		GetCapabilitiesResponse resp{};
 		resp.status = IpcStatus::Ok;
 		resp.backend = IpcBackend::VehDll;
-		resp.flags = kCapStopsThreads | kCapBasicTracePolicies | kCapValueScanV2;
+		resp.flags = kCapStopsThreads | kCapBasicTracePolicies | kCapValueScanV2 | kCapBasicTraceLazy;
 		strcpy_s(resp.name, "veh-dll");
 		// Every command HandleCommand routes to a handler.
 		static constexpr IpcCommand kImplemented[] = {

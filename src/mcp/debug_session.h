@@ -451,11 +451,11 @@ public:
 		uint32_t elapsedMs = 0;
 		uint64_t stepsExecuted = 0;
 		uint64_t finalAddress = 0;
-		uint32_t unsupportedMemoryWrites = 0;
+		uint64_t unsupportedMemoryWrites = 0;
 		bool memoryWritesTruncated = false;
-		uint32_t filteredSteps = 0;
+		uint64_t filteredSteps = 0;
 		bool startConditionMet = true;
-		uint32_t unsupportedMemoryReads = 0;
+		uint64_t unsupportedMemoryReads = 0;
 		bool memoryReadsTruncated = false;
 		bool dependencyIncomplete = false;
 		uint32_t threadId = 0;
@@ -489,11 +489,14 @@ public:
 		std::vector<uint8_t> codeBytes;
 		TraceCodeArtifactResult codeArtifact;
 		TraceEventArtifactResult eventArtifact;
+        uint64_t appliedMaxSteps = 0;
+		uint64_t decodeCacheBytes = 0;
+		uint32_t appliedMaxDecodedInstructions = 0;
         bool hardwareRequested = false;
         hardwaretrace::ResponseV1 hardware{};
 	};
 	TraceBasicBlocksResult TraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, uint64_t rangeEnd,
-		uint32_t maxBlocks = 4096, uint32_t maxEdges = 8192, uint32_t maxSteps = 100000,
+		uint32_t maxBlocks = 4096, uint32_t maxEdges = 8192, uint64_t maxSteps = 1000000,
 		uint32_t timeoutMs = 10000, uint16_t stackBytes = 128, bool followExceptions = true,
 		bool collectMemoryWrites = false, uint32_t maxMemoryWrites = 4096,
 		bool collectMemoryReads = false, uint32_t maxMemoryReads = 4096,
@@ -514,7 +517,7 @@ public:
 		const TraceOccurrenceWindow& occurrenceWindow = {},
 		bool stopOnReturn = false,
 		const TraceTargetWindow& targetWindow = {}, uint32_t collectionFlags = 0,
-        uint32_t hardwareKinds = 0);
+        uint32_t hardwareKinds = 0, uint32_t maxDecodedInstructions = 0);
 
 	// --- Resolve (PDB) ---
 	uint64_t ResolveSourceLine(const std::string& file, uint32_t line);

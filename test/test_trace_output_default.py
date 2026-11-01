@@ -75,6 +75,9 @@ def main():
             ):
                 refused = client.tool("veh_trace_basic_blocks", dict(args, **invalid))
                 assert fragment in refused.get("error", ""), refused
+            for extension in ({"max_steps": "10000000000"}, {"max_decoded_instructions": 64}):
+                refused = client.tool("veh_trace_basic_blocks", dict(args, **extension))
+                assert "backend_does_not_support_trace_resource_limits" in refused.get("error", ""), refused
             assert client.tool("veh_threads")["threads"][0]["name"] == before
             assert json.loads(explicit.read_bytes()) == inline
 

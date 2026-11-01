@@ -108,9 +108,9 @@ def main():
                 "collect_code": True, "code_output": "file",
                 "max_code_bytes": 400 * 1024 * 1024,
             }), timeout=15)
-            assert file_trace == {
-                "error": "injected DLL does not support code_output=file",
-            }, file_trace
+            # A refusal is evidence of a failed request, not proof of missing file support.
+            assert file_trace.get("error") and file_trace.get("failure"), file_trace
+            assert "does not support code_output=file" not in file_trace["error"], file_trace
         if os.environ.get("VEH_TEST_EXPECT_OCCURRENCE_UNSUPPORTED") == "1":
             extension_stop = stop_at_start()
             occurrence_trace = client.tool("veh_trace_basic_blocks", inline_trace_args({

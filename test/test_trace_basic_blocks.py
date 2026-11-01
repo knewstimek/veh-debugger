@@ -112,7 +112,8 @@ def check_path_policies(client, thread_id, ip_name, address, output_path):
     reset()
     raw = client.tool("veh_trace_basic_blocks", inline_trace_args(arguments), timeout=15)
     assert "error" not in raw and raw["snapshots"], raw
-    enhanced = dict(arguments, collect_snapshots=False, compress_paths=True)
+    enhanced = dict(arguments, collect_snapshots=False, compress_paths=True,
+                    max_decoded_instructions=1000001)
     reset()
     compressed = client.tool("veh_trace_basic_blocks", inline_trace_args(enhanced), timeout=15)
     assert "error" not in compressed, compressed
@@ -244,6 +245,8 @@ def check_path_policies(client, thread_id, ip_name, address, output_path):
     with open(action_path, encoding="utf-8") as source:
         action = json.load(source)
     # A one-shot entry prefix permits the full loop capture through an action.
+    assert action["resource_limits"] == action_reference["resource_limits"], action
+    assert action["resource_limits"]["max_decoded_instructions"] == 1000001, action
     assert action["collection"]["snapshots"] is False, action
     assert action["stop_reason"] == "max_steps", action
     assert action["events"] == action_reference["events"], action
@@ -326,7 +329,8 @@ def main():
         assert failure.get("response_header_bytes") == failure.get("expected_response_bytes"), rejected
         assert failure.get("stopped") is True and failure.get("ip_in_range") is False, rejected
         assert failure.get("decode_succeeded") is True, rejected
-        assert failure.get("decoded_instruction_count", 0) > 0, rejected
+        # A lazy backend rejects an out-of-range IP before decoding any code.
+        assert failure.get("decoded_instruction_count") == 0, rejected
         assert int(failure["normalized_ip"], 0) == start, rejected
         assert int(failure["normalized_start"], 0) == start + 1, rejected
         assert int(failure["normalized_end"], 0) == start + 0x100, rejected
@@ -375,7 +379,7 @@ def main():
         assert trace["thread_id"] == thread_id, trace
         assert trace["ordering"] == {
             "available": True, "granularity": "basic_block_transitions",
-            "event_schema_version": 2, "complete": True,
+            "event_schema_version": 2, "complete": True, "decode_incomplete": False,
             "events_captured": len(trace["events"]), "events_dropped": 0,
         }, trace
         assert trace["events"] and trace["events"][0]["type"] == "block_entry", trace

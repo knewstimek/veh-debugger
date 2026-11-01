@@ -110,6 +110,7 @@ public:
 		struct Instruction {
 			uint64_t address = 0;
 			uint64_t next = 0;
+			uint8_t decodedBytes[15]{};
 			uint64_t staticBlockStart = 0;
 			uint64_t hitCount = 0;
 			uint64_t lastHitStep = 0;
@@ -215,7 +216,7 @@ public:
 		uint64_t rangeEnd = 0;
 		uint32_t maxBlocks = 0;
 		uint32_t maxEdges = 0;
-		uint32_t maxSteps = 0;
+		uint64_t maxSteps = 0;
 		uint16_t stackBytes = 0;
 		bool followExceptions = false;
 		bool collectMemoryWrites = false;
@@ -251,7 +252,7 @@ public:
 		bool targetMatched = false;
 		uint64_t entryBreakpointAddress = 0;
 		bool entryBreakpointNeedsRearm = false;
-		uint32_t filteredSteps = 0;
+		uint64_t filteredSteps = 0;
 		bool stopOnReturn = false;
 		bool functionReturned = false;
 		bool externalCallActive = false;
@@ -262,13 +263,13 @@ public:
 		uint32_t returnSnapshot = UINT32_MAX;
 		std::vector<Instruction> instructions;
 		std::vector<uint64_t> staticBlockStarts;
-		// Executed addresses the linear sweep did not produce (overlapping or
-		// obfuscated code) are decoded on first execution. Distinct executed
-		// addresses cannot exceed max_steps, so both buffers are sized from it at
-		// trace start: the dense array is reserved (pages commit on use) and the
-		// index is an open-addressing table of array positions. Appends stay within
-		// the reservation, so the handler never allocates and pointers stay valid.
-		static constexpr uint32_t kMaxDynamicInstructions = 1u << 19;
+		// Wire12 decodes entered blocks lazily. Legacy callers use this table for
+		// off-sweep addresses. The separately budgeted dense array and hash index
+		// are reserved before resuming, so the VEH never allocates or invalidates
+		// metadata pointers. Code bytes are checked before reusing cached semantics.
+		static constexpr uint32_t kMaxDynamicInstructions = 1u << 19; // legacy
+		bool lazyDecode = false;
+		uint64_t decodeCacheBytes = 0;
 		std::vector<Instruction> dynamicInstructions;
 		std::vector<uint32_t> dynamicInstructionIndex;  // UINT32_MAX = empty
 		uint32_t dynamicInstructionLimit = 0;
@@ -337,10 +338,10 @@ public:
 		uint32_t snapshotCount = 0;
 		uint32_t exceptionsFollowed = 0;
 		uint32_t memoryWriteCount = 0;
-		uint32_t unsupportedMemoryWrites = 0;
+		uint64_t unsupportedMemoryWrites = 0;
 		bool memoryWritesTruncated = false;
 		uint32_t memoryReadCount = 0;
-		uint32_t unsupportedMemoryReads = 0;
+		uint64_t unsupportedMemoryReads = 0;
 		bool memoryReadsTruncated = false;
 		bool dependencyIncomplete = false;
 		bool eventsTruncated = false;
@@ -392,7 +393,7 @@ public:
 	// Same, decoding in-range instructions on first execution when the sweep missed them
 	TraceBasicBlocksState::Instruction* EnsureBasicTraceInstruction(uint64_t address);
 	bool StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, uint64_t rangeEnd,
-		uint32_t maxBlocks, uint32_t maxEdges, uint32_t maxSteps, uint16_t stackBytes,
+		uint32_t maxBlocks, uint32_t maxEdges, uint64_t maxSteps, uint16_t stackBytes,
 		bool followExceptions, bool collectMemoryWrites, uint32_t maxMemoryWrites,
 		bool collectMemoryReads, uint32_t maxMemoryReads,
 		bool collectEvents, uint32_t maxEvents,
@@ -408,7 +409,8 @@ public:
 		const TraceCondition& collectCondition, const TraceOccurrenceWindow& occurrenceWindow,
 		bool stopOnReturn, const TraceTargetWindow& targetWindow,
 		std::vector<TraceBasicBlocksState::Instruction>&& instructions,
-		std::vector<uint64_t>&& staticBlockStarts, uint32_t collectionFlags);
+		std::vector<uint64_t>&& staticBlockStarts, uint32_t collectionFlags,
+		bool lazyDecode = false, uint32_t maxDecodedInstructions = kTraceDefaultDecodedInstructions);
 	void CancelTraceBasicBlocks(TraceBasicBlockStopReason reason);
 	void FinalizeTraceBasicBlocksStreams();
 
@@ -646,6 +648,7 @@ private:
 
 // Decodes one instruction into trace metadata (defined with the range sweep in
 // pipe_server.cpp). Allocation-free, so it is safe inside the exception handler.
+bool TraceInstructionBytesMatch(const VehHandler::TraceBasicBlocksState::Instruction& instruction, uint64_t limit);
 bool DecodeTraceInstructionAt(uint64_t address, uint64_t limit,
 	VehHandler::TraceBasicBlocksState::Instruction& out);
 

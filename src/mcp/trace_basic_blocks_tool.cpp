@@ -326,12 +326,18 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 	uint64_t start = 0, end = 0;
 	if (!parseAddress("start", start) || !parseAddress("end", end) || start >= end)
 		return {{"error", "start and end are required and must define a non-empty address range"}};
-	if (end - start > 4ULL * 1024 * 1024)
-		return {{"error", "trace range is too large (max 4 MiB)"}};
+	// Range/step extensions are capability-checked by DebugSession before effects.
 
 	int maxBlocks = TraceJsonInt(args, "max_blocks", 4096);
 	int maxEdges = TraceJsonInt(args, "max_edges", 8192);
-	int maxSteps = TraceJsonInt(args, "max_steps", 100000);
+	uint64_t maxSteps = 1000000;
+	if (args.contains("max_steps") && (!TraceJsonUint64(args, "max_steps", maxSteps) ||
+		!maxSteps || maxSteps > kTraceMaxSteps64))
+		return {{"error", "max_steps must be 1-18446744073709551614 (use a string for exact large values)"}};
+	uint64_t decodeLimit = 0;
+	if (args.contains("max_decoded_instructions") &&
+		(!TraceJsonUint64(args, "max_decoded_instructions", decodeLimit) || !decodeLimit || decodeLimit >= UINT32_MAX))
+		return {{"error", "max_decoded_instructions must be 1-4294967294"}};
 	int timeoutMs = TraceJsonInt(args, "timeout_ms", 10000);
 	int stackBytes = TraceJsonInt(args, "stack_bytes", 128);
 	bool stopOnReturn = TraceJsonBool(args, "stop_on_return", false);
@@ -416,11 +422,13 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 	int maxRegisterEvents = TraceJsonInt(args, "max_register_events", 8192);
 	if (maxBlocks < 1 || maxBlocks > 16384) return {{"error", "max_blocks must be 1-16384"}};
 	if (maxEdges < 1 || maxEdges > 32768) return {{"error", "max_edges must be 1-32768"}};
-	if (maxSteps < 1 || maxSteps > 5000000) return {{"error", "max_steps must be 1-5000000"}};
+	if (hardware && maxSteps > 5000000) return {{"error", "hardware max_steps must be 1-5000000"}};
 	const bool longGuestFile = session.IsGuestTarget() && fileEventOutput && !session.IsRemoteTarget();
-        const int maxTimeoutMs = (hardware || longGuestFile) ? 1800000 : 60000;
+        const bool lazyDecode = !hardware && session.GetBackendInfo().reported &&
+		(session.GetBackendInfo().flags & kCapBasicTraceLazy);
+        const int maxTimeoutMs = lazyDecode ? static_cast<int>(kTraceMaxTimeoutMs) : (hardware || longGuestFile) ? 1800000 : 60000;
         if (timeoutMs < 100 || timeoutMs > maxTimeoutMs)
-            return {{"error", maxTimeoutMs == 1800000 ? "timeout_ms must be 100-1800000" : "timeout_ms must be 100-60000"}};
+            return {{"error", "timeout_ms must be 100-" + std::to_string(maxTimeoutMs)}};
 	if (stackBytes < 0 || stackBytes > static_cast<int>(kTraceBasicBlockMaxStackBytes))
 		return {{"error", "stack_bytes must be 0-256"}};
 	if (maxMemoryWrites < 1 || maxMemoryWrites > 16384)
@@ -542,7 +550,7 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		(compressPaths ? kTraceCompressPaths : 0);
 	auto result = session.TraceBasicBlocks(threadId, start, end,
 		static_cast<uint32_t>(maxBlocks), static_cast<uint32_t>(maxEdges),
-		static_cast<uint32_t>(maxSteps), static_cast<uint32_t>(timeoutMs),
+		maxSteps, static_cast<uint32_t>(timeoutMs),
 		static_cast<uint16_t>(stackBytes), followExceptions,
 		collectMemoryWrites, static_cast<uint32_t>(maxMemoryWrites),
 		collectMemoryReads, static_cast<uint32_t>(maxMemoryReads),
@@ -555,7 +563,7 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		collectMemoryEvents, static_cast<uint32_t>(maxMemoryEvents),
 		collectRegisterEvents, static_cast<uint32_t>(maxRegisterEvents),
 		dependencySources, startCondition, stopCondition, collectCondition, occurrenceWindow,
-		stopOnReturn, targetWindow, collectionFlags, hardwareKinds);
+		stopOnReturn, targetWindow, collectionFlags, hardwareKinds, static_cast<uint32_t>(decodeLimit));
 	auto hex = [](uint64_t value) {
 		char buffer[24]; snprintf(buffer, sizeof(buffer), "0x%llX", value);
 		return std::string(buffer);
@@ -573,6 +581,8 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		case TraceBasicBlockStopReason::OccurrenceWindow: return "occurrence_window";
 		case TraceBasicBlockStopReason::FunctionReturn: return "function_return";
 		case TraceBasicBlockStopReason::TargetWindow: return "target_window";
+		case TraceBasicBlockStopReason::DecodeBudget: return "decode_budget";
+		case TraceBasicBlockStopReason::DecodeFailed: return "decode_failed";
 		default: return "completed";
 		}
 	};
@@ -592,14 +602,16 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
                 {"hardware_events", raw.success ? json(std::to_string(raw.hardwareEvents)) : json(nullptr)}};
             return failure;
         }
-		if (fileCodeOutput && !result.codeArtifact.error.empty())
-			return {{"error", result.codeArtifact.error}};
-		if (fileEventOutput && !result.eventArtifact.error.empty())
-			return {{"error", result.eventArtifact.error}};
+		// Preserve local artifact-validation errors when no control exchange began.
+		if (!result.controlResponseReceived && result.controlFailure.empty()) {
+			if (!result.codeArtifact.error.empty()) return {{"error", result.codeArtifact.error}};
+			if (!result.eventArtifact.error.empty()) return {{"error", result.eventArtifact.error}};
+		}
 		auto failureName = [](TraceBasicBlocksStartFailure reason) {
 			switch (reason) {
 			case TraceBasicBlocksStartFailure::InvalidArguments: return "invalid_arguments";
 			case TraceBasicBlocksStartFailure::DecodeFailed: return "decode_failed";
+			case TraceBasicBlocksStartFailure::AllocationFailed: return "allocation_failed";
 			case TraceBasicBlocksStartFailure::ThreadNotStopped: return "thread_not_stopped";
 			case TraceBasicBlocksStartFailure::InstructionPointerOutsideRange: return "instruction_pointer_outside_range";
 			case TraceBasicBlocksStartFailure::CollectorBusy: return "collector_busy";
@@ -612,8 +624,9 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 			}
 		};
 		std::string reason = failureName(result.startFailure);
-		if (reason.empty()) reason = !result.controlFailure.empty() ?
-			result.controlFailure : "control_error";
+		if (reason.empty()) reason = !result.controlFailure.empty() ? result.controlFailure :
+			(!result.codeArtifact.error.empty() ? result.codeArtifact.error :
+			(!result.eventArtifact.error.empty() ? result.eventArtifact.error : "control_error"));
 		auto statusName = [](IpcStatus status) {
 			switch (status) {
 			case IpcStatus::Ok: return "ok";
@@ -627,6 +640,8 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 			{"control_response_received", result.controlResponseReceived},
 			{"control_response_bytes", result.controlResponseBytes},
 			{"advertised_payload_bytes", result.advertisedPayloadBytes}};
+		if (!result.codeArtifact.error.empty()) failure["code_stream_error"] = result.codeArtifact.error;
+		if (!result.eventArtifact.error.empty()) failure["event_stream_error"] = result.eventArtifact.error;
 		if (result.controlSystemError) failure["system_error"] = result.controlSystemError;
 		if (result.responseHeaderSize) failure["response_header_bytes"] = result.responseHeaderSize;
 		if (result.expectedResponseBytes) failure["expected_response_bytes"] = result.expectedResponseBytes;
@@ -979,6 +994,10 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		{"complete", result.eventCollectionEnabled && !eventsTruncated},
 		{"events_captured", capturedEvents}, {"events_dropped", result.eventsDropped}};
 	if (fileEventOutput) ordering["storage"] = "file";
+	if (result.appliedMaxDecodedInstructions) {
+		ordering["decode_incomplete"] = result.decodeIncomplete;
+		if (result.decodeIncomplete) ordering["complete"] = false;
+	}
 	if (collectionFlags) {
 		ordering["compressed"] = compressPaths;
 		ordering["expanded_events_captured"] = result.expandedEventCount;
@@ -1116,6 +1135,11 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		{"final_dependencies", std::move(finalDependencies)},
 		{"exceptions", std::move(exceptions)},
 		{"register_order", std::move(registerOrder)}, {"snapshots", std::move(snapshots)}};
+	if (result.appliedMaxDecodedInstructions) fullResult["decode_incomplete"] = result.decodeIncomplete;
+	if (result.appliedMaxDecodedInstructions) fullResult["resource_limits"] = {
+		{"decode_mode", "lazy"}, {"max_steps", std::to_string(result.appliedMaxSteps)},
+		{"max_decoded_instructions", result.appliedMaxDecodedInstructions},
+		{"decode_cache_bytes", std::to_string(result.decodeCacheBytes)}};
 	if (collectionFlags) fullResult["collection"] = {
 		{"snapshots", !(result.appliedCollectionFlags & kTraceSuppressSnapshots)},
 		{"compressed_paths", (result.appliedCollectionFlags & kTraceCompressPaths) != 0}};
@@ -1226,7 +1250,7 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		{"code", fullResult["code_truncated"]},
 		{"memory_writes", fullResult["memory_writes_truncated"]},
 		{"memory_reads", fullResult["memory_reads_truncated"]}};
-	if (collectionFlags) truncation["decode"] = result.decodeIncomplete;
+	if (collectionFlags || result.appliedMaxDecodedInstructions) truncation["decode"] = result.decodeIncomplete;
 	bool complete = true;
 	for (const auto& value : truncation.items()) if (value.value().get<bool>()) complete = false;
 	json compact = {{"schema_version", 4}, {"mode", "file"},
@@ -1241,6 +1265,7 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		{"truncation", std::move(truncation)}, {"occurrence_window", fullResult["occurrence_window"]},
 		{"output_file", {{"path", exported.path}, {"format", exported.format},
 			{"size", exported.size}, {"sha256", exported.sha256}, {"complete", complete}}}};
+	if (fullResult.contains("resource_limits")) compact["resource_limits"] = fullResult["resource_limits"];
 	if (collectionFlags) compact["collection"] = fullResult["collection"];
     if (hardware) {
         compact["hardware"] = hardwareSummary;

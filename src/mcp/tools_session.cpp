@@ -144,6 +144,8 @@ json BackendSummary(const DebugSession::BackendInfo& info, const RemoteWorkInfo*
         info.Supports(IpcCommand::IsThreadStopped) && info.Supports(IpcCommand::GetRegisters);
     const bool valueFreeze = process && info.reported && info.Supports(IpcCommand::ReadMemory) &&
         info.Supports(IpcCommand::WriteMemory);
+    out["basicTrace"] = {{"protocol", info.reported && (info.flags & kCapBasicTraceLazy) ? "veh-trace/12" : "legacy"},
+        {"lazyDecode", info.reported && (info.flags & kCapBasicTraceLazy) != 0}};
     out["valueScan"]={{"protocol",info.reported&&(info.flags&kCapValueScanV2)?"veh-value-scan/2":"legacy"},
         {"async",info.reported&&(info.flags&kCapValueScanV2)!=0},
         {"undo",info.reported&&(info.flags&kCapValueScanV2)!=0}};

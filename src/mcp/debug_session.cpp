@@ -1973,7 +1973,7 @@ DebugSession::TraceCallsResult DebugSession::TraceCalls(
 
 DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		uint32_t threadId, uint64_t rangeStart, uint64_t rangeEnd,
-		uint32_t maxBlocks, uint32_t maxEdges, uint32_t maxSteps,
+		uint32_t maxBlocks, uint32_t maxEdges, uint64_t maxSteps,
 		uint32_t timeoutMs, uint16_t stackBytes, bool followExceptions,
 		bool collectMemoryWrites, uint32_t maxMemoryWrites,
 		bool collectMemoryReads, uint32_t maxMemoryReads,
@@ -1989,7 +1989,7 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		const TraceCondition& startCondition, const TraceCondition& stopCondition,
 		const TraceCondition& collectCondition, const TraceOccurrenceWindow& occurrenceWindow,
 		bool stopOnReturn, const TraceTargetWindow& targetWindow, uint32_t collectionFlags,
-        uint32_t hardwareKinds) {
+        uint32_t hardwareKinds, uint32_t maxDecodedInstructions) {
 	TraceBasicBlocksResult result;
     result.hardwareRequested = hardwareKinds != 0;
     hardwaretrace::CapabilitiesV1 hardwareCaps{};
@@ -2034,6 +2034,12 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		result.controlFailure = "backend_does_not_support_trace_collection_policies";
 		return result;
 	}
+	const bool lazyDecode = !hardwareKinds && backendInfo_.reported && (backendInfo_.flags & kCapBasicTraceLazy);
+	if (!lazyDecode && (maxDecodedInstructions || maxSteps > 5000000 ||
+		(!hardwareKinds && !IsGuestTarget() && timeoutMs > 60000) || rangeEnd - rangeStart > 4ULL * 1024 * 1024)) {
+		result.controlFailure = "backend_does_not_support_trace_resource_limits";
+		return result;
+	}
 	TraceCodeArtifactReceiver codeArtifactReceiver;
 	TraceEventArtifactReceiver eventArtifactReceiver;
 	const bool fileCodeOutput = collectCode && codeOutputMode == TraceCodeOutputMode::File;
@@ -2050,15 +2056,18 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		return result;
 	}
 	TraceBasicBlocksRequest req{};
-	req.wireVersion = collectionFlags ? kTraceBasicBlocksWireVersion : 10;
-	req.requestSize = collectionFlags ? sizeof(req) : kTraceBasicBlocksRequestV10Size;
+	req.wireVersion = lazyDecode ? 12 : (collectionFlags ? 11 : 10);
+	req.requestSize = lazyDecode ? kTraceBasicBlocksRequestV12Size :
+		(collectionFlags ? kTraceBasicBlocksRequestV11Size : kTraceBasicBlocksRequestV10Size);
+	req.maxSteps64 = maxSteps;
+	req.maxDecodedInstructions = maxDecodedInstructions ? maxDecodedInstructions : kTraceDefaultDecodedInstructions;
 	req.collectionFlags = collectionFlags;
 	req.threadId = threadId;
 	req.rangeStart = rangeStart;
 	req.rangeEnd = rangeEnd;
 	req.maxBlocks = maxBlocks;
 	req.maxEdges = maxEdges;
-	req.maxSteps = maxSteps;
+	req.maxSteps = static_cast<uint32_t>(std::min<uint64_t>(maxSteps, UINT32_MAX));
 	req.timeoutMs = timeoutMs;
 	req.stackBytes = stackBytes;
 	req.followExceptions = followExceptions ? 1 : 0;
@@ -2187,11 +2196,6 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		return result;
 	}
 	result.status = *reinterpret_cast<const IpcStatus*>(data.data());
-	if (fileCodeOutput && result.status == IpcStatus::InvalidArgs && result.codeArtifact.error.empty())
-		result.codeArtifact.error = "injected DLL does not support code_output=file";
-	if (fileEventOutput && (!result.eventArtifact.success || result.status == IpcStatus::InvalidArgs) &&
-		result.eventArtifact.error.empty())
-		result.eventArtifact.error = "injected DLL does not support events_output=file";
 	if (data.size() < kTraceBasicBlocksResponseV3Size) {
 		result.controlFailure = "response_too_small_for_trace_header";
 		return result;
@@ -2248,6 +2252,16 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 		result.decodeIncomplete = header->decodeIncomplete != 0;
 		result.expandedEventCount = header->expandedEventCount;
 	}
+	if (result.status == IpcStatus::Ok && lazyDecode) {
+		if (headerSize < kTraceBasicBlocksResponseV10Size || header->appliedMaxSteps != maxSteps ||
+			header->appliedMaxDecodedInstructions != req.maxDecodedInstructions || !header->decodeCacheBytes) {
+			result.controlFailure = "trace_resource_limits_not_acknowledged";
+			return result;
+		}
+		result.appliedMaxSteps = header->appliedMaxSteps;
+		result.appliedMaxDecodedInstructions = header->appliedMaxDecodedInstructions;
+		result.decodeCacheBytes = header->decodeCacheBytes;
+	}
 	result.stopReason = header->stopReason;
 	result.truncated = header->truncated != 0;
 	result.elapsedMs = header->elapsedMs;
@@ -2303,11 +2317,11 @@ DebugSession::TraceBasicBlocksResult DebugSession::TraceBasicBlocks(
 	}
 
 	result.exceptionsFollowed = header->exceptionsFollowed;
-	result.unsupportedMemoryWrites = header->unsupportedMemoryWrites;
+	result.unsupportedMemoryWrites = lazyDecode ? header->unsupportedMemoryWrites64 : header->unsupportedMemoryWrites;
 	result.memoryWritesTruncated = header->memoryWritesTruncated != 0;
-	result.filteredSteps = header->filteredSteps;
+	result.filteredSteps = lazyDecode ? header->filteredSteps64 : header->filteredSteps;
 	result.startConditionMet = header->startConditionMet != 0;
-	result.unsupportedMemoryReads = header->unsupportedMemoryReads;
+	result.unsupportedMemoryReads = lazyDecode ? header->unsupportedMemoryReads64 : header->unsupportedMemoryReads;
 	result.memoryReadsTruncated = header->memoryReadsTruncated != 0;
 	result.dependencyIncomplete = header->dependencyIncomplete != 0;
 	result.eventCollectionEnabled = header->eventCollectionEnabled != 0;

@@ -8,6 +8,8 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 
 ## Tool catalog
 
+Process lazy-decode budgets and the additive wire12 contract are documented in [TRACE_LAZY_DECODE.md](TRACE_LAZY_DECODE.md). `test/test_trace_lazy_decode.py` covers large ranges, exact64-bit requests, cache exhaustion, file errors and direct/batch/action parity; use the shared runner for x64 and build32.
+
 | Tool | Purpose |
 |---|---|
 | `test/test_analysis_surfaces.py` | Native stop/step comment previews, exact-address stack/software/hardware labels, pending/comment-only exclusion, opt-out and direct/batch/action parity. |

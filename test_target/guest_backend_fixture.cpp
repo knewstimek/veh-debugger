@@ -202,6 +202,7 @@ int wmain(int argc, wchar_t** argv) {
             if(mode==L"address-delay")veh::SetCommandSupported(caps.commands,veh::IpcCommand::ResolveAddressSpace);
             if (mode.rfind(L"path-", 0) == 0) {
                 caps.flags |= veh::kCapBasicTracePolicies;
+                if (mode == L"path-wide-limits") caps.flags |= veh::kCapBasicTraceLazy;
                 veh::SetCommandSupported(caps.commands, veh::IpcCommand::TraceBasicBlocks);
             }
             if (mode == L"trace") {
@@ -228,11 +229,13 @@ int wmain(int argc, wchar_t** argv) {
             if (!hardwareCapture(pipe, header.command, bytes, mode)) break;
         } else if (mode.rfind(L"path-", 0) == 0 && command == veh::IpcCommand::TraceBasicBlocks) {
             veh::TraceBasicBlocksRequest request{};
-            if (bytes.size() != sizeof(request)) {
+            const bool wideLimits = mode == L"path-wide-limits";
+            const size_t expectedBytes = wideLimits ? veh::kTraceBasicBlocksRequestV12Size : veh::kTraceBasicBlocksRequestV11Size;
+            if (bytes.size() != expectedBytes) {
                 if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break;
                 continue;
             }
-            std::memcpy(&request, bytes.data(), sizeof(request));
+            std::memcpy(&request, bytes.data(), expectedBytes);
             ++pathRequests;
             // Output policy must never silently change the backend collection mode.
             if (mode == L"path-file-output" && request.eventOutputMode != 0) {
@@ -268,6 +271,20 @@ int wmain(int argc, wchar_t** argv) {
                 response.startFailureReason = static_cast<uint8_t>(veh::TraceBasicBlocksStartFailure::HardwareBreakpointConflict);
                 response.eventCount = 0; response.expandedEventCount = 0;
                 response.appliedCollectionFlags = 0;
+            }
+            if (wideLimits) {
+                response.eventCount = 0; response.expandedEventCount = 0;
+                response.eventCollectionEnabled = 0; response.eventSchemaVersion = 1;
+                response.appliedMaxSteps = request.maxSteps64;
+                response.appliedMaxDecodedInstructions = request.maxDecodedInstructions;
+                response.decodeCacheBytes = 123456;
+                response.stopReason = veh::TraceBasicBlockStopReason::MaxSteps;
+                response.stepsExecuted = request.maxSteps64;
+                response.filteredSteps64 = UINT64_C(0x100000001);
+                response.unsupportedMemoryWrites64 = UINT64_C(0x100000002);
+                response.unsupportedMemoryReads64 = UINT64_C(0x100000003);
+                response.filteredSteps = response.unsupportedMemoryWrites = response.unsupportedMemoryReads = UINT32_MAX;
+                response.finalAddress = request.rangeStart;
             }
             std::vector<unsigned char> result(sizeof(response) + response.eventCount * sizeof(events[0]));
             std::memcpy(result.data(), &response, sizeof(response));
