@@ -1056,11 +1056,14 @@ void PipeServer::HandleExecutionCommand(uint32_t command, const uint8_t* payload
 			return ids;
 		};
 		const auto stoppedBefore = wantDetails ? stoppedThreadIds() : std::set<uint32_t>{};
-		// VEH 핸들러에서 대기 중인 스레드를 깨운다
+		// Record actual released waits. A fast next breakpoint can stop the same
+		// thread again before this reply; that later event is not a resume refusal.
+		std::vector<uint32_t> releasedVeh;
+		if (wantDetails) releasedVeh.reserve(stoppedBefore.size());
 		if (req->threadId == 0) {
-			VehHandler::Instance().ResumeAllStoppedThreads();
-		} else {
-			VehHandler::Instance().ResumeStoppedThread(req->threadId, false, passEx);
+			VehHandler::Instance().ResumeAllStoppedThreads(false, wantDetails ? &releasedVeh : nullptr);
+		} else if (VehHandler::Instance().ResumeStoppedThread(req->threadId, false, passEx)) {
+			if (wantDetails) releasedVeh.push_back(req->threadId);
 		}
 		// Pause (OS SuspendThread) 로 정지된 스레드도 resume
 		// (VEH resume과 별개 -- Pause는 OS-level, Continue는 양쪽 모두 해제)
@@ -1070,7 +1073,12 @@ void PipeServer::HandleExecutionCommand(uint32_t command, const uint8_t* payload
 			ThreadManager::Instance().ResumeThread(req->threadId);
 		}
 		if (!wantDetails) break;
-		const auto stillStopped = stoppedThreadIds();
+		auto stillStopped = stoppedThreadIds();
+		const auto suspendedAfter = ThreadManager::Instance().GetSuspendedThreadIds();
+		for (uint32_t tid : releasedVeh) {
+			if (std::find(suspendedAfter.begin(), suspendedAfter.end(), tid) == suspendedAfter.end())
+				stillStopped.erase(tid);
+		}
 		std::vector<uint32_t> resumed;
 		for (uint32_t tid : stoppedBefore) {
 			if (stillStopped.find(tid) == stillStopped.end()) resumed.push_back(tid);

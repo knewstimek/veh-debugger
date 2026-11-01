@@ -154,7 +154,7 @@ HANDLE VehHandler::GetOrCreateThreadEvent(uint32_t threadId) {
 	return evt;
 }
 
-void VehHandler::ResumeStoppedThread(uint32_t threadId, bool step, bool passException) {
+bool VehHandler::ResumeStoppedThread(uint32_t threadId, bool step, bool passException) {
 	LOG_DEBUG("ResumeStoppedThread(%u, step=%d, passEx=%d)", threadId, step, passException);
 
 	// step + passException 플래그 설정 (VEH 핸들러 스레드에서 읽음)
@@ -180,13 +180,15 @@ void VehHandler::ResumeStoppedThread(uint32_t threadId, bool step, bool passExce
 	std::lock_guard<std::mutex> lock(eventMapMutex_);
 	auto it = threadEvents_.find(threadId);
 	if (it != threadEvents_.end()) {
-		SyscallResolver::Instance().SetEvent(it->second);
+		if (!NT_SUCCESS(SyscallResolver::Instance().SetEvent(it->second))) return false;
 		// NOTE: NtClose는 VEH 핸들러(NtWaitForSingleObject 호출자)가 담당
 		threadEvents_.erase(it);
+		return true;
 	}
+	return false;
 }
 
-void VehHandler::ResumeAllStoppedThreads(bool forDetach) {
+void VehHandler::ResumeAllStoppedThreads(bool forDetach, std::vector<uint32_t>* resumed) {
 	LOG_DEBUG("ResumeAllStoppedThreads(forDetach=%d)", forDetach);
 	{
 		std::lock_guard<std::mutex> lock(stepFlagMutex_);
@@ -201,11 +203,13 @@ void VehHandler::ResumeAllStoppedThreads(bool forDetach) {
 	}
 	// Normal continue: stoppedContexts_를 유지 -- VEH 핸들러가 context 복원 후 자체 정리
 	std::lock_guard<std::mutex> lock(eventMapMutex_);
-	for (auto& [tid, evt] : threadEvents_) {
-		SyscallResolver::Instance().SetEvent(evt);
-		// NOTE: NtClose는 VEH 핸들러(NtWaitForSingleObject 호출자)가 담당
+	if (resumed) resumed->reserve(resumed->size() + threadEvents_.size());
+	for (auto it = threadEvents_.begin(); it != threadEvents_.end();) {
+		if (!NT_SUCCESS(SyscallResolver::Instance().SetEvent(it->second))) { ++it; continue; }
+		if (resumed) resumed->push_back(it->first);
+		// The handler owns NtClose; a later stop may reuse this thread ID.
+		it = threadEvents_.erase(it);
 	}
-	threadEvents_.clear();
 }
 
 bool VehHandler::IsThreadStopped(uint32_t threadId) {
