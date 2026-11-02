@@ -133,6 +133,13 @@ def run():
         corrupt=capture(max_steps=10000)
         check("error" in corrupt and corrupt.get("copied_records")=="4096" and stub.resumes==1,"corrupted packet never becomes an observation",corrupt)
         stub.bad_crc_at=None
+        before=len(stub.commands)
+        refused=capture(max_steps=2)
+        check("error" in refused and len(stub.commands)==before,"no-ack checksum failure requires reconnect",refused)
+        client.tool("veh_kd_disconnect")
+        stub.close()
+        stub=StreamStub()
+        check(client.tool("veh_kd_connect",{"transport":"tcp","address":f"127.0.0.1:{stub.port}"}).get("halted"),"reconnect after corrupt frame")
         short=capture(max_steps=100000,timeout_ms=1)
         check(short.get("timeout_requested") and short.get("stop_reason")=="interrupted" and
             short.get("steps_executed")==4096 and stub.resumes==0,"global deadline cancels before next execution",short)

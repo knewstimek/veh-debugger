@@ -618,6 +618,21 @@ Those register keys are omitted and named in `unavailable_registers`; available
 registers keep their wire offsets. An unavailable RIP cannot authorize a step.
 The regression distinguishes legal `x` slots from truly malformed encodings.
 
+`test/test_kernel_late_replies.py` delays only valid replies, using explicit
+fixture events rather than timing sleeps. It verifies that a timed-out address's
+byte cannot become a second address's result, no new write reaches the peer while
+the earlier reply remains pending, and a partial monitor stream is drained through
+its terminal reply. The old response must complete before another ordinary command
+is sent; its drain uses the new operation's existing monotonic timeout budget.
+An out-of-band interrupt still handles a running target with a deferred stop query.
+The same fixture replays breakpoint `T05`, console fragments, a second `T05`,
+breakpoint removal and both register monitor commands. This is a positive
+compatibility check; the reported live failure is not reproduced by that sequence
+alone. Monitor failures now return a bounded `diagnostic`. A no-ack checksum
+failure invalidates the connection; the streaming fixture reconnects before
+continuing unrelated positive checks.
+Reconnect must preserve the current session if owned breakpoint cleanup fails.
+
 ### Kernel hardware capture
 
 `veh_trace_basic_blocks(execution_context="kd", collect_hardware_events=true)`

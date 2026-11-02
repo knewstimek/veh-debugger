@@ -48,6 +48,13 @@ public:
 private:
 	bool Send(const std::string& payload);
 	bool Receive(std::string* payload, uint32_t timeout_ms);
+	bool CompletePending(std::string* output, uint64_t deadline, bool& success);
+	bool DrainPending(uint64_t deadline);
+	enum class PendingReply { None, Request, Monitor };
+	PendingReply pending_reply_ = PendingReply::None;
+	bool pending_asks_stop_ = false;
+	bool pending_monitor_invalid_ = false;
+	bool transport_usable_ = true;
 
 	std::unique_ptr<KdTransport> transport_;
 	std::string buffer_;

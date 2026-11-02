@@ -190,11 +190,23 @@ def run():
         first = client.tool("veh_kd_disconnect")
         assert "error" in first and "retained" in first["error"], first
         assert "D" not in stub.commands, stub.commands
+        # A reconnect must not discard an old session whose breakpoint cleanup
+        # was refused. Re-arm the fixture refusal to exercise this entry point.
+        stub.reject_remove = True
+        replacement = Stub()
+        try:
+            refused = client.tool("veh_kd_connect", {
+                "transport": "tcp", "address": f"127.0.0.1:{replacement.port}",
+            })
+            assert "error" in refused and "retained" in refused["error"], refused
+            assert replacement.peer is None, "Reconnect opened a new peer before old cleanup completed"
+        finally:
+            replacement.close()
         assert client.tool("veh_kd_registers").get("rip") == "0x1000"
         second = client.tool("veh_kd_disconnect")
         assert second.get("detached"), second
         removals = [p for p in stub.commands if p.startswith("z")]
-        assert removals == ["z0,1000,1", "z2,2000,4", "z2,2000,4", "z4,2000,8"], removals
+        assert removals == ["z0,1000,1", "z2,2000,4", "z2,2000,4", "z2,2000,4", "z4,2000,8"], removals
         assert stub.commands[-1] == "D", stub.commands
         print("PASS two-CPU duplicate/late T/S stops, DBGC trailing space, aligned console/register replies and typed detach cleanup")
     finally:

@@ -317,12 +317,15 @@ void KernelDebugClient::Trace(char dir, const char* data, size_t n)
 
 bool KernelDebugClient::Send(const std::string& payload)
 {
+	if (!transport_usable_) return false;
 	uint8_t sum = 0;
 	for (char c : payload)
 		sum = static_cast<uint8_t>(sum + static_cast<uint8_t>(c));
 	const std::string frame = "$" + payload + "#" + kHex[sum >> 4] + kHex[sum & 15];
 	Trace('>', frame.data(), frame.size());
-	return transport_->Write(frame.data(), frame.size());
+	if (transport_->Write(frame.data(), frame.size())) return true;
+	transport_usable_ = false; // a partial frame cannot safely precede another command
+	return false;
 }
 
 bool KernelDebugClient::Receive(std::string* payload, uint32_t timeout_ms)
@@ -341,15 +344,17 @@ bool KernelDebugClient::Receive(std::string* payload, uint32_t timeout_ms)
                 buffer_.erase(0, hash + 3);
                 if(!valid){
                     wait_diagnostic_="RSP checksum mismatch";
-                    if(!ack_)return false; // no-ack peers cannot retransmit this reply
-                    Trace('>',"-",1);if(!transport_->Write("-",1))return false;
+                    if(!ack_){transport_usable_=false;return false;} // no retransmission in no-ack mode
+                    Trace('>',"-",1);if(!transport_->Write("-",1)){transport_usable_=false;return false;}
                     continue;
                 }
 				// VirtualBox's stub ends every payload with a NUL byte.
 				while (!payload->empty() && payload->back() == '\0')
 					payload->pop_back();
-				if (ack_)
-					{ Trace('>', "+", 1); transport_->Write("+", 1); }
+				if (ack_) {
+					Trace('>', "+", 1);
+					if (!transport_->Write("+", 1)) { transport_usable_ = false; return false; }
+				}
 				return true;
 			}
 		}
@@ -358,8 +363,7 @@ bool KernelDebugClient::Receive(std::string* payload, uint32_t timeout_ms)
 			return false;
 		uint8_t chunk[4096];
 		const int n = transport_->Read(chunk, sizeof(chunk), static_cast<uint32_t>(end - now < 50 ? end - now : 50));
-		if (n < 0)
-			return false;
+		if (n < 0) { transport_usable_ = false; return false; }
 		Trace('<', reinterpret_cast<char*>(chunk), static_cast<size_t>(n));
 		buffer_.append(reinterpret_cast<char*>(chunk), static_cast<size_t>(n));
 	}
@@ -368,49 +372,68 @@ bool KernelDebugClient::Receive(std::string* payload, uint32_t timeout_ms)
 bool KernelDebugClient::Request(const std::string& packet, std::string* reply, uint32_t timeout_ms)
 {
 	const auto deadline = NowMs() + timeout_ms;
-	if (!Send(packet) || !Receive(reply, timeout_ms))
-		return false;
-	// Live (VirtualBox DBGC): after a breakpoint stop the console prints the
-	// event as O<hex> packets, which then preceded the next reply ('z0' was
-	// answered "O30"). No reply of ours starts with 'O' except OK.
-	const auto console = [](const std::string& r) {
-		return r.size() > 1 && r[0] == 'O' && r != "OK" &&
-			r.find_first_not_of("0123456789abcdefABCDEF", 1) == std::string::npos;
-	};
-	// A stop reply answers only '?' and resumes; another one here is a late
-	// event (live: 'z0' after a breakpoint stop got "T05thread:01;").
-	const bool asks_stop = packet == "?";
-	const auto late_stop = [&](const std::string& r) {
-		return !asks_stop && IsStopReply(r);
-	};
-	for (int skipped = 0; (console(*reply) || late_stop(*reply)) && skipped < 4096; ++skipped) {
-		if (late_stop(*reply))
-			last_stop_ = *reply;
-		const auto now = NowMs();
-		if (now >= deadline || !Receive(reply, static_cast<uint32_t>(deadline - now)))
-			return false;
-	}
-	return !console(*reply) && !late_stop(*reply);
+	reply->clear();
+	if (!DrainPending(deadline) || NowMs() >= deadline || !Send(packet)) return false;
+	pending_reply_ = PendingReply::Request;
+	pending_asks_stop_ = packet == "?";
+	bool success = false;
+	return CompletePending(reply, deadline, success) && success;
 }
 
 bool KernelDebugClient::Monitor(const std::string& hex_command, std::string* hex_output, uint32_t timeout_ms)
 {
 	hex_output->clear();
-	bool invalid_output = false;
+	const auto deadline = NowMs() + timeout_ms;
+	if (!DrainPending(deadline) || NowMs() >= deadline || !Send("qRcmd," + hex_command)) return false;
+	pending_reply_ = PendingReply::Monitor;
+	pending_monitor_invalid_ = false;
+	bool success = false;
+	return CompletePending(hex_output, deadline, success) && success;
+}
+
+bool KernelDebugClient::DrainPending(uint64_t deadline)
+{
+	if (!transport_usable_) {
+		wait_diagnostic_ = "KD transport failed; a new connection is required";
+		return false;
+	}
+	if (pending_reply_ == PendingReply::None) return true;
+	bool ignored = false;
+	if (CompletePending(nullptr, deadline, ignored)) return true;
+	wait_diagnostic_ = "Previous KD reply incomplete; new command was not sent";
+	return false;
+}
+
+bool KernelDebugClient::CompletePending(std::string* output, uint64_t deadline, bool& success)
+{
+	// RSP replies have no request IDs. A timeout leaves the old response owned
+	// by that exchange until its terminal packet is received, never by the next.
+	const auto complete = [&](bool ok) {
+		pending_reply_ = PendingReply::None;
+		if (ok) wait_diagnostic_.clear();
+		success = ok;
+		return true;
+	};
 	const auto hex_bytes = [](const std::string& value, size_t at) {
 		return (value.size() - at) % 2 == 0 &&
 			value.find_first_not_of("0123456789abcdefABCDEF", at) == std::string::npos;
 	};
-	const auto deadline = NowMs() + timeout_ms;
-	if (!Send("qRcmd," + hex_command))
-		return false;
-	// Live (VirtualBox DBGC): O<hex> packets, then OK; reading only the first
-	// left the rest in the stream and every later reply was a packet late.
 	for (int packets = 0; packets < 4096; ++packets) {
 		std::string reply;
 		const auto now = NowMs();
-		if (now >= deadline || !Receive(&reply, static_cast<uint32_t>(deadline - now)))
+		if (now >= deadline || !Receive(&reply, static_cast<uint32_t>(deadline - now))) {
+			if (transport_usable_) wait_diagnostic_ = "KD reply incomplete; response ownership retained";
 			return false;
+		}
+		if (pending_reply_ == PendingReply::Request) {
+			const bool console = reply.size() > 1 && reply[0] == 'O' && reply != "OK" &&
+				reply.find_first_not_of("0123456789abcdefABCDEF", 1) == std::string::npos;
+			if (!pending_asks_stop_ && IsStopReply(reply)) { last_stop_ = reply; continue; }
+			if (console) continue;
+			if (pending_asks_stop_ && IsStopReply(reply)) { last_stop_ = reply; running_ = false; }
+			if (output) *output = reply;
+			return complete(true);
+		}
 		// Per-CPU connect notifications or a late halt may precede/interleave
 		// qRcmd output. Keep the stop, but consume the console through its reply.
 		if (IsStopReply(reply)) {
@@ -418,18 +441,28 @@ bool KernelDebugClient::Monitor(const std::string& hex_command, std::string* hex
 			continue;
 		}
 		if (reply == "OK" || reply.empty())
-			return !invalid_output;
-		if (reply[0] == 'E' && reply.size() == 3)
-			return false;
+			return complete(!pending_monitor_invalid_);
+		if (reply[0] == 'E' && reply.size() == 3) {
+			wait_diagnostic_ = "Monitor returned " + reply;
+			return complete(false);
+		}
 		if (reply[0] == 'O') {
-			if (hex_bytes(reply, 1)) hex_output->append(reply, 1, std::string::npos);
-			else invalid_output = true; // drain through the terminal reply before returning failure
+			if (hex_bytes(reply, 1)) { if (output) output->append(reply, 1, std::string::npos); }
+			else {
+				pending_monitor_invalid_ = true;
+				wait_diagnostic_ = "Invalid monitor console hex (" + std::to_string(reply.size() - 1) + " digits): " + reply.substr(0, 80);
+			}
 			continue;
 		}
-		if (invalid_output || !hex_bytes(reply, 0)) return false;
-		hex_output->append(reply); // a stub answering with one hex packet
-		return true;
+		if (pending_monitor_invalid_) return complete(false);
+		if (!hex_bytes(reply, 0)) {
+			wait_diagnostic_ = "Unexpected monitor reply: " + reply.substr(0, 80);
+			return complete(false);
+		}
+		if (output) output->append(reply); // a stub answering with one hex packet
+		return complete(true);
 	}
+	wait_diagnostic_ = "KD reply packet limit reached; response ownership retained";
 	return false;
 }
 
@@ -453,7 +486,7 @@ bool KernelDebugClient::Handshake(std::string* stop, std::string* error)
 
 bool KernelDebugClient::Resume(const std::string& packet)
 {
-	if (!Send(packet))
+	if (!DrainPending(NowMs() + 5000) || !Send(packet))
 		return false;
 	running_ = true;
 	return true;
@@ -461,6 +494,8 @@ bool KernelDebugClient::Resume(const std::string& packet)
 
 bool KernelDebugClient::WaitStop(std::string* stop, uint32_t timeout_ms)
 {
+	const auto deadline = NowMs() + timeout_ms;
+	if (!DrainPending(deadline)) return false;
 	if (!running_) {
 		*stop = last_stop_;
 		return true;
@@ -468,9 +503,8 @@ bool KernelDebugClient::WaitStop(std::string* stop, uint32_t timeout_ms)
 	// Live (VirtualBox DBGC): the console announces the event as O<hex>
 	// packets ("dbgf event: Breakpoint ...") before the stop reply; taking
 	// one as the stop left the real T packet to answer the next request.
-	const auto deadline = GetTickCount64() + timeout_ms;
 	for (int skipped = 0; skipped < 4096; ++skipped) {
-		const auto now = GetTickCount64();
+		const auto now = NowMs();
 		if (now >= deadline || !Receive(stop, static_cast<uint32_t>(deadline - now))) {
 			char note[160];
 			std::snprintf(note, sizeof(note), "no stop reply within %u ms (%d console packet(s) skipped, %zu byte(s) buffered%s%.40s)",
@@ -511,6 +545,14 @@ bool KernelDebugClient::QueryStop(std::string* stop, uint32_t timeout_ms)
 
 bool KernelDebugClient::Interrupt(std::string* stop, uint32_t timeout_ms)
 {
+	const auto deadline = NowMs() + timeout_ms;
+	// The out-of-band interrupt has no ordinary reply slot. A running stub
+	// may defer '?' until it stops, so do not wait on that reply before halting.
+	if (pending_reply_ != PendingReply::None && running_ && transport_usable_) {
+		Trace('>', "\x03", 1);
+		if (!transport_->Write("\x03", 1)) { transport_usable_ = false; return false; }
+	}
+	if (!DrainPending(deadline)) return false;
 	if (!running_) {
 		*stop = last_stop_;
 		return true;
@@ -524,12 +566,10 @@ bool KernelDebugClient::Interrupt(std::string* stop, uint32_t timeout_ms)
 	// halting and the resume had not taken effect yet, so it did nothing and
 	// the target then ran. vCont;t is repeated each second (a halted stub
 	// ignores it), alternating with the interrupt byte for other stubs.
-	const auto deadline = GetTickCount64() + timeout_ms;
 	for (unsigned attempt = 0;; ++attempt) {
 		const bool sent = (attempt & 1) ? transport_->Write("\x03", 1) : Send("vCont;t");
-		if (!sent)
-			return false;
-		const auto now = GetTickCount64();
+		if (!sent) { transport_usable_ = false; return false; }
+		const auto now = NowMs();
 		if (now >= deadline)
 			return false;
 		const auto slice = static_cast<uint32_t>(std::min<uint64_t>(deadline - now, attempt ? 1000 : 300));

@@ -241,7 +241,9 @@ json McpServer::ToolKdTraceBasicBlocks(const json& args) {
     }
     json error;if(!KdSelect(args,error))return error;
     std::string reply;
-    if(!kd_->Request("qTraceBB:cap",&reply)||reply!="1,1000")
+    if(!kd_->Request("qTraceBB:cap",&reply))
+        return {{"error","Could not query KD capture capabilities"},{"diagnostic",kd_->wait_diagnostic()}};
+    if(reply!="1,1000")
         return {{"error","KD backend does not support bounded TraceBasicBlocks"},{"code","unsupported_backend"}};
     std::string selected;
     if(!kd_->Request("qC",&selected)||selected.rfind("QC",0)!=0)

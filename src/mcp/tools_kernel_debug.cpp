@@ -124,8 +124,10 @@ json McpServer::ToolKdConnect(const json& args)
 	const std::string address = args.value("address", "");
 	if (address.empty())
 		return {{"error", "address required (pipe name, COM port, host:port or ip:port)"}};
-	if (kd_)
-		(void)ToolKdDisconnect(json::object()); // its breakpoints out, then D
+	if (kd_) {
+		const auto detached = ToolKdDisconnect(json::object());
+		if (detached.contains("error")) return detached; // keep owned cleanup state for retry
+	}
 	kd_.reset();
 	std::string error;
 	auto link = OpenKdTransport(transport, address, JsonUint32(args, "baud", 115200), &error);
@@ -475,7 +477,7 @@ json McpServer::ToolKdMonitor(const json& args)
 		return {{"error", "running: veh_kd_break first"}};
 	bool ok = false;
 	const std::string text = MonitorText(*kd_, args.value("command", "help") + (kd_dbgc_ ? " " : ""), &ok);
-	if (!ok) return {{"error", "monitor command failed"}};
+	if (!ok) return {{"error", "monitor command failed"}, {"diagnostic", kd_->wait_diagnostic()}};
 	return {{"output", text}};
 }
 

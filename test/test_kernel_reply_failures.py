@@ -87,6 +87,7 @@ def run():
             stub.mode = mode
             result = client.tool("veh_kd_monitor", {"command": "probe"})
             assert "error" in result and "output" not in result, (mode, result)
+            assert ("E01" if mode == "monitor-error" else "Invalid monitor console hex") in result.get("diagnostic", ""), result
             stub.mode = "normal"
             assert client.tool("veh_kd_monitor", {"command": "probe"}).get("output") == "probe-ok"
             assert client.tool("veh_kd_registers").get("rip") == "0x1000"
