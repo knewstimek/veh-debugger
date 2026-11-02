@@ -608,6 +608,11 @@ Initial halt checks reject acknowledgements, unsupported/error replies, malforme
 signal numbers and target exits before probing registers or the monitor. Valid
 signal-only S replies remain supported.
 
+`test/test_kernel_reply_failures.py` uses the same owned localhost fixture to
+verify monitor errors and subsequent response alignment, malformed/odd/oversized
+hex rejection, contiguous short reads, write/address/value admission without
+backend effects, CPU IDs above nine and refusal to write registers while running.
+
 ### Kernel hardware capture
 
 `veh_trace_basic_blocks(execution_context="kd", collect_hardware_events=true)`

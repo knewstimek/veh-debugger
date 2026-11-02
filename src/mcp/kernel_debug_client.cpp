@@ -396,6 +396,11 @@ bool KernelDebugClient::Request(const std::string& packet, std::string* reply, u
 bool KernelDebugClient::Monitor(const std::string& hex_command, std::string* hex_output, uint32_t timeout_ms)
 {
 	hex_output->clear();
+	bool invalid_output = false;
+	const auto hex_bytes = [](const std::string& value, size_t at) {
+		return (value.size() - at) % 2 == 0 &&
+			value.find_first_not_of("0123456789abcdefABCDEF", at) == std::string::npos;
+	};
 	const auto deadline = NowMs() + timeout_ms;
 	if (!Send("qRcmd," + hex_command))
 		return false;
@@ -413,13 +418,15 @@ bool KernelDebugClient::Monitor(const std::string& hex_command, std::string* hex
 			continue;
 		}
 		if (reply == "OK" || reply.empty())
-			return true;
+			return !invalid_output;
 		if (reply[0] == 'E' && reply.size() == 3)
 			return false;
 		if (reply[0] == 'O') {
-			hex_output->append(reply, 1, std::string::npos);
+			if (hex_bytes(reply, 1)) hex_output->append(reply, 1, std::string::npos);
+			else invalid_output = true; // drain through the terminal reply before returning failure
 			continue;
 		}
+		if (invalid_output || !hex_bytes(reply, 0)) return false;
 		hex_output->append(reply); // a stub answering with one hex packet
 		return true;
 	}

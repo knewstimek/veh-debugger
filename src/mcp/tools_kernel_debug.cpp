@@ -4,6 +4,7 @@
 #include "tools_common.h"
 #include "kernel_debug_client.h"
 #include "../adapter/disassembler.h"
+#include <charconv>
 #include <cstring>
 
 namespace veh {
@@ -13,9 +14,13 @@ const char* const kGdbRegs[] = { "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp"
 	"r12", "r13", "r14", "r15", "rip" };
 const char* const kGdbSegs[] = { "cs", "ss", "ds", "es", "fs", "gs" };
 
-uint64_t ParseHex(const std::string& s)
+bool ParseHex(const std::string& s, uint64_t& value)
 {
-	return std::strtoull(s.c_str(), nullptr, 16);
+	const char* first = s.data();
+	const char* end = first + s.size();
+	if (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) first += 2;
+	const auto parsed = std::from_chars(first, end, value, 16);
+	return first != end && parsed.ec == std::errc{} && parsed.ptr == end;
 }
 
 std::string HexBytes(const std::vector<uint8_t>& b)
@@ -29,13 +34,17 @@ std::string HexBytes(const std::vector<uint8_t>& b)
 	return out;
 }
 
-std::vector<uint8_t> FromHex(const std::string& s)
+std::vector<uint8_t> FromHex(const std::string& s, bool allow_spacing = false)
 {
 	std::vector<uint8_t> out;
 	std::string digits;
-	for (char c : s)
+	for (char c : s) {
 		if (std::isxdigit(static_cast<unsigned char>(c)))
 			digits += c;
+		else if (!allow_spacing || !std::isspace(static_cast<unsigned char>(c)))
+			return {};
+	}
+	if (digits.size() % 2) return {};
 	for (size_t i = 0; i + 1 < digits.size(); i += 2)
 		out.push_back(static_cast<uint8_t>(std::stoul(digits.substr(i, 2), nullptr, 16)));
 	return out;
@@ -71,11 +80,13 @@ json StopJson(const std::string& stop)
 	return j;
 }
 
-std::string MonitorText(KernelDebugClient& kd, const std::string& command)
+std::string MonitorText(KernelDebugClient& kd, const std::string& command, bool* success = nullptr)
 {
 	std::string reply;
 	std::vector<uint8_t> text(command.begin(), command.end());
-	if (!kd.Monitor(HexBytes(text), &reply) || reply.empty())
+	const bool ok = kd.Monitor(HexBytes(text), &reply);
+	if (success) *success = ok;
+	if (!ok || reply.empty())
 		return "";
 	const auto bytes = FromHex(reply);
 	return std::string(bytes.begin(), bytes.end());
@@ -94,9 +105,13 @@ bool McpServer::KdSelect(const json& args, json& error)
 		return true;
 	std::string reply;
 	const int cpu = JsonInt(args, "cpu", 0);
+	if (cpu < 0 || cpu >= 64) {
+		error = {{"error", "no such cpu"}, {"cpu", cpu}};
+		return false;
+	}
 	char selection[32];
 	std::snprintf(selection, sizeof(selection), "Hg%x", cpu + 1);
-	if (cpu < 0 || cpu >= 64 || !kd_->Request(selection, &reply) || reply != "OK") {
+	if (!kd_->Request(selection, &reply) || reply != "OK") {
 		error = {{"error", "no such cpu"}, {"cpu", cpu}};
 		return false;
 	}
@@ -219,9 +234,16 @@ json McpServer::ToolKdStep(const json& args)
 		return KdNotConnected();
 	if (kd_->running())
 		return {{"error", "running: veh_kd_break first"}};
+	json error;
+	if (!KdSelect(args, error)) return error;
 	const uint32_t count = JsonUint32(args, "count", 1);
 	std::string stop = kd_->last_stop();
-	std::string thread = args.contains("cpu") ? ":" + std::to_string(JsonInt(args, "cpu", 0) + 1) : "";
+	std::string thread;
+	if (args.contains("cpu")) {
+		char id[16];
+		std::snprintf(id, sizeof(id), ":%x", JsonInt(args, "cpu", 0) + 1);
+		thread = id;
+	}
 	if (thread.empty()) {
 		const size_t t = stop.find("thread:");
 		if (t != std::string::npos)
@@ -265,6 +287,8 @@ json McpServer::ToolKdRegisters(const json& args)
 	if (!kd_->Request("g", &reply) || reply.size() < 2 * (17 * 8 + 4))
 		return {{"error", "register read failed"}, {"reply", reply.substr(0, 16)}};
 	const auto g = FromHex(reply);
+	if (g.size() < 17 * 8 + 4)
+		return {{"error", "invalid register reply"}};
 	json out;
 	for (size_t i = 0; i < 17; ++i)
 		out[kGdbRegs[i]] = HexAddr(Le(g, i * 8, 8));
@@ -286,11 +310,15 @@ json McpServer::ToolKdSetRegister(const json& args)
 {
 	if (!kd_)
 		return KdNotConnected();
+	if (kd_->running())
+		return {{"error", "running: veh_kd_break first"}};
 	json error;
 	if (!KdSelect(args, error))
 		return error;
 	const std::string name = args.value("name", "");
-	const uint64_t value = ParseHex(args.value("value", "0"));
+	uint64_t value = 0;
+	if (!ParseHex(args.value("value", ""), value))
+		return {{"error", "invalid hexadecimal register value"}};
 	int number = -1;
 	size_t size = 8;
 	for (int i = 0; i < 17; ++i)
@@ -336,12 +364,18 @@ json McpServer::ToolKdMemory(const json& args)
 	if (!KdSelect(args, error))
 		return error;
 	const std::string op = args.value("operation", "read");
-	const uint64_t address = ParseHex(args.value("address", "0"));
+	if (op != "read" && op != "write" && op != "disassemble")
+		return {{"error", "operation must be read, write or disassemble"}};
+	uint64_t address = 0;
+	if (!ParseHex(args.value("address", ""), address))
+		return {{"error", "invalid hexadecimal address"}};
 	std::string reply;
 	if (op == "write") {
-		const auto data = FromHex(args.value("data", ""));
+		const auto data = FromHex(args.value("data", ""), true);
 		if (data.empty())
 			return {{"error", "data required (hex bytes)"}};
+		if (data.size() - 1 > UINT64_MAX - address)
+			return {{"error", "memory range overflows address space"}};
 		for (size_t at = 0; at < data.size(); at += 0x7F0) {
 			const std::vector<uint8_t> chunk(data.begin() + at, data.begin() + (std::min)(data.size(), at + 0x7F0));
 			char head[48];
@@ -352,10 +386,12 @@ json McpServer::ToolKdMemory(const json& args)
 		return {{"success", true}, {"address", HexAddr(address)}, {"size", data.size()}};
 	}
 	const bool disasm = op == "disassemble";
-	const uint32_t count = JsonUint32(args, "count", 16);
-	size_t size = disasm ? count * 15 : JsonUint32(args, "size", 64);
+	const uint32_t count = (std::min)(JsonUint32(args, "count", 16), 0x10000u);
+	size_t size = disasm ? static_cast<size_t>(count) * 15 : JsonUint32(args, "size", 64);
 	if (size > 0x10000)
 		size = 0x10000;
+	if (size && size - 1 > UINT64_MAX - address)
+		return {{"error", "memory range overflows address space"}};
 	std::vector<uint8_t> data;
 	for (size_t at = 0; at < size;) {
 		const size_t n = (std::min)(size - at, static_cast<size_t>(0x7F0));
@@ -367,7 +403,10 @@ json McpServer::ToolKdMemory(const json& args)
 			break; // a readable prefix
 		}
 		const auto chunk = FromHex(reply);
+		if (chunk.empty() || chunk.size() > n)
+			return {{"error", "invalid memory reply"}, {"address", HexAddr(address + at)}};
 		data.insert(data.end(), chunk.begin(), chunk.end());
+		if (chunk.size() < n) break; // stop at a contiguous readable prefix; never skip a gap
 		at += n;
 	}
 	if (!disasm)
@@ -393,7 +432,9 @@ json McpServer::ToolKdBreakpoint(const json& args)
 	}
 	if (kd_->running())
 		return {{"error", "running: veh_kd_break first"}};
-	const uint64_t address = ParseHex(args.value("address", "0"));
+	uint64_t address = 0;
+	if (!ParseHex(args.value("address", ""), address))
+		return {{"error", "invalid hexadecimal address"}};
 	const std::string kind = args.value("kind", "execute");
 	const char type = kind == "write" ? '2' : kind == "read" ? '3' : kind == "access" ? '4' : '0';
 	const uint32_t size = type == '0' ? 1 : JsonUint32(args, "size", 1);
@@ -424,7 +465,9 @@ json McpServer::ToolKdMonitor(const json& args)
 		return KdNotConnected();
 	if (kd_->running())
 		return {{"error", "running: veh_kd_break first"}};
-	const std::string text = MonitorText(*kd_, args.value("command", "help") + (kd_dbgc_ ? " " : ""));
+	bool ok = false;
+	const std::string text = MonitorText(*kd_, args.value("command", "help") + (kd_dbgc_ ? " " : ""), &ok);
+	if (!ok) return {{"error", "monitor command failed"}};
 	return {{"output", text}};
 }
 
