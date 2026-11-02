@@ -4,6 +4,7 @@
 #include "adapter/pipe_client.h"
 #include "common/logger.h"
 #include "common/ipc_response_validation.h"
+#include "common/guest_launch_startup.h"
 #include <sstream>
 #include <algorithm>
 #include <cstring>
@@ -138,7 +139,7 @@ bool DebugSession::ConnectExternalAgent(uint32_t pid, const ExternalAgent& agent
 		wchar_t pipe[96];
 		swprintf_s(pipe, L"\\\\.\\pipe\\veh-ext-%u-%016llx", pid, static_cast<unsigned long long>(nonce));
 		std::wstring cmd = QuoteArg(Widen(agent.path));
-        if(!agent.vmTarget)cmd += L" --pid " + std::to_wstring(pid);
+        if(!agent.vmTarget && !agent.guestLaunchBootstrap)cmd += L" --pid " + std::to_wstring(pid);
         cmd += L" --pipe " + std::wstring(pipe);
 		for (const auto& a : agent.args) cmd += L" " + QuoteArg(Widen(a));
 		STARTUPINFOW si = {sizeof(si)};
@@ -154,7 +155,7 @@ bool DebugSession::ConnectExternalAgent(uint32_t pid, const ExternalAgent& agent
 	}
 	UseTransport(running->second.pipe, (agent.guestTarget || agent.vmTarget) ? 30000 : 0);
     auto* pipe = dynamic_cast<PipeClient*>(ipcTransport_.get());
-    const bool connected = pipe && pipe->ConnectToPeer(pid, 5000, running->second.process.get());
+    const bool connected = pipe && pipe->ConnectToPeer(pid, agent.guestLaunchBootstrap ? 180000 : 5000, running->second.process.get());
     if (!connected) {
         const bool exited = WaitForSingleObject(running->second.process.get(), 0) == WAIT_OBJECT_0;
         DWORD exitCode = 0;
@@ -162,10 +163,10 @@ bool DebugSession::ConnectExternalAgent(uint32_t pid, const ExternalAgent& agent
         externalAgents_.erase(running);
         // A previously acknowledged agent may exit just after its liveness check.
         // Retry only a confirmed-dead cached peer, never a live/ambiguous startup.
-        if (reusing && exited) return ConnectExternalAgent(pid, agent);
+        if (reusing && exited && !agent.guestLaunchBootstrap) return ConnectExternalAgent(pid, agent);
         lastAttachError_ = exited ? "External backend agent exited before accepting its pipe (exit code " +
             std::to_string(exitCode) + ")" : "External backend: agent pipe for PID " +
-            std::to_string(pid) + " did not come up within 5s.";
+            std::to_string(pid) + (agent.guestLaunchBootstrap ? " did not come up within 180s." : " did not come up within 5s.");
         return false;
     }
 	if (ipcTransport_->PeerProcessId() != running->second.processId) {
@@ -309,7 +310,7 @@ bool DebugSession::CompleteBackendAttach() {
     }
     const bool peerGuest = backendInfo_.reported && (backendInfo_.flags & kCapGuestTarget);
     const bool peerVm = backendInfo_.reported && (backendInfo_.flags & kCapVirtualMachineTarget);
-    if (!externalAttachPending_) {
+    if (!externalAttachPending_ && !guestTarget_ && !vmTarget_) {
         if(peerGuest||peerVm)lastAttachError_="External guest/VM backend requires explicit matching target_scope; launch is unsupported.";
         return !peerGuest&&!peerVm;
     }
@@ -345,6 +346,21 @@ bool DebugSession::CompleteBackendAttach() {
             lastAttachError_ = "Backend target identity or address width validation failed.";
             return false;
         }
+        if (!pendingGuestLaunch_.empty()) {
+            try {
+                const auto request=hvguest::decode(hvguest::read(pendingGuestLaunch_,256*1024));
+                const auto receipt=hvguest::read_result(pendingGuestLaunch_,request.header.nonce);
+                const auto regs=GetRegisters(launchedMainThreadId_);
+                if(receipt.status!=1||receipt.pid!=targetPid_||receipt.tid!=launchedMainThreadId_||
+                   receipt.bits!=info.addressBits||!IsThreadStopped(receipt.tid)||!regs||regs->rip!=receipt.entry||
+                   static_cast<bool>(regs->is32bit)!=(receipt.bits==32))
+                    throw std::runtime_error("Guest launch entry metadata does not match the retained receipt");
+                std::error_code ec;
+                std::filesystem::remove(hvguest::result_path(pendingGuestLaunch_),ec);
+                std::filesystem::remove(pendingGuestLaunch_,ec);
+                pendingGuestLaunch_.clear();
+            } catch(const std::exception& error) {lastAttachError_=error.what();return false;}
+        }
         targetAddressBits_ = info.addressBits;
         disassembler_ = CreateDisassembler(info.addressBits == 64);
         externalAttachPending_ = false;
@@ -353,6 +369,88 @@ bool DebugSession::CompleteBackendAttach() {
     externalAttachPending_ = false;
     FinishAttach(targetPid_);
     return true;
+}
+
+
+void DebugSession::RetainGuestLaunch() {
+    // Dropping a local connection neither resumes nor terminates the guest.
+    StopProcessMonitor();
+    ipcTransport_->StopHeartbeat();
+    ipcTransport_->StopEventListener();
+    ipcTransport_->Disconnect();
+    attached_=false;
+}
+
+DebugSession::LaunchResult DebugSession::LaunchGuest(const LaunchOptions& opts) {
+    LaunchResult result;
+    if(!opts.agent||!opts.agent->guestLaunch||opts.agent->remote||!opts.agent->guestTarget||opts.agent->vmTarget) {
+        result.error="Guest launch requires an explicitly enabled registered local backend";return result;
+    }
+    if(!pendingGuestLaunch_.empty()) {
+        result.error="Previous guest launch outcome retained; recover its request before another launch";return result;
+    }
+    if(opts.runAsInvoker||opts.injectionMethod!="auto") {
+        result.error="Guest launch currently requires runAsInvoker=false and injectionMethod=auto";return result;
+    }
+    try {
+        const auto text=[](const std::string& value) {
+            if(value.size()>32766u*4u||value.find('\0')!=std::string::npos)
+                throw std::runtime_error("Guest launch text invalid");
+            if(value.empty())return std::wstring{};
+            const auto size=static_cast<int>(value.size());
+            const int count=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value.data(),size,nullptr,0);
+            if(count<=0||count>32766)throw std::runtime_error("Guest launch UTF8 invalid");
+            std::wstring out(static_cast<size_t>(count),L'\0');
+            if(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,value.data(),size,out.data(),count)!=count)
+                throw std::runtime_error("Guest launch UTF8 conversion failed");
+            return out;
+        };
+        hvguest::Request request;request.header.nonce=hvguest::nonce();request.header.flags=opts.stopOnEntry?1u:0u;
+        request.program=text(opts.program);request.cwd=text(opts.cwd);
+        for(const auto& arg:opts.args)request.args.push_back(text(arg));
+        for(const auto& entry:opts.env){
+            auto value=text(entry);const auto split=value.find(L'=');
+            const bool drive=split==0&&value.size()>=4&&value[2]==L':'&&value[3]==L'='&&
+                ((value[1]>=L'A'&&value[1]<=L'Z')||(value[1]>=L'a'&&value[1]<=L'z'));
+            if(split==std::wstring::npos||(split==0&&!drive))throw std::runtime_error("Guest environment override requires a valid name");
+            request.env.push_back(std::move(value));
+        }
+        const auto bytes=hvguest::encode(request);
+        const auto path=hvguest::temporary();
+        hvguest::write_new(path,bytes.data(),static_cast<DWORD>(bytes.size()));
+        pendingGuestLaunch_=path.wstring();
+        auto agent=*opts.agent;agent.guestLaunchBootstrap=true;
+        agent.args.push_back("--guest-launch-request");agent.args.push_back(path.u8string());
+        if(!ConnectExternalAgent(0,agent))throw std::runtime_error(lastAttachError_);
+        const auto receipt=hvguest::read_result(path,request.header.nonce);
+        if(receipt.status!=1)throw std::runtime_error("Guest launch did not attest an entry stop");
+        // Guest identifiers never reach host OpenProcess/OpenThread/ResumeThread.
+        guestTarget_=true;vmTarget_=false;externalAttachPending_=true;backendInfo_={};
+        launchedMainThreadId_=receipt.tid;mainThreadResumed_=true;launchedByUs_=true;
+        FinishAttach(receipt.pid);
+        if(auto running=externalAgents_.extract(0);!running.empty()) {
+            running.key()=receipt.pid;running.mapped().args=opts.agent->args;
+            externalAgents_.insert(std::move(running));
+        }
+        result.ok=true;result.pid=receipt.pid;return result;
+    } catch(const std::exception& error) {
+        result.error=error.what();
+        if(!pendingGuestLaunch_.empty()) {
+            // Only an exact nonce-matched no-submission receipt allows retry.
+            try {
+                const auto request=hvguest::decode(hvguest::read(pendingGuestLaunch_,256*1024));
+                if(hvguest::read_result(pendingGuestLaunch_,request.header.nonce).status==2) {
+                    std::error_code ec;
+                    std::filesystem::remove(hvguest::result_path(pendingGuestLaunch_),ec);
+                    std::filesystem::remove(pendingGuestLaunch_,ec);
+                    pendingGuestLaunch_.clear();
+                }
+            }catch(...) {}
+            if(!pendingGuestLaunch_.empty())
+                result.error+="; launch request retained for recovery: " + std::filesystem::path(pendingGuestLaunch_).u8string();
+        }
+        RetainGuestLaunch();return result;
+    }
 }
 
 DebugSession::LaunchResult DebugSession::Launch(const LaunchOptions& opts) {
@@ -365,10 +463,7 @@ DebugSession::LaunchResult DebugSession::Launch(const LaunchOptions& opts) {
     }
     // Reject before local file lookup, process creation, or session mutation.
     if(opts.agent&&opts.agent->vmTarget){result.error="VM sessions do not create host processes.";return result;}
-    if (opts.agent && opts.agent->guestTarget) {
-        result.error = "Guest process launch is not supported by this frontend yet. Start the program in the guest and use veh_attach with target_scope=guest.";
-        return result;
-    }
+    if (opts.agent && opts.agent->guestTarget) return LaunchGuest(opts);
     guestTarget_ = false;
     externalAttachPending_ = false;
 	backendInfo_ = {};
@@ -2431,8 +2526,10 @@ DebugSession::SymbolMatches DebugSession::FindSymbols(const std::string& name, u
         result.error = moduleBase ? "Backend does not advertise base-scoped symbol lookup (FindSymbolsInModule 0x47)" :
             "Backend does not advertise bounded symbol-name lookup (FindSymbols 0x45)"; return result;
     }
-    if (moduleBase && (name.find('!') != std::string::npos || (TargetAddressBits() == 32 && moduleBase > UINT32_MAX))) {
-        result.error = "Use an unqualified symbol and a module base within the target address width"; return result;
+    // Candidate enumeration includes native images of a WoW64 process.
+    // Actual memory/execution commands retain their own target-width gates.
+    if (moduleBase && name.find('!') != std::string::npos) {
+        result.error = "Use an unqualified symbol with an explicit image base"; return result;
     }
     FindSymbolsRequest request{}; request.maxResults = maximum;
     std::memcpy(request.name, name.data(), name.size());
@@ -2459,8 +2556,7 @@ DebugSession::SymbolMatches DebugSession::FindSymbols(const std::string& name, u
             !std::memchr(entry.functionName, 0, sizeof(entry.functionName)) || !entry.functionName[0] ||
             !std::memchr(entry.moduleName, 0, sizeof(entry.moduleName)) ||
             (!entry.moduleName[0] && !(header.flags & kFindSymbolsIncomplete)) ||
-            ((entry.flags & kFindSymbolForwarder) ? entry.address != 0 : entry.address < entry.moduleBase) ||
-            (TargetAddressBits() == 32 && (entry.address > UINT32_MAX || entry.moduleBase > UINT32_MAX))) {
+            ((entry.flags & kFindSymbolForwarder) ? entry.address != 0 : entry.address < entry.moduleBase)) {
             result.error = "FindSymbols: invalid candidate metadata"; return result;
         }
         result.matches.push_back(entry);

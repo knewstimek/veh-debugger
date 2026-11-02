@@ -392,6 +392,58 @@ void TraceEventArtifactReceiver::ReaderThread() {
 	SetEvent(doneEvent_);
 }
 
+// Salvage only fully received, checksum-verified v1 chunks. A final chunk may
+// split a record; truncate that tail and never infer a missing completion/PC.
+static bool RecoverEventPrefix(HANDLE file,uint64_t received,uint32_t chunks,
+                               TraceEventArtifactResult& result) {
+    if(result.schemaVersion!=1||received<sizeof(TraceEventArtifactRecordHeader))return false;
+    uint64_t cursor=0,counts[3]{};
+    LARGE_INTEGER position{};position.QuadPart=sizeof(TraceEventArtifactHeader);
+    if(!SetFilePointerEx(file,position,nullptr,FILE_BEGIN))return false;
+    while(received-cursor>=sizeof(TraceEventArtifactRecordHeader)){
+        TraceEventArtifactRecordHeader record{};DWORD read=0;
+        if(!ReadFile(file,&record,sizeof(record),&read,nullptr)||read!=sizeof(record))return false;
+        uint32_t expected=0,index=0;
+        if(record.type==static_cast<uint16_t>(TraceEventRecordType::BasicBlock)){
+            expected=sizeof(TraceBasicBlockEventEntry);index=0;
+        }else if(record.type==static_cast<uint16_t>(TraceEventRecordType::Memory)){
+            expected=sizeof(TraceBasicBlockMemoryEventEntry);index=1;
+        }else if(record.type==static_cast<uint16_t>(TraceEventRecordType::Register)){
+            expected=sizeof(TraceBasicBlockRegisterEventEntry);index=2;
+        }else break;
+        if(record.reserved||record.payloadSize!=expected||
+           received-cursor-sizeof(record)<expected)break;
+        position.QuadPart=expected;
+        if(!SetFilePointerEx(file,position,nullptr,FILE_CURRENT))return false;
+        cursor+=sizeof(record)+expected;++counts[index];
+    }
+    if(!cursor)return false;
+    TraceEventArtifactHeader header{};
+    header.magic=kTraceEventArtifactMagic;header.schemaVersion=1;header.headerSize=sizeof(header);
+    header.flags=kTraceEventArtifactFlagTruncated; // No Complete flag/producer footer.
+    header.recordHeaderSize=sizeof(TraceEventArtifactRecordHeader);
+    header.basicBlockEntrySize=sizeof(TraceBasicBlockEventEntry);
+    header.memoryEntrySize=sizeof(TraceBasicBlockMemoryEventEntry);
+    header.registerEntrySize=sizeof(TraceBasicBlockRegisterEventEntry);
+    header.recordByteCount=cursor;header.basicBlockEventCount=counts[0];
+    header.memoryEventCount=counts[1];header.registerEventCount=counts[2];
+    header.chunkCount=chunks;
+    header.truncationReason=static_cast<uint32_t>(TraceEventTruncationReason::TransferFailure);
+    position.QuadPart=sizeof(header)+cursor;
+    if(!SetFilePointerEx(file,position,nullptr,FILE_BEGIN)||!SetEndOfFile(file))return false;
+    position.QuadPart=0;DWORD written=0;
+    if(!SetFilePointerEx(file,position,nullptr,FILE_BEGIN)||
+       !WriteFile(file,&header,sizeof(header),&written,nullptr)||written!=sizeof(header)||
+       !FlushFileBuffers(file))return false;
+    result.captureComplete=false;result.captureTruncated=true;
+    result.recordBytes=cursor;result.basicBlockEvents=counts[0];
+    result.memoryEvents=counts[1];result.registerEvents=counts[2];
+    result.chunks=chunks;result.truncationReason=TraceEventTruncationReason::TransferFailure;
+    result.fileSize=sizeof(header)+cursor;
+    return true;
+}
+
+
 TraceEventArtifactResult TraceEventArtifactReceiver::Finish(bool controlResponseReceived) {
 	if (thread_.joinable()) {
 		if (controlResponseReceived) WaitForSingleObject(doneEvent_, 10000);
@@ -413,8 +465,10 @@ TraceEventArtifactResult TraceEventArtifactReceiver::Finish(bool controlResponse
             result_.path = EventWideToUtf8(finalPath_);
         }
     }
+	const bool recovered = file_ != INVALID_HANDLE_VALUE && !result_.success &&
+		!result_.error.empty() && RecoverEventPrefix(file_, receivedBytes_, static_cast<uint32_t>(expectedChunk_), result_);
 	bool published = false;
-	if (file_ != INVALID_HANDLE_VALUE && result_.success && result_.error.empty()) {
+	if (file_ != INVALID_HANDLE_VALUE && ((result_.success && result_.error.empty()) || recovered)) {
 		published = CreateHardLinkW(finalPath_.c_str(), partialPath_.c_str(), nullptr) != FALSE;
 		if (!published) published = CopyFileW(partialPath_.c_str(), finalPath_.c_str(), TRUE) != FALSE;
 		if (!published) {
@@ -427,7 +481,7 @@ TraceEventArtifactResult TraceEventArtifactReceiver::Finish(bool controlResponse
 	if (stopEvent_) { CloseHandle(stopEvent_); stopEvent_ = nullptr; }
 	if (doneEvent_) { CloseHandle(doneEvent_); doneEvent_ = nullptr; }
     if (result_.rawPrefix) result_.sha256 = EventFileSha256(finalPath_);
-	if (result_.success && result_.error.empty() && published) {
+	if (((result_.success && result_.error.empty()) || recovered) && published) {
 		result_.path = EventWideToUtf8(finalPath_);
 		result_.sha256 = EventFileSha256(finalPath_);
 		if (result_.sha256.empty()) {

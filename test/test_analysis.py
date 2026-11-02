@@ -96,6 +96,48 @@ def test_revision_conflicts_history_search_delete(tmp_path):
     assert doc["entries"] == {} and doc["revision"] == "3", doc
 
 
+def test_annotation_identity_precondition_preserves_records(tmp_path):
+    logfile = tmp_path / "identity-actions.log"
+    with native(tmp_path, client_args=["--log=" + str(logfile)]) as (client, address):
+        observed = analysis(client, "get", address=address)["identity"]
+        identity = {key: observed[key] for key in ("build_id", "module_base", "module_epoch")}
+        saved = analysis(client, "set", address=address, comment="observed", expected_identity=identity)
+        assert saved.get("success"), saved
+        note = saved["annotation"]
+        document = tmp_path / "project/analysis.json"
+        before = document.read_bytes()
+        for key in identity:
+            stale = dict(identity, **{key: identity[key] + "changed"})
+            for operation in ("set", "delete"):
+                args = {"analysis": {"operation": operation, "address": address,
+                    "comment": "stale writer", "expected_revision": note["revision"], "expected_identity": stale}}
+                direct = client.tool("veh_symbolize", args)
+                batch = client.tool("veh_batch", {"steps": [{"tool": "veh_symbolize", "args": args}]})
+                assert direct["code"] == "analysis_identity_changed", direct
+                assert batch["results"][0]["result"] == direct, batch
+                assert document.read_bytes() == before
+        for bad in ({}, dict(identity, extra="unexpected"), dict(identity, module_epoch=1)):
+            rejected = analysis(client, "set", address=address, expected_identity=bad)
+            assert rejected["code"] == "analysis_arguments", rejected
+            assert document.read_bytes() == before
+        rejected = analysis(client, "delete", id=note["id"], expected_revision=note["revision"], expected_identity=identity)
+        assert rejected["code"] == "analysis_arguments", rejected
+        assert document.read_bytes() == before
+        args = {"analysis": {"operation": "set", "address": address, "comment": "stale action",
+            "expected_revision": note["revision"], "expected_identity": dict(identity, module_epoch="stale")}}
+        direct = client.tool("veh_symbolize", args)
+        installed = client.tool("veh_set_breakpoint", {"address": address, "action": [{"tool": "veh_symbolize", "args": args}]})
+        assert installed.get("success"), installed
+        client.tool("veh_continue", {"wait": True, "timeout": 1}, timeout=4)
+        assert client.tool("veh_remove_breakpoint", {"id": installed["id"]})["success"]
+        assert document.read_bytes() == before
+        deleted = analysis(client, "delete", address=address, expected_revision=note["revision"], expected_identity=identity)
+        assert deleted.get("success"), deleted
+    marker = "Breakpoint action completed with an error: "
+    reports = [json.loads(line.split(marker, 1)[1]) for line in logfile.read_text(encoding="utf-8").splitlines() if marker in line]
+    assert reports and all(report["results"][0]["result"] == direct for report in reports), reports
+
+
 def test_modified_code_is_stale_and_requires_acceptance(tmp_path):
     with native(tmp_path) as (client, address):
         saved = analysis(client, "set", address=address, comment="original instruction")["annotation"]

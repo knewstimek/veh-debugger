@@ -27,6 +27,8 @@ Process lazy-decode budgets and the additive wire12 contract are documented in [
 | `test/test_pipe_write_failure.py`, `test_target/ipc_transport_regression.cpp` | Runs bounded native fault injection against production PipeClient: a frame delivered before write cancellation cannot be followed by another ordinary request, with/without the reader; cleanup remains available. Build target: `ipc_transport_regression`. |
 | `test/owned_mcp_client.py` | Captures the MCP and all descendants in a private Windows job before requests, then terminates and waits exact owned handles even if attach never exposes an agent PID. |
 | `test/mcp_test_client.py` | Shared timeout-aware MCP stdio client. It bounds captured diagnostics and terminates only processes it started. `inline_trace_args` explicitly selects the prior process-trace response shape for legacy regressions; it never changes the client default. |
+| `test/test_guest_launch.py` | Registered local guest bootstrap, x86/x64 entry and single Continue, UTF-16 args/env, receipt refusal, no replay and exact no-submission retry; all peers run in an owned job. |
+| `test/test_trace_compact_artifacts.py`, `test/test_trace_failure_prefix.py` | Automatic event files, compact JSON receipts, direct/batch/action parity, checksummed schema1 prefix salvage, reader opt-in and uncertain execution facts. |
 | `test/test_trace_output_default.py` | Synthetic owned-peer checks for default JSON/JSONL files, hashes, direct/batch/action parity, explicit inline, no-overwrite, and validation before backend effects. |
 | `test/dap_test_client.py`, `test/test_dap_thread_errors.py`, `test/test_dap_guest_attach.py` | Bounded DAP stdio client; no-attach error and synthetic external guest attach, scope/identity validation, capability-gated command routing, rejection and acknowledged disconnect retry tests. The adapter runs without opening a console window. `test/test_vm_attach.py` covers malformed guest thread-list IPC through MCP. |
 | `tools/run_mcp_scenario.py` | Runs 1-500 calls from a JSON scenario, supports named result references, stops on errors by default, and optionally writes a new report without overwriting. |
@@ -354,7 +356,7 @@ The output path must not exist. Reports default to a 16 MiB serialized limit, co
 
 ## Trace output validation
 
-Process `veh_trace_basic_blocks` defaults to `output_mode="file"`: omitting `output_file` generates a new result under the MCP host temporary `veh-mcp-artifacts` directory. Set `output_mode="inline"` explicitly for the full legacy response; it cannot be combined with `output_file` or `output_format`. `output_file` selects a new path and `output_format` (`json` or `jsonl`) applies to explicit and generated paths. Callers own retention and cleanup. This result transport does not enable target event streaming or change capture limits; use explicit `events_output="file"` when the backend supports long ordered-event streams. Target windows keep their existing bounded rings, and remote/legacy backends keep their existing collection IPC. KD retains its separate capture artifact policy. The server writes the complete result to a new MCP-host file and returns only bounded metadata: path, SHA-256, byte size, event counts, truncation state, and errors. JSONL uses one manifest followed by ordered section-item records. Existing files are never overwritten; a failed write removes its randomized sibling partial file when the process can still perform cleanup.
+Process `veh_trace_basic_blocks` defaults to `output_mode="file"`: omitting `output_file` generates a new result under the MCP host temporary `veh-mcp-artifacts` directory. Set `output_mode="inline"` explicitly for JSON responses up to64KiB (larger replies return a compact file receipt); it cannot be combined with `output_file` or `output_format`. `output_file` selects a new path and `output_format` (`json` or `jsonl`) applies to explicit and generated paths. Callers own retention and cleanup. Result transport is independent of target event streaming. Local ordered captures above256 max_steps default to events_output=file except target_window; explicit events_output=inline preserves bounded rings. Remote defaults remain inline because file data pipes are unavailable. Target windows keep their existing bounded rings, and remote/legacy backends keep their existing collection IPC. KD retains its separate capture artifact policy. The server writes the complete result to a new MCP-host file and returns only bounded metadata: path, SHA-256, byte size, event counts, truncation state, and errors. JSONL uses one manifest followed by ordered section-item records. Existing files are never overwritten; a failed write removes its randomized sibling partial file when the process can still perform cleanup.
 
 ```powershell
 py -3 tools/validate_trace_output.py trace.jsonl --sha256 <expected-sha256>
@@ -362,7 +364,7 @@ py -3 tools/validate_trace_output.py trace.jsonl --sha256 <expected-sha256>
 
 The separate `code_output="file"` mode stores executed code versions in a portable `.vtc` artifact. A full trace export can reference that artifact, and the validator checks the referenced version IDs. Relative artifact paths are resolved from the trace file directory. After copying artifacts to another Windows, Linux, or macOS host, pass `--code-artifact <local-file.vtc>` to replace the capture host's path; the file formats themselves do not depend on the capture OS.
 
-The opt-in `events_output="file"` mode stores block/edge, memory, and register events in their actual emission order in a portable `.vte` artifact. Set `events_output_path` to a new MCP-host path, or omit it for a generated temporary path. Existing files are never overwritten. `max_event_file_bytes` includes the header and complete records, defaults to 4 GiB, and accepts lower limits from 88 bytes through 4 GiB. File mode does not allocate or return the inline event arrays, and their legacy per-kind caps do not limit capture. If the byte limit cannot fit the next complete record, event capture stops with `truncated=true` and `limit_reason="size_limit"`; aggregate tracing continues and the file remains parseable. Four fixed 256 KiB buffers are allocated before tracing. If all are full, the traced thread waits for the writer instead of dropping records, and `wait_time_ns`/`wait_time_ms` report that backpressure cost. File event streaming works through direct calls, `veh_batch`, and breakpoint actions. It can be combined with occurrence windows, but not `target_window`, whose pre-trigger eviction semantics require its existing bounded inline rings.
+The `events_output="file"` mode stores block/edge, memory, and register events in their actual emission order in a portable `.vte` artifact. Set `events_output_path` to a new MCP-host path, or omit it for a generated temporary path. Existing files are never overwritten. `max_event_file_bytes` includes the header and complete records, defaults to 4 GiB, and accepts lower limits from 88 bytes through 4 GiB. File mode does not allocate or return the inline event arrays, and their legacy per-kind caps do not limit capture. If the byte limit cannot fit the next complete record, event capture stops with `truncated=true` and `limit_reason="size_limit"`; aggregate tracing continues and the file remains parseable. Four fixed 256 KiB buffers are allocated before tracing. If all are full, the traced thread waits for the writer instead of dropping records, and `wait_time_ns`/`wait_time_ms` report that backpressure cost. File event streaming works through direct calls, `veh_batch`, and breakpoint actions. Transfer failure preserves only checksummed schema1 chunks up to the last complete record; capture/execution completion and final PC remain unknown. The CLI reader requires `--allow-incomplete` for these marked prefixes, and still validates every record/count/EOF boundary. It can be combined with occurrence windows, but not `target_window`, whose pre-trigger eviction semantics require its existing bounded inline rings.
 
 ```powershell
 py -3 tools/read_trace_event_stream.py trace.vte --output trace-events.jsonl
@@ -692,8 +694,16 @@ invalid width and explicit Unsupported responses.
 It opens no host process handle for guest targets, installs no host PID monitor,
 and uses backend-provided width for disassembly. Guest event ownership is the
 authenticated backend's responsibility, not a host Toolhelp lookup. Backend
-reuse requires identical path, arguments and scope. Guest `veh_launch` is
-explicitly unsupported until guest process creation and stopOnEntry are wired.
+reuse requires identical path, arguments and scope. Guest MCP `veh_launch` requires registered local `target_scope=guest`, `guest_launch=true`.
+The version1 bootstrap is shared in `src/common/guest_launch_startup.h`; request/receipt
+files are owner/SYSTEM protected, nonce-bound and limited to256KiB. The backend
+creates and verifies the child entry stop before exposing Ready; the frontend checks
+PID/TID, target width, stopped state and entry registers. Unknown outcomes retain
+the request and block replay. Only an exact no-submission receipt permits retry.
+Guest paths never open host target handles; `stopOnEntry=false` continues once.
+Remote/inline/VM creation, runAsInvoker and non-default injection policies are refused.
+DAP remains attach-only. Launch remains a session-start batch step; breakpoint actions
+cannot launch targets because that replaces their owning session.
 
 For guest DAP module-qualified function breakpoints (`module!function`), the
 adapter uses `SetModuleLoadStop` only when that command, Continue and
@@ -730,7 +740,7 @@ routing on backend capabilities. Control includes continue/pause, instruction
 steps and step out; memory, breakpoint, symbol and inspection commands require
 the corresponding advertised IPC commands. Source/function breakpoints use
 backend symbol resolution. Stops name the selected thread and do not claim all
-threads stopped. Guest launch and `stopOnModuleLoad` remain unsupported.
+threads stopped. Guest DAP launch and `stopOnModuleLoad` remain unsupported.
 
 `py -3 tools/run_tests.py test_guest_backend.py --jobs 1 --timeout 60` builds on
 the host-only `guest_backend_fixture` target to check PID collisions, metadata

@@ -5,6 +5,14 @@ tool or database library is required. Notes are frontend metadata; they do not
 patch instructions, alter registers, create target threads, or become PDB symbols.
 This version adds annotations to MCP results, not a VS Code annotation editor.
 
+Address-based `set`/`delete` can include `expected_identity` with exactly the
+`build_id`, `module_base` and `module_epoch` strings from `get.identity`.
+A changed build/base/lifetime or unavailable persistent identity returns
+`analysis_identity_changed` before mutating records. Incomplete or extra fields
+return `analysis_arguments`; id-only edits cannot use this precondition.
+`expected_revision` still protects record revisions independently. Direct calls,
+batch steps and breakpoint actions share these checks.
+
 ## Open once, then use ordinary inspection
 
 Choose an absolute local directory explicitly. The following path is synthetic:

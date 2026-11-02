@@ -160,6 +160,8 @@ public:
 		std::vector<std::string> args; // appended after --pid/--pipe
 		bool guestTarget = false; // guest PIDs/paths never name host objects
         bool vmTarget = false; // VM sessions omit --pid and have no OS target
+        bool guestLaunch = false; // registered local backend explicitly opts in
+        bool guestLaunchBootstrap = false; // internal: omit PID until owner creates child
         std::optional<RemoteEndpoint> remote; // registered profile only; no inline credentials
 	};
 	// nullptr agent: inject the VEH DLL. Otherwise start or reuse that agent.
@@ -206,6 +208,8 @@ public:
 		std::string error;
 	};
 	LaunchResult Launch(const LaunchOptions& opts);
+    LaunchResult LaunchGuest(const LaunchOptions& opts);
+    void RetainGuestLaunch();
 	bool Detach();
 	// Terminate the target from inside (via DLL). Works even on self-protected targets that
 	// deny external OpenProcess(PROCESS_TERMINATE). Tears down the session afterward.
@@ -600,6 +604,7 @@ private:
 	std::atomic<bool> launchedByUs_{false};
 	uint32_t launchedMainThreadId_ = 0;
 	bool mainThreadResumed_ = false;
+    std::wstring pendingGuestLaunch_; // ambiguous creation blocks a fresh nonce/replay
 
 	// Breakpoint tracking
 	std::vector<SwBpInfo> swBreakpoints_;

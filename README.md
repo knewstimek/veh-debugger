@@ -271,8 +271,9 @@ npm run compile
 메모리 쓰기, 계속·정지, 명령어 단위 스텝·step out, 실행·데이터 중단점,
 식 평가·변수 변경·종료를 지원합니다. 소스·함수 중단점은 백엔드의 심볼 해석을
 사용하며, 미지원 명령은 오류를 반환합니다. 정지 이벤트는 선택된 스레드만
-멈췄다고 표시합니다. 게스트 프로세스 생성(`veh_launch`/DAP `launch`)과
-`stopOnEntry`는 아직 미지원이므로 기존 프로세스에 attach해야 합니다.
+멈췄다고 표시합니다. 게스트 DAP `launch`와 `stopOnEntry`는 미지원이므로 DAP는
+기존 프로세스에 attach해야 합니다. MCP의 등록된 로컬 백엔드는 아래 설명대로
+게스트 `veh_launch`를 사용할 수 있습니다.
 `stopOnModuleLoad`는 게스트 DAP 연결에서 사용할 수 없습니다.
 
 ### 2. TCP 모드 (로컬)
@@ -382,8 +383,14 @@ PID와 32·64비트 정보는 백엔드가 검증하며, 게스트 연결은 호
 호스트 PID 종료 감시를 사용하지 않습니다. 정지된 VM을 요구하는 백엔드는 연결 전에
 그 조건을 충족해야 합니다. 게스트 프로세스 목록·선택은 이 기능이 제공하지 않습니다.
 
-**게스트 `veh_launch`와 `stopOnEntry`는 아직 지원하지 않습니다.** 요청은 호스트에서
-프로그램을 실행하거나 현재 세션을 끊기 전에 거부됩니다. 정지·스텝·트레이스는 각
+**게스트 MCP 실행은 등록된 로컬 백엔드의 `guest_launch: true` 명시가 필요합니다.**
+설정의 `target_scope`를 `guest`로 두고
+`veh_launch(program="Q:/samples/sample.exe", backend="guest-lab", stopOnEntry=true)`를 사용합니다.
+경로·인자·cwd·환경변수는 게스트에 전달합니다. nonce가 일치하는 생성 영수증과
+PID/TID·주소 폭·실제 진입점 정지를 검증해야 성공합니다. `stopOnEntry=false`는 검증 후
+한 번 계속합니다. 불명확한 결과는 요청 파일을 보존하고 새 생성 요청을 막습니다.
+직접 지정 agent·원격 게스트·VM 범위 생성, `runAsInvoker=true`, 비기본 injectionMethod는
+거부합니다. DAP는 attach 전용입니다. 정지·스텝·트레이스는 각
 백엔드가 지원한다고 보고한 명령만 사용할 수 있습니다. 이 설정은 MCP용이며 VSCode
 DAP의 게스트 연결 설정은 추가하지 않습니다. 실행 중 서버의 도구 설명은
 `veh_toolbox(operation="describe", tool="veh_attach")`로 확인할 수 있습니다.
@@ -420,7 +427,7 @@ VM 자체에 연결할 때는 외부 백엔드를 VM 범위로 등록한 뒤
 | `veh_virtual_machine` | `operation, cpu?, max_instructions?, duration_ms?, cpl_mask?, cr3_roots?, rip_begin?, rip_end?` | 명시적 VM 전체 제어·정지 상태 vCPU 트레이스. 수동 호출 전용 |
 | `veh_processes` | - | 지원하는 게스트/VM 백엔드에서 OS 프로세스 목록(PID, 주소 폭, 짧은 이미지명)을 한 스냅샷으로 조회. 기본 프로필에선 `veh_toolbox`로 호출 |
 | `veh_attach` | `pid?, backend?/agent?, agent_args?, target_scope?` | VEH 주입 또는 외부 백엔드 연결. VM PID는 `target_scope="guest"`와 백엔드 검증 필요. VM 자체 연결은 pid를 생략합니다. |
-| `veh_launch` | `program, args?, stopOnEntry?, cwd?, env?, backend?/agent?, target_scope?` | 호스트 프로세스 생성·연결. `cwd`/`env` 지원. 게스트 launch/stopOnEntry는 미지원이며 기존 세션을 보존하고 거부 |
+| `veh_launch` | `program, args?, stopOnEntry?, cwd?, env?, backend?/agent?, target_scope?` | 호스트 프로세스 생성·연결 및 등록된 로컬 guest_launch 백엔드의 게스트 진입점 생성·검증. DAP/원격 게스트는 attach 전용 |
 | `veh_detach` | - | 디버거 분리 (타겟은 계속 실행). 백엔드 정리 실패 시 오류를 반환하고 세션을 유지해 재시도 가능 |
 | `veh_terminate` | `exitCode?` | 타겟을 **내부에서** 강제 종료 (주입된 DLL이 자기 프로세스에 `TerminateProcess` 호출). 외부 `taskkill`/`OpenProcess`를 막는 자기보호 타겟(deny-DACL/상위 무결성)도 확실히 종료 -- 프로세스 자기 핸들은 항상 종료 권한 보유. 종료 후 자동 detach. `WM_CLOSE->detach->taskkill` 수순 대체 |
 | `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?, action?` | 소프트웨어 BP. `action`으로 히트 시 자동 실행 (veh_batch 형식) |

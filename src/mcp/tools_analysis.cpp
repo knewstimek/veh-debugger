@@ -140,6 +140,7 @@ json McpServer::ToolAnalysis(const json& args) {
         Text(args, "id", 256); Text(args, "expected_revision", 20);
         const auto expected = args.value("expected_revision", "");
         if (args.contains("id")) {
+            if (args.contains("expected_identity")) throw AnalysisError("analysis_arguments", "Identity preconditions require a current address");
             const auto id = args["id"].get<std::string>();
             if (!doc["entries"].contains(id)) throw AnalysisError("analysis_missing", "Annotation not found");
             if (operation == "delete") return analysisStore_.Mutate(operation, {{"id", id}}, expected);
@@ -160,6 +161,22 @@ json McpServer::ToolAnalysis(const json& args) {
         std::string moduleError; const auto modules = session_.GetModules(&moduleError);
         if (!moduleError.empty()) throw AnalysisError("analysis_module", moduleError);
         auto context = AnnotationContext(address, modules);
+        // Optional write precondition binds the effect to the editor's observation.
+        // Capture the identity in this operation; the epoch check below guards
+        // all subsequent instruction reads before publishing the saved record.
+        if (args.contains("expected_identity")) {
+            const auto& wanted = args["expected_identity"];
+            if ((operation != "set" && operation != "delete") || !wanted.is_object() || wanted.size() != 3 ||
+                    !wanted.contains("build_id") || !wanted["build_id"].is_string() ||
+                    !wanted.contains("module_base") || !wanted["module_base"].is_string() ||
+                    !wanted.contains("module_epoch") || !wanted["module_epoch"].is_string())
+                throw AnalysisError("analysis_arguments", "Expected a complete annotation identity precondition");
+            if (!hasEpoch || !context["persistent_identity"].get<bool>() ||
+                    wanted["build_id"] != context["build_id"] ||
+                    wanted["module_base"] != context["module_base"] ||
+                    wanted["module_epoch"] != context["module_epoch"])
+                throw AnalysisError("analysis_identity_changed", "The expected annotation build or lifetime changed; read again");
+        }
         const auto stableObservation = [&] {
             if (!context["persistent_identity"].get<bool>()) return;
             GetModuleIdentityResponse after{}; std::string error;

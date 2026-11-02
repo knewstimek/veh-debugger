@@ -25,7 +25,8 @@ def main():
             })
             assert attached.get("success"), attached
             args = {"threadId": 77, "start": "0x1000", "end": "0x1100",
-                    "collect_code": True, "collect_snapshots": False, "compress_paths": True}
+                    "collect_code": True, "collect_snapshots": False, "compress_paths": True,
+                    "events_output": "inline"}
             inline = client.tool("veh_trace_basic_blocks", dict(args, output_mode="inline"))
             assert "error" not in inline and inline["events"], inline
 

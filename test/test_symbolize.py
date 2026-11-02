@@ -357,3 +357,40 @@ def test_real_module_unload_and_reload_symbols():
                 symbol = client.tool("veh_symbolize", {"address": previous})["symbols"][0]
                 assert "ReloadOnlyProbe" not in symbol.get("function", ""), symbol
                 assert symbol.get("module", "").lower() != "symbol_lookup_reload.dll", symbol
+
+
+def test_mixed_width_guest_candidates_and_module_stems():
+    from pathlib import Path
+    binaries = Path(RELEASE)
+    with OwnedMcpClient(executable=str(binaries / "veh-mcp-server.exe")) as client:
+        client.initialize("mixed-width-candidates")
+        attached = client.tool("veh_attach", {
+            "pid": 424242, "agent": str(binaries / "guest_backend_fixture.exe"),
+            "target_scope": "guest", "agent_args": ["--metadata", "symbols-images-wide"]})
+        assert attached.get("success"), attached
+        modules = client.tool("veh_modules")["modules"]
+        assert [row["addressBits"] for row in modules] == [32, 64], modules
+        assert int(modules[1]["baseAddress"], 16) == 0x180000000, modules
+        for spelling in ("ntdll.dll+324CD", "ntdll+324CD"):
+            refused = client.tool("veh_read_memory", {"address": spelling, "size": 1})
+            assert refused.get("code") == "ambiguous_module", refused
+            assert [row["addressBits"] for row in refused["candidates"]] == [32, 64], refused
+        names = client.tool("veh_symbolize", {"name": "SharedProbe"})
+        assert not names["resolved"] and len(names["matches"]) == 2, names
+        assert [row["addressBits"] for row in names["matches"]] == [32, 64], names
+        high = client.tool("veh_symbolize", {"name": "Probe", "module_base": "0x180000000"})
+        assert high["resolved"] and high["matches"][0]["addressBits"] == 64, high
+        assert high["matches"][0]["modulePath"].endswith("System32\\ntdll.dll"), high
+        # Enumeration does not relax the actual 32-bit read/execution address gate.
+        actual_read = client.tool("veh_read_memory", {"address": "0x180000000!Probe", "size": 1})
+        assert "error" in actual_read, actual_read
+        assert client.tool("veh_detach").get("success")
+        attached = client.tool("veh_attach", {
+            "pid": 424242, "agent": str(binaries / "guest_backend_fixture.exe"),
+            "target_scope": "guest", "agent_args": ["--metadata", "symbols-images-wide-unique"]})
+        assert attached.get("success"), attached
+        for expression, expected in (("sample.dll+324CD", 0x334CD), ("sample+324CD", 0x334CD),
+                                     ("sample.dll+0x324CD", 0x334CD), ("sample+10", 0x1010)):
+            result = client.tool("veh_read_memory", {"address": expression, "size": 1})
+            assert "error" not in result and int(result["address"], 16) == expected, result
+        assert client.tool("veh_detach").get("success")

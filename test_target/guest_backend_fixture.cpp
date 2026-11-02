@@ -5,6 +5,7 @@
 #include <cstring>
 #include "ipc_protocol.h"
 #include "startup_diagnostics.h"
+#include "guest_launch_startup.h"
 
 bool transfer(HANDLE pipe, bool writing, void* bytes, DWORD size) {
     auto* next = static_cast<unsigned char*>(bytes);
@@ -26,13 +27,14 @@ template<class T> bool reply(HANDLE pipe, uint32_t command, const T& value) { re
 #include "hardware_trace_fixture.h"
 
 int wmain(int argc, wchar_t** argv) {
-    std::wstring name, mode, readyEvent;
+    std::wstring name, mode, readyEvent, launchRequest;
     uint32_t pid = 0;bool pidProvided=false;
     for (int i = 1; i + 1 < argc; i += 2) {
         const std::wstring option = argv[i];
         if (option == L"--pid"){pid = std::stoul(argv[i + 1]);pidProvided=true;}
         else if (option == L"--pipe") name = argv[i + 1];
         else if (option == L"--metadata") mode = argv[i + 1];
+        else if (option == L"--guest-launch-request") launchRequest=argv[i+1];
         else if (option == L"--ready-event") readyEvent = argv[i + 1];
     }
     if (mode == L"diagnostic-driver" || mode == L"diagnostic-abi") {
@@ -52,6 +54,23 @@ int wmain(int argc, wchar_t** argv) {
         return 10;
     }
     if (mode == L"early-exit") return 37;
+    const bool launchMode=mode.rfind(L"launch-",0)==0;
+    if(launchMode) {
+        if(pidProvided||launchRequest.empty())return 2;
+        try {
+            const auto request=hvguest::decode(hvguest::read(launchRequest,256*1024));
+            if(request.program!=L"Q:\\guest only\\sample.exe"||request.cwd!=L"Q:\\guest only"||
+               request.args!=std::vector<std::wstring>{L"",L"a b",L"한글",L"quote\"tail"})return 2;
+            if(!request.env.empty()&&request.env!=std::vector<std::wstring>{L"EMPTY=",L"PATH=guest-new",L"UNICODE=\uD55C\uAE00"})return 2;
+            hvguest::Result result;result.nonce=request.header.nonce;result.status=1;
+            result.pid=424242;result.tid=77;result.bits=mode==L"launch-64"?64:32;result.entry=0x1000;
+            if(mode==L"launch-bad-nonce")++result.nonce;
+            if(mode==L"launch-no-child"){result={};result.nonce=request.header.nonce;result.status=2;}
+            hvguest::write_new(hvguest::result_path(launchRequest),&result,sizeof(result));
+            if(mode==L"launch-no-child")return 10;
+            pid=424242;
+        } catch(...) {return 2;}
+    }
     const bool machineMode=mode.rfind(L"machine",0)==0;
     const bool vmMode=mode.rfind(L"vm",0)==0||machineMode;uint32_t vmState=2,detachFailures=0;
     uint32_t continueRequests = 0, pauseRequests = 0, resolveRequests = 0;
@@ -69,7 +88,7 @@ int wmain(int argc, wchar_t** argv) {
     veh::InstrumentationDataPolicy captureData[3]{};
     veh::InstrumentationTransactionPolicy captureTransaction[3]{};
     uint32_t captureBuffer[3]{};
-    const bool operationsMode = mode.rfind(L"ops-", 0) == 0;
+    const bool operationsMode = mode.rfind(L"ops-", 0) == 0 || launchMode;
     const bool receiptMode = mode.rfind(L"receipt-", 0) == 0;
     const bool systemReceiptMode = mode.rfind(L"system-receipts-", 0) == 0;
     bool operationsStopped = true, operationsExitSent = false;
@@ -189,7 +208,7 @@ int wmain(int argc, wchar_t** argv) {
                 if(mode!=L"deferred-unsupported")veh::SetCommandSupported(caps.commands,veh::IpcCommand::SetModuleLoadStop);
             }
             if(mode.rfind(L"shellcode-",0)==0)veh::SetCommandSupported(caps.commands,veh::IpcCommand::ExecuteShellcode);
-            if(mode==L"shellcode-action"||mode==L"path-file-output"||hardwareMode)for(auto op:{veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue})veh::SetCommandSupported(caps.commands,op);
+            if(mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode)for(auto op:{veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue})veh::SetCommandSupported(caps.commands,op);
             if(mode.rfind(L"control-",0)==0) {
                 for(auto op:{veh::IpcCommand::Continue,veh::IpcCommand::Pause,veh::IpcCommand::StepInto,
                     veh::IpcCommand::StepOver,veh::IpcCommand::StepOut,veh::IpcCommand::WriteMemory,veh::IpcCommand::TerminateThread})
@@ -200,7 +219,7 @@ int wmain(int argc, wchar_t** argv) {
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::GetRegisters);
             }
             if(mode==L"address-delay")veh::SetCommandSupported(caps.commands,veh::IpcCommand::ResolveAddressSpace);
-            if (mode.rfind(L"path-", 0) == 0) {
+            if ((mode.rfind(L"path-", 0) == 0 || launchMode)) {
                 caps.flags |= veh::kCapBasicTracePolicies;
                 if (mode == L"path-wide-limits") caps.flags |= veh::kCapBasicTraceLazy;
                 veh::SetCommandSupported(caps.commands, veh::IpcCommand::TraceBasicBlocks);
@@ -227,16 +246,87 @@ int wmain(int argc, wchar_t** argv) {
         } else if (mode == L"hardware-legacy-file" && command == veh::IpcCommand::TraceBasicBlocks) {
             ++pathRequests;
             if (!hardwareCapture(pipe, header.command, bytes, mode)) break;
-        } else if (mode.rfind(L"path-", 0) == 0 && command == veh::IpcCommand::TraceBasicBlocks) {
+        } else if ((mode.rfind(L"path-", 0) == 0 || launchMode) && command == veh::IpcCommand::TraceBasicBlocks) {
             veh::TraceBasicBlocksRequest request{};
             const bool wideLimits = mode == L"path-wide-limits";
-            const size_t expectedBytes = wideLimits ? veh::kTraceBasicBlocksRequestV12Size : veh::kTraceBasicBlocksRequestV11Size;
+            const bool streamed = mode.rfind(L"path-stream-", 0) == 0 || launchMode;
+            const size_t expectedBytes = (streamed || mode==L"path-large-json" || mode==L"path-inline-error") ? veh::kTraceBasicBlocksRequestV10Size :
+                wideLimits ? veh::kTraceBasicBlocksRequestV12Size : veh::kTraceBasicBlocksRequestV11Size;
             if (bytes.size() != expectedBytes) {
                 if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break;
                 continue;
             }
             std::memcpy(&request, bytes.data(), expectedBytes);
+            if (launchMode && request.followExceptions) {
+                if (!reply(pipe, header.command, veh::IpcStatus::Unsupported)) break;
+                continue;
+            }
             ++pathRequests;
+            if (mode.rfind(L"path-stream-", 0) == 0 || launchMode) {
+                if(request.eventOutputMode != static_cast<uint8_t>(veh::TraceEventOutputMode::File)){
+                    if(!reply(pipe,header.command,veh::IpcStatus::InvalidArgs))break;
+                    continue;
+                }
+                const auto name=veh::GetTraceEventPipeName(request.eventStreamOwnerPid,request.eventStreamToken);
+                if(!WaitNamedPipeW(name.c_str(),3000))return 12;
+                HANDLE eventPipe=CreateFileW(name.c_str(),GENERIC_WRITE,0,nullptr,OPEN_EXISTING,0,nullptr);
+                if(eventPipe==INVALID_HANDLE_VALUE)return 13;
+                std::vector<unsigned char> records;
+                const auto append=[&](veh::TraceEventRecordType type,const auto& row){
+                    veh::TraceEventArtifactRecordHeader head{};
+                    head.type=static_cast<uint16_t>(type);head.payloadSize=sizeof(row);
+                    const auto at=records.size();records.resize(at+sizeof(head)+sizeof(row));
+                    std::memcpy(records.data()+at,&head,sizeof(head));
+                    std::memcpy(records.data()+at+sizeof(head),&row,sizeof(row));
+                };
+                for(uint64_t i=1;i<=300;++i){
+                    veh::TraceBasicBlockRegisterEventEntry reg{};
+                    reg.sequence=i;reg.threadId=request.threadId;reg.instruction=request.rangeStart;
+                    reg.is32bit=mode==L"launch-64"?0:1;reg.before[0]=i-1;reg.after[0]=i;reg.changedMask=1;
+                    if(request.collectRegisterEvents)append(veh::TraceEventRecordType::Register,reg);
+                    veh::TraceBasicBlockMemoryEventEntry mem{};
+                    mem.sequence=i;mem.threadId=request.threadId;mem.instruction=request.rangeStart;
+                    mem.address=0x2000;mem.size=4;
+                    if(request.collectMemoryEvents)append(veh::TraceEventRecordType::Memory,mem);
+                }
+                if (mode == L"path-stream-prefix") records.insert(records.end(), 3, 0);
+                veh::TraceEventStreamFrameHeader frame{};
+                frame.magic=veh::kTraceEventStreamMagic;frame.schemaVersion=1;
+                frame.type=static_cast<uint16_t>(veh::TraceEventStreamFrameType::Data);
+                frame.token=request.eventStreamToken;frame.payloadSize=static_cast<uint32_t>(records.size());
+                frame.payloadHash=veh::TraceEventPayloadHash(records.data(),records.size());
+                if (mode == L"path-stream-bad-hash") ++frame.payloadHash;
+                bool ok=transfer(eventPipe,true,&frame,sizeof(frame))&&transfer(eventPipe,true,records.data(),static_cast<DWORD>(records.size()));
+                if (mode == L"path-stream-prefix" || mode == L"path-stream-bad-hash") {
+                    CloseHandle(eventPipe);
+                    veh::TraceBasicBlocksResponse failed{};
+                    failed.status=veh::IpcStatus::Error;failed.headerSize=sizeof(failed);
+                    failed.threadId=request.threadId;failed.returnSnapshot=UINT32_MAX;
+                    if (!reply(pipe,header.command,failed)) break;
+                    continue;
+                }
+                veh::TraceEventStreamComplete done{};
+                done.committedRecordBytes=records.size();done.chunkCount=1;
+                done.registerEventCount=request.collectRegisterEvents?300:0;done.memoryEventCount=request.collectMemoryEvents?300:0;
+                frame.type=static_cast<uint16_t>(veh::TraceEventStreamFrameType::Complete);
+                frame.chunkIndex=1;frame.streamOffset=records.size();frame.payloadSize=sizeof(done);
+                frame.payloadHash=veh::TraceEventPayloadHash(&done,sizeof(done));
+                ok=ok&&transfer(eventPipe,true,&frame,sizeof(frame))&&transfer(eventPipe,true,&done,sizeof(done));
+                CloseHandle(eventPipe);if(!ok)return 14;
+                veh::TraceBasicBlocksResponse response{};
+                response.status=veh::IpcStatus::Ok;response.headerSize=sizeof(response);
+                response.threadId=request.threadId;response.stepsExecuted=300;
+                response.eventCollectionEnabled=1;response.eventSchemaVersion=1;
+                response.registerEventCollectionEnabled=request.collectRegisterEvents;
+                response.registerEventSchemaVersion=request.collectRegisterEvents?1:0;
+                response.memoryEventCollectionEnabled=request.collectMemoryEvents;
+                response.memoryEventSchemaVersion=request.collectMemoryEvents?1:0;
+                response.appliedCollectionFlags=request.collectionFlags;
+                response.returnSnapshot=UINT32_MAX;
+                if(!reply(pipe,header.command,response))break;
+                continue;
+            }
+
             // Output policy must never silently change the backend collection mode.
             if (mode == L"path-file-output" && request.eventOutputMode != 0) {
                 if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break;
@@ -286,9 +376,26 @@ int wmain(int argc, wchar_t** argv) {
                 response.filteredSteps = response.unsupportedMemoryWrites = response.unsupportedMemoryReads = UINT32_MAX;
                 response.finalAddress = request.rangeStart;
             }
-            std::vector<unsigned char> result(sizeof(response) + response.eventCount * sizeof(events[0]));
+            if (mode == L"path-inline-error") {
+                response.status=veh::IpcStatus::Error;response.eventCount=0;response.expandedEventCount=0;
+                response.stepsExecuted=0;response.finalAddress=0x1000;
+            }
+            if (mode == L"path-large-json") {
+                response.eventCount=0;response.expandedEventCount=0;response.eventSchemaVersion=1;
+                response.registerEventCount=200;response.registerEventCollectionEnabled=1;
+                response.registerEventSchemaVersion=1;response.stepsExecuted=200;
+            }
+            std::vector<unsigned char> result(sizeof(response) + response.eventCount * sizeof(events[0]) +
+                response.registerEventCount * sizeof(veh::TraceBasicBlockRegisterEventEntry));
             std::memcpy(result.data(), &response, sizeof(response));
             if (response.eventCount) std::memcpy(result.data() + sizeof(response), events, sizeof(events));
+            for (uint32_t i=0;i<response.registerEventCount;++i) {
+                veh::TraceBasicBlockRegisterEventEntry reg{};
+                reg.sequence=i+1;reg.threadId=request.threadId;reg.instruction=request.rangeStart;
+                reg.is32bit=1;reg.changedMask=0xFF;
+                for (unsigned r=0;r<8;++r) {reg.before[r]=0xF0000000;reg.after[r]=0xF0000001;}
+                std::memcpy(result.data()+sizeof(response)+i*sizeof(reg),&reg,sizeof(reg));
+            }
             if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
         } else if (mode == L"symbols-analysis-stack-many" && command == veh::IpcCommand::GetStackTrace) {
             veh::GetStackTraceRequest request{};
@@ -328,8 +435,8 @@ int wmain(int argc, wchar_t** argv) {
             response.head = {veh::IpcStatus::Ok, 2};
             for (uint32_t i = 0; i < 2; ++i) {
                 auto& detail = response.modules[i]; auto& module = detail.module;
-                module.baseAddress = 0x1000 + i * 0x1000; module.size = 0x1000;
-                strcpy_s(module.name, "ntdll.dll");
+                module.baseAddress = (mode.rfind(L"symbols-images-wide", 0) == 0 && i) ? UINT64_C(0x180000000) : 0x1000 + i * 0x1000; module.size = 0x1000;
+                strcpy_s(module.name, mode == L"symbols-images-wide-unique" ? (i ? "native.dll" : "sample.dll") : "ntdll.dll");
                 strcpy_s(module.path, i ? "C:\\Windows\\System32\\ntdll.dll" : "C:\\Windows\\SysWOW64\\ntdll.dll");
                 detail.addressBits = mode == L"symbols-images-badbits" ? 48 : i ? 64 : 32;
             }
@@ -368,10 +475,10 @@ int wmain(int argc, wchar_t** argv) {
             for (uint32_t i = 0; i < response.count; ++i) {
                 veh::FindSymbolEntry entry{};
                 const bool second = query == "probe_b.dll!SharedProbe" || (ambiguous && i == 1);
-                entry.moduleBase = second ? 0x2000 : 0x1000;
+                entry.moduleBase = (mode.rfind(L"symbols-images-wide", 0) == 0 && second) ? UINT64_C(0x180000000) : second ? 0x2000 : 0x1000;
                 entry.address = forwarder ? 0 : entry.moduleBase + 0x100 + i * 16;
                 entry.flags = veh::kFindSymbolExport | (forwarder ? veh::kFindSymbolForwarder : 0);
-                strcpy_s(entry.moduleName, second ? "probe_b.dll" : "probe_a.dll");
+                strcpy_s(entry.moduleName, mode.rfind(L"symbols-images-wide", 0) == 0 ? "ntdll.dll" : second ? "probe_b.dll" : "probe_a.dll");
                 strcpy_s(entry.functionName, query == "UniqueProbe" ? "UniqueProbe" : forwarder ? "ForwardedProbe" : "SharedProbe");
                 if (mode == L"symbols-name") std::memset(entry.functionName, 'X', sizeof(entry.functionName));
                 if (mode == L"symbols-address") entry.address = 1;
@@ -539,7 +646,8 @@ int wmain(int argc, wchar_t** argv) {
             if (mode == L"inst-reply-long") result.push_back(0);
             if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
         } else if (command == veh::IpcCommand::GetTargetInfo) {
-            veh::GetTargetInfoResponse info{veh::IpcStatus::Ok, veh::IpcTargetScope::Guest, pid, hardwareMode ? 64u : 32u};
+            veh::GetTargetInfoResponse info{veh::IpcStatus::Ok, veh::IpcTargetScope::Guest, pid, (hardwareMode || mode==L"launch-64") ? 64u : 32u};
+            if(mode==L"launch-wrong-pid")++info.pid;
             if(mode == L"hardware-host") info.scope = veh::IpcTargetScope::Host;
             if(machineMode){info.scope=veh::IpcTargetScope::VirtualMachine;info.pid=0;info.addressBits=0;}
             if(mode==L"machine-wrong-pid")info.pid=1;
@@ -640,7 +748,7 @@ int wmain(int argc, wchar_t** argv) {
                     static_cast<uint8_t>(operationsStopped)})) break;
             } else if (command == veh::IpcCommand::GetRegisters) {
                 veh::GetRegistersResponse response{};
-                response.status = veh::IpcStatus::Ok; response.regs.is32bit = 1; response.regs.rip = operationsRip;
+                response.status = veh::IpcStatus::Ok; response.regs.is32bit = mode==L"launch-64"?0:1; response.regs.rip = operationsRip;
                 if (!reply(pipe, header.command, response)) break;
             } else if (command == veh::IpcCommand::GetThreads) {
                 if (mode == L"ops-exit-on-threads" && !operationsExitSent) {
@@ -912,12 +1020,12 @@ int wmain(int argc, wchar_t** argv) {
                 response.exitCode=7;
                 if(!reply(pipe,header.command,response))break;
             }
-        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||hardwareMode)&&command==veh::IpcCommand::SetBreakpoint){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode)&&command==veh::IpcCommand::SetBreakpoint){
             fixtureBreakpointId=mode==L"path-file-output"?(fixtureBreakpointId?fixtureBreakpointId+1:9001):9001;
             if(!reply(pipe,header.command,veh::SetBreakpointResponse{veh::IpcStatus::Ok,fixtureBreakpointId}))break;
-        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||hardwareMode)&&command==veh::IpcCommand::RemoveBreakpoint){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode)&&command==veh::IpcCommand::RemoveBreakpoint){
             if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
-        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||hardwareMode)&&command==veh::IpcCommand::Continue){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode)&&command==veh::IpcCommand::Continue){
             veh::ContinueRequest request{};
             if(bytes.size()!=sizeof(request))break;
             std::memcpy(&request,bytes.data(),sizeof(request));

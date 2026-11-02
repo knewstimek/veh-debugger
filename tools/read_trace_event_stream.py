@@ -44,7 +44,7 @@ def _bytes(value, size):
     return value[:size].hex(" ")
 
 
-def read_header(stream):
+def read_header(stream, allow_incomplete=False):
     raw = stream.read(HEADER.size)
     if len(raw) != HEADER.size:
         raise ValueError("file is too small for an event artifact header")
@@ -80,7 +80,30 @@ def read_header(stream):
     if tuple(header["entry_sizes"].values()) != expected_sizes:
         raise ValueError("event artifact entry sizes do not match schema 1")
     if not header["flags"] & 1:
-        raise ValueError("event artifact is not complete")
+        if not allow_incomplete:
+
+            raise ValueError("event artifact is not complete")
+
+        # Only the v1 receiver's explicit transfer-failure prefix is readable.
+
+        # Keep every record/count/EOF check; never infer an execution total/PC.
+
+        if (header["schema_version"] != 1 or header["flags"] != 2 or
+
+                header["truncation_reason_code"] != 2 or values[15] != 0 or
+
+                not header["record_bytes"] or not header["chunk_count"] or
+
+                not sum(header["counts"].values())):
+
+            raise ValueError("invalid incomplete event artifact marker")
+
+        header.update(stream_complete=False, capture_incomplete=True,
+
+                      execution_count_incomplete=True, lost_records=None,
+
+                      final_address=None)
+
     if header["flags"] & ~(7 if header["schema_version"] == 3 else 3):
         raise ValueError("unknown artifact flags")
     if header["schema_version"] == 3:
@@ -365,9 +388,9 @@ def iter_records(stream, header):
         raise ValueError("event artifact has bytes beyond the declared record stream")
 
 
-def convert(input_path, output, expand_paths=False):
+def convert(input_path, output, expand_paths=False, allow_incomplete=False):
     with open(input_path, "rb") as stream:
-        header = read_header(stream)
+        header = read_header(stream, allow_incomplete)
         manifest = dict(header)
         manifest["record"] = "manifest"
         manifest.pop("magic")
@@ -385,15 +408,17 @@ def main():
     parser.add_argument("artifact")
     parser.add_argument("--expand-paths", action="store_true", help="Expand schema 2 repeats (at most 5,000,001 events)")
     parser.add_argument("--output", help="New JSONL file (default: stdout)")
+    parser.add_argument("--allow-incomplete", action="store_true",
+                        help="Read only marked schema 1 transfer-failure prefixes; execution remains uncertain")
     args = parser.parse_args()
     if args.output and os.path.exists(args.output):
         parser.error("output file already exists")
     try:
         if args.output:
             with open(args.output, "x", encoding="utf-8", newline="\n") as output:
-                convert(args.artifact, output, args.expand_paths)
+                convert(args.artifact, output, args.expand_paths, args.allow_incomplete)
         else:
-            convert(args.artifact, sys.stdout, args.expand_paths)
+            convert(args.artifact, sys.stdout, args.expand_paths, args.allow_incomplete)
     except (OSError, ValueError, struct.error) as error:
         parser.exit(1, f"error: {error}\n")
 

@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Changed
+- **Guest MCP entry launch** -- registered local guest backends can opt in with `guest_launch=true`. Validate nonce-bound creation receipts and actual PID/TID, address width and stopped entry registers before reporting success; continue once for `stopOnEntry=false`. Preserve uncertain requests without replay. DAP and remote guest launch remain unsupported.
+- **Bounded ordered trace output** -- local captures above256 steps default to event files except target windows; explicit event-inline collection remains available. JSON replies above64KiB return an artifact receipt, including explicit inline requests. File receipts distinguish storage completion from capture completion. Preserve verified schema1 record prefixes on transfer failure with unknown execution totals/final PC; the reader requires `--allow-incomplete`.
+- **Mixed-width symbol candidates** -- enumerate native image symbols in WoW64 sessions and accept unambiguous module stems such as `sample+10`; execution and memory access retain the session address-width gate.
+- **Annotation write preconditions** -- `expected_identity` binds address-based set/delete to the observed build, module base and lifetime epoch; mismatches preserve stored records across direct, batch and breakpoint actions.
 - **Trace guidance** -- synchronize Korean/English/extension READMEs, extension and tool descriptions, and CLI help for lazy decoding and independent execution/cache budgets; detailed limits and compatibility remain in the linked guide.
 - **Process trace resource budgets** -- capability-gated wire12 decodes entered blocks lazily, checks changed instruction bytes before reuse, accepts large ranges and 64-bit execution ceilings, and exposes an independent `max_decoded_instructions` cache budget (default1,000,000). Process execution defaults to1,000,000 steps; explicit long timeouts and event files remain independent. Cache exhaustion stops precisely before an uncached instruction. x86 retains its address-space limits; unsupported peers reject new options before execution. See [lazy trace contract](../docs/TRACE_LAZY_DECODE.md).
 

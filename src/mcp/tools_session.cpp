@@ -128,6 +128,7 @@ bool ResolveBackend(const json& args, std::optional<DebugSession::ExternalAgent>
 	std::filesystem::path path = table[name]["path"].get<std::string>();
 	if (path.is_relative()) path = file.parent_path() / path;
 	out = DebugSession::ExternalAgent{path.string(), strings(table[name].value("args", json::array()))};
+    out->guestLaunch = table[name].value("guest_launch", false);
 	return scope(table[name], out->guestTarget, out->vmTarget);
 }
 
@@ -238,8 +239,11 @@ json McpServer::ToolLaunch(const json& args) {
 		return {{"error", error}};
     if(agent&&agent->vmTarget)
         return {{"error","VM attachment does not create a process. Use veh_attach with target_scope=vm."}};
-    if (agent && agent->guestTarget)
-        return {{"error", "Guest process launch is not supported yet. Start the program in the guest and attach with target_scope=guest."}};
+    if (agent && agent->guestTarget && !agent->guestLaunch)
+        return {{"error", "Guest process launch requires a registered local backend with guest_launch=true."}};
+    if (agent && agent->guestTarget && (agent->remote || JsonBool(args, "runAsInvoker", false) ||
+        args.value("injectionMethod", "auto") != "auto"))
+        return {{"error", "Guest launch requires a local backend, runAsInvoker=false and injectionMethod=auto."}};
 	if (session_.IsAttached() && !(agent && agent->remote)) {
 		LOG_INFO("Auto-detaching from previous session (pid=%u) before new launch", session_.GetTargetPid());
 		const auto detached = ToolDetach({});
@@ -302,7 +306,8 @@ json McpServer::ToolLaunch(const json& args) {
 	session_.QueryBackendInfo();
     if (!session_.CompleteBackendAttach()) {
         const auto error = session_.LastAttachError();
-        session_.Terminate();
+        if (agent && agent->guestTarget) session_.RetainGuestLaunch();
+        else session_.Terminate();
         return {{"error", error.empty() ? "Backend target scope validation failed" : error}};
     }
 	session_.StartProcessMonitor();
@@ -310,7 +315,10 @@ json McpServer::ToolLaunch(const json& args) {
 	// stopOnEntry=false: VEH 설치 완료(WaitForReady) 이후에야 메인스레드를 재개한다.
 	// (Launch 내부에서 재개하면 핸들러 설치 전 조기 실행 레이스가 생김)
 	if (!opts.stopOnEntry) {
-		session_.ResumeMainThread();
+        if (agent && agent->guestTarget) {
+            if (!session_.ContinueWithDetails(session_.LaunchMainThreadId(), false).ok)
+                return {{"error", "Guest entry continue unconfirmed; attached session retained"}};
+        } else session_.ResumeMainThread();
 	}
 
 	json ret = {{"success", true}, {"pid", result.pid}, {"message",

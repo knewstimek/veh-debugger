@@ -1116,7 +1116,19 @@ bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
                 if (!moduleError.empty()) throw AddressResolutionError(moduleError, "module_lookup_failed");
                 json candidates = json::array();
                 std::set<uint64_t> bases;
-                for (const auto& module : modules) if (_stricmp(module.name.c_str(), left.c_str()) == 0) {
+                const bool exactModule = std::any_of(modules.begin(), modules.end(), [&](const auto& module) {
+                    return _stricmp(module.name.c_str(), left.c_str()) == 0;
+                });
+                for (const auto& module : modules) {
+                    bool matches = _stricmp(module.name.c_str(), left.c_str()) == 0;
+                    const auto dot = module.name.find_last_of('.');
+                    if (!exactModule && dot != std::string::npos) {
+                        const auto ext = module.name.substr(dot);
+                        const bool imageExtension = !_stricmp(ext.c_str(), ".dll") || !_stricmp(ext.c_str(), ".exe") ||
+                            !_stricmp(ext.c_str(), ".sys");
+                        matches = imageExtension && !_stricmp(module.name.substr(0, dot).c_str(), left.c_str());
+                    }
+                    if (!matches) continue;
                     if (bases.insert(module.baseAddress).second && candidates.size() < 10)
                         candidates.push_back(ModuleIdentity(module));
                     base = module.baseAddress; moduleFound = true;
@@ -1163,6 +1175,9 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
             {"id", {{"type", "string"}, {"description", "Offline get/delete; also set for unbound notes. Revision required for changes."}}},
             {"history_limit", {{"type", "integer"}, {"minimum", 0}, {"maximum", 8}, {"default", 0}, {"description", "get: explicitly include up to this many previous revisions"}}},
             {"expected_revision", {{"type", "string"}, {"description", "Required for updating/deleting an existing record; decimal string from get"}}},
+            {"expected_identity", {{"type", "object"}, {"description", "set/delete by address: require the build/base/epoch returned by get before any record mutation"},
+                {"properties", {{"build_id", {{"type", "string"}}}, {"module_base", {{"type", "string"}}}, {"module_epoch", {{"type", "string"}}}}},
+                {"required", json::array({"build_id","module_base","module_epoch"})}, {"additionalProperties", false}}},
             {"comment", {{"type", "string"}, {"maxLength", 4096}}},
             {"label", {{"type", "string"}, {"maxLength", 128}}},
             {"status", {{"type", "string"}, {"enum", json::array({"hypothesis","observed","refuted"})}}},
@@ -1182,13 +1197,13 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"pid", {{"type", "integer"}, {"description", "Required for host/guest process scope; omit for vm scope"}}},
 			{"backend", {{"type", "string"}, {"description", "veh (default): inject the VEH DLL. Any other name: an out-of-process agent registered in veh-backends.json next to the server (or VEH_BACKENDS); nothing is injected. The response's backend.unsupported lists tool families the backend cannot serve."}}},
 			{"agent", {{"type", "string"}, {"description", "Path of an out-of-process agent to use instead of a registered backend name. Process agent: --pid <pid> --pipe <name> [agent_args]; VM scope omits --pid."}}},
-			{"target_scope", {{"type", "string"}, {"enum", json::array({"host", "guest", "vm"})}, {"description", "host default or backend scope; guest validates PID/width; vm omits PID. Guest/VM launch unsupported."}}},
+			{"target_scope", {{"type", "string"}, {"enum", json::array({"host", "guest", "vm"})}, {"description", "host default or backend scope; guest validates PID/width; vm omits PID. VM launch unsupported; guest launch requires registered local opt-in."}}},
 			{"agent_args", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Extra arguments for agent."}}},
 			{"logFile", {{"type", "string"}, {"description", "Enable server-side logging to this file path (e.g. 'veh-mcp.log'). Omit to disable logging."}}}
 		 }}, {"required", json::array()}}}}),
 
 		Tool(&McpServer::ToolLaunch, "session", kLite | kInteractive | kCapture, false,
-			{{"name", "veh_launch"}, {"description", "Launch and attach a host program through VEH or an external host backend using CREATE_SUSPENDED. Guest launch/stopOnEntry is unsupported; rejection preserves the session and creates no host process."},
+			{{"name", "veh_launch"}, {"description", "Launch and attach a host program, or a guest program through a registered local guest_launch backend. Guest paths stay in the guest; a nonce-bound receipt must attest the entry stop. stopOnEntry=false continues once after validation. Remote guest and DAP launch remain unsupported."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"program", {{"type", "string"}, {"description", "Path to executable"}}},
 			{"args", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Command line arguments"}}},
@@ -1197,9 +1212,9 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"stopOnEntry", {{"type", "boolean"}, {"description", "Stop at entry point (default: true)"}}},
 			{"runAsInvoker", {{"type", "boolean"}, {"description", "Bypass UAC elevation prompt by setting __COMPAT_LAYER=RunAsInvoker (default: false)"}}},
 			{"injectionMethod", {{"type", "string"}, {"enum", json::array({"auto", "createRemoteThread", "ntCreateThreadEx", "threadHijack", "queueUserApc"})}, {"description", "DLL injection method (default: auto). Auto tries all methods in order."}}},
-			{"backend", {{"type", "string"}, {"description", "veh (default): inject the VEH DLL. Other names select veh-backends.json (or VEH_BACKENDS). External host backends create the process suspended without injection. Guest backends reject launch; use veh_attach for an existing guest PID."}}},
+			{"backend", {{"type", "string"}, {"description", "veh (default): inject the VEH DLL. Other names select veh-backends.json (or VEH_BACKENDS). External host backends create the process suspended without injection. Guest launch requires target_scope=guest and guest_launch=true in this local registry; inline agents cannot enable it."}}},
 			{"agent", {{"type", "string"}, {"description", "Path of an out-of-process agent to use instead of a registered backend name."}}},
-			{"target_scope", {{"type", "string"}, {"enum", json::array({"host", "guest", "vm"})}, {"description", "host default or backend scope; guest validates PID/width; vm omits PID. Guest/VM launch unsupported."}}},
+			{"target_scope", {{"type", "string"}, {"enum", json::array({"host", "guest", "vm"})}, {"description", "host default or backend scope; guest validates PID/width; vm omits PID. VM launch unsupported; guest launch requires registered local opt-in."}}},
 			{"agent_args", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Extra arguments for agent."}}},
 			{"logFile", {{"type", "string"}, {"description", "Enable server-side logging to this file path (e.g. 'veh-mcp.log'). Omit to disable logging."}}}
 		 }}, {"required", json::array({"program"})}}}}),
@@ -1472,7 +1487,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}, {"required", json::array({"addresses"})}}}}),
 
 		Tool(&McpServer::ToolTraceBasicBlocks, "trace", kCapture, true,
-			{{"name", "veh_trace_basic_blocks"}, {"description", "Trace a stopped process thread. Wire12 backends support lazy decoding and independent execution/cache budgets. Default output_mode=file returns a result artifact receipt; output_mode=inline returns full JSON. Events stay bounded unless events_output=file is explicitly selected on a supported local backend. Optional snapshots, code/memory/register events, function-return scope and lossless repeated paths. Policies need backend support; VEH refuses active HW breakpoints. Compression does not reduce TF exceptions. collect_hardware_events adds capability-negotiated CR/MSR/scalar I/O events in schema3 files. KD uses execution_context=kd: ordinary capture negotiates TraceBB v1/v2; hardware uses independent TraceHW v1 and paired streams. Optional run_peer_cpus needs the relevant protocol capability and keeps collection on the selected CPU. Saved event reads/analysis and KD instruction pages work offline; KD execution is direct-only."},
+			{{"name", "veh_trace_basic_blocks"}, {"description", "Trace a stopped process thread. Wire12 backends support lazy decoding and independent execution/cache budgets. Default output_mode=file returns a result artifact receipt; output_mode=inline returns JSON up to64KiB, then a compact artifact receipt. Ordered captures above256 max_steps default to file on local backends except target_window; explicit events_output=inline preserves bounded collection. Optional snapshots, code/memory/register events, function-return scope and lossless repeated paths. Policies need backend support; VEH refuses active HW breakpoints. Compression does not reduce TF exceptions. collect_hardware_events adds capability-negotiated CR/MSR/scalar I/O events in schema3 files. KD uses execution_context=kd: ordinary capture negotiates TraceBB v1/v2; hardware uses independent TraceHW v1 and paired streams. Optional run_peer_cpus needs the relevant protocol capability and keeps collection on the selected CPU. Saved event reads/analysis and KD instruction pages work offline; KD execution is direct-only."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"operation", {{"type", "string"}, {"enum", {"capture", "read_capture", "read_events", "analyze_events"}}, {"description", "capture (default); KD read_capture; process or KD read_events/analyze_events reads saved hardware events offline. Immutable reads support batch/actions; KD capture is direct-only"}}},
             {"event_file", {{"type", "string"}, {"description", "Saved .vte file for read_events/analyze_events; hardware pages are limited to8KiB"}}},
@@ -1519,7 +1534,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			,{"code_output", {{"type", "string"}, {"enum", {"inline", "file"}}, {"default", "inline"}, {"description", "Code bytes within the result (inline default) or a separate streamed artifact; independent of output_mode"}}}
 			,{"code_output_path", {{"type", "string"}, {"description", "Optional new artifact path on the MCP host for code_output=file; an existing file is never overwritten"}}}
 			,{"code_chunk_bytes", {{"type", "integer"}, {"description", "File-stream chunk size, 262144-8388608 in 65536-byte multiples (default 4194304)"}}}
-			,{"events_output", {{"type", "string"}, {"enum", {"inline", "file"}}, {"description", "Ordered events inline by default; hardware trace defaults to and requires file. Independent of output_mode; remote file pipes unavailable"}}}
+			,{"events_output", {{"type", "string"}, {"enum", {"inline", "file"}}, {"description", "Ordered local captures above256 max_steps default to file except target_window; explicit inline preserves bounded collection. Hardware requires file. Remote defaults to inline; file pipes unavailable"}}}
 			,{"events_output_path", {{"type", "string"}, {"description", "Optional new artifact path on the MCP host for events_output=file; an existing file is never overwritten"}}}
 			,{"max_event_file_bytes", {{"type", "integer"}, {"minimum", sizeof(TraceEventArtifactHeader)}, {"maximum", kTraceEventMaxFileBytes}, {"description", "Total event artifact size limit including its header (default and max 4294967296)"}}}
 			,{"dependency_sources", {{"type", "array"}, {"maxItems", 32}, {"description", "Conservative dependency sources: register names or {address,size,label?} memory ranges"}}}
@@ -1537,7 +1552,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 				{"before_steps", {{"type", "integer"}, {"minimum", 0}, {"maximum", 100000}, {"description", "Completed instruction steps retained before the trigger"}}},
 				{"after_steps", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100000}, {"description", "Completed instruction steps retained after the trigger"}}}
 			}}, {"required", json::array({"address", "occurrence", "before_steps", "after_steps"})}, {"description", "Bounded pre-trigger ring plus post-trigger capture; incompatible with occurrence_window, conditions, stop_on_return, code_output=file, and events_output=file"}}}
-			,{"output_mode", {{"type", "string"}, {"enum", {"file", "inline"}}, {"default", "file"}, {"description", "Process trace: file receipt by default; inline explicitly returns the full result. KD hardware capture requires file. Backend collection limits and streaming are unchanged"}}}
+			,{"output_mode", {{"type", "string"}, {"enum", {"file", "inline"}}, {"default", "file"}, {"description", "Process trace: file receipt by default; inline returns full JSON up to64KiB, then a file receipt. KD hardware capture requires file. Independent of events_output"}}}
 			,{"output_file", {{"type", "string"}, {"description", "Optional new MCP-host result path; file mode generates a temporary path when omitted. Caller owns retention"}}}
 			,{"output_format", {{"type", "string"}, {"enum", {"json", "jsonl"}}, {"description", "File encoding (default json), including generated paths; JSONL uses a manifest plus section-item records"}}}
 		 }}, {"anyOf", json::array({json{{"required",json::array({"start","end"})}},json{{"properties",{{"operation",{{"enum",{"read_events","analyze_events"}}}}}},{"required",json::array({"operation","event_file"})}},json{{"properties",{{"execution_context",{{"const","kd"}}},{"operation",{{"const","read_capture"}}}}},{"required",json::array({"execution_context","operation","capture_file"})}}})}}}}),

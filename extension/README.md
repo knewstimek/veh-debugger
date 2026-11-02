@@ -90,7 +90,7 @@ The bundled `veh-mcp-server.exe` exposes debugging operations through the Model 
 MCP can also attach through an external backend with `backend` or `agent`.
 For VM guest PIDs, register `target_scope: "guest"` in `veh-backends.json`
 (or pass it to `veh_attach`); backend PID/address-width validation is required.
-Guest `veh_launch`/`stopOnEntry` is unsupported, and other commands depend on
+Guest MCP `veh_launch`/`stopOnEntry` requires a registered local backend with `target_scope=guest` and `guest_launch=true`; DAP remains attach-only. Other commands depend on
 the attach response's `backend.unsupported`. This is MCP support, not a guest
 extension to the VSCode DAP launch configuration. Use `veh_toolbox` with
 `operation="describe"` for the live attach/launch schema. See the repository's
@@ -101,7 +101,7 @@ are omitted. Select an explicit registered backend name for remote TCP connectio
 The resident `veh-remote-runner.exe` runs on the analysis VM; for VirtualBox/WHPX
 it belongs on the analysis host VM, outside the inner guest. Authentication runs
 once per connection, using a private token file and pinned server certificate.
-Successful reconnects do not consume the failed-authentication limit. Guest launch,
+Successful reconnects do not consume the failed-authentication limit. Remote guest launch,
 remote frontend conditional breakpoints and target-side trace file pipes remain
 unsupported. The adapter's DAP TCP listener is a separate interface. Configuration
 and limits are documented in `docs/REMOTE_TRANSPORT.md` in the repository.
@@ -198,7 +198,7 @@ reported guest PID/address width. Backend capabilities gate memory/register
 inspection and writes, continue/pause, instruction steps, execution/data
 breakpoints, symbol-based source/function breakpoints and termination.
 Unsupported commands return errors. Stops identify the selected thread;
-guest launch, `stopOnEntry` and `stopOnModuleLoad` remain unsupported.
+guest DAP launch, `stopOnEntry` and `stopOnModuleLoad` remain unsupported.
 Module-qualified pending guest functions (`module!function`) use advertised
 loader-stop and stop-query support to bind while the DLL is held. The adapter
 confirms the thread is still stopped and exposes that state for explicit user

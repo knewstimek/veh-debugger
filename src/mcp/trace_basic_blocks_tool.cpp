@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <map>
 #include <sstream>
+#include <streambuf>
 #include <unordered_map>
 
 namespace veh {
@@ -267,6 +268,25 @@ static bool ParseTraceCondition(const json& args, const char* key, TraceConditio
 	return result.clauseCount != 0;
 }
 
+// Measure serialized replies without constructing a second unbounded string.
+// Large traces remain artifacts; only the bounded receipt enters MCP text.
+static bool TraceReplyNeedsArtifact(const json& value) {
+    class Counter final : public std::streambuf {
+    public:
+        size_t bytes = 0;
+        std::streamsize xsputn(const char*, std::streamsize n) override {
+            bytes = (std::min)(size_t{65537}, bytes + static_cast<size_t>(n)); return n;
+        }
+        int_type overflow(int_type ch) override {
+            if (!traits_type::eq_int_type(ch, traits_type::eof()))
+                bytes = (std::min)(size_t{65537}, bytes + 1);
+            return traits_type::not_eof(ch);
+        }
+    } counter;
+    std::ostream measure(&counter); measure << value;
+    return counter.bytes > 65536;
+}
+
 json ExecuteTraceBasicBlocksTool(DebugSession& session, const json& args,
 	const TraceAddressResolver& resolveAddress, const json& artifactMetadata) {
 if (args.value("execution_context", "process") != "process" || args.value("operation", "capture") != "capture")
@@ -365,12 +385,17 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		return {{"error", "events_output must be a string"}};
 	if (args.contains("events_output_path") && !args["events_output_path"].is_string())
 		return {{"error", "events_output_path must be a string"}};
-	std::string eventsOutput = args.value("events_output", hardware ? "file" : "inline");
+	const bool largeOrderedCapture = maxSteps > 256 && (collectEvents || collectCode ||
+        TraceJsonBool(args, "collect_memory_events", false) || TraceJsonBool(args, "collect_register_events", false));
+    std::string eventsOutput = args.value("events_output", (hardware ||
+        (largeOrderedCapture && !args.contains("target_window") && !session.IsRemoteTarget())) ? "file" : "inline");
 	std::transform(eventsOutput.begin(), eventsOutput.end(), eventsOutput.begin(),
 		[](unsigned char value) { return static_cast<char>(std::tolower(value)); });
 	if (eventsOutput != "inline" && eventsOutput != "file")
 		return {{"error", "events_output must be inline or file"}};
 	const bool fileEventOutput = eventsOutput == "file";
+    if (fileEventOutput && session.IsRemoteTarget())
+        return {{"error", "Target-side file data pipes are not supported remotely; use inline collection or output_file"}};
 	const bool anyOrderedEvents = collectEvents || collectCode ||
 		TraceJsonBool(args, "collect_memory_events", false) ||
 		TraceJsonBool(args, "collect_register_events", false);
@@ -586,6 +611,20 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		default: return "completed";
 		}
 	};
+    const auto eventFailure = [&]() -> json {
+            const auto& a=result.eventArtifact;
+            json failure={{"error",a.error.empty() ? (result.ok ? "event artifact stream failed" :
+                "TraceBasicBlocks control failed; event prefix preserved") : a.error},{"capture_incomplete",true},
+                {"execution_count_incomplete",true},{"lost_records",nullptr},{"final_address",nullptr}};
+            if(!a.path.empty()&&!a.sha256.empty())failure["event_file"]={
+                {"path",a.path},{"sha256",a.sha256},{"size",a.fileSize},
+                {"schema_version",a.schemaVersion},{"record_bytes",a.recordBytes},
+                {"storage_complete",true},{"capture_complete",false},{"complete",false},
+                {"counts",{{"events",a.basicBlockEvents},{"memory_events",a.memoryEvents},
+                           {"register_events",a.registerEvents}}}};
+            return failure;
+    };
+
 	if (!result.ok) {
         if (hardware) {
             json failure = {{"error", !result.controlFailure.empty() ? result.controlFailure :
@@ -600,6 +639,13 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
                 {"storage_complete", raw.success}, {"capture_complete", false}, {"complete", false},
                 {"raw_prefix", raw.rawPrefix},
                 {"hardware_events", raw.success ? json(std::to_string(raw.hardwareEvents)) : json(nullptr)}};
+            return failure;
+        }
+        if (fileEventOutput && (!result.eventArtifact.path.empty() ||
+            (!result.eventArtifact.error.empty() && (result.controlResponseReceived || !result.controlFailure.empty())))) {
+            auto failure = eventFailure();
+            if (!result.codeArtifact.error.empty()) failure["code_error"] = result.codeArtifact.error;
+            if (!result.controlFailure.empty()) failure["control_error"] = result.controlFailure;
             return failure;
         }
 		// Preserve local artifact-validation errors when no control exchange began.
@@ -651,7 +697,16 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 			failure["steps_executed"] = result.stepsExecuted;
 			failure["final_address"] = hex(result.finalAddress);
 		}
-		if (result.startFailure != TraceBasicBlocksStartFailure::None) {
+        const bool executionUncertain = failureName(result.startFailure)[0] == 0;
+        if (executionUncertain) {
+            if (result.responseHeaderSize >= kTraceBasicBlocksResponseV3Size)
+                failure["backend_reported"] = {{"stop_reason", stopReason(result.stopReason)},
+                    {"steps_executed", result.stepsExecuted}, {"final_address", hex(result.finalAddress)}};
+            failure["stop_reason"] = "unconfirmed";
+            failure["steps_executed"] = nullptr;
+            failure["final_address"] = nullptr;
+        }
+		if (!executionUncertain) {
 			failure["stopped"] = result.stopped;
 			failure["ip_in_range"] = result.ipInRange;
 			failure["decode_succeeded"] = result.decodeSucceeded;
@@ -660,12 +715,16 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 			failure["normalized_start"] = hex(result.normalizedRangeStart);
 			failure["normalized_end"] = hex(result.normalizedRangeEnd);
 		}
-		return {{"error", std::string("TraceBasicBlocks failed: ") + reason},
-			{"failure", std::move(failure)}};
+        json error = {{"error", std::string("TraceBasicBlocks failed: ") + reason},
+            {"failure", std::move(failure)}};
+        if (executionUncertain) {
+            error["capture_incomplete"] = true; error["execution_count_incomplete"] = true;
+            error["lost_records"] = nullptr; error["final_address"] = nullptr;
+        }
+        return error;
 	}
 	if (fileEventOutput && !result.eventArtifact.success)
-		return {{"error", result.eventArtifact.error.empty() ?
-			"event artifact stream failed" : result.eventArtifact.error}};
+        return eventFailure();
 	if (occurrenceWindow.enabled && !result.occurrenceSupported)
 		return {{"error", "injected DLL does not support occurrence_window"}};
 	if (stopOnReturn && !result.functionScopeSupported)
@@ -1216,14 +1275,26 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
         else if (h.resultFlags & hardwaretrace::kScopeExit) fullResult["stop_reason"] = "left_scope";
     }
 	if (!artifactMetadata.empty()) fullResult["capture_environment"] = artifactMetadata;
-	if (outputMode == "inline") return fullResult;
+	if (outputMode == "inline" && !TraceReplyNeedsArtifact(fullResult)) return fullResult;
+
+	json truncation = {{"trace", fullResult["truncated"]},
+		{"events", fullResult["events_truncated"]},
+		{"memory_events", fullResult["memory_events_truncated"]},
+		{"register_events", fullResult["register_events_truncated"]},
+		{"code", fullResult["code_truncated"]},
+		{"memory_writes", fullResult["memory_writes_truncated"]},
+		{"memory_reads", fullResult["memory_reads_truncated"]}};
+	if (collectionFlags || result.appliedMaxDecodedInstructions) truncation["decode"] = result.decodeIncomplete;
+	bool complete = true;
+	for (const auto& value : truncation.items()) if (value.value().get<bool>()) complete = false;
 
 	auto exported = outputFile.empty() ?
 		WriteJsonArtifactInDirectory("", "trace", fullResult, outputFormat) :
 		WriteTraceOutputFile(outputFile, outputFormat, fullResult);
     if (!exported.success) {
         json failure = {{"error", exported.error}, {"output_file", {{"path", outputFile},
-            {"format", outputFormat}, {"complete", false}}}};
+            {"format", outputFormat}, {"storage_complete", false}, {"capture_complete", complete}, {"complete", false}}}};
+        if (fileEventOutput) failure["event_file"] = eventFile;
         if (hardware) {
             failure["event_file"] = eventFile;
             failure["hardware"] = hardwareSummary;
@@ -1243,16 +1314,6 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		else if (fileEventOutput && std::string(name) == "register_events") counts[name] = capturedRegisterEvents;
 		else counts[name] = fullResult[name].size();
 	}
-	json truncation = {{"trace", fullResult["truncated"]},
-		{"events", fullResult["events_truncated"]},
-		{"memory_events", fullResult["memory_events_truncated"]},
-		{"register_events", fullResult["register_events_truncated"]},
-		{"code", fullResult["code_truncated"]},
-		{"memory_writes", fullResult["memory_writes_truncated"]},
-		{"memory_reads", fullResult["memory_reads_truncated"]}};
-	if (collectionFlags || result.appliedMaxDecodedInstructions) truncation["decode"] = result.decodeIncomplete;
-	bool complete = true;
-	for (const auto& value : truncation.items()) if (value.value().get<bool>()) complete = false;
 	json compact = {{"schema_version", 4}, {"mode", "file"},
 		{"thread_id", fullResult["thread_id"]}, {"stop_reason", fullResult["stop_reason"]},
 		{"steps_executed", fullResult["steps_executed"]},
@@ -1264,7 +1325,8 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 			{"register_events", fullResult["register_events_dropped"]}}},
 		{"truncation", std::move(truncation)}, {"occurrence_window", fullResult["occurrence_window"]},
 		{"output_file", {{"path", exported.path}, {"format", exported.format},
-			{"size", exported.size}, {"sha256", exported.sha256}, {"complete", complete}}}};
+			{"size", exported.size}, {"sha256", exported.sha256},
+                {"storage_complete", true}, {"capture_complete", complete}, {"complete", complete}}}};
 	if (fullResult.contains("resource_limits")) compact["resource_limits"] = fullResult["resource_limits"];
 	if (collectionFlags) compact["collection"] = fullResult["collection"];
     if (hardware) {

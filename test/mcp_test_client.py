@@ -20,6 +20,7 @@ def inline_trace_args(arguments):
     result = dict(arguments)
     if result.get("execution_context", "process") == "process":
         result.setdefault("output_mode", "file" if result.get("output_file") else "inline")
+        result.setdefault("events_output", "inline")
     return result
 
 
