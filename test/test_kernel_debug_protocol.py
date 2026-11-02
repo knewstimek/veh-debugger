@@ -146,6 +146,8 @@ def check_initial_stop(reply, valid=False):
             assert client.tool("veh_kd_disconnect").get("detached")
         else:
             assert "error" in result and not result.get("halted"), (reply, result)
+            assert "diagnostic" in result and "protocol_trace" in result, result
+            assert len(result["protocol_trace"]) <= 400, result
             assert not any(command.startswith("qRcmd,") for command in stub.commands), stub.commands
     finally:
         try:

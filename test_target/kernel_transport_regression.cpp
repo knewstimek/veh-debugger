@@ -10,16 +10,20 @@ void Check(bool ok, const char* message) { if (!ok) throw std::runtime_error(mes
 
 class FragmentTransport : public veh::KdTransport {
 public:
-    FragmentTransport(size_t fragment, bool no_ack) : fragment_(fragment), no_ack_(no_ack) {}
+    FragmentTransport(size_t fragment, bool no_ack) : fragment_(fragment), no_ack_(no_ack) {
+        Queue("T05thread:01;"); Queue("T05thread:01;"); // unsolicited, coalesced before negotiation
+    }
     bool Write(const void* data, size_t size) override {
         const std::string frame(static_cast<const char*>(data), size);
         if (frame == "+") return true;
         Check(frame.size() >= 4 && frame[0] == '$', "unexpected client frame");
         const auto command = frame.substr(1, frame.find('#') - 1);
         if (command.find("qSupported:") == 0) {
-            Queue("T05thread:01;"); Queue("T05thread:01;");
-            Queue("PacketSize=4000");
-        } else if (command == "QStartNoAckMode") Queue(no_ack_ ? "OK" : "");
+            Queue(no_ack_ ? "PacketSize=4000;QStartNoAckMode+" : "qXfer:features:read+;vContSupported+");
+        } else if (command == "QStartNoAckMode") {
+            Check(no_ack_, "unadvertised QStartNoAckMode must not be sent");
+            Queue("OK");
+        }
         else if (command == "?") { Queue("T05thread:01;"); Queue("T05thread:01;"); }
         else if (command == "qRcmd,7220") {
             Queue("O7269703d"); Queue("S05"); Queue("O307831303030"); Queue("OK");

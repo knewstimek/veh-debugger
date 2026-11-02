@@ -618,6 +618,14 @@ Those register keys are omitted and named in `unavailable_registers`; available
 registers keep their wire offsets. An unavailable RIP cannot authorize a step.
 The regression distinguishes legal `x` slots from truly malformed encodings.
 
+`test/test_kernel_handshake_capabilities.py` uses the ACK-only feature list and
+coalesced duplicate initial stops. It checks that an unadvertised no-ACK probe
+is never sent, the requested stop still arrives, and later register/monitor
+commands stay aligned. The fixture deliberately leaves an unexpected probe
+unanswered; this reproduced `no valid stop reason` before the capability gate.
+This does not establish how a live peer answered an unrecorded optional probe.
+Failed handshakes include bounded `diagnostic` and `protocol_trace` fields.
+
 `test/test_kernel_transport_fragments.py` runs the production RSP client against a
 native transport that returns at most 1, 2, 3, 7, 64 or 4096 bytes per read, in
 ACK and no-ACK modes. Its 12 deterministic cases cover NUL/checksum boundaries,

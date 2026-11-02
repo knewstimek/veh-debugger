@@ -475,8 +475,16 @@ bool KernelDebugClient::Handshake(std::string* stop, std::string* error)
 		return false;
 	}
 	// Request already consumes unsolicited stops ahead of negotiation replies.
-	if (Request("QStartNoAckMode", &reply) && reply == "OK")
-		ack_ = false;
+	// Only negotiate no-ACK mode when the peer explicitly advertises it.
+	// An unanswered optional probe would own the reply slot and block "?".
+	const std::string features = ";" + reply + ";";
+	if (features.find(";QStartNoAckMode+;") != std::string::npos) {
+		if (!Request("QStartNoAckMode", &reply)) {
+			*error = "no answer to advertised QStartNoAckMode";
+			return false;
+		}
+		if (reply == "OK") ack_ = false;
+	}
 	if (!QueryStop(stop, 5000)) {
 		*error = "no valid stop reason";
 		return false;

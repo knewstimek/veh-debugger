@@ -136,7 +136,7 @@ json McpServer::ToolKdConnect(const json& args)
 	auto client = std::make_unique<KernelDebugClient>(std::move(link));
 	std::string stop;
 	if (!client->Handshake(&stop, &error))
-		return {{"error", error}};
+		return {{"error", error}, {"diagnostic", client->wait_diagnostic()}, {"protocol_trace", client->trace()}};
 	kd_ = std::move(client);
 	kd_breakpoints_.clear();
 	// VirtualBox 7.2's stub mis-sizes the P value (RTStrConvertHexBytes gets
