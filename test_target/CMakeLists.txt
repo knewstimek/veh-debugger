@@ -6,6 +6,10 @@ add_executable(ipc_transport_regression ipc_transport_regression.cpp ../src/adap
 target_include_directories(ipc_transport_regression PRIVATE ../src ../src/common)
 target_compile_definitions(ipc_transport_regression PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 
+add_executable(kernel_transport_regression kernel_transport_regression.cpp ../src/mcp/kernel_debug_client.cpp)
+target_compile_definitions(kernel_transport_regression PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(kernel_transport_regression PRIVATE ws2_32)
+
 add_executable(trace_path_regression trace_path_regression.cpp)
 target_compile_definitions(trace_path_regression PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 

@@ -344,13 +344,19 @@ json McpServer::ToolKdSetRegister(const json& args)
 		char command[64];
 		snprintf(command, sizeof(command), "r %s = 0x%llx", name == "eflags" ? "rflags" : name.c_str(),
 			static_cast<unsigned long long>(value));
-		const std::string text = MonitorText(*kd_, std::string(command) + " ");
+		bool monitor_ok = false;
+		const std::string text = MonitorText(*kd_, std::string(command) + " ", &monitor_ok);
+		const std::string monitor_diagnostic = kd_->wait_diagnostic();
 		std::string reply;
 		char read[8];
 		snprintf(read, sizeof(read), "p%x", number);
-		const auto now = kd_->Request(read, &reply) ? FromHex(reply) : std::vector<uint8_t>{};
+		const bool read_ok = kd_->Request(read, &reply);
+		const auto now = read_ok ? FromHex(reply) : std::vector<uint8_t>{};
 		if (now.size() < size || Le(now, 0, size) != (size == 4 ? (value & 0xFFFFFFFFu) : value))
-			return {{"error", "register write failed"}, {"console", text}};
+			return {{"error", "register write failed"}, {"console", text},
+				{"monitor_completed", monitor_ok}, {"monitor_diagnostic", monitor_diagnostic},
+				{"verification_completed", read_ok}, {"verification_reply", reply.substr(0, 96)},
+				{"diagnostic", kd_->wait_diagnostic()}, {"protocol_trace", kd_->trace()}};
 		return {{"success", true}, {"name", name}, {"value", HexAddr(value)}};
 	}
 	std::vector<uint8_t> bytes(size);
@@ -477,7 +483,7 @@ json McpServer::ToolKdMonitor(const json& args)
 		return {{"error", "running: veh_kd_break first"}};
 	bool ok = false;
 	const std::string text = MonitorText(*kd_, args.value("command", "help") + (kd_dbgc_ ? " " : ""), &ok);
-	if (!ok) return {{"error", "monitor command failed"}, {"diagnostic", kd_->wait_diagnostic()}};
+	if (!ok) return {{"error", "monitor command failed"}, {"diagnostic", kd_->wait_diagnostic()}, {"protocol_trace", kd_->trace()}};
 	return {{"output", text}};
 }
 

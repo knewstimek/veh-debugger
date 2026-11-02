@@ -68,7 +68,12 @@ class FaultStub(Stub):
                 super().packet(text)
         elif text == "p0":
             self.commands.append(text)
-            self.send((1).to_bytes(8, "little").hex())
+            if self.mode == "write-verify-error":
+                self.send("E01")
+            elif self.mode == "write-unavailable":
+                self.send("x" * 16)
+            else:
+                self.send((1).to_bytes(8, "little").hex())
         elif text.startswith("vCont;s"):
             self.commands.append(text)
             self.send("T05thread:0a;")
@@ -147,6 +152,20 @@ def run():
             before = len(stub.commands)
             refused = client.tool(tool, args)
             assert "error" in refused and len(stub.commands) == before, refused
+
+        # Silent DBGC assignment is valid; only the independent readback proves its value.
+        same = client.tool("veh_kd_set_register", {"cpu": 0, "name": "rax", "value": "0x1"})
+        assert same.get("success"), same
+        for mode, value, expected in (("write-verify-error", "0x1", "E01"),
+                                      ("write-unavailable", "0x1", "x" * 16),
+                                      ("normal", "0x2", "0100000000000000")):
+            stub.mode = mode
+            failed = client.tool("veh_kd_set_register", {"cpu": 0, "name": "rax", "value": value})
+            assert "error" in failed and failed.get("console") == "", (mode, failed)
+            assert failed.get("monitor_completed") and failed.get("verification_completed"), failed
+            assert failed.get("verification_reply") == expected, failed
+            assert "p0" in failed.get("protocol_trace", "") and len(failed["protocol_trace"]) <= 400, failed
+        stub.mode = "normal"
 
         stepped = client.tool("veh_kd_step", {"cpu": 9, "timeout_ms": 200})
         assert stepped.get("steps") == 1, stepped

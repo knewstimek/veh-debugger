@@ -618,6 +618,18 @@ Those register keys are omitted and named in `unavailable_registers`; available
 registers keep their wire offsets. An unavailable RIP cannot authorize a step.
 The regression distinguishes legal `x` slots from truly malformed encodings.
 
+`test/test_kernel_transport_fragments.py` runs the production RSP client against a
+native transport that returns at most 1, 2, 3, 7, 64 or 4096 bytes per read, in
+ACK and no-ACK modes. Its 12 deterministic cases cover NUL/checksum boundaries,
+silent monitor completion followed by register readback, and breakpoint
+`T05 -> O fragments -> T05 -> z0 -> monitor`. Build target:
+`kernel_transport_regression`. A pass checks stream framing, not live VM parity.
+Failed DBGC register-write results retain separate `monitor_completed`,
+`monitor_diagnostic`, `verification_completed`, `verification_reply` (96-character
+maximum), and `protocol_trace` (400-character maximum). The latter also appears
+on failed monitor commands. These fields diagnose failures without relaxing
+value verification or changing the DBGC trailing-space convention.
+
 `test/test_kernel_late_replies.py` delays only valid replies, using explicit
 fixture events rather than timing sleeps. It verifies that a timed-out address's
 byte cannot become a second address's result, no new write reaches the peer while
