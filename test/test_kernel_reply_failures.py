@@ -33,6 +33,19 @@ class FaultStub(Stub):
         elif text == "g" and self.mode == "invalid-registers":
             self.commands.append(text)
             self.send("z" * (2 * (17 * 8 + 4)))
+        elif text == "g" and self.mode.startswith("unavailable-"):
+            self.commands.append(text)
+            registers = bytearray(17 * 8 + 4)
+            registers[8:16] = (0x1234).to_bytes(8, "little")
+            registers[16 * 8:17 * 8] = (0x1000).to_bytes(8, "little")
+            encoded = registers.hex()
+            if self.mode == "unavailable-rax":
+                encoded = "x" * 16 + encoded[16:] + "x" * 8  # optional CS unavailable too
+            elif self.mode == "unavailable-rip":
+                encoded = encoded[:16 * 16] + "x" * 16 + encoded[17 * 16:]
+            else:
+                encoded = "x" * len(encoded)
+            self.send(encoded)
         elif text.startswith("qRcmd,"):
             command = bytes.fromhex(text.split(",", 1)[1]).decode()
             if command.startswith("probe"):
@@ -85,6 +98,19 @@ def run():
         stub.mode = "invalid-registers"
         result = client.tool("veh_kd_registers")
         assert "error" in result and "rip" not in result, result
+        stub.mode = "unavailable-rax"
+        result = client.tool("veh_kd_registers")
+        assert "error" not in result and "rax" not in result and "cs" not in result, result
+        assert result.get("rbx") == "0x1234" and result.get("rip") == "0x1000", result
+        assert result.get("unavailable_registers") == ["rax", "cs"], result
+        stub.mode = "unavailable-all"
+        result = client.tool("veh_kd_registers")
+        assert "error" not in result and "rip" not in result, result
+        assert len(result.get("unavailable_registers", [])) == 18, result
+        stub.mode = "unavailable-rip"
+        before = sum(command.startswith("vCont;s") for command in stub.commands)
+        result = client.tool("veh_kd_step", {"timeout_ms": 200})
+        assert "error" in result and sum(command.startswith("vCont;s") for command in stub.commands) == before, result
 
         stub.mode = "short-memory"
         before = len(stub.memory_reads)

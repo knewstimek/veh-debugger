@@ -612,6 +612,11 @@ signal-only S replies remain supported.
 verify monitor errors and subsequent response alignment, malformed/odd/oversized
 hex rejection, contiguous short reads, write/address/value admission without
 backend effects, CPU IDs above nine and refusal to write registers while running.
+The `g` reply permits literal `x` digits for unavailable registers, as specified by
+[GDB RSP](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Packets.html).
+Those register keys are omitted and named in `unavailable_registers`; available
+registers keep their wire offsets. An unavailable RIP cannot authorize a step.
+The regression distinguishes legal `x` slots from truly malformed encodings.
 
 ### Kernel hardware capture
 

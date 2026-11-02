@@ -251,6 +251,8 @@ json McpServer::ToolKdStep(const json& args)
 	}
 	for (uint32_t i = 0; i < count; ++i) {
 		const std::string before = ToolKdRegisters(json::object()).value("rip", "");
+		if (before.empty())
+			return {{"error", "instruction pointer unavailable; step was not submitted"}, {"steps", i}};
 		if (!kd_->Resume("vCont;s" + thread))
 			return {{"error", "link lost"}, {"steps", i}};
 		if (kd_->WaitStop(&stop, JsonUint32(args, "timeout_ms", 10000)))
@@ -286,15 +288,21 @@ json McpServer::ToolKdRegisters(const json& args)
 	// number of segment registers after them (VirtualBox: cs and ss).
 	if (!kd_->Request("g", &reply) || reply.size() < 2 * (17 * 8 + 4))
 		return {{"error", "register read failed"}, {"reply", reply.substr(0, 16)}};
-	const auto g = FromHex(reply);
-	if (g.size() < 17 * 8 + 4)
+	// RSP uses literal 'x' digits for unavailable registers. Preserve register
+	// positions and known values; never decode those slots as zero or drop bytes.
+	if (reply.size() % 2 || reply.find_first_not_of("0123456789abcdefABCDEFx") != std::string::npos)
 		return {{"error", "invalid register reply"}};
-	json out;
-	for (size_t i = 0; i < 17; ++i)
-		out[kGdbRegs[i]] = HexAddr(Le(g, i * 8, 8));
-	out["rflags"] = HexAddr(Le(g, 17 * 8, 4));
-	for (size_t i = 0; i < 6 && g.size() >= 17 * 8 + 4 + (i + 1) * 4; ++i)
-		out[kGdbSegs[i]] = HexAddr(Le(g, 17 * 8 + 4 + i * 4, 4));
+	json out = json::object(), unavailable = json::array();
+	const auto reg = [&](const char* name, size_t offset, size_t size) {
+		const auto encoded = reply.substr(offset * 2, size * 2);
+		if (encoded.find('x') != std::string::npos) unavailable.push_back(name);
+		else out[name] = HexAddr(Le(FromHex(encoded), 0, size));
+	};
+	for (size_t i = 0; i < 17; ++i) reg(kGdbRegs[i], i * 8, 8);
+	reg("rflags", 17 * 8, 4);
+	for (size_t i = 0; i < 6 && reply.size() >= 2 * (17 * 8 + 4 + (i + 1) * 4); ++i)
+		reg(kGdbSegs[i], 17 * 8 + 4 + i * 4, 4);
+	if (!unavailable.empty()) out["unavailable_registers"] = std::move(unavailable);
 	// System state (stub monitor command), when the stub offers it.
 	const std::string extra = MonitorText(*kd_, kd_dbgc_ ? "regs " : "regs");
 	for (const char* key : { "cr3", "gs_base", "fs_base", "idt", "cpl" }) {
