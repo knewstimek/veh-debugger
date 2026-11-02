@@ -6,7 +6,8 @@ from mcp_test_client import McpClient
 
 
 class Stub:
-    def __init__(self):
+    def __init__(self, initial_stop_reply="T05thread:01;"):
+        self.initial_stop_reply = initial_stop_reply
         self.listener = socket.socket()
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen(1)
@@ -34,8 +35,9 @@ class Stub:
         elif text == "QStartNoAckMode":
             self.send("OK")
         elif text == "?":
-            self.send("T05thread:01;")
-            self.send("T05thread:01;")  # queued behind the requested stop
+            self.send(self.initial_stop_reply)
+            if self.initial_stop_reply == "T05thread:01;":
+                self.send("T05thread:01;")  # queued behind the requested stop
         elif text.startswith("qRcmd,"):
             command = bytes.fromhex(text.split(",", 1)[1]).decode()
             assert command.endswith(" "), "DBGC drops the final decoded byte"
@@ -130,7 +132,33 @@ class Stub:
         assert self.error is None, self.error
 
 
+def check_initial_stop(reply, valid=False):
+    stub = Stub(reply)
+    client = None
+    try:
+        client = McpClient()
+        client.initialize()
+        result = client.tool("veh_kd_connect", {
+            "transport": "tcp", "address": f"127.0.0.1:{stub.port}",
+        })
+        if valid:
+            assert result.get("halted") and result["stop"]["raw"] == reply, result
+            assert client.tool("veh_kd_disconnect").get("detached")
+        else:
+            assert "error" in result and not result.get("halted"), (reply, result)
+            assert not any(command.startswith("qRcmd,") for command in stub.commands), stub.commands
+    finally:
+        try:
+            if client is not None:
+                client.close(terminate_target=False)
+        finally:
+            stub.close()
+
+
 def run():
+    for reply in ("OK", "", "E01", "Tzz", "Sx5", "T0", "W00", "X09"):
+        check_initial_stop(reply)
+    check_initial_stop("S05", valid=True)
     stub = Stub()
     client = None
     try:

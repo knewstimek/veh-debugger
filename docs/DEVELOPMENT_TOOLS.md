@@ -604,6 +604,9 @@ last-stop retention, DBGC command trailing spaces, NUL-terminated packets, conso
 register replies, interrupt fallback and safe detach of execution/data
 breakpoints. Cleanup rejection must retain the session and prevent detach;
 retry must remove each original kind/size before sending `D`. No VM is used.
+Initial halt checks reject acknowledgements, unsupported/error replies, malformed
+signal numbers and target exits before probing registers or the monitor. Valid
+signal-only S replies remain supported.
 
 ### Kernel hardware capture
 

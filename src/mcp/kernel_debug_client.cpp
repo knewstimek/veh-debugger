@@ -10,6 +10,14 @@
 namespace veh {
 namespace {
 
+bool IsStopReply(const std::string& reply, bool allow_exit = false)
+{
+	return reply.size() >= 3 &&
+		(reply[0] == 'T' || reply[0] == 'S' || (allow_exit && (reply[0] == 'W' || reply[0] == 'X'))) &&
+		std::isxdigit(static_cast<unsigned char>(reply[1])) &&
+		std::isxdigit(static_cast<unsigned char>(reply[2]));
+}
+
 uint64_t NowMs()
 {
 	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -373,8 +381,7 @@ bool KernelDebugClient::Request(const std::string& packet, std::string* reply, u
 	// event (live: 'z0' after a breakpoint stop got "T05thread:01;").
 	const bool asks_stop = packet == "?";
 	const auto late_stop = [&](const std::string& r) {
-		return !asks_stop && r.size() >= 3 && (r[0] == 'T' || r[0] == 'S') &&
-			std::isxdigit(static_cast<unsigned char>(r[1])) && std::isxdigit(static_cast<unsigned char>(r[2]));
+		return !asks_stop && IsStopReply(r);
 	};
 	for (int skipped = 0; (console(*reply) || late_stop(*reply)) && skipped < 4096; ++skipped) {
 		if (late_stop(*reply))
@@ -401,9 +408,7 @@ bool KernelDebugClient::Monitor(const std::string& hex_command, std::string* hex
 			return false;
 		// Per-CPU connect notifications or a late halt may precede/interleave
 		// qRcmd output. Keep the stop, but consume the console through its reply.
-		if (reply.size() >= 3 && (reply[0] == 'T' || reply[0] == 'S') &&
-			std::isxdigit(static_cast<unsigned char>(reply[1])) &&
-			std::isxdigit(static_cast<unsigned char>(reply[2]))) {
+		if (IsStopReply(reply)) {
 			last_stop_ = reply;
 			continue;
 		}
@@ -429,20 +434,13 @@ bool KernelDebugClient::Handshake(std::string* stop, std::string* error)
 		*error = "no answer to qSupported (is the stub enabled and the transport right?)";
 		return false;
 	}
-	// A stub that halts on connect (VirtualBox's DBGC) sends its stop reply
-	// unasked, ahead of the qSupported answer: keep it and read the answer.
-	if (!reply.empty() && (reply[0] == 'T' || reply[0] == 'S') && !Receive(&reply, 5000)) {
-		*error = "no answer to qSupported after the stub's stop reply";
-		return false;
-	}
+	// Request already consumes unsolicited stops ahead of negotiation replies.
 	if (Request("QStartNoAckMode", &reply) && reply == "OK")
 		ack_ = false;
-	if (!Request("?", stop)) {
-		*error = "no stop reason";
+	if (!QueryStop(stop, 5000)) {
+		*error = "no valid stop reason";
 		return false;
 	}
-	last_stop_ = *stop;
-	running_ = false;
 	return true;
 }
 
@@ -476,10 +474,7 @@ bool KernelDebugClient::WaitStop(std::string* stop, uint32_t timeout_ms)
 		const bool console = stop->size() > 1 && (*stop)[0] == 'O' && *stop != "OK" &&
 			stop->find_first_not_of("0123456789abcdefABCDEF", 1) == std::string::npos;
 		// Acknowledgements/unsupported vCont replies are not evidence of a stop.
-		const bool stopped = stop->size() >= 3 &&
-			((*stop)[0] == 'T' || (*stop)[0] == 'S' || (*stop)[0] == 'W' || (*stop)[0] == 'X') &&
-			std::isxdigit(static_cast<unsigned char>((*stop)[1])) &&
-			std::isxdigit(static_cast<unsigned char>((*stop)[2]));
+		const bool stopped = IsStopReply(*stop, true);
 		if (!console && stop->size() == 3 && (*stop)[0] == 'E' &&
 			std::isxdigit(static_cast<unsigned char>((*stop)[1])) && std::isxdigit(static_cast<unsigned char>((*stop)[2]))) {
 			wait_diagnostic_ = "resume refused: " + *stop;
@@ -499,7 +494,7 @@ bool KernelDebugClient::WaitStop(std::string* stop, uint32_t timeout_ms)
 bool KernelDebugClient::QueryStop(std::string* stop, uint32_t timeout_ms)
 {
 	std::string reply;
-	if (!Request("?", &reply, timeout_ms) || reply.size() < 3 || (reply[0] != 'T' && reply[0] != 'S'))
+	if (!Request("?", &reply, timeout_ms) || !IsStopReply(reply))
 		return false;
 	*stop = reply;
 	last_stop_ = reply;
