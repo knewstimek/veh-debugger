@@ -618,6 +618,15 @@ Those register keys are omitted and named in `unavailable_registers`; available
 registers keep their wire offsets. An unavailable RIP cannot authorize a step.
 The regression distinguishes legal `x` slots from truly malformed encodings.
 
+`test/test_kernel_nak_recovery.py` rejects an ACK-mode same-value register write
+once, accepts its identical retry, verifies one command execution and aligned
+readback/monitor replies, then checks repeated rejection stops after the original
+frame plus three retries. DBGC register reads must not issue `regs `.
+The native fragment fixture also splits NAK controls, verifies identical retry
+bytes, checks retry exhaustion, and prevents replay after positive acknowledgment.
+Only an explicit NAK permits a retry; a response timeout does not.
+Each framed console chunk and terminal reply receives its own ACK in ACK mode.
+
 `test/test_kernel_handshake_capabilities.py` uses the ACK-only feature list and
 coalesced duplicate initial stops. It checks that an unadvertised no-ACK probe
 is never sent, the requested stop still arrives, and later register/monitor

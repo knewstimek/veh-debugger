@@ -306,7 +306,9 @@ json McpServer::ToolKdRegisters(const json& args)
 		reg(kGdbSegs[i], 17 * 8 + 4 + i * 4, 4);
 	if (!unavailable.empty()) out["unavailable_registers"] = std::move(unavailable);
 	// System state (stub monitor command), when the stub offers it.
-	const std::string extra = MonitorText(*kd_, kd_dbgc_ ? "regs " : "regs");
+	// DBGC has no "regs" command. Its general registers already came from g;
+	// reserve the optional monitor probe for peers using the other dialect.
+	const std::string extra = kd_dbgc_ ? "" : MonitorText(*kd_, "regs");
 	for (const char* key : { "cr3", "gs_base", "fs_base", "idt", "cpl" }) {
 		const std::string tag = std::string(key) + "=";
 		const size_t at = extra.find(tag);

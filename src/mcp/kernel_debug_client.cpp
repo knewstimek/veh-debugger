@@ -322,6 +322,8 @@ bool KernelDebugClient::Send(const std::string& payload)
 	for (char c : payload)
 		sum = static_cast<uint8_t>(sum + static_cast<uint8_t>(c));
 	const std::string frame = "$" + payload + "#" + kHex[sum >> 4] + kHex[sum & 15];
+	unacked_frame_ = ack_ ? frame : "";
+	nak_retries_ = 0;
 	Trace('>', frame.data(), frame.size());
 	if (transport_->Write(frame.data(), frame.size())) return true;
 	transport_usable_ = false; // a partial frame cannot safely precede another command
@@ -332,6 +334,30 @@ bool KernelDebugClient::Receive(std::string* payload, uint32_t timeout_ms)
 {
 	const uint64_t end = NowMs() + timeout_ms;
 	for (;;) {
+		// ACK/NAK are stream control bytes, not framed payloads. Consume them
+		// before searching for a packet, including when no packet follows.
+		const size_t next_frame = buffer_.find('$');
+		const size_t controls = next_frame == std::string::npos ? buffer_.size() : next_frame;
+		for (size_t i = 0; i < controls; ++i) {
+			if (!ack_) continue;
+			if (buffer_[i] == '+') unacked_frame_.clear();
+			if (buffer_[i] == '-' && !unacked_frame_.empty()) {
+				// Only explicit rejection permits replay. Timeouts never do.
+				if (nak_retries_ >= 3) {
+					wait_diagnostic_ = "RSP NAK retry limit reached; a new connection is required";
+					transport_usable_ = false;
+					return false;
+				}
+				++nak_retries_;
+				Trace('>', unacked_frame_.data(), unacked_frame_.size());
+				if (!transport_->Write(unacked_frame_.data(), unacked_frame_.size())) {
+					wait_diagnostic_ = "RSP NAK retransmission write failed";
+					transport_usable_ = false;
+					return false;
+				}
+			}
+		}
+		buffer_.erase(0, controls);
 		const size_t start = buffer_.find('$');
 		if (start != std::string::npos) {
 			const size_t hash = buffer_.find('#', start);
@@ -410,6 +436,7 @@ bool KernelDebugClient::CompletePending(std::string* output, uint64_t deadline, 
 	// by that exchange until its terminal packet is received, never by the next.
 	const auto complete = [&](bool ok) {
 		pending_reply_ = PendingReply::None;
+		unacked_frame_.clear();
 		if (ok) wait_diagnostic_.clear();
 		success = ok;
 		return true;

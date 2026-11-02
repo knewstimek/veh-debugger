@@ -58,6 +58,8 @@ private:
 
 	std::unique_ptr<KdTransport> transport_;
 	std::string buffer_;
+	std::string unacked_frame_;
+	unsigned nak_retries_ = 0;
 	bool ack_ = true;
 	bool running_ = false;
 	std::string last_stop_;

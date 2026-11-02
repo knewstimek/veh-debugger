@@ -27,7 +27,15 @@ public:
         else if (command == "?") { Queue("T05thread:01;"); Queue("T05thread:01;"); }
         else if (command == "qRcmd,7220") {
             Queue("O7269703d"); Queue("S05"); Queue("O307831303030"); Queue("OK");
-        } else if (command == "qRcmd,7720") Queue("OK"); // successful silent command
+        } else if (command == "qRcmd,7720") {
+            if (!no_ack_ && rejected_frame_.empty()) {
+                rejected_frame_ = frame;
+                incoming_ += "-"; // reject once, then accept only the identical frame
+            } else {
+                Check(no_ack_ || frame == rejected_frame_, "NAK retry changed command bytes");
+                Queue("OK");
+            }
+        }
         else if (command == "p0") Queue("8877665544332211");
         else if (command == "c") {
             Queue("T05thread:01;");
@@ -57,7 +65,45 @@ private:
     size_t fragment_;
     bool no_ack_;
     std::string incoming_;
+    std::string rejected_frame_;
 };
+
+class RejectTransport : public veh::KdTransport {
+public:
+    explicit RejectTransport(bool acknowledged) : acknowledged_(acknowledged) {}
+    bool Write(const void* data, size_t size) override {
+        const std::string frame(static_cast<const char*>(data), size);
+        if (frame == "+") return true;
+        if (!writes.empty()) Check(frame == writes.front(), "retry changed frame bytes");
+        writes.push_back(frame);
+        pending_ += acknowledged_ ? "+-" : "-";
+        return true;
+    }
+    int Read(uint8_t* buffer, size_t, uint32_t) override {
+        if (pending_.empty()) return 0;
+        *buffer = static_cast<uint8_t>(pending_[0]);
+        pending_.erase(0, 1);
+        return 1;
+    }
+    std::vector<std::string> writes;
+private:
+    bool acknowledged_;
+    std::string pending_;
+};
+
+void RunRejected(bool acknowledged) {
+    auto transport = std::make_unique<RejectTransport>(acknowledged);
+    auto* peer = transport.get();
+    veh::KernelDebugClient client(std::move(transport));
+    std::string reply;
+    Check(!client.Request("M1000,1:90", &reply, 20), "rejected request succeeded");
+    Check(peer->writes.size() == (acknowledged ? 1 : 4), "NAK retry bound or accepted-frame guard");
+    if (!acknowledged)
+        Check(client.wait_diagnostic().find("NAK retry limit") != std::string::npos, "retry-limit diagnostic");
+    const auto before = peer->writes.size();
+    Check(!client.Request("m2000,1", &reply, 20) && peer->writes.size() == before,
+          "new request submitted while prior response incomplete or link failed");
+}
 
 void Run(size_t fragment, bool no_ack) {
     veh::KernelDebugClient client(std::make_unique<FragmentTransport>(fragment, no_ack));
@@ -76,7 +122,9 @@ int main() {
         for (bool no_ack : {false, true})
             for (size_t fragment : {size_t(1), size_t(2), size_t(3), size_t(7), size_t(64), size_t(4096)})
                 Run(fragment, no_ack);
-        std::cout << "PASS KD read fragmentation: 12 ACK/no-ACK scenarios, silent write verification and duplicate breakpoint stops\n";
+        RunRejected(false);
+        RunRejected(true);
+        std::cout << "PASS KD read fragmentation: 12 ACK/no-ACK scenarios, NAK retries/limits, accepted-frame guard and duplicate stops\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
