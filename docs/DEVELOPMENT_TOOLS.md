@@ -599,7 +599,8 @@ The parity runner invokes the architecture-sensitive integration suite for each 
 
 `py -3 tools/run_tests.py test_kernel_debug_protocol.py --jobs 1 --timeout 30`
 uses a synthetic localhost GDB RSP peer with the shared bounded MCP client.
-It checks unsolicited stops, NUL-terminated packets, console output, short
+It checks repeated per-CPU connect stops, late T/S stops between console chunks,
+last-stop retention, DBGC command trailing spaces, NUL-terminated packets, console output, short
 register replies, interrupt fallback and safe detach of execution/data
 breakpoints. Cleanup rejection must retain the session and prevent detach;
 retry must remove each original kind/size before sending `D`. No VM is used.

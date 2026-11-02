@@ -29,16 +29,24 @@ class Stub:
         self.commands.append(text)
         if text.startswith("qSupported"):
             self.send("T05thread:01;")  # unsolicited halt before negotiation
+            self.send("T05thread:01;")  # one notification per vCPU
             self.send("PacketSize=4000;QStartNoAckMode+;vContSupported+")
         elif text == "QStartNoAckMode":
             self.send("OK")
         elif text == "?":
             self.send("T05thread:01;")
+            self.send("T05thread:01;")  # queued behind the requested stop
         elif text.startswith("qRcmd,"):
-            self.send("O" + b"rip=0x1000".hex())
+            command = bytes.fromhex(text.split(",", 1)[1]).decode()
+            assert command.endswith(" "), "DBGC drops the final decoded byte"
+            assert command[:-1] in ("r", "regs"), command
+            self.send("O" + b"rip=".hex())
+            self.send("S05")  # a late signal stop between console chunks
+            self.send("O" + b"0x1000".hex())
+            self.send("T05thread:02;")  # retain the most recent stop, drain to OK
             self.send("OK")
         elif text == "qfThreadInfo":
-            self.send("m1")
+            self.send("m1,2")
         elif text == "qsThreadInfo":
             self.send("l")
         elif text == "g":
@@ -98,6 +106,8 @@ class Stub:
                         self.packet(command)
                     else:
                         raise AssertionError("Unexpected RSP framing")
+        except ConnectionResetError:
+            pass  # the owned MCP may close its peer while unwinding a failed assertion
         except OSError as error:
             if not self.stop.is_set():
                 self.error = error
@@ -130,6 +140,12 @@ def run():
             "transport": "tcp", "address": f"127.0.0.1:{stub.port}",
         })
         assert connected.get("halted"), connected
+        assert connected.get("cpus") == [0, 1], connected
+        for _ in range(2):
+            monitored = client.tool("veh_kd_monitor", {"command": "r"})
+            assert monitored.get("output") == "rip=0x1000", monitored
+            cached = client.tool("veh_kd_wait")
+            assert cached.get("stop", {}).get("raw") == "T05thread:02;", cached
         registers = client.tool("veh_kd_registers")
         assert registers.get("rip") == "0x1000", registers
         for kind, size in (("execute", 1), ("write", 4), ("access", 8)):
@@ -152,7 +168,7 @@ def run():
         removals = [p for p in stub.commands if p.startswith("z")]
         assert removals == ["z0,1000,1", "z2,2000,4", "z2,2000,4", "z4,2000,8"], removals
         assert stub.commands[-1] == "D", stub.commands
-        print("PASS kernel RSP console/NUL handling, real-stop validation and typed detach cleanup")
+        print("PASS two-CPU duplicate/late T/S stops, DBGC trailing space, aligned console/register replies and typed detach cleanup")
     finally:
         try:
             if client is not None:

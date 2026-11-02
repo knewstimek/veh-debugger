@@ -399,6 +399,14 @@ bool KernelDebugClient::Monitor(const std::string& hex_command, std::string* hex
 		const auto now = NowMs();
 		if (now >= deadline || !Receive(&reply, static_cast<uint32_t>(deadline - now)))
 			return false;
+		// Per-CPU connect notifications or a late halt may precede/interleave
+		// qRcmd output. Keep the stop, but consume the console through its reply.
+		if (reply.size() >= 3 && (reply[0] == 'T' || reply[0] == 'S') &&
+			std::isxdigit(static_cast<unsigned char>(reply[1])) &&
+			std::isxdigit(static_cast<unsigned char>(reply[2]))) {
+			last_stop_ = reply;
+			continue;
+		}
 		if (reply == "OK" || reply.empty())
 			return true;
 		if (reply[0] == 'E' && reply.size() == 3)

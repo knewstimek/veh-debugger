@@ -11,6 +11,7 @@
 - **Process trace resource budgets** -- capability-gated wire12 decodes entered blocks lazily, checks changed instruction bytes before reuse, accepts large ranges and 64-bit execution ceilings, and exposes an independent `max_decoded_instructions` cache budget (default1,000,000). Process execution defaults to1,000,000 steps; explicit long timeouts and event files remain independent. Cache exhaustion stops precisely before an uncached instruction. x86 retains its address-space limits; unsupported peers reject new options before execution. See [lazy trace contract](../docs/TRACE_LAZY_DECODE.md).
 
 ### Fixed
+- **Kernel monitor response alignment** -- skip and retain duplicate or late T/S stop notifications while collecting monitor output through its terminal reply. This preserves DBGC detection and subsequent responses on multi-CPU stubs; the required command trailing space is unchanged.
 - File-mode traces preserve the injected DLL's actual startup failure and structured diagnostics instead of incorrectly reporting file output as unsupported.
 
 ## 1.2.4 - 2026-11-01
