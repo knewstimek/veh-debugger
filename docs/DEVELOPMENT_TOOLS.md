@@ -597,7 +597,11 @@ The parity runner invokes the architecture-sensitive integration suite for each 
 
 ## Kernel-stub protocol regression
 
-`py -3 tools/run_tests.py test_kernel_debug_protocol.py --jobs 1 --timeout 30`
+`py -3 tools/run_tests.py test_kernel_debug_protocol.py --jobs 1 --timeout 120`
+
+The protocol fixture also checks exception-stop metadata v1, fault/trap retirement,
+unknown or malformed outcomes, exact 64-bit fault addresses, and termination of
+multi-step requests at an exception. Whole-machine KD steps remain direct-only.
 uses a synthetic localhost GDB RSP peer with the shared bounded MCP client.
 It checks repeated per-CPU connect stops, late T/S stops between console chunks,
 last-stop retention, DBGC command trailing spaces, NUL-terminated packets, console output, short

@@ -1785,7 +1785,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 				{"timeout_ms", {{"type", "integer"}, {"description", "Default 10000"}}}
 			 }}}}}),
 		Tool(&McpServer::ToolKdStep, "kernel", 0, false,
-			{{"name", "veh_kd_step"}, {"description", "Single-step one CPU (default: the one that stopped) while the others stay halted; returns the new rip and the next instruction."},
+			{{"name", "veh_kd_step"}, {"description", "Single-step one CPU (default: the one that stopped) while the others stay halted. Returns confirmed steps, rip and the next instruction; stops the request at an exception. Versioned exception metadata distinguishes unretired faults from retired traps."},
 			 {"inputSchema", {{"type", "object"}, {"properties", {
 				{"cpu", {{"type", "integer"}}},
 				{"count", {{"type", "integer"}, {"description", "Default 1"}}},

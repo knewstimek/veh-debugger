@@ -6,8 +6,9 @@ from mcp_test_client import McpClient
 
 
 class Stub:
-    def __init__(self, initial_stop_reply="T05thread:01;"):
+    def __init__(self, initial_stop_reply="T05thread:01;", step_replies=None):
         self.initial_stop_reply = initial_stop_reply
+        self.step_replies = list(step_replies or [])
         self.listener = socket.socket()
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen(1)
@@ -63,6 +64,9 @@ class Stub:
                 self.send("E01")
             else:
                 self.send("OK")
+        elif text.startswith("vCont;s"):
+            assert self.step_replies, "Unexpected extra step after an exception"
+            self.send(self.step_replies.pop(0))
         elif text == "vCont;t":
             self.send("")  # unsupported is not a stop; client must use 0x03
         elif text == "interrupt":
@@ -157,7 +161,58 @@ def check_initial_stop(reply, valid=False):
             stub.close()
 
 
+def check_step_progress():
+    # The stub keeps RIP fixed: retirement must come from explicit metadata,
+    # not a comparison against the exception handler's normalized PC.
+    prefix = "thread:01;stepmeta:1;reason:exception;progress:"
+    cases = [
+        (["T04" + prefix + "fault;vector:6;"], 0, True, "fault"),
+        (["T0b" + prefix + "fault;vector:e;xerror:5;xaddress:ffffffffffffffff;"], 0, True, "fault"),
+        (["T05" + prefix + "trap;vector:3;"], 1, True, "trap"),
+        (["T05" + prefix + "unknown;vector:1;"], 0, True, "unknown"),
+        (["T05" + prefix + "partial;vector:e;xaddress:1;"], 0, True, "partial"),
+        (["T05thread:01;stepmeta:2;reason:exception;progress:trap;vector:3;"], 0, False, "unknown"),
+        (["T05" + prefix + "trap;vector:100;"], 0, False, "unknown"),
+        (["T0b" + prefix + "fault;vector:e;"], 0, False, "unknown"),
+        (["T05" + prefix + "trap;vector:3;xerror:;"], 0, False, "unknown"),
+        (["T05" + prefix + "trap;vector:3;xaddress:;"], 0, False, "unknown"),
+        (["T05thread:01;reason:unsupported;"], 0, None, None),
+        (["T05thread:01;"] * 4, 4, None, None),
+        (["T02thread:01;"], 0, None, None),
+        (["T05thread:01;", "T04" + prefix + "fault;vector:6;"], 1, True, "fault"),
+    ]
+    for replies, expected, valid, progress in cases:
+        stub = Stub(step_replies=replies)
+        client = None
+        try:
+            client = McpClient()
+            client.initialize()
+            connected = client.tool("veh_kd_connect", {
+                "transport": "tcp", "address": f"127.0.0.1:{stub.port}",
+            })
+            assert connected.get("halted"), connected
+            result = client.tool("veh_kd_step", {"count": 4, "timeout_ms": 1500})
+            assert result.get("steps") == expected, result
+            assert len([p for p in stub.commands if p.startswith("vCont;s")]) == len(replies), stub.commands
+            if valid is not None:
+                stop = result["stop"]
+                assert stop["reason"] == "exception" and stop["exception_pending"], result
+                assert stop["exception_metadata_valid"] == valid, result
+                assert stop["instruction_progress"] == progress, result
+                if "xaddress:ffffffffffffffff;" in replies[-1]:
+                    assert stop["fault_address"] == "0xffffffffffffffff", result
+            assert client.tool("veh_kd_disconnect").get("detached")
+        finally:
+            try:
+                if client is not None:
+                    client.close(terminate_target=False)
+            finally:
+                stub.close()
+    print("PASS exception retirement, exact fault address, incomplete-step counts and batch termination")
+
+
 def run():
+    check_step_progress()
     for reply in ("OK", "", "E01", "Tzz", "Sx5", "T0", "W00", "X09"):
         check_initial_stop(reply)
     check_initial_stop("S05", valid=True)

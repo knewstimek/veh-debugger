@@ -3,6 +3,7 @@
 #include "mcp_server.h"
 #include "tools_common.h"
 #include "kernel_debug_client.h"
+#include "../common/kd_stop_protocol.h"
 #include "../adapter/disassembler.h"
 #include <charconv>
 #include <cstring>
@@ -58,12 +59,30 @@ uint64_t Le(const std::vector<uint8_t>& b, size_t at, size_t size)
 	return v;
 }
 
+std::string StopField(const std::string& stop,const std::string& key,bool* present=nullptr)
+{
+    if(present)*present=false;
+    for(size_t at=3;at<stop.size();) {
+        const size_t end=stop.find(';',at);
+        const size_t colon=stop.find(':',at);
+        if(colon!=std::string::npos && (end==std::string::npos||colon<end) &&
+            stop.compare(at,colon-at,key)==0) {
+            if(present)*present=true;
+            return stop.substr(colon+1,(end==std::string::npos?stop.size():end)-colon-1);
+        }
+        if(end==std::string::npos)break;
+        at=end+1;
+    }
+    return {};
+}
+
 // "T05thread:2;swbreak:;" -> {signal, cpu}
 json StopJson(const std::string& stop)
 {
 	json j = {{"raw", stop}};
 	if (stop.size() >= 3 && (stop[0] == 'T' || stop[0] == 'S')) {
 		const int sig = std::stoi(stop.substr(1, 2), nullptr, 16);
+        j["signal"]=sig;
 		j["reason"] = sig == 5 ? "breakpoint or step" : sig == 2 ? "interrupt" : "signal " + std::to_string(sig);
 		for (const char* tag : { "awatch:", "rwatch:", "watch:" }) {
 			const size_t w = stop.find(tag);
@@ -76,6 +95,27 @@ json StopJson(const std::string& stop)
 		const size_t t = stop.find("thread:");
 		if (t != std::string::npos)
 			j["cpu"] = std::stoi(stop.substr(t + 7), nullptr, 16) - 1;
+        if(StopField(stop,"reason")=="unsupported")j["reason"]="unsupported";
+        if(StopField(stop,"reason")=="exception") {
+            j["reason"]="exception";j["exception_pending"]=true;
+            j["instruction_progress"]=kdstop::kUnknown;
+            const auto progress=StopField(stop,"progress");
+            bool has_error=false,has_address=false;
+            const auto error=StopField(stop,"xerror",&has_error),address=StopField(stop,"xaddress",&has_address);
+            uint64_t vector=0,error_value=0,address_value=0;
+            const bool known_progress=progress==kdstop::kFault||progress==kdstop::kTrap||
+                progress==kdstop::kPartial||progress==kdstop::kUnknown;
+            const bool valid=StopField(stop,"stepmeta")==kdstop::kVersion && known_progress &&
+                ParseHex(StopField(stop,"vector"),vector)&&vector<=0xFF &&
+                (!has_error||(ParseHex(error,error_value)&&error_value<=UINT32_MAX)) &&
+                (!has_address||ParseHex(address,address_value)) && (vector!=14||has_address);
+            j["exception_metadata_valid"]=valid;
+            if(valid) {
+                j["instruction_progress"]=progress;j["exception_vector"]=vector;
+                if(!error.empty())j["exception_error"]="0x"+error;
+                if(!address.empty())j["fault_address"]="0x"+address;
+            }
+        }
 	}
 	return j;
 }
@@ -251,23 +291,35 @@ json McpServer::ToolKdStep(const json& args)
 		if (t != std::string::npos)
 			thread = ":" + stop.substr(t + 7, stop.find(';', t) - t - 7);
 	}
+    uint32_t completed=0;
 	for (uint32_t i = 0; i < count; ++i) {
 		const std::string before = ToolKdRegisters(json::object()).value("rip", "");
 		if (before.empty())
 			return {{"error", "instruction pointer unavailable; step was not submitted"}, {"steps", i}};
 		if (!kd_->Resume("vCont;s" + thread))
 			return {{"error", "link lost"}, {"steps", i}};
-		if (kd_->WaitStop(&stop, JsonUint32(args, "timeout_ms", 10000)))
-			continue;
-		// Live (VirtualBox DBGC, kd_x64 run 203425): the stub acknowledged the
-		// step but sent no stop reply. Ask for the stop reason; the step counts
-		// only if the target is halted at a new RIP.
-		const std::string diagnostic = kd_->wait_diagnostic();
-		if (!kd_->QueryStop(&stop, 3000) || ToolKdRegisters(json::object()).value("rip", "") == before)
-			return {{"error", "step did not complete"}, {"steps", i}, {"diagnostic", diagnostic}};
+        if(!kd_->WaitStop(&stop,JsonUint32(args,"timeout_ms",10000))) {
+            // Recover a missing legacy notification, but never use a changed PC
+            // to turn a separately identified exception into a completed step.
+            const std::string diagnostic=kd_->wait_diagnostic();
+            if(!kd_->QueryStop(&stop,3000))
+                return {{"error","step did not complete"},{"steps",completed},{"diagnostic",diagnostic}};
+            const auto recovered=StopJson(stop);
+            if(recovered.value("reason","")!="exception" && recovered.value("reason","")!="unsupported" &&
+                ToolKdRegisters(json::object()).value("rip","")==before)
+                return {{"error","step did not complete"},{"steps",completed},{"diagnostic",diagnostic}};
+        }
+        const auto stopped=StopJson(stop);
+        if(stopped.value("reason","")=="exception") {
+            if(stopped.value("exception_metadata_valid",false)&&
+                stopped.value("instruction_progress","")==kdstop::kTrap)++completed;
+            break; // pending delivery must never consume the rest of this batch
+        }
+        if(stopped.value("reason","")=="unsupported"||stopped.value("signal",5)!=5)break;
+        ++completed;
 	}
 	json regs = ToolKdRegisters(json::object());
-	json out = {{"steps", count}, {"stop", StopJson(stop)}, {"rip", regs.value("rip", "")}};
+	json out = {{"steps", completed}, {"stop", StopJson(stop)}, {"rip", regs.value("rip", "")}};
 	if (regs.contains("rip")) {
 		json mem = ToolKdMemory({{"operation", "disassemble"}, {"address", regs["rip"]}, {"count", 1}});
 		if (mem.contains("instructions") && !mem["instructions"].empty())
