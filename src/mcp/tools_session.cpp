@@ -531,114 +531,105 @@ static std::string StepRefusedMessage(uint32_t threadId, IpcStatus status) {
 	}
 }
 
+void McpServer::NotifyStepStop(const char* reason, uint64_t address, uint32_t threadId, uint32_t breakpointId) {
+    const auto generation = session_.GetSessionGeneration();
+    const auto cached = session_.PeekCachedStop();
+    StopEvent event;
+    event.reason = reason; event.address = address; event.threadId = threadId;
+    event.breakpointId = breakpointId; event.sessionGeneration = generation;
+    if (cached && cached->reason == reason && cached->address == address && cached->threadId == threadId)
+        event = *cached;
+    json exception = nullptr;
+    if (event.reason == "exception") {
+        std::lock_guard<std::mutex> lock(exceptionMutex_);
+        if (lastException_.threadId == threadId && lastException_.address == address)
+            exception = {{"exceptionCode", HexAddr(lastException_.code)}, {"address", HexAddr(address)},
+                {"threadId", threadId}, {"description", lastException_.description}};
+    }
+    {
+        std::lock_guard<std::mutex> lock(stepMutex_);
+        if (!stepRequestedThread_ || stepSessionGeneration_ != generation ||
+            (threadId != stepRequestedThread_ && event.reason != "exit" &&
+             !(event.reason == "pause" && threadId == 0))) return;
+        stepStop_ = std::move(event); stepException_ = std::move(exception); stepStopReady_ = true;
+    }
+    stepCv_.notify_all();
+}
+
+json McpServer::StepAndWait(uint32_t threadId, IpcCommand command, int timeoutSec) {
+    const auto generation = session_.GetSessionGeneration();
+    const auto prior = session_.PeekCachedStop();
+    {
+        std::lock_guard<std::mutex> lock(stepMutex_);
+        stepRequestedThread_ = threadId; stepSessionGeneration_ = generation;
+        stepStopReady_ = false; stepStop_ = {}; stepException_ = nullptr;
+    }
+    const auto status = command == IpcCommand::StepInto ? session_.StepIn(threadId) :
+        command == IpcCommand::StepOver ? session_.StepOver(threadId) : session_.StepOut(threadId);
+    if (status != IpcStatus::Ok) {
+        std::lock_guard<std::mutex> lock(stepMutex_);
+        stepRequestedThread_ = 0;
+        return {{"error", StepRefusedMessage(threadId, status)}};
+    }
+    if (prior && prior->threadId == threadId) session_.ConsumeCachedStop(prior->sequence);
+    std::unique_lock<std::mutex> lock(stepMutex_);
+    const bool ready = stepCv_.wait_for(lock, std::chrono::seconds(timeoutSec), [this, generation] {
+        return stepStopReady_ || !session_.IsAttached() || !running_ || session_.GetSessionGeneration() != generation;
+    });
+    const auto stop = stepStop_;
+    const auto exception = stepException_;
+    const bool received = stepStopReady_;
+    stepRequestedThread_ = 0;
+    lock.unlock();
+    if (session_.GetSessionGeneration() != generation) return {{"error", "Debug session changed during step"}};
+    if (!ready) return {{"error", "Step timed out (threadId=" + std::to_string(threadId) + "). No matching stop event received."}};
+    if (!received) return {{"error", "Debug session ended during step"}, {"reason", "session-ended"}, {"stepCompleted", false}};
+    session_.ConsumeCachedStop(stop.sequence); // preserve any newer or foreign receipt
+    const bool completed = stop.reason == "step";
+    if (inBreakpointAction_ && !completed) actionStepInterrupted_ = true;
+    const bool stopped = stop.reason != "exit" && stop.reason != "thread-exit";
+    json result = {{"success", completed}, {"stepCompleted", completed}, {"stopped", stopped},
+        {"reason", stop.reason}, {"threadId", stop.threadId}};
+    if (stopped) result["instructionPointer"] = HexAddr(stop.address);
+    if (stop.breakpointId) result["breakpointId"] = stop.breakpointId;
+    if (!exception.is_null()) result["exception"] = exception;
+    return result;
+}
+
 json McpServer::ToolStepIn(const json& args) {
-	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
-	session_.ResumeMainThread();
-	uint32_t threadId = JsonUint32(args, "threadId");
-	if (threadId == 0) return {{"error", "threadId is required"}};
-	{
-		std::lock_guard<std::mutex> lock(stepMutex_);
-		stepCompleted_ = false;
-		stepCompletedAddr_ = 0;
-		stepCompletedThread_ = 0;
-	}
-
-	if (const IpcStatus st = session_.StepIn(threadId); st != IpcStatus::Ok)
-		return {{"error", StepRefusedMessage(threadId, st)}};
-
-	std::unique_lock<std::mutex> lock(stepMutex_);
-	if (!stepCv_.wait_for(lock, std::chrono::seconds(5), [this, threadId]{
-			return (stepCompleted_ && stepCompletedThread_ == threadId) || !session_.IsAttached() || !running_;
-		})) {
-		return {{"error", "Step timed out (threadId=" + std::to_string(threadId) + "). Thread may not be stopped or may be deadlocked."}};
-	}
-	if (!(stepCompleted_ && stepCompletedThread_ == threadId) && !session_.IsAttached()) {
-		return {{"error", "Target process exited during step"}};
-	}
-	return {{"success", true}, {"threadId", threadId},
-		{"instructionPointer", (std::ostringstream() << "0x" << std::hex << stepCompletedAddr_).str()}};
+    if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+    const uint32_t threadId = JsonUint32(args, "threadId");
+    if (!threadId) return {{"error", "threadId is required"}};
+    session_.ResumeMainThread(threadId);
+    return StepAndWait(threadId, IpcCommand::StepInto, 5);
 }
 
 json McpServer::ToolStepOver(const json& args) {
-	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
-	session_.ResumeMainThread();
-	uint32_t threadId = JsonUint32(args, "threadId");
-	if (threadId == 0) return {{"error", "threadId is required"}};
-
-	// Clean up any stale temp BP from previous step-over
-
-	// Check if current instruction is CALL - if so, skip over it
-	uint64_t nextAddr = 0;
-	if (IsCallInstruction(threadId, nextAddr)) {
+    if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+    const uint32_t threadId = JsonUint32(args, "threadId");
+    if (!threadId) return {{"error", "threadId is required"}};
+    session_.ResumeMainThread(threadId);
+    uint64_t nextAddr = 0;
+    if (IsCallInstruction(threadId, nextAddr)) {
         auto result = StartRunUntil(nextAddr, threadId);
         if (!result.contains("error")) { result["skippedCall"] = true; result["threadId"] = threadId; }
         return result;
-	}
-
-	// Check if we're on a BP (rearm will execute 2 instructions)
-	uint64_t callAfterAddr = 0;
-	if (IsNextInstructionCall(threadId, callAfterAddr)) {
+    }
+    uint64_t callAfterAddr = 0;
+    if (IsNextInstructionCall(threadId, callAfterAddr)) {
         auto result = StartRunUntil(callAfterAddr, threadId);
         if (!result.contains("error")) { result["skippedCall"] = true; result["threadId"] = threadId; }
         return result;
-	}
-
-	// Normal single-step with synchronous wait
-	{
-		std::lock_guard<std::mutex> lock(stepMutex_);
-		stepCompleted_ = false;
-		stepCompletedAddr_ = 0;
-		stepCompletedThread_ = 0;
-	}
-
-	if (const IpcStatus st = session_.StepOver(threadId); st != IpcStatus::Ok)
-		return {{"error", StepRefusedMessage(threadId, st)}};
-
-	// Wait for StepCompleted event (up to 5s)
-	{
-		std::unique_lock<std::mutex> lock(stepMutex_);
-		if (!stepCv_.wait_for(lock, std::chrono::seconds(5),
-				[this, threadId]{ return (stepCompleted_ && stepCompletedThread_ == threadId) || !session_.IsAttached() || !running_; })) {
-			return {{"error", "Step timed out (threadId=" + std::to_string(threadId) + "). Thread may not be stopped or may be deadlocked."}};
-		}
-		if (!(stepCompleted_ && stepCompletedThread_ == threadId) && !session_.IsAttached()) {
-			return {{"error", "Target process exited during step"}};
-		}
-	}
-
-	return {{"success", true}, {"threadId", threadId},
-		{"instructionPointer", (std::ostringstream() << "0x" << std::hex << stepCompletedAddr_).str()}};
+    }
+    return StepAndWait(threadId, IpcCommand::StepOver, 5);
 }
 
 json McpServer::ToolStepOut(const json& args) {
-	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
-	session_.ResumeMainThread();
-	uint32_t threadId = JsonUint32(args, "threadId");
-	if (threadId == 0) return {{"error", "threadId is required"}};
-	const int timeoutSec = std::clamp(args.value("timeout", 30), 1, 300);
-	{
-		std::lock_guard<std::mutex> lock(stepMutex_);
-		stepCompleted_ = false;
-		stepCompletedAddr_ = 0;
-		stepCompletedThread_ = 0;
-	}
-
-	if (const IpcStatus st = session_.StepOut(threadId); st != IpcStatus::Ok)
-		return {{"error", StepRefusedMessage(threadId, st)}};
-	// Like step_in: report where the step out stopped. A function can run
-	// long before it returns, so the wait is bounded by `timeout`.
-	std::unique_lock<std::mutex> lock(stepMutex_);
-	if (!stepCv_.wait_for(lock, std::chrono::seconds(timeoutSec), [this, threadId]{
-			return (stepCompleted_ && stepCompletedThread_ == threadId) || !session_.IsAttached() || !running_;
-		})) {
-		return {{"error", "Step out did not complete within " + std::to_string(timeoutSec) + " s (threadId=" +
-			std::to_string(threadId) + "); the thread is still running toward its return."}};
-	}
-	if (!(stepCompleted_ && stepCompletedThread_ == threadId) && !session_.IsAttached()) {
-		return {{"error", "Target process exited during step out"}};
-	}
-	return {{"success", true}, {"threadId", threadId},
-		{"instructionPointer", (std::ostringstream() << "0x" << std::hex << stepCompletedAddr_).str()}};
+    if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+    const uint32_t threadId = JsonUint32(args, "threadId");
+    if (!threadId) return {{"error", "threadId is required"}};
+    session_.ResumeMainThread(threadId);
+    return StepAndWait(threadId, IpcCommand::StepOut, std::clamp(args.value("timeout", 30), 1, 300));
 }
 
 json McpServer::ToolPause(const json& args) {

@@ -244,7 +244,7 @@ public:
 	// --- Execution control ---
 	bool Continue(uint32_t threadId = 0, bool passException = false);
 	ContinueResult ContinueWithDetails(uint32_t threadId = 0, bool passException = false);
-	IpcStatus StepIn(uint32_t threadId); // Ok: the step completes with a StepCompleted event
+	IpcStatus StepIn(uint32_t threadId); // Ok accepts the request; a stop may interrupt completion
 	IpcStatus StepOver(uint32_t threadId);
 	IpcStatus StepOut(uint32_t threadId);
 	bool Pause(uint32_t threadId = 0);
@@ -254,6 +254,8 @@ public:
 	StopEvent WaitForStop(int timeoutSec = 10, uint64_t expectedGeneration = 0);
 	// Consume cached stop event without sending Continue
 	std::optional<StopEvent> ConsumeCachedStop();
+	std::optional<StopEvent> PeekCachedStop();
+	void ConsumeCachedStop(uint64_t sequence);
 	bool IsLatestStop(const StopEvent& event);
 	// Clear stop state when a new process becomes the active session.
 	void ResetStopState();

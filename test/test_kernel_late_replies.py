@@ -76,17 +76,17 @@ def run():
     check_delay("request")
     check_delay("request", blocked_write=True)
     check_delay("monitor")
-    check_pending_stop_query()
+    check_step_timeout_recovery()
     check_breakpoint_console_sequence()
     print("PASS valid delayed request/monitor replies drained before new commands; uncertain exchanges submit no new writes")
 
 
-def check_pending_stop_query():
+def check_step_timeout_recovery():
     class RunningStub(FaultStub):
-        defer_query = False
+        defer_step = False
 
         def packet(self, text):
-            if self.defer_query and (text == "?" or text.startswith("vCont;s")):
+            if self.defer_step and text.startswith("vCont;s"):
                 self.commands.append(text)  # no reply until the out-of-band interrupt
             else:
                 super().packet(text)
@@ -97,7 +97,7 @@ def check_pending_stop_query():
         client = McpClient()
         client.initialize()
         assert client.tool("veh_kd_connect", {"transport": "tcp", "address": f"127.0.0.1:{stub.port}"}).get("halted")
-        stub.defer_query = True
+        stub.defer_step = True
         failed = client.tool("veh_kd_step", {"timeout_ms": 1}, timeout=6)
         assert "error" in failed, failed
         stopped = client.tool("veh_kd_break", {"timeout_ms": 1000}, timeout=3)

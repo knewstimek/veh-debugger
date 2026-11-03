@@ -44,3 +44,11 @@ Windows user-mode exception records are separate observation phases.
 Whole-machine KD execution remains direct-only: it can stop or resume every CPU
 and is excluded from generic batches, capture setup and process breakpoint
 actions. A step request's count is still bounded by the first exception stop.
+
+A missing step-stop notification is an incomplete operation. The frontend does
+not query `?` and read registers to infer completion: an unextended stock stub
+can answer `?` with T05 while it is still running. No speculative follow-up
+register read is submitted on that timeout; explicit break remains available.
+A failed post-stop register read is returned as an error with the known stop and
+confirmed count, never as a successful result containing an empty RIP.
+These checks do not establish why a provider omitted its step notification.

@@ -657,7 +657,7 @@ byte cannot become a second address's result, no new write reaches the peer whil
 the earlier reply remains pending, and a partial monitor stream is drained through
 its terminal reply. The old response must complete before another ordinary command
 is sent; its drain uses the new operation's existing monotonic timeout budget.
-An out-of-band interrupt still handles a running target with a deferred stop query.
+Explicit break recovery still handles a running target after a missing step notification.
 The same fixture replays breakpoint `T05`, console fragments, a second `T05`,
 breakpoint removal and both register monitor commands. This is a positive
 compatibility check; the reported live failure is not reproduced by that sequence
@@ -854,6 +854,22 @@ loss/partial-failure validation, manual-only nesting and no guest execution.
 `py -3 -B test/test_vm_attach.py` checks no-PID VM agent routing, explicit
 metadata validation, prior-session preservation and registered VM scope with a
 synthetic host fixture. The fixture rejects a VM invocation containing --pid.
+
+`test/test_step_interruptions.py` exercises process step-in/normal step-over/
+step-out against exceptions, breakpoints, thread/process exit and a notification
+arriving before its command reply. Only StepCompleted sets `stepCompleted=true`
+and `success=true`; interrupted operations report the actual reason and consume
+only the selected receipt. A foreign pending stop is retained. Direct, batch and
+supported breakpoint-action paths are covered; an interrupted action step skips
+automatic continuation. CALL step-over keeps its existing run-until path;
+step-over remains excluded from breakpoint actions under that ownership policy.
+
+`test/test_kernel_step_boundaries.py` reproduces a missing step notification
+followed by a misleading queried T05 and missing register data. The old MCP
+returned `steps=1,rip=""`; the fix returns an incomplete-step error without
+querying/reading a target whose completion was not confirmed. A separate case
+checks post-stop register errors retain the confirmed count and actual stop.
+This is failure-boundary coverage, not proof that a provider omission is fixed.
 
 `test/test_continue_stop_identity.py` delivers a newer exception on the same
 thread during the stopped-state probe, both for a cached stop and for an event

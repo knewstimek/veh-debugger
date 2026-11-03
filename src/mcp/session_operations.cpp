@@ -172,6 +172,7 @@ bool McpServer::RetireRunUntil(bool explicitRequest, std::string& error) {
 }
 
 void McpServer::QueueExecutionStop(const char* reason, uint64_t address, uint32_t thread, uint32_t breakpoint) {
+    NotifyStepStop(reason, address, thread, breakpoint);
     const auto generation = session_.GetSessionGeneration();
     if (std::string(reason) == "exit") terminalNoticeGeneration_ = generation;
     std::lock_guard<std::mutex> lock(eventMutex_);

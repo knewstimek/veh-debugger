@@ -95,6 +95,8 @@ int wmain(int argc, wchar_t** argv) {
     uint64_t operationsRip = 0x1000, operationsBreakpointAddress = 0x1000;
     uint32_t operationsCreated = 0, operationsRemoved = 0, operationsResumed = 0, operationsWrites = 0;
     unsigned char operationsMemory[64]; std::memset(operationsMemory, 0x11, sizeof(operationsMemory));
+    const bool stepStopMode=mode.rfind(L"step-stop-",0)==0;
+    uint32_t stepStopContinues=0;
     const bool stopRaceMode=mode.rfind(L"stop-race-",0)==0;
     bool raceOld=false,raceNew=false;
     uint32_t raceContinues=0;
@@ -238,10 +240,54 @@ int wmain(int argc, wchar_t** argv) {
                     veh::SetCommandSupported(caps.commands, op);
             }
             if (mode == L"delayed-trace") veh::SetCommandSupported(caps.commands, veh::IpcCommand::TraceCallers);
+            if(stepStopMode)for(auto op:{veh::IpcCommand::StepInto,veh::IpcCommand::StepOver,veh::IpcCommand::StepOut,
+                                        veh::IpcCommand::Continue,veh::IpcCommand::IsThreadStopped,
+                                        veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint})
+                veh::SetCommandSupported(caps.commands,op);
             if(stopRaceMode)for(auto op:{veh::IpcCommand::Continue,veh::IpcCommand::IsThreadStopped})
                 veh::SetCommandSupported(caps.commands,op);
             strcpy_s(caps.name, "synthetic-guest");
             if (!reply(pipe, header.command, caps)) break;
+        } else if(stepStopMode && command==veh::IpcCommand::SetBreakpoint) {
+            if(!reply(pipe,header.command,veh::SetBreakpointResponse{veh::IpcStatus::Ok,42}))break;
+        } else if(stepStopMode && command==veh::IpcCommand::RemoveBreakpoint) {
+            if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
+        } else if(stepStopMode && (command==veh::IpcCommand::StepInto||command==veh::IpcCommand::StepOver||
+                                  command==veh::IpcCommand::StepOut)) {
+            auto stop=[&](){
+                if(mode==L"step-stop-thread-exit")return reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ThreadExited),veh::ThreadEvent{77});
+                if(mode==L"step-stop-exit")return reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ProcessExited),veh::ProcessExitEvent{0});
+                if(mode==L"step-stop-breakpoint")return reply(pipe,static_cast<uint32_t>(veh::IpcEvent::BreakpointHit),
+                    veh::BreakpointHitEvent{77,42,0x2000,{}});
+                if(mode==L"step-stop-foreign"){
+                    veh::ExceptionEvent other{};other.threadId=88;other.address=0x4000;other.exceptionCode=0xc000001d;
+                    if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ExceptionOccurred),other))return false;
+                    return reply(pipe,static_cast<uint32_t>(veh::IpcEvent::StepCompleted),veh::StepCompletedEvent{77,0x2000});
+                }
+                veh::ExceptionEvent event{};event.threadId=77;event.address=0x2000;event.exceptionCode=0xc000001d;
+                return reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ExceptionOccurred),event);
+            };
+            const bool early=mode==L"step-stop-exception-before";
+            if(early&&!stop())break;
+            if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
+            if(!early&&!stop())break;
+        } else if(stepStopMode && command==veh::IpcCommand::Continue) {
+            ++stepStopContinues;
+            struct {veh::ContinueResponse head;uint32_t tid;} response{{veh::IpcStatus::Ok,1,0},77};
+            if(!reply(pipe,header.command,response))break;
+            if(mode==L"step-stop-action"&&stepStopContinues==1){
+                if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::BreakpointHit),veh::BreakpointHitEvent{77,42,0x1000,{}}))break;
+            }else{
+                veh::ExceptionEvent event{};event.threadId=77;event.address=0x3000;event.exceptionCode=0xc0000005;
+                if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ExceptionOccurred),event))break;
+            }
+        } else if(stepStopMode && command==veh::IpcCommand::IsThreadStopped) {
+            if(!reply(pipe,header.command,veh::IsThreadStoppedResponse{veh::IpcStatus::Ok,1}))break;
+        } else if(stepStopMode && command==veh::IpcCommand::GetThreads) {
+            struct {veh::GetThreadsResponse head;veh::ThreadInfo thread;} response{};
+            response.head={veh::IpcStatus::Ok,1};response.thread.id=77;
+            sprintf_s(response.thread.name,"continues=%u",stepStopContinues);
+            if(!reply(pipe,header.command,response))break;
         } else if(stopRaceMode && command==veh::IpcCommand::Continue) {
             ++raceContinues;
             veh::ExceptionEvent event{};event.threadId=77;event.address=0x1000;event.exceptionCode=0xc0000005;

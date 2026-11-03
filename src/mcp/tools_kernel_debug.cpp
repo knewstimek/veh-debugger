@@ -293,21 +293,17 @@ json McpServer::ToolKdStep(const json& args)
 	}
     uint32_t completed=0;
 	for (uint32_t i = 0; i < count; ++i) {
-		const std::string before = ToolKdRegisters(json::object()).value("rip", "");
-		if (before.empty())
-			return {{"error", "instruction pointer unavailable; step was not submitted"}, {"steps", i}};
+		const auto beforeRegs = ToolKdRegisters(json::object());
+		if (!beforeRegs.contains("rip"))
+			return {{"error", "instruction pointer unavailable; step was not submitted"}, {"steps", completed},
+                {"register_error", beforeRegs}, {"protocol_trace", kd_->trace()}};
 		if (!kd_->Resume("vCont;s" + thread))
 			return {{"error", "link lost"}, {"steps", i}};
         if(!kd_->WaitStop(&stop,JsonUint32(args,"timeout_ms",10000))) {
-            // Recover a missing legacy notification, but never use a changed PC
-            // to turn a separately identified exception into a completed step.
-            const std::string diagnostic=kd_->wait_diagnostic();
-            if(!kd_->QueryStop(&stop,3000))
-                return {{"error","step did not complete"},{"steps",completed},{"diagnostic",diagnostic}};
-            const auto recovered=StopJson(stop);
-            if(recovered.value("reason","")!="exception" && recovered.value("reason","")!="unsupported" &&
-                ToolKdRegisters(json::object()).value("rip","")==before)
-                return {{"error","step did not complete"},{"steps",completed},{"diagnostic",diagnostic}};
+            // A stock stub answers '?' with T05 even while still running.
+            // A query or changed RIP cannot establish instruction retirement.
+            return {{"error","step completion was not confirmed by a stop notification"},{"steps",completed},
+                {"running",kd_->running()},{"diagnostic",kd_->wait_diagnostic()},{"protocol_trace",kd_->trace()}};
         }
         const auto stopped=StopJson(stop);
         if(stopped.value("reason","")=="exception") {
@@ -319,6 +315,9 @@ json McpServer::ToolKdStep(const json& args)
         ++completed;
 	}
 	json regs = ToolKdRegisters(json::object());
+    if (!regs.contains("rip"))
+        return {{"error","register read failed after step stop"},{"steps",completed},{"stop",StopJson(stop)},
+            {"register_error",regs},{"diagnostic",kd_->wait_diagnostic()},{"protocol_trace",kd_->trace()}};
 	json out = {{"steps", completed}, {"stop", StopJson(stop)}, {"rip", regs.value("rip", "")}};
 	if (regs.contains("rip")) {
 		json mem = ToolKdMemory({{"operation", "disassemble"}, {"address", regs["rip"]}, {"count", 1}});

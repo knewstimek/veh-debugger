@@ -4,6 +4,7 @@
 - Use `docs/DEVELOPMENT_TOOLS.md` as the catalog for reusable MCP scenario, trace-validation, parity, and IPC-compatibility tooling; extend those tools instead of adding one-off harnesses when practical.
 
 - After a successful VEH Debugger build, use the `agent-tool` `copy` tool to deploy `veh-mcp-server.exe`, `veh-debug-adapter.exe`, and the required `vcruntime_net*.dll` beside `agent-tool.exe`, verifying exact paths and copied hashes first.
+- During a user-requested acceptance freeze, do not overwrite installed artifacts or change qualification inputs mid-run. Stage immutable candidates with source commits and exact hashes for a coordinated switch, and keep the selected set fixed until acceptance completion or an explicit unfreeze.
 - When this repository has a changelog or release-notes file, record completed user-facing changes under an `Unreleased` section as part of the same task so the next release notes are ready.
 - When adding a public MCP tool or extending a tool with batch-meaningful behavior, wire it into `veh_batch` and breakpoint actions unless the operation is inherently unsafe or nonsensical there. Keep direct, batch, and action result semantics in parity and add integration coverage for each supported path; document any deliberate exclusion.
 - 백엔드와 공유하는 규약은 합의 후 동결하고, 기존 구현과의 호환성을 깨는 변경은 별도 버전·capability로 추가하며, 변경 시 공통 헤더·문서·시험 가능한 실행 파일을 함께 제공한다.

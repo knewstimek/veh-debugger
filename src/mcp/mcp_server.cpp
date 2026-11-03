@@ -297,9 +297,10 @@ void McpServer::ResetSessionEventState() {
     operationPid_ = session_.GetTargetPid();
     StopValueFreezes("scope-ended");
 	tempStepOverBpId_ = 0;
-	stepCompleted_ = false;
-	stepCompletedAddr_ = 0;
-	stepCompletedThread_ = 0;
+	stepRequestedThread_ = 0;
+	stepStopReady_ = false;
+	stepStop_ = {};
+	stepException_ = nullptr;
 	lastException_ = {};
 	ignoreExceptionCodes_.clear();
 	bpActions_.clear();
@@ -420,13 +421,24 @@ void McpServer::FlushEvents() {
 		auto pending = std::move(actions.front());
 		actions.pop();
         if (runUntil_.active) continue; // old queued actions must not resume a new operation
-        struct ActionScope { bool& flag; bool old; ActionScope(bool& f):flag(f),old(f){flag=true;} ~ActionScope(){flag=old;} } actionScope(inBreakpointAction_);
+        struct ActionScope {
+            bool& flag; bool& interrupted; bool oldFlag, oldInterrupted;
+            ActionScope(bool& f, bool& i):flag(f),interrupted(i),oldFlag(f),oldInterrupted(i){flag=true;interrupted=false;}
+            ~ActionScope(){flag=oldFlag;interrupted=oldInterrupted;}
+        } actionScope(inBreakpointAction_, actionStepInterrupted_);
 		BatchExecutor executor = NewBatchExecutor();
 		json result = executor.Execute(pending.steps);
 		if (result.dump().find("\"error\"") != std::string::npos) {
 			LOG_WARN("Breakpoint action completed with an error: %s", result.dump().c_str());
 		}
-		// Actions auto-continue by contract. An explicit veh_continue as the last
+        if (actionStepInterrupted_) {
+            std::lock_guard<std::mutex> lock(eventMutex_);
+            pendingEvents_.push({"notifications/logging", {{"level","warning"},{"logger","veh-debugger"},
+                {"data","Breakpoint action step ended without completion; automatic continue was skipped."}}});
+            SetEvent(eventsReady_);
+            continue;
+        }
+		// Ordinary actions auto-continue. An explicit veh_continue as the last
 		// action step is harmless; a second resume finds no stopped event.
 		if (!session_.Continue(pending.threadId)) {
 			LOG_WARN("Breakpoint action auto-continue failed for thread %u", pending.threadId);
@@ -928,14 +940,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 				std::lock_guard<std::mutex> lock(eventMutex_);
 				pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}}); SetEvent(eventsReady_);
 			}
-			// Signal synchronous step waiters.
-			{
-				std::lock_guard<std::mutex> lock(stepMutex_);
-				stepCompleted_ = true;
-				stepCompletedAddr_ = e->address;
-				stepCompletedThread_ = e->threadId;
-			}
-			stepCv_.notify_all();
+			// QueueExecutionStop wakes the matching step waiter with this reason.
             QueueExecutionStop("step", e->address, e->threadId, 0);
 		}
 		break;
@@ -1314,19 +1319,19 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}}}}),
 
 		Tool(&McpServer::ToolStepIn, "session", 0, true,
-			{{"name", "veh_step_in"}, {"description", "Single step into (execute one instruction, entering calls). Waits for completion and returns the new instruction pointer."},
+			{{"name", "veh_step_in"}, {"description", "Single step into (execute one instruction, entering calls). Returns the actual same-thread stop reason and instruction pointer. Only a completed step has success=true and stepCompleted=true; exceptions, breakpoints and exits interrupt the wait."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}}
 		 }}, {"required", json::array({"threadId"})}}}}),
 
 		Tool(&McpServer::ToolStepOver, "session", 0, true,
-			{{"name", "veh_step_over"}, {"description", "Step over (execute one instruction, skipping calls). Waits for completion and returns the new instruction pointer."},
+			{{"name", "veh_step_over"}, {"description", "Step over (execute one instruction, skipping calls). Returns the actual same-thread stop reason and instruction pointer. Only a completed step has success=true and stepCompleted=true; exceptions, breakpoints and exits interrupt the wait."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}}
 		 }}, {"required", json::array({"threadId"})}}}}),
 
 		Tool(&McpServer::ToolStepOut, "session", 0, true,
-			{{"name", "veh_step_out"}, {"description", "Step out (run until current function returns). Waits for completion and returns the new instruction pointer."},
+			{{"name", "veh_step_out"}, {"description", "Step out (run until current function returns). Returns the actual same-thread stop reason and instruction pointer. Only a completed step has success=true and stepCompleted=true; exceptions, breakpoints and exits interrupt the wait."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}},
 			{"timeout", {{"type", "integer"}, {"description", "Max seconds to wait for the return (1-300, default: 30)"}}}

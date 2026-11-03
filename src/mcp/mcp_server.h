@@ -111,7 +111,7 @@ private:
     json lastRunUntil_ = nullptr;
     std::vector<ValueFreeze> valueFreezes_;
     uint64_t nextOperation_ = 1, nextFreeze_ = 1, terminalGeneration_ = 0;
-    bool executionNotifications_ = false, inBreakpointAction_ = false;
+    bool executionNotifications_ = false, inBreakpointAction_ = false, actionStepInterrupted_ = false;
     std::atomic<uint32_t> operationPid_{0};
     std::atomic<uint64_t> executionSequence_{0};
     std::atomic<uint64_t> terminalNoticeGeneration_{0}; // reader-side effect fence
@@ -122,6 +122,8 @@ private:
     struct ToolWorker { std::thread thread; std::shared_ptr<std::atomic<bool>> done; };
     std::vector<ToolWorker> toolWorkers_;
     void ReapToolWorkers(bool all);
+	json StepAndWait(uint32_t threadId, IpcCommand command, int timeoutSec);
+	void NotifyStepStop(const char* reason, uint64_t address, uint32_t threadId, uint32_t breakpointId);
 	json ToolStepIn(const json& args);
 	json ToolStepOver(const json& args);
 	json ToolStepOut(const json& args);
@@ -319,9 +321,11 @@ private:
 	// Step completion synchronization
 	std::mutex stepMutex_;
 	std::condition_variable stepCv_;
-	bool stepCompleted_ = false;
-	uint64_t stepCompletedAddr_ = 0;
-	uint32_t stepCompletedThread_ = 0;
+	uint32_t stepRequestedThread_ = 0;
+	uint64_t stepSessionGeneration_ = 0;
+	bool stepStopReady_ = false;
+	StopEvent stepStop_;
+	json stepException_;
 
 	// Event queue for thread-safe notification delivery
 	std::queue<std::pair<std::string, json>> pendingEvents_;
