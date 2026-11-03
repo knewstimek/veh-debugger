@@ -300,6 +300,18 @@ json McpServer::ToolKdStep(const json& args)
 		if (!kd_->Resume("vCont;s" + thread))
 			return {{"error", "link lost"}, {"steps", i}};
         if(!kd_->WaitStop(&stop,JsonUint32(args,"timeout_ms",10000))) {
+            const std::string diagnostic=kd_->wait_diagnostic();
+            if(diagnostic.rfind("resume refused: ",0)==0) {
+                // An explicit rejection permits a status query; absence of a
+                // notification does not. A confirmed halt never counts as a
+                // completed instruction, but must permit register repair.
+                std::string confirmed;
+                const bool halted=kd_->QueryStop(&confirmed,std::min<uint32_t>(JsonUint32(args,"timeout_ms",10000),1000));
+                json rejected={{"error","step was rejected by the target"},{"steps",completed},
+                    {"running",kd_->running()},{"diagnostic",diagnostic},{"protocol_trace",kd_->trace()}};
+                if(halted)rejected["stop"]=StopJson(confirmed);
+                return rejected;
+            }
             // A stock stub answers '?' with T05 even while still running.
             // A query or changed RIP cannot establish instruction retirement.
             return {{"error","step completion was not confirmed by a stop notification"},{"steps",completed},

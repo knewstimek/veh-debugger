@@ -869,6 +869,9 @@ followed by a misleading queried T05 and missing register data. The old MCP
 returned `steps=1,rip=""`; the fix returns an incomplete-step error without
 querying/reading a target whose completion was not confirmed. A separate case
 checks post-stop register errors retain the confirmed count and actual stop.
+Explicit E22 rejection permits one bounded stop query: a confirmed halt permits
+register repair, an unconfirmed halt keeps access blocked, and neither increments
+retirement. A rejection after a completed prefix retains only that prefix count.
 This is failure-boundary coverage, not proof that a provider omission is fixed.
 
 `test/test_continue_stop_identity.py` delivers a newer exception on the same
