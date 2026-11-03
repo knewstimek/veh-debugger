@@ -854,3 +854,19 @@ loss/partial-failure validation, manual-only nesting and no guest execution.
 `py -3 -B test/test_vm_attach.py` checks no-PID VM agent routing, explicit
 metadata validation, prior-session preservation and registered VM scope with a
 synthetic host fixture. The fixture rejects a VM invocation containing --pid.
+
+`test/test_continue_stop_identity.py` delivers a newer exception on the same
+thread during the stopped-state probe, both for a cached stop and for an event
+arriving inside Continue. It verifies that the returned address matches
+`veh_exception_info`, no extra Continue is submitted, and a genuine immediate
+restop is retained. The receipt sequence is frontend-local and changes no IPC
+wire layout or global/single-thread resume scope.
+
+`test/test_trace_receiver_early_close.py` runs `trace_receiver_early_close`,
+which uses the production event/code artifact receivers. A gated producer writes
+and closes before the actual Win32 ConnectNamedPipe call; the test requires
+ERROR_NO_DATA rather than synthesizing it. A one-record event file and one-byte
+code snapshot remain complete and hashed; empty, truncated and corrupt streams
+never become complete artifacts. Verified event prefixes keep their existing
+incomplete-file semantics. Run both through `tools/run_tests.py` with a 20-second
+per-file timeout.

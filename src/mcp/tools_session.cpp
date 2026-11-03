@@ -440,34 +440,31 @@ json McpServer::ToolContinue(const json& args) {
 			!session_.GetBackendInfo().Supports(IpcCommand::IsThreadStopped) || session_.IsThreadStopped(ev.threadId);
 	};
 
-	// Check for cached stop event before sending Continue
-	if (wait && !passException) {
-		auto cached = session_.ConsumeCachedStop();
-		// A breakpoint stop is current only while the thread is still at its
-		// address (live, guest backend: a duplicate hit event delivered after a
-		// trace moved the thread to the function's return made the next
-		// continue return at once without resuming).
-		const auto atStop = [this](const StopEvent& ev) {
-			if (ev.reason != "breakpoint" || !ev.threadId) return true;
-			const auto regs = session_.GetRegisters(ev.threadId);
-			if (!regs) return true;
-			const uint64_t rip = regs->is32bit ? (regs->rip & 0xFFFFFFFFull) : regs->rip;
-			return rip == ev.address;
-		};
-		if (cached && IsCurrentStopEvent(*cached) && stillStopped(*cached) && atStop(*cached)) {
-			json ret = {
-				{"stopped", true},
-				{"reason", cached->reason},
-				{"address", (std::ostringstream() << "0x" << std::hex << cached->address).str()},
-				{"threadId", cached->threadId},
-				{"breakpointId", cached->breakpointId}
-			};
-			if (!cached->bpType.empty()) ret["breakpointType"] = cached->bpType;
-			return ret;
-		}
-	}
+    // A state probe can deliver a newer same-thread stop while checking the
+    // cached candidate. Recheck its local identity before returning or resuming.
+    if (wait && !passException) {
+        while (auto cached = session_.ConsumeCachedStop()) {
+            const auto atStop = [this](const StopEvent& ev) {
+                if (ev.reason != "breakpoint" || !ev.threadId) return true;
+                const auto regs = session_.GetRegisters(ev.threadId);
+                if (!regs) return true;
+                const uint64_t rip = regs->is32bit ? (regs->rip & 0xFFFFFFFFull) : regs->rip;
+                return rip == ev.address;
+            };
+            if (IsCurrentStopEvent(*cached) && stillStopped(*cached) && atStop(*cached) &&
+                session_.IsLatestStop(*cached)) {
+                json ret = {
+                    {"stopped", true}, {"reason", cached->reason},
+                    {"address", (std::ostringstream() << "0x" << std::hex << cached->address).str()},
+                    {"threadId", cached->threadId}, {"breakpointId", cached->breakpointId}
+                };
+                if (!cached->bpType.empty()) ret["breakpointType"] = cached->bpType;
+                return ret;
+            }
+        }
+    }
 
-	auto continueResult = session_.ContinueWithDetails(threadId, passException);
+    auto continueResult = session_.ContinueWithDetails(threadId, passException);
 	if (!continueResult.ok) {
 		return {{"error", IpcErrorMessage()}};
 	}
@@ -507,7 +504,8 @@ json McpServer::ToolContinue(const json& args) {
 		if (stopEvent.sessionChanged) {
 			return {{"error", "Debug session changed while waiting for a stop event"}};
 		}
-		if (IsCurrentStopEvent(stopEvent) && stillStopped(stopEvent)) break;
+		if (IsCurrentStopEvent(stopEvent) && stillStopped(stopEvent) &&
+				session_.IsLatestStop(stopEvent)) break;
 	}
 
 	json ret = {

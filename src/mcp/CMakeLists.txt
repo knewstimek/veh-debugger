@@ -37,6 +37,11 @@ add_executable(veh-mcp-server
 	../adapter/zydis_disassembler.cpp
 )
 
+add_executable(trace_receiver_early_close ${CMAKE_SOURCE_DIR}/test/trace_receiver_early_close.cpp)
+target_link_libraries(trace_receiver_early_close PRIVATE veh_common nlohmann_json advapi32)
+target_include_directories(trace_receiver_early_close PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/third_party)
+target_compile_definitions(trace_receiver_early_close PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+
 # Native storage fault boundaries without launching a target or KD connection.
 add_executable(kd_capture_store_tests
     ${CMAKE_SOURCE_DIR}/test/kd_capture_store_tests.cpp

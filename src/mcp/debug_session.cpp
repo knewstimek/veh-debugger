@@ -1021,6 +1021,13 @@ std::optional<StopEvent> DebugSession::ConsumeCachedStop() {
 	return std::nullopt;
 }
 
+bool DebugSession::IsLatestStop(const StopEvent& event) {
+	std::lock_guard<std::mutex> lock(stopMutex_);
+	// WaitForStop can synthesize an exit when the connection has ended.
+	if (!event.sequence && event.reason == "exit") return true;
+	return event.sessionGeneration == sessionGeneration_.load() && event.sequence == stopSeq_;
+}
+
 void DebugSession::ResetStopState() {
 	{
 		std::lock_guard<std::mutex> lock(stopMutex_);
@@ -1070,7 +1077,7 @@ void DebugSession::SignalStop(const std::string& reason, uint64_t addr, uint32_t
 	{
 		std::lock_guard<std::mutex> lock(stopMutex_);
 		stopOccurred_ = true;
-		++stopSeq_;
+		lastStop_.sequence = ++stopSeq_;
 		lastStop_.stopped = true;
 		lastStop_.reason = reason;
 		lastStop_.address = addr;

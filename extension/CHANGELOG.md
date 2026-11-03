@@ -21,6 +21,8 @@
 - **Kernel stop validation** -- handshake and stop queries require T/S plus a valid hexadecimal signal before reporting a halted machine. Request, monitor and stop waits share the classifier; acknowledgements, malformed stops and exit replies cannot satisfy the initial halt check.
 - **Kernel monitor response alignment** -- skip and retain duplicate or late T/S stop notifications while collecting monitor output through its terminal reply. This preserves DBGC detection and subsequent responses on multi-CPU stubs; the required command trailing space is unchanged.
 - File-mode traces preserve the injected DLL's actual startup failure and structured diagnostics instead of incorrectly reporting file output as unsupported.
+- **Continue stop identity** -- recheck a stop's local receipt identity after backend state probes. A newer same-thread stop supersedes an older cached or in-flight event, keeping the returned exception stop aligned with exception information without sending another Continue.
+- **Early-close trace streams** -- event and code artifact receivers drain queued bytes when a producer writes and closes before connection acceptance (`ERROR_NO_DATA`). Completion, hash and record validation still determine whether an artifact is complete.
 
 ## 1.2.4 - 2026-11-01
 

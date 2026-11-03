@@ -44,6 +44,7 @@ struct StopEvent {
 	uint32_t threadId = 0;
 	uint32_t breakpointId = 0;
 	uint64_t sessionGeneration = 0;
+	uint64_t sequence = 0; // local receipt identity; never serialized into IPC
 };
 
 struct ContinueResult {
@@ -253,6 +254,7 @@ public:
 	StopEvent WaitForStop(int timeoutSec = 10, uint64_t expectedGeneration = 0);
 	// Consume cached stop event without sending Continue
 	std::optional<StopEvent> ConsumeCachedStop();
+	bool IsLatestStop(const StopEvent& event);
 	// Clear stop state when a new process becomes the active session.
 	void ResetStopState();
 	uint64_t GetSessionGeneration() const { return sessionGeneration_.load(); }

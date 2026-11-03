@@ -244,12 +244,17 @@ void TraceEventArtifactReceiver::ReaderThread() {
 		HANDLE waits[] = {connect.hEvent, stopEvent_};
 		DWORD wait = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
 		DWORD transferred = 0;
-		if (wait == WAIT_OBJECT_0) connected = GetOverlappedResult(pipe_, &connect, &transferred, FALSE);
+		if (wait == WAIT_OBJECT_0) {
+            connected = GetOverlappedResult(pipe_, &connect, &transferred, FALSE);
+            if (!connected && GetLastError() == ERROR_NO_DATA) connected = TRUE;
+        }
         else {
             CancelIoEx(pipe_, &connect);
             GetOverlappedResult(pipe_, &connect, &transferred, TRUE);
         }
-	} else if (!connected && error == ERROR_PIPE_CONNECTED) {
+	} else if (!connected && (error == ERROR_PIPE_CONNECTED || error == ERROR_NO_DATA)) {
+        // A producer may have written and closed before this thread connects.
+        // Read queued bytes; only the validated completion frame proves success.
 		connected = TRUE;
 	}
 	CloseHandle(connect.hEvent);

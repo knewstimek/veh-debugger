@@ -95,6 +95,9 @@ int wmain(int argc, wchar_t** argv) {
     uint64_t operationsRip = 0x1000, operationsBreakpointAddress = 0x1000;
     uint32_t operationsCreated = 0, operationsRemoved = 0, operationsResumed = 0, operationsWrites = 0;
     unsigned char operationsMemory[64]; std::memset(operationsMemory, 0x11, sizeof(operationsMemory));
+    const bool stopRaceMode=mode.rfind(L"stop-race-",0)==0;
+    bool raceOld=false,raceNew=false;
+    uint32_t raceContinues=0;
     const bool deferredMode=mode.rfind(L"deferred-",0)==0;
     bool deferredGuard=false,moduleHeld=false,exceptionHeld=false;
     uint32_t moduleHeldTid=77,deferredStopQueries=0;
@@ -235,8 +238,34 @@ int wmain(int argc, wchar_t** argv) {
                     veh::SetCommandSupported(caps.commands, op);
             }
             if (mode == L"delayed-trace") veh::SetCommandSupported(caps.commands, veh::IpcCommand::TraceCallers);
+            if(stopRaceMode)for(auto op:{veh::IpcCommand::Continue,veh::IpcCommand::IsThreadStopped})
+                veh::SetCommandSupported(caps.commands,op);
             strcpy_s(caps.name, "synthetic-guest");
             if (!reply(pipe, header.command, caps)) break;
+        } else if(stopRaceMode && command==veh::IpcCommand::Continue) {
+            ++raceContinues;
+            veh::ExceptionEvent event{};event.threadId=77;event.address=0x1000;event.exceptionCode=0xc0000005;
+            raceOld=true;
+            if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ExceptionOccurred),event))break;
+            struct {veh::ContinueResponse head;uint32_t tid;} response{{veh::IpcStatus::Ok,1,0},77};
+            if(!reply(pipe,header.command,response))break;
+        } else if(stopRaceMode && command==veh::IpcCommand::IsThreadStopped) {
+            if(!raceNew&&mode!=L"stop-race-restop"){
+                veh::ExceptionEvent event{};event.threadId=77;event.address=0x2000;event.exceptionCode=0xc0000094;
+                raceNew=true;
+                if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ExceptionOccurred),event))break;
+            }
+            if(!reply(pipe,header.command,veh::IsThreadStoppedResponse{veh::IpcStatus::Ok,1}))break;
+        } else if(stopRaceMode && command==veh::IpcCommand::GetThreads) {
+            if(mode==L"stop-race-cached"&&!raceOld){
+                veh::ExceptionEvent event{};event.threadId=77;event.address=0x1000;event.exceptionCode=0xc0000005;
+                raceOld=true;
+                if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ExceptionOccurred),event))break;
+            }
+            struct {veh::GetThreadsResponse head;veh::ThreadInfo thread;} response{};
+            response.head={veh::IpcStatus::Ok,1};response.thread.id=77;
+            sprintf_s(response.thread.name,"continues=%u",raceContinues);
+            if(!reply(pipe,header.command,response))break;
         } else if (hardwareMode && command == veh::IpcCommand::TraceHardwareCapabilities) {
             ++hardwareQueries;
             if (!hardwareCapabilities(pipe, header.command, mode)) break;
