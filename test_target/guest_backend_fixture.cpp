@@ -25,6 +25,7 @@ bool send(HANDLE pipe, uint32_t command, const void* bytes, uint32_t size) {
 template<class T> bool reply(HANDLE pipe, uint32_t command, const T& value) { return send(pipe, command, &value, sizeof(value)); }
 
 #include "hardware_trace_fixture.h"
+#include "caller_capture_fixture.h"
 
 int wmain(int argc, wchar_t** argv) {
     std::wstring name, mode, readyEvent, launchRequest;
@@ -71,6 +72,7 @@ int wmain(int argc, wchar_t** argv) {
             pid=424242;
         } catch(...) {return 2;}
     }
+    callerfixture::Capture callerCapture(mode);
     const bool machineMode=mode.rfind(L"machine",0)==0;
     const bool vmMode=mode.rfind(L"vm",0)==0||machineMode;uint32_t vmState=2,detachFailures=0;
     uint32_t continueRequests = 0, pauseRequests = 0, resolveRequests = 0;
@@ -181,6 +183,11 @@ int wmain(int argc, wchar_t** argv) {
                 for (auto op : {veh::IpcCommand::QueryBranchTrace, veh::IpcCommand::StartBranchTrace,
                                 veh::IpcCommand::StopBranchTrace, veh::IpcCommand::ReadBranchTrace})
                     veh::SetCommandSupported(caps.commands, op);
+            if(callerCapture.enabled()&&mode!=L"cc-no-caps")
+                for(auto op:{veh::IpcCommand::QueryCallerCapture,veh::IpcCommand::StartCallerCapture,
+                    veh::IpcCommand::StopCallerCapture,veh::IpcCommand::ReadCallerCapture})
+                    if(mode!=L"cc-partial-caps"||op==veh::IpcCommand::QueryCallerCapture)
+                        veh::SetCommandSupported(caps.commands,op);
             if (instrumentationMode && mode != L"inst-no-caps")
                 for (auto op : {veh::IpcCommand::QueryInstrumentation, veh::IpcCommand::StartInstrumentation,
                                 veh::IpcCommand::StopInstrumentation, veh::IpcCommand::ReadInstrumentation})
@@ -623,6 +630,8 @@ int wmain(int argc, wchar_t** argv) {
                 if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ValueScanProgress),event))break;
             }
             if(!reply(pipe,header.command,response))break;
+        } else if(callerCapture.handles(command)) {
+            if(!callerCapture.handle(pipe,header.command,bytes))break;
         } else if (instrumentationMode && command == veh::IpcCommand::QueryInstrumentation) {
             veh::QueryInstrumentationRequest request{};
             if (bytes.size() != sizeof(request)) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
@@ -721,7 +730,7 @@ int wmain(int argc, wchar_t** argv) {
             if (mode == L"inst-reply-long") result.push_back(0);
             if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
         } else if (command == veh::IpcCommand::GetTargetInfo) {
-            veh::GetTargetInfoResponse info{veh::IpcStatus::Ok, veh::IpcTargetScope::Guest, pid, (hardwareMode || mode==L"launch-64") ? 64u : 32u};
+            veh::GetTargetInfoResponse info{veh::IpcStatus::Ok, veh::IpcTargetScope::Guest, pid, (hardwareMode || mode==L"launch-64" || (callerCapture.enabled()&&mode!=L"cc-x86")) ? 64u : 32u};
             if(mode==L"launch-wrong-pid")++info.pid;
             if(mode == L"hardware-host") info.scope = veh::IpcTargetScope::Host;
             if(machineMode){info.scope=veh::IpcTargetScope::VirtualMachine;info.pid=0;info.addressBits=0;}

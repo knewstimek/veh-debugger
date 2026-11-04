@@ -90,6 +90,10 @@ enum class IpcCommand : uint32_t {
     StartInstrumentation  = 0x0052,
     StopInstrumentation   = 0x0053,
     ReadInstrumentation   = 0x0054,
+    QueryCallerCapture    = 0x0055, // independent detailed caller-capture v1
+    StartCallerCapture    = 0x0056,
+    StopCallerCapture     = 0x0057,
+    ReadCallerCapture     = 0x0058,
 
 	// Memory management
 	AllocateMemory         = 0x0060,

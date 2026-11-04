@@ -8,6 +8,8 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 
 ## Tool catalog
 
+`test/test_caller_capture.py` verifies detailed caller-capture v1 with the real MCP and host-only guest fixture: exact IDs/TSC, x64/x86 raw snapshots, partial stacks, admission/peer validation, bounded immutable file export and direct/batch/action parity. Run with the shared runner for both build widths. The canonical header and backend acceptance boundaries are in [caller capture v1](CALLER_CAPTURE_PROTOCOL.md); this fixture does not qualify a live provider.
+
 Process lazy-decode budgets and the additive wire12 contract are documented in [TRACE_LAZY_DECODE.md](TRACE_LAZY_DECODE.md). `test/test_trace_lazy_decode.py` covers large ranges, exact64-bit requests, cache exhaustion, file errors and direct/batch/action parity; use the shared runner for x64 and build32.
 
 | Tool | Purpose |

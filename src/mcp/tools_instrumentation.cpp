@@ -37,7 +37,7 @@ json McpServer::ToolInstrumentation(const json& args, InstrumentationKind kind) 
     const std::string operation = args.value("operation", "status");
     if (operation != "status" && operation != "start" && operation != "stop" && operation != "read")
         return {{"error", "operation must be status, start, stop or read"}};
-    for (const auto* key : {"duration_ms", "duration_sec", "threadId", "buffer_kb"})
+    for (const auto* key : {"duration_ms", "duration_sec", "threadId", "buffer_kb", "stack_bytes", "max_hits", "buffer_bytes", "filters", "output_file"})
         if (args.contains(key)) return {{"error", std::string(key) + " is not an instrumentation option"}};
     if (operation != "start")
         for (const auto* key : {"address", "buffer_records", "data_policy", "transaction_policy", "include_ip"})

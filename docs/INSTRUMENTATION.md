@@ -1,5 +1,9 @@
 # Instrumentation interface, version 1
 
+For hit-time register/stack snapshots, filters and hit limits, use the independent
+[detailed caller-capture v1](CALLER_CAPTURE_PROTOCOL.md). It leaves this interface
+unchanged and requires its own advertised commands.
+
 This is an additive frontend/backend contract. Existing `TraceCallers (0x0050)`
 and `veh_branch_trace(kind="full")` retain their wire format and behavior.
 The built-in VEH DLL does not implement the new collector; hardware/agent

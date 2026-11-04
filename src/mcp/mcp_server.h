@@ -152,6 +152,7 @@ private:
 	json ToolExceptionInfo(const json& args);
 	json ToolTraceCallers(const json& args);
     json ToolInstrumentation(const json& args, InstrumentationKind kind);
+    json ToolCallerCapture(const json& args);
 	json ToolDumpMemory(const json& args);
 	json ToolAllocateMemory(const json& args);
 	json ToolProtectMemory(const json& args);

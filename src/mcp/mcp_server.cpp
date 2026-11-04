@@ -1465,10 +1465,10 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
 
 		Tool(&McpServer::ToolTraceCallers, "trace", 0, true,
-			{{"name", "veh_trace_callers"}, {"description", "Standard preserves caller hit-count profiling and duration_ms precedence. VEH resumes/pauses; hypervisor tracing does neither. x86 [ESP] is accurate at entry only. Explicit mode=detour uses status/start/stop/read, summary by default and stopped-capture pages; backend support required, no automatic fallback."},
+			{{"name", "veh_trace_callers"}, {"description", "Standard preserves caller hit-count profiling and duration_ms precedence. VEH resumes/pauses; hypervisor tracing does neither. x86 [ESP] is accurate at entry only. Detour uses instrumentation v1. Detailed uses independent caller-capture v1: hit-time registers/stack, filters and limits; status/start/stop/read/export, immutable pages and files. Backend support required; no fallback."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
-                {"mode", {{"type", "string"}, {"enum", json::array({"standard", "detour"})}, {"default", "standard"}}},
-                {"operation", {{"type", "string"}, {"enum", json::array({"status", "start", "stop", "read"})}, {"description", "Explicit instrumentation only; default status"}}},
+                {"mode", {{"type", "string"}, {"enum", json::array({"standard", "detour", "detailed"})}, {"default", "standard"}}},
+                {"operation", {{"type", "string"}, {"enum", json::array({"status", "start", "stop", "read", "export"})}, {"description", "Detour/detailed only; default status. export is detailed-only"}}},
                 {"trace_id", {{"type", "string"}, {"description", "Exact capture ID from start; read/stop"}}},
                 {"cursor", {{"type", "string"}, {"description", "Read: exact returned nextCursor, default 0"}}},
                 {"max", {{"type", "integer"}, {"minimum", 0}, {"maximum", 256}, {"default", 0}, {"description", "Instrumentation read: 0 summary only; stopped capture pages up to 256"}}},
@@ -1476,9 +1476,20 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
                 {"data_policy", {{"type", "string"}, {"enum", json::array({"original", "patched"})}, {"default", "original"}, {"description", "Start: patched exposes E9/detour bytes to target reads; integrity checks/self-code reads can change"}}},
                 {"transaction_policy", {{"type", "string"}, {"enum", json::array({"omit", "rollback"})}, {"default", "omit"}, {"description", "Start: omit all transactional records; rollback stages until commit and discards aborted records"}}},
                 {"include_ip", {{"type", "boolean"}, {"default", true}, {"description", "Start: request instruction addresses; unavailable IP remains null"}}},
-			{"address", {{"type", "string"}, {"description", "Required: standard trace address or detour start function entry"}}},
-			{"duration_sec", {{"type", "integer"}, {"description", "How long to collect callers in seconds (default: 5, max: 60)"}}},
-			{"duration_ms", {{"type", "integer"}, {"description", "Same window in milliseconds (50-60000); overrides duration_sec"}}}
+			{"address", {{"type", "string"}, {"description", "Standard trace address or detour/detailed start function entry"}}},
+                {"stack_bytes", {{"type", "integer"}, {"minimum", 0}, {"maximum", 4096}, {"description", "Detailed start: bytes copied at each hit from SP; default min(256, backend limit)"}}},
+                {"max_hits", {{"type", "string"}, {"description", "Detailed start: exact decimal hit limit, default 1000; 0 disables; duration_ms or max_hits must be nonzero"}}},
+                {"buffer_bytes", {{"type", "integer"}, {"minimum", 216}, {"maximum", 67108864}, {"description", "Detailed start: total retained record bytes; default min(4 MiB, backend limit)"}}},
+                {"filters", {{"type", "array"}, {"maxItems", 8}, {"items", {{"type", "object"}, {"properties", {
+                    {"register", {{"type", "string"}}}, {"mask", {{"type", "string"}}}, {"equals", {{"type", "string"}}}
+                }}, {"required", json::array({"register", "mask", "equals"})}, {"additionalProperties", false}}},
+                    {"description", "Detailed start: AND of (integer register & hexadecimal mask) == hexadecimal equals; no dereferences"}}},
+                {"output_file", {{"type", "object"}, {"properties", {{"path", {{"type", "string"}}},
+                    {"format", {{"type", "string"}, {"enum", json::array({"json", "jsonl"})}}}}},
+                    {"required", json::array({"path"})}, {"additionalProperties", false},
+                    {"description", "Detailed read/export: new MCP-host file. Export gathers all stopped pages; caller owns retention"}}},
+			{"duration_sec", {{"type", "integer"}, {"description", "Standard: collection seconds (default 5, max 60)"}}},
+			{"duration_ms", {{"type", "integer"}, {"description", "Standard: 50-60000, overrides duration_sec. Detailed start: 0-60000, default 5000; 0 disables the time limit"}}}
 		 }}}}}),
 
 		Tool(&McpServer::ToolTraceCalls, "trace", 0, true,

@@ -18,6 +18,7 @@ add_executable(veh-mcp-server
 	kernel_debug_client.cpp
 	tools_trace.cpp
     tools_instrumentation.cpp
+    tools_caller_capture.cpp
 	tools_checkpoint.cpp
 	tools_orchestration.cpp
 	debug_session.cpp

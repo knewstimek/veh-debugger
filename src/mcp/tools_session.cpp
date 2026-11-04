@@ -36,7 +36,7 @@ constexpr CommandName kOptionalCommands[] = {
 	{IpcCommand::WriteMemory, "write_memory"}, {IpcCommand::ResolveSourceLine, "source_line"},
 	{IpcCommand::ResolveFunction, "resolve_function"}, {IpcCommand::EnumLocals, "locals"},
 	{IpcCommand::Symbolize, "symbolize"}, {IpcCommand::DisplayType, "display_type"},
-	{IpcCommand::TraceCallers, "trace_callers"}, {IpcCommand::AllocateMemory, "allocate_memory"},
+	{IpcCommand::TraceCallers, "trace_callers"}, {IpcCommand::QueryCallerCapture, "caller_capture"}, {IpcCommand::AllocateMemory, "allocate_memory"},
 	{IpcCommand::ExecuteShellcode, "execute_shellcode"}, {IpcCommand::QueryMemoryMap, "memory_map"},
 	{IpcCommand::SearchMemory, "search_memory"}, {IpcCommand::ProtectMemory, "protect_memory"},
 	{IpcCommand::ValueScan, "value_scan"}, {IpcCommand::TraceRegister, "trace_register"},
