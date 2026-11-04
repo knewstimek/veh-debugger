@@ -114,6 +114,7 @@ private:
 	HANDLE targetProcess_ = nullptr;
 	bool launchedByUs_ = false;
 	bool guestTarget_ = false;
+    std::atomic<bool> guestStopIdentity_{false};
 	HANDLE guestAgentProcess_ = nullptr;
 	uint8_t guestCommands_[32] = {};
 	uint32_t guestAddressBits_ = 0;
@@ -178,13 +179,14 @@ private:
 	struct DeferredModuleStop {
 		ModuleLoadStopEvent event{};
 		bool owned = false;
+        StopIdentityV1 identity{};
 	};
 	std::deque<DeferredModuleStop> deferredModuleStops_;
 	std::set<std::string> internalModuleStops_; // retryMutex_; acknowledged/arming patterns
 	std::unordered_map<uint32_t, uint64_t> visibleStops_; // retryMutex_
 	std::atomic<uint64_t> visibleStopVersion_{0};
 	void SyncInternalModuleStops();
-	void QueueDeferredModuleStop(const ModuleLoadStopEvent& event);
+	void QueueDeferredModuleStop(const ModuleLoadStopEvent& event, const StopIdentityV1& identity = {});
 	void HandleDeferredModuleStop(const DeferredModuleStop& stop);
 	void RemoveUnreferencedBreakpoint(uint32_t id);
 	void StartRetryThread();

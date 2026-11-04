@@ -103,6 +103,11 @@ int wmain(int argc, wchar_t** argv) {
     bool raceOld=false,raceNew=false;
     uint32_t raceContinues=0;
     const bool deferredMode=mode.rfind(L"deferred-",0)==0;
+    const bool stopIdentityMode=mode.rfind(L"deferred-id-",0)==0;
+    bool identityEvents=false,internalGuardClass=false;
+    uint64_t stopSequence=9007199254740992ULL,lastConditionalSequence=0;
+    veh::StopIdentityV1 currentIdentity{};
+    uint32_t conditionalCalls=0,conditionalResumes=0,identityQueries=0,legacyStopQueries=0;
     bool deferredGuard=false,moduleHeld=false,exceptionHeld=false;
     uint32_t moduleHeldTid=77,deferredStopQueries=0;
     uint32_t deferredResolves=0,deferredSets=0,deferredResumes=0,deferredRemoves=0,deferredId=0,deferredContinueCalls=0;
@@ -135,6 +140,18 @@ int wmain(int argc, wchar_t** argv) {
             }
             veh::ModuleLoadStopEvent e{0x1000,0x1000,moduleHeldTid};
             strcpy_s(e.name,mode==L"deferred-external"?"other.dll":mode==L"deferred-prefix"?"prefix-sample.dll":"sample.dll");
+            if(stopIdentityMode) {
+                currentIdentity={veh::StopHoldKind::ModuleLoad,++stopSequence,
+                    internalGuardClass&&mode!=L"deferred-id-user" ? veh::kStopInternalModuleGuard:0};
+                if(mode==L"deferred-id-unknown")currentIdentity={};
+                const veh::ModuleLoadStopEventV1 extended{e,currentIdentity};
+                if(mode==L"deferred-id-new-sequence")currentIdentity.stopSequence=++stopSequence;
+                if(mode==L"deferred-id-visible"&&identityEvents)
+                    return reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ModuleLoadStopped),e)&&
+                        reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ModuleLoadStopped),extended);
+                if(identityEvents&&mode!=L"deferred-id-legacy-event")
+                    return reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ModuleLoadStopped),extended);
+            }
             return reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ModuleLoadStopped),e);
         }
         veh::ModuleEvent e{};e.module.baseAddress=0x1000;strcpy_s(e.module.name,"sample.dll");
@@ -212,6 +229,10 @@ int wmain(int argc, wchar_t** argv) {
                     caps.commands[index / 8] &= static_cast<uint8_t>(~(1u << (index % 8)));
                 }
                 if (mode != L"ops-no-write") veh::SetCommandSupported(caps.commands, veh::IpcCommand::WriteMemory);
+            }
+            if(stopIdentityMode) {
+                if(mode!=L"deferred-id-no-cap")caps.flags|=veh::kCapStopIdentityV1;
+                if(mode!=L"deferred-id-partial")veh::SetCommandSupported(caps.commands,veh::IpcCommand::ContinueIfStopped);
             }
             if(deferredMode){
                 for(auto op:{veh::IpcCommand::ResolveFunction,veh::IpcCommand::SetBreakpoint,
@@ -952,11 +973,20 @@ int wmain(int argc, wchar_t** argv) {
             if(mode==L"deferred-query-error"){if(!reply(pipe,header.command,veh::IpcStatus::Error))break;continue;}
             if(mode==L"deferred-query-short"){if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;continue;}
             veh::IsThreadStoppedRequest request{};
-            if(bytes.size()!=sizeof(request))break;
-            std::memcpy(&request,bytes.data(),sizeof(request));
+            if(bytes.size()==sizeof(veh::IsThreadStoppedRequestV1)&&stopIdentityMode) {
+                veh::IsThreadStoppedRequestV1 extended{};
+                std::memcpy(&extended,bytes.data(),sizeof(extended));
+                if(extended.version!=veh::kStopIdentityVersion)break;
+                request=extended.base;++identityQueries;
+            } else if(bytes.size()==sizeof(request)) {
+                std::memcpy(&request,bytes.data(),sizeof(request));++legacyStopQueries;
+            } else break;
             veh::IsThreadStoppedResponse response{veh::IpcStatus::Ok,
                 static_cast<uint8_t>((moduleHeld&&request.threadId==moduleHeldTid)||(exceptionHeld&&request.threadId==88))};
-            if(!reply(pipe,header.command,response))break;
+            if(bytes.size()==sizeof(veh::IsThreadStoppedRequestV1)&&mode!=L"deferred-id-legacy-query") {
+                const veh::IsThreadStoppedResponseV1 extended{response,response.stopped?currentIdentity:veh::StopIdentityV1{}};
+                if(!send(pipe,header.command,&extended,mode==L"deferred-id-query-short"?20:sizeof(extended)))break;
+            } else if(!reply(pipe,header.command,response))break;
             if(!response.stopped&&mode==L"deferred-queued-release"){
                 veh::ModuleEvent unloaded{};unloaded.module.baseAddress=0x1000;
                 strcpy_s(unloaded.module.name,"sample.dll");
@@ -968,8 +998,14 @@ int wmain(int argc, wchar_t** argv) {
             if(mode==L"deferred-terminate-old"&&!emitDeferredLoad(true))break;
         } else if (deferredMode && command==veh::IpcCommand::SetModuleLoadStop) {
             veh::SetModuleLoadStopRequest request{};
-            if(bytes.size()!=sizeof(request)){if(!reply(pipe,header.command,veh::IpcStatus::InvalidArgs))break;continue;}
-            std::memcpy(&request,bytes.data(),sizeof(request));
+            if(bytes.size()==sizeof(veh::SetModuleLoadStopRequestV1)&&stopIdentityMode) {
+                veh::SetModuleLoadStopRequestV1 extended{};
+                std::memcpy(&extended,bytes.data(),sizeof(extended));
+                if(extended.version!=veh::kStopIdentityVersion||(extended.flags&~veh::kStopInternalModuleGuard))break;
+                request=extended.base;identityEvents=true;
+                internalGuardClass=extended.flags==veh::kStopInternalModuleGuard;
+            } else if(bytes.size()==sizeof(request))std::memcpy(&request,bytes.data(),sizeof(request));
+            else {if(!reply(pipe,header.command,veh::IpcStatus::InvalidArgs))break;continue;}
             const std::string pattern(request.name,strnlen(request.name,sizeof(request.name)));
             if(request.action==0&&pattern=="sample.dll")deferredGuard=true;
             else if(request.action==1&&pattern=="sample.dll")deferredGuard=false;
@@ -985,7 +1021,7 @@ int wmain(int argc, wchar_t** argv) {
             if(deferredResolves==1&&!stale&&!emitDeferredLoad())break;
         } else if(deferredMode && command==veh::IpcCommand::SetBreakpoint) {
             ++deferredSets;
-            if(!moduleHeld||(mode==L"deferred-reject"&&deferredSets==1)){
+            if(!moduleHeld||((mode==L"deferred-reject"||mode==L"deferred-id-reject")&&deferredSets==1)){
                 if(!reply(pipe,header.command,veh::IpcStatus::Error))break;
                 if(!moduleHeld&&mode==L"deferred-stale"&&!emitDeferredLoad())break;
                 continue;
@@ -995,11 +1031,57 @@ int wmain(int argc, wchar_t** argv) {
                 veh::ExceptionEvent e{};e.threadId=mode==L"deferred-same-tid"?77:88;e.exceptionCode=0xc0000005;e.address=0x3000;
                 if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ExceptionOccurred),e))break;
             }
+            if(mode==L"deferred-id-other-thread"&&deferredSets==1) {
+                exceptionHeld=true;
+                veh::ExceptionEvent event{};event.threadId=88;event.exceptionCode=0xc0000005;event.address=0x3000;
+                if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ExceptionOccurred),event))break;
+            }
+            if(mode==L"deferred-id-during"&&deferredSets==1) {
+                currentIdentity={veh::StopHoldKind::Exception,++stopSequence,0};
+                veh::ExceptionEvent event{};event.threadId=moduleHeldTid;event.exceptionCode=0xc0000005;event.address=0x3000;
+                if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ExceptionOccurred),event))break;
+            }
             deferredId=9000;
             if(!reply(pipe,header.command,veh::SetBreakpointResponse{veh::IpcStatus::Ok,deferredId}))break;
         } else if(deferredMode && command==veh::IpcCommand::RemoveBreakpoint) {
             ++deferredRemoves;deferredId=0;
             if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
+        } else if(stopIdentityMode&&command==veh::IpcCommand::ContinueIfStopped) {
+            ++conditionalCalls;
+            veh::ContinueIfStoppedRequestV1 request{};
+            if(bytes.size()!=sizeof(request)){if(!reply(pipe,header.command,veh::IpcStatus::InvalidArgs))break;continue;}
+            std::memcpy(&request,bytes.data(),sizeof(request));
+            lastConditionalSequence=request.expected.stopSequence;
+            if(request.version!=veh::kStopIdentityVersion||!request.threadId||!request.expected.stopSequence||
+                request.expected.kind==veh::StopHoldKind::Unknown||!veh::ValidStopIdentity(request.expected,true)||
+                request.passException>1||request.reserved[0]||request.reserved[1]||request.reserved[2]) {
+                if(!reply(pipe,header.command,veh::IpcStatus::InvalidArgs))break;continue;
+            }
+            const auto exception=[&] {
+                moduleHeld=true;currentIdentity={veh::StopHoldKind::Exception,++stopSequence,0};
+                veh::ExceptionEvent event{};event.threadId=moduleHeldTid;event.exceptionCode=0xc0000005;event.address=0x3000;
+                return reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ExceptionOccurred),event);
+            };
+            // This mutation occurs after the frontend's last query and before
+            // the authoritative comparison, reproducing the TOCTOU boundary.
+            if(mode==L"deferred-id-race"&&!exception())break;
+            if(mode==L"deferred-id-race-no-event")currentIdentity={veh::StopHoldKind::Exception,++stopSequence,0};
+            if(mode==L"deferred-id-no-hold"){moduleHeld=false;currentIdentity={};}
+            if(mode==L"deferred-id-error"){if(!reply(pipe,header.command,veh::IpcStatus::Error))break;continue;}
+            if(mode==L"deferred-id-short"){if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;continue;}
+            veh::ContinueIfStoppedResponseV1 response{{veh::IpcStatus::InvalidState,static_cast<uint8_t>(moduleHeld)},currentIdentity};
+            if(moduleHeld&&request.threadId==moduleHeldTid&&veh::SameStopIdentity(request.expected,currentIdentity)) {
+                response.base.status=veh::IpcStatus::Ok;
+                if(mode!=L"deferred-id-same-reply"){
+                    moduleHeld=false;currentIdentity={};++conditionalResumes;deferredId=0;
+                }
+                if(mode==L"deferred-id-restop"&&!exception())break;
+            }
+            response.base.stopped=static_cast<uint8_t>(moduleHeld);
+            response.identity=moduleHeld?currentIdentity:veh::StopIdentityV1{};
+            if(mode==L"deferred-id-released-short") {
+                if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
+            } else if(!reply(pipe,header.command,response))break;
         } else if(deferredMode && command==veh::IpcCommand::Continue){
             ++deferredContinueCalls;
             veh::ContinueRequest request{};
@@ -1187,8 +1269,12 @@ int wmain(int argc, wchar_t** argv) {
             }
             if(mode.rfind(L"local-",0)==0)sprintf_s(threads.thread.name,"fixture-agent:%lu",GetCurrentProcessId());
             if(mode==L"shellcode-action")sprintf_s(threads.thread.name,"shellcode-calls:%u",shellcodeRequests);
-            if(deferredMode)std::snprintf(threads.thread.name,sizeof(threads.thread.name),
-                "g=%u,set=%u,res=%u,held=%u,rm=%u,c=%u,q=%u",deferredGuard?1u:0u,deferredSets,deferredResumes,moduleHeld?1u:0u,deferredRemoves,deferredContinueCalls,deferredStopQueries);
+            if(stopIdentityMode)std::snprintf(threads.thread.name,sizeof(threads.thread.name),
+                "a=%u,n=%u,h=%u,c=%u,i=%u,l=%u,e=%u,s=%llu",conditionalResumes,conditionalCalls,moduleHeld?1u:0u,
+                deferredContinueCalls,identityQueries,legacyStopQueries,exceptionHeld?1u:0u,static_cast<unsigned long long>(lastConditionalSequence));
+            else if(deferredMode)std::snprintf(threads.thread.name,sizeof(threads.thread.name),
+                "g=%u,set=%u,res=%u,held=%u,rm=%u,c=%u,q=%u",deferredGuard?1u:0u,deferredSets,deferredResumes,
+                moduleHeld?1u:0u,deferredRemoves,deferredContinueCalls,deferredStopQueries);
             if (mode == L"silent-detach" || mode == L"late-detach" || mode == L"host-cap")
                 sprintf_s(threads.thread.name, "fixture-agent:%lu", GetCurrentProcessId());
             if (mode == L"trace") strcpy_s(threads.thread.name,

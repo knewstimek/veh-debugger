@@ -144,6 +144,8 @@ handler occurrence만 필요하면 `target_window={address,occurrence,before_ste
 
 상세 수집은 대상을 자동 재개·정지하지 않는다. 기본 VEH DLL은 이 모드를 제공하지 않으며, 스택 원본·레지스터 기록은 전체 콜스택 복원이나 인자 타입 해석을 보장하지 않는다. [사용 옵션과 백엔드 규약](docs/CALLER_CAPTURE_PROTOCOL.md)을 참고한다.
 
+함수 중단점용 모듈 guard는 백엔드가 [정지 식별 v1](docs/STOP_IDENTITY.md)을 지원하면 로더 안전 바인딩 뒤 자동 재개할 수 있다. 어댑터는 자기 내부 정지의 종류·일련번호·소유권이 모두 일치할 때만 조건부 재개하며, 사용자 정지나 바뀐 정지는 유지한다. 구버전 백엔드는 기존 pause·명시적 continue 경로를 사용하고, 공개 DAP/MCP 인자는 바뀌지 않는다.
+
 ## 특징
 
 - **VEH 기반**: Windows Debug API 대신 VEH를 사용하여 안티디버그 우회에 유리

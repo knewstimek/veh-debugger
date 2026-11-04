@@ -8,6 +8,8 @@ MCP symbol search lists up to ten candidates with image bases, paths and availab
 
 Persistent MCP comments and labels are managed through `veh_symbolize(analysis=...)` and saved as JSON in a selected local folder. Builds stay isolated and changed code is marked for review; unavailable build identities never auto-apply notes. See the repository's [analysis notes guide](https://github.com/knewstimek/veh-debugger/blob/master/docs/ANALYSIS_NOTES.md).
 
+Function-breakpoint module guards support automatic release after loader-safe binding on backends implementing [stop identity v1](https://github.com/knewstimek/veh-debugger/blob/master/docs/STOP_IDENTITY.md). Exact identity/ownership is checked atomically; user/replaced holds remain stopped. Older backends keep explicit pause/continue behavior. Public DAP/MCP arguments are unchanged.
+
 ## Features
 
 - **Anti-debug friendly** — Uses VEH instead of `ntdll!DbgUiRemoteBreakin`, bypasses common anti-debug checks
@@ -203,10 +205,10 @@ Unsupported commands return errors. Stops identify the selected thread;
 guest DAP launch, `stopOnEntry` and `stopOnModuleLoad` remain unsupported.
 Module-qualified pending guest functions (`module!function`) use advertised
 loader-stop and stop-query support to bind while the DLL is held. The adapter
-confirms the thread is still stopped and exposes that state for explicit user
-continuation, preserving any known exception/breakpoint reason. It does not
-automatically resume: the IPC has no token to condition continuation on the
-same hold. Other backends retain best-effort module notifications. Loader
+confirms the thread is still stopped and preserves known exception/breakpoint
+reasons. With stop identity v1 it atomically releases only its own unchanged
+internal guard after binding. Without that proof it exposes a pause for explicit
+continuation. Other backends retain best-effort module notifications. Loader
 patterns use the backend substring contract and may also stop similarly named
 DLLs. This is separate from the explicit guest `stopOnModuleLoad` option. A loader-origin stop may retain the loader lock:
 finish binding and explicitly continue before executing target code or creating

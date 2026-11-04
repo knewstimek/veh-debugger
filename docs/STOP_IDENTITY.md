@@ -73,10 +73,14 @@ if represented in JSON/log tooling; never route them through floating point.
 
 The only v1 flag is kStopInternalModuleGuard=1. On an extended registration it
 marks a frontend-owned internal guard. On a hold/event it means the hold is
-EXCLUSIVELY caused by internal guards, with no coexisting user stop. It is valid
-only for ModuleLoad. Reserved flag bits are rejected.
+EXCLUSIVELY caused by this connection's internal guards, with no coexisting
+user stop or foreign connection's hold. It is valid only for ModuleLoad. Reserved flag bits are rejected.
 
-Backend registration identity includes pattern AND ownership class. A legacy
+Backend registration identity includes the bound frontend connection/owner,
+pattern AND ownership class. The flag is an authoritative per-connection view,
+not permission granted by a client-supplied bit; conditional release must verify
+that same connection owns the guard. Another connection's internal guard cannot
+be released by copying its kind/sequence. A legacy
 user pattern and an internal guard of the same name can coexist; removing an
 internal pattern must not remove the user pattern. A matching user stop wins:
 the emitted hold has flags0, even if an internal guard matches too. A change in

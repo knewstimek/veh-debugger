@@ -142,6 +142,8 @@ Check `veh_trace_callers(mode="detailed", operation="status")` for availability 
 
 Detailed collection never resumes or pauses the target. The built-in VEH DLL does not provide this mode; raw stacks/registers do not guarantee complete unwinding or typed argument decoding. See [options and the backend contract](docs/CALLER_CAPTURE_PROTOCOL.md).
 
+Function-breakpoint module guards can resume automatically after a loader-safe binding pass when the backend provides [stop identity v1](docs/STOP_IDENTITY.md). The adapter conditionally releases only its own exact internal hold; changed/user stops remain stopped. Older backends retain the explicit pause/continue path. Public DAP/MCP arguments are unchanged.
+
 ## Features
 
 - **VEH-based**: Uses VEH instead of Windows Debug API - bypasses PEB/NtQuery-based anti-debug checks (Themida, VMProtect, etc.)

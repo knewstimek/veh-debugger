@@ -116,6 +116,16 @@ bool AddAddressOffset(uint64_t base, int64_t offset, uint64_t& result) {
 	}
 	return true;
 }
+bool DecodeThreadStopState(const std::vector<uint8_t>& bytes, bool extended,
+    veh::IsThreadStoppedResponseV1& state) {
+    state = {};
+    if(bytes.size()==sizeof(veh::IsThreadStoppedResponse))
+        std::memcpy(&state.base,bytes.data(),sizeof(state.base));
+    else if(extended&&bytes.size()==sizeof(state))
+        std::memcpy(&state,bytes.data(),sizeof(state));
+    else return false;
+    return state.base.stopped<=1 && veh::ValidStopIdentity(state.identity,state.base.stopped!=0);
+}
 } // anonymous namespace
 
 namespace veh::dap {
@@ -368,6 +378,10 @@ bool DapServer::AttachGuestAgent(const Request& req, std::string& error) {
 	stopOnModuleLoadPatterns_.clear();
 	guestAgentProcess_ = process.hProcess;
 	std::memcpy(guestCommands_, caps.commands, sizeof(guestCommands_));
+    guestStopIdentity_.store((caps.flags & kCapStopIdentityV1) &&
+        IsCommandSupported(caps.commands,IpcCommand::ContinueIfStopped) &&
+        IsCommandSupported(caps.commands,IpcCommand::IsThreadStopped) &&
+        IsCommandSupported(caps.commands,IpcCommand::SetModuleLoadStop));
 	disassembler_ = veh::CreateDisassembler(target.addressBits == 64);
 	ipcTransport_->StartHeartbeat();
 	return true;
@@ -1210,7 +1224,10 @@ void DapServer::SyncInternalModuleStops() {
         SetModuleLoadStopRequest request{};
         strncpy_s(request.name, module.c_str(), sizeof(request.name) - 1);
         std::string error;
-        if (!SendStatusCommand(IpcCommand::SetModuleLoadStop, &request, sizeof(request), error)) {
+        const SetModuleLoadStopRequestV1 extended{request,kStopIdentityVersion,kStopInternalModuleGuard};
+        const bool identity = guestStopIdentity_.load();
+        if (!SendStatusCommand(IpcCommand::SetModuleLoadStop, identity ? static_cast<const void*>(&extended) : &request,
+            identity ? sizeof(extended) : sizeof(request), error)) {
             std::lock_guard<std::mutex> lock(retryMutex_);
             internalModuleStops_.erase(module);
             for (auto& queued : deferredModuleStops_)
@@ -1224,77 +1241,114 @@ void DapServer::SyncInternalModuleStops() {
         request.action = 1; // remove our pattern only; never clear all backend patterns
         strncpy_s(request.name, module.c_str(), sizeof(request.name) - 1);
         std::string error;
-        if (SendStatusCommand(IpcCommand::SetModuleLoadStop, &request, sizeof(request), error)) {
+        const SetModuleLoadStopRequestV1 extended{request,kStopIdentityVersion,kStopInternalModuleGuard};
+        const bool identity = guestStopIdentity_.load();
+        if (SendStatusCommand(IpcCommand::SetModuleLoadStop, identity ? static_cast<const void*>(&extended) : &request,
+            identity ? sizeof(extended) : sizeof(request), error)) {
             std::lock_guard<std::mutex> lock(retryMutex_);
             internalModuleStops_.erase(module);
         } else LOG_WARN("Deferred module guard removal failed: %s", error.c_str());
     }
 }
 
-void DapServer::QueueDeferredModuleStop(const ModuleLoadStopEvent& event) {
+void DapServer::QueueDeferredModuleStop(const ModuleLoadStopEvent& event, const StopIdentityV1& identity) {
     std::lock_guard<std::mutex> lock(retryMutex_);
     const auto name = ModuleName(event.name);
     // The backend pattern contract is a case-insensitive substring match.
     const bool owned = std::any_of(internalModuleStops_.begin(), internalModuleStops_.end(),
         [&](const auto& pattern) { return name.find(pattern) != std::string::npos; });
-    deferredModuleStops_.push_back({event, owned});
+    deferredModuleStops_.push_back({event, owned, identity});
     retryWake_ = true;
     retryCv_.notify_one();
 }
 
 void DapServer::HandleDeferredModuleStop(const DeferredModuleStop& stop) {
-    // A loader-origin stop may hold the target loader lock. Keep this path to
-    // stop-state/symbol/breakpoint operations; never execute code or create threads.
-    if (!running_ || !ipcTransport_->IsConnected()) return;
-    // A queued event is historical. An explicit Continue/Step can have consumed
-    // its hold before this worker acquires the transaction mutex.
-    std::vector<uint8_t> bytes;
-    std::string error;
-    const IsThreadStoppedRequest request{stop.event.threadId};
-    if (!stop.event.threadId || !GuestSupports(IpcCommand::IsThreadStopped) ||
-        !ReceiveBackendReply(IpcCommand::IsThreadStopped, &request, sizeof(request), bytes, error) ||
-        bytes.size() != sizeof(IsThreadStoppedResponse)) {
-        SendEvent("output", {{"category", "stderr"},
-            {"output", "Deferred binding skipped: current thread stop could not be confirmed.\n"}});
+    // Loader-safe operations only: a module guard can hold the loader lock.
+    if(!running_ || !ipcTransport_->IsConnected())return;
+    const bool extended=guestStopIdentity_.load();
+    const auto query=[&](IsThreadStoppedResponseV1& state)->bool {
+        if(!stop.event.threadId||!GuestSupports(IpcCommand::IsThreadStopped))return false;
+        const IsThreadStoppedRequest legacy{stop.event.threadId};
+        const IsThreadStoppedRequestV1 request{legacy,kStopIdentityVersion};
+        std::vector<uint8_t> bytes;
+        std::string error;
+        return ReceiveBackendReply(IpcCommand::IsThreadStopped,
+            extended?static_cast<const void*>(&request):&legacy,
+            extended?sizeof(request):sizeof(legacy),bytes,error) &&
+            DecodeThreadStopState(bytes,extended,state);
+    };
+    const auto diagnostic=[&](const char* message) {
+        SendEvent("output",{{"category","stderr"},{"output",std::string(message)+"\n"}});
+    };
+    IsThreadStoppedResponseV1 state{};
+    if(!query(state)) {
+        diagnostic("Deferred binding skipped: current thread stop could not be confirmed.");
         return;
     }
-    IsThreadStoppedResponse state{};
-    std::memcpy(&state, bytes.data(), sizeof(state));
-    if (state.stopped == 0) return; // already resumed; do not rebind or invent a stop
-    if (state.stopped != 1) {
-        SendEvent("output", {{"category", "stderr"}, {"output", "Invalid backend thread-stop state.\n"}});
-        return;
-    }
-    const auto module = ModuleName(stop.event.name);
-    if (stop.owned) {
+    if(!state.base.stopped)return;
+    const auto module=ModuleName(stop.event.name);
+    if(stop.owned) {
         std::set<uint32_t> obsolete;
         {
             std::lock_guard<std::mutex> lock(breakpointMutex_);
-            for (auto& mapping : breakpointMappings_) {
-                if (mapping.type != BpType::Function || FunctionModule(mapping.functionName) != module) continue;
-                if (mapping.vehId) obsolete.insert(mapping.vehId);
-                mapping.vehId = 0;
-                mapping.address = 0;
-                mapping.pending = true;
+            for(auto& mapping:breakpointMappings_) {
+                if(mapping.type!=BpType::Function||FunctionModule(mapping.functionName)!=module)continue;
+                if(mapping.vehId)obsolete.insert(mapping.vehId);
+                mapping.vehId=0;mapping.address=0;mapping.pending=true;
             }
         }
-        for (auto id : obsolete) RemoveUnreferencedBreakpoint(id);
+        for(auto id:obsolete)RemoveUnreferencedBreakpoint(id);
     }
-    RetryPendingBreakpointsOnce(true, module);
-    bool pending = false;
+    RetryPendingBreakpointsOnce(true,module);
+    bool pending=false;
     {
         std::lock_guard<std::mutex> lock(breakpointMutex_);
-        for (const auto& mapping : breakpointMappings_)
-            if (mapping.type == BpType::Function && FunctionModule(mapping.functionName) == module && mapping.pending)
-                pending = true;
+        for(const auto& mapping:breakpointMappings_)
+            if(mapping.type==BpType::Function&&FunctionModule(mapping.functionName)==module&&mapping.pending)
+                pending=true;
     }
-    // The current IPC proves only "stopped", not the identity/reason of the
-    // current hold. Binding is allowed; automatic continuation is not.
-    SendEvent("stopped", {
-        {"reason", "pause"}, {"threadId", stop.event.threadId}, {"allThreadsStopped", false},
-        {"description", std::string("Backend confirms stopped thread; ") +
-            (pending ? "function breakpoint remains pending for " : "deferred binding checked for ") + module},
-    }, true);
+    // Reconcile current state after binding. This query is not the authority
+    // to resume; the owner must compare again atomically with the release.
+    if(extended && !query(state)) {
+        diagnostic("Deferred binding complete but current thread stop could not be confirmed.");
+        return;
+    }
+    if(!state.base.stopped)return;
+    bool alreadyVisible=false;
+    { std::lock_guard<std::mutex> lock(retryMutex_); alreadyVisible=visibleStops_.count(stop.event.threadId)!=0; }
+    const bool ours=extended && stop.owned && !alreadyVisible &&
+        stop.identity.kind==StopHoldKind::ModuleLoad && stop.identity.stopSequence!=0 &&
+        stop.identity.flags==kStopInternalModuleGuard &&
+        SameStopIdentity(stop.identity,state.identity);
+    if(ours) {
+        const ContinueIfStoppedRequestV1 request{kStopIdentityVersion,stop.event.threadId,stop.identity,0,{}};
+        const auto cutoff=visibleStopVersion_.load();
+        std::vector<uint8_t> bytes;
+        PipeExchangeDiagnostics diagnostics{};
+        const bool received=ipcTransport_->SendAndReceive(IpcCommand::ContinueIfStopped,
+            &request,sizeof(request),bytes,3000,&diagnostics);
+        IsThreadStoppedResponseV1 reply{};
+        const bool complete=received && bytes.size()==sizeof(reply) &&
+            DecodeThreadStopState(bytes,true,reply) &&
+            (reply.base.status==IpcStatus::Ok||reply.base.status==IpcStatus::InvalidState);
+        if(complete && !(reply.base.status==IpcStatus::Ok && reply.base.stopped &&
+            SameStopIdentity(reply.identity,request.expected))) {
+            state=reply;
+            if(reply.base.status==IpcStatus::Ok)ClearVisibleStops(stop.event.threadId,cutoff);
+        } else {
+            // A timeout/bad receipt never authorizes ordinary Continue or replay.
+            diagnostic("Conditional guard continuation was not confirmed; checking the current stop.");
+            if(!query(state))return;
+        }
+        if(!state.base.stopped)return;
+    }
+    // Legacy/unknown/changed/user-visible holds require explicit continuation.
+    // Never overwrite a more specific exception/BP received in the meantime.
+    SendEvent("stopped",{
+        {"reason","pause"},{"threadId",stop.event.threadId},{"allThreadsStopped",false},
+        {"description",std::string("Backend confirms stopped thread; ")+
+            (pending?"function breakpoint remains pending for ":"deferred binding checked for ")+module},
+    },true);
 }
 
 void DapServer::StartRetryThread() {
@@ -3452,7 +3506,16 @@ void DapServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 			std::memcpy(&copy, payload, sizeof(copy));
 			copy.name[sizeof(copy.name) - 1] = '\0';
 			if (guestTarget_) {
-				QueueDeferredModuleStop(copy);
+                StopIdentityV1 identity{};
+                if(guestStopIdentity_.load()&&size==sizeof(ModuleLoadStopEventV1)) {
+                    ModuleLoadStopEventV1 extended{};
+                    std::memcpy(&extended,payload,sizeof(extended));
+                    if(ValidStopIdentity(extended.identity,true)&&
+                        (extended.identity.kind==StopHoldKind::ModuleLoad||extended.identity.kind==StopHoldKind::Unknown))
+                        identity=extended.identity;
+                    else LOG_WARN("Invalid module-stop identity; explicit continuation required");
+                }
+				QueueDeferredModuleStop(copy,identity);
 				break;
 			}
 			const auto* e = &copy;
@@ -4063,6 +4126,7 @@ void DapServer::Cleanup(bool detachOnly, bool backendDetached) {
 	}
 	if (guestTarget_) {
 		guestTarget_ = false;
+        guestStopIdentity_.store(false);
 		guestAddressBits_ = 0;
 		std::memset(guestCommands_, 0, sizeof(guestCommands_));
 		ipcTransport_ = std::make_unique<PipeClient>();

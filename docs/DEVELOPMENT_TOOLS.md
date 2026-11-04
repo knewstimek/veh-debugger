@@ -8,6 +8,8 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 
 ## Tool catalog
 
+`test/test_dap_stop_identity.py` extends the existing deferred-loader-stop fixture for stop-identity v1: matching internal guards, exact high-bit sequences, user ownership, pre-release replacement, no hold, immediate restop, malformed/failed replies and capability/legacy fallback. Run it with `test_dap_deferred_loader_stop.py` and `test_session_receipts.py` on x64/x86 using the shared runner. Layouts and live owner/ledger acceptance requirements are in [stop identity v1](STOP_IDENTITY.md).
+
 `test/test_caller_capture.py` verifies detailed caller-capture v1 with the real MCP and host-only guest fixture: exact IDs/TSC, x64/x86 raw snapshots, partial stacks, admission/peer validation, bounded immutable file export and direct/batch/action parity. Run with the shared runner for both build widths. The canonical header and backend acceptance boundaries are in [caller capture v1](CALLER_CAPTURE_PROTOCOL.md); this fixture does not qualify a live provider.
 
 Process lazy-decode budgets and the additive wire12 contract are documented in [TRACE_LAZY_DECODE.md](TRACE_LAZY_DECODE.md). `test/test_trace_lazy_decode.py` covers large ranges, exact64-bit requests, cache exhaustion, file errors and direct/batch/action parity; use the shared runner for x64 and build32.
@@ -786,11 +788,11 @@ before starting those operations. A manual pause following module load is not
 a general-purpose safe call point. Guard names are module base names such as
 `version.dll`, not file paths; matching remains the backend substring contract.
 
-There is deliberately no automatic Continue: `IsThreadStopped` proves state,
-not ownership, and neither the module event nor Continue carries a hold ID.
-Transparent automatic continuation would require a backend-issued stop identity
-and an atomic resume-if-that-hold-is-current operation. Arrival counters or a
-reason query alone do not close that race. Guards remain while functions are
+Legacy `IsThreadStopped` proves state without hold ownership, so legacy peers
+retain explicit continuation. The optional [stop identity v1](STOP_IDENTITY.md)
+adds a backend-issued identity and atomic `ContinueIfStopped`: only an unchanged,
+exclusively owned internal guard can auto-release after binding. Arrival counters
+or a reason query alone do not close that race. Guards remain while functions are
 configured so reloads can rebind; replacement removes only internal patterns
 and preserves shared software breakpoint IDs. Backend patterns use substring
 matching, so similarly named DLLs may also produce an observed stop. Missing
