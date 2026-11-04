@@ -56,6 +56,7 @@ enum class IpcCommand : uint32_t {
 	Pause                  = 0x0014,
 	TerminateThread        = 0x0015,
 	SetInstructionPointer  = 0x0016,
+    ContinueIfStopped      = 0x0017, // atomic compare-and-continue; stop identity v1
 
 	// State queries
 	GetThreads             = 0x0020,
@@ -440,6 +441,65 @@ struct SetRegistersResponse {
 
 struct IsThreadStoppedRequest { uint32_t threadId; };
 struct IsThreadStoppedResponse { IpcStatus status; uint8_t stopped; };
+
+// Stop identity v1: additive, opt-in wire layouts. See docs/STOP_IDENTITY.md.
+// Sequence is a logical VM-lifetime identity, not a clock. Backend ledger high
+// watermark survives owner restarts; zero is unknown/legacy and never resumable.
+constexpr uint32_t kStopIdentityVersion = 1;
+enum class StopHoldKind : uint32_t {
+    Unknown = 0, Breakpoint = 1, Step = 2, Exception = 3,
+    ModuleLoad = 4, Pause = 5, Resync = 6
+};
+constexpr uint32_t kStopInternalModuleGuard = 1; // exclusively internal, no user hold
+struct StopIdentityV1 {
+    StopHoldKind kind;
+    uint64_t stopSequence;
+    uint32_t flags;
+};
+struct SetModuleLoadStopRequestV1 {
+    SetModuleLoadStopRequest base; // original 257-byte prefix
+    uint32_t version;
+    uint32_t flags; // 0=user pattern; kStopInternalModuleGuard=internal guard
+};
+struct ModuleLoadStopEventV1 {
+    ModuleLoadStopEvent base; // original 272-byte prefix
+    StopIdentityV1 identity;
+};
+struct IsThreadStoppedRequestV1 {
+    IsThreadStoppedRequest base;
+    uint32_t version;
+};
+struct IsThreadStoppedResponseV1 {
+    IsThreadStoppedResponse base; // original 5-byte prefix
+    StopIdentityV1 identity;
+};
+struct ContinueIfStoppedRequestV1 {
+    uint32_t version, threadId; // nonzero thread only
+    StopIdentityV1 expected; // nonzero kind/sequence; flags also compare exactly
+    uint8_t passException; // same exception delivery choice as ordinary Continue
+    uint8_t reserved[3];
+};
+// Ok: matching hold was released; InvalidState: no effects. Both include the
+// current post-operation snapshot. A new immediate restop has a fresh identity.
+using ContinueIfStoppedResponseV1 = IsThreadStoppedResponseV1;
+inline bool ValidStopIdentity(const StopIdentityV1& value, bool stopped) {
+    if(value.flags & ~kStopInternalModuleGuard)return false;
+    if(!stopped || value.kind==StopHoldKind::Unknown)
+        return value.kind==StopHoldKind::Unknown && value.stopSequence==0 && value.flags==0;
+    return static_cast<uint32_t>(value.kind)<=static_cast<uint32_t>(StopHoldKind::Resync) &&
+        value.stopSequence!=0 && (!value.flags || value.kind==StopHoldKind::ModuleLoad);
+}
+inline bool SameStopIdentity(const StopIdentityV1& a,const StopIdentityV1& b) {
+    return a.kind==b.kind && a.stopSequence==b.stopSequence && a.flags==b.flags;
+}
+static_assert(sizeof(ModuleLoadStopEvent)==272 && sizeof(IsThreadStoppedResponse)==5);
+static_assert(sizeof(StopIdentityV1)==16 && offsetof(StopIdentityV1,stopSequence)==4);
+static_assert(sizeof(SetModuleLoadStopRequestV1)==265);
+static_assert(sizeof(ModuleLoadStopEventV1)==288);
+static_assert(sizeof(IsThreadStoppedRequestV1)==8 && sizeof(IsThreadStoppedResponseV1)==21);
+static_assert(sizeof(ContinueIfStoppedRequestV1)==28 && sizeof(ContinueIfStoppedResponseV1)==21);
+static_assert(offsetof(ModuleLoadStopEventV1,identity)==sizeof(ModuleLoadStopEvent));
+static_assert(offsetof(IsThreadStoppedResponseV1,identity)==sizeof(IsThreadStoppedResponse));
 
 // Module info
 struct ModuleInfo {
@@ -2048,6 +2108,7 @@ static_assert(sizeof(VirtualCpuInstructionRecord)==96);
 // everything it knows".
 enum class IpcBackend : uint32_t { VehDll = 0, Hypervisor = 1 };
 
+constexpr uint32_t kCapStopIdentityV1 = 1u << 9; // opt-in hold identity and atomic ContinueIfStopped
 constexpr uint32_t kCapBasicTraceLazy = 1u << 8; // wire12 lazy decode, cache budget and 64-bit steps
 constexpr uint32_t kCapValueScanV2 = 1u << 7; // transactional disk/undo and event-driven async value scans
 constexpr uint32_t kCapBasicTracePolicies  = 1u << 6;  // wire11 snapshot suppression and path compression
