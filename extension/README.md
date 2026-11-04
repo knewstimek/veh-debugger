@@ -106,6 +106,8 @@ remote frontend conditional breakpoints and target-side trace file pipes remain
 unsupported. The adapter's DAP TCP listener is a separate interface. Configuration
 and limits are documented in `docs/REMOTE_TRANSPORT.md` in the repository.
 
+`veh_trace_callers(mode="detailed", operation="status")` checks caller-capture support for the attached target architecture. A supporting backend can capture hit-time integer registers and raw stack prefixes with register filters and hit/time/storage limits. Use `start`, then the returned exact string `trace_id` for `stop`, `read` or JSON/JSONL `export`. Read defaults to a summary (`max=0`); set a positive `max` and pass the exact returned `nextCursor` as `cursor` to page records. Large pages can return file receipts; optional `output_file={path,format}` chooses a new host file. The caller owns saved files. Detailed mode never resumes/pauses the target and does not guarantee full unwinding or typed arguments. The built-in VEH DLL does not provide this optional mode. See the [caller capture guide](https://github.com/knewstimek/veh-debugger/blob/master/docs/CALLER_CAPTURE_PROTOCOL.md).
+
 `veh_trace_memory` preserves first-write detection when `duration_ms` is omitted.
 Add `duration_ms` (10-60000 ms) to collect location counts with `access="write"`
 (default) or combined `"readwrite"`; read-only and individual read/write

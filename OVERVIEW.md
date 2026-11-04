@@ -174,9 +174,9 @@ OnNext
 
 ## TraceCallers
 
-Records which code paths call a given function by placing a trace BP and collecting callers.
+Standard VEH mode records which code paths call a given function by placing a trace BP and collecting callers. Optional detour mode uses the existing [instrumentation contract](docs/INSTRUMENTATION.md). Detailed mode uses the separate [caller-capture contract](docs/CALLER_CAPTURE_PROTOCOL.md) for backend-collected hit-time integer registers and raw stack prefixes, register filters, hit/time/storage limits, immutable pages and file export. Both optional modes require backend support and preserve target execution state; complete unwinding is not implied.
 
-### Mechanism
+### Mechanism (standard VEH mode)
 1. `StartTrace(address)` sets `traceAddress_` (atomic)
 2. INT3 hit at trace address -> VEH handler reads caller, writes to lock-free ring buffer, auto-continues (no stop)
 3. After `duration_sec`, `StopTrace()` + `GetTraceResults()` aggregates ring buffer into `{caller -> hitCount}` map

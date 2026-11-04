@@ -1229,7 +1229,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
 
 		Tool(&McpServer::ToolTerminate, "session", kLite | kInteractive | kCapture, false,
-			{{"name", "veh_terminate"}, {"description", "Kill the target process from inside (the injected DLL calls TerminateProcess on its own process). Works even on self-protected targets that deny external OpenProcess/taskkill (deny-DACL or higher integrity), because a process's own-handle always has terminate rights. Detaches afterward. Use this instead of the WM_CLOSE->detach->taskkill dance."},
+			{{"name", "veh_terminate"}, {"description", "Terminate the target through its backend; detach on success. VEH can terminate from inside the target when external access is denied."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"exitCode", {{"type", "integer"}, {"description", "Process exit code (default: 0)"}}}
 		 }}}}}),
@@ -1309,7 +1309,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
                 {"expected_generation", {{"type", "string"}}}
              }}}}}),
 		Tool(&McpServer::ToolContinue, "session", kLite | kInteractive | kCapture, true,
-			{{"name", "veh_continue"}, {"description", "Continue execution. threadId=0 resumes all debugger-stopped threads; threadId=X resumes only X and leaves the others stopped. Every executed continue reports resumedThreadIds and stillStoppedThreadIds. Use wait=true to block until a breakpoint hit, exception, pause, or process exit occurs (returns stop reason, address, threadId). Use pass_exception=true to forward the current exception to the process's own SEH handler (for CFF/obfuscated INT3, etc.). Default timeout 10s, configurable."},
+			{{"name", "veh_continue"}, {"description", "Resume threadId (0: all debugger-stopped threads; nonzero: only that thread). Executed continues report resumedThreadIds/stillStoppedThreadIds. wait=true returns a breakpoint/exception/pause/exit with reason/address/threadId; timeout defaults to 10s. pass_exception=true forwards the current exception to target SEH."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "Thread ID (0 = resume all debugger-stopped threads; nonzero = resume only that thread and keep all others stopped; default: 0)"}}},
 			{"wait", {{"type", "boolean"}, {"description", "If true, block until target stops (breakpoint/exception/pause/exit). Default: false"}}},
@@ -1465,17 +1465,17 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
 
 		Tool(&McpServer::ToolTraceCallers, "trace", 0, true,
-			{{"name", "veh_trace_callers"}, {"description", "Standard preserves caller hit-count profiling and duration_ms precedence. VEH resumes/pauses; hypervisor tracing does neither. x86 [ESP] is accurate at entry only. Detour uses instrumentation v1. Detailed uses independent caller-capture v1: hit-time registers/stack, filters and limits; status/start/stop/read/export, immutable pages and files. Backend support required; no fallback."},
+			{{"name", "veh_trace_callers"}, {"description", "Default standard mode collects caller hit counts; duration_ms takes precedence. Standard VEH resumes/pauses and x86 [ESP] is entry-only; hypervisor standard preserves state. Detour/detailed never resume/pause. Detailed records hit-time integer registers/raw stack, filters and limits; check status for attached-target availability, then start/stop/read/export. Backend support required; no fallback or complete-unwind guarantee."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
                 {"mode", {{"type", "string"}, {"enum", json::array({"standard", "detour", "detailed"})}, {"default", "standard"}}},
                 {"operation", {{"type", "string"}, {"enum", json::array({"status", "start", "stop", "read", "export"})}, {"description", "Detour/detailed only; default status. export is detailed-only"}}},
-                {"trace_id", {{"type", "string"}, {"description", "Exact capture ID from start; read/stop"}}},
+                {"trace_id", {{"type", "string"}, {"description", "Exact capture ID from start; detour/detailed read/stop and detailed export"}}},
                 {"cursor", {{"type", "string"}, {"description", "Read: exact returned nextCursor, default 0"}}},
-                {"max", {{"type", "integer"}, {"minimum", 0}, {"maximum", 256}, {"default", 0}, {"description", "Instrumentation read: 0 summary only; stopped capture pages up to 256"}}},
+                {"max", {{"type", "integer"}, {"minimum", 0}, {"maximum", 256}, {"default", 0}, {"description", "Detour/detailed read: 0 summary only; stopped pages up to 256 records (byte limits may return fewer)"}}},
                 {"buffer_records", {{"type", "integer"}, {"minimum", 1}, {"maximum", 65536}, {"description", "Start: default min(4096, backend limit)"}}},
-                {"data_policy", {{"type", "string"}, {"enum", json::array({"original", "patched"})}, {"default", "original"}, {"description", "Start: patched exposes E9/detour bytes to target reads; integrity checks/self-code reads can change"}}},
-                {"transaction_policy", {{"type", "string"}, {"enum", json::array({"omit", "rollback"})}, {"default", "omit"}, {"description", "Start: omit all transactional records; rollback stages until commit and discards aborted records"}}},
-                {"include_ip", {{"type", "boolean"}, {"default", true}, {"description", "Start: request instruction addresses; unavailable IP remains null"}}},
+                {"data_policy", {{"type", "string"}, {"enum", json::array({"original", "patched"})}, {"default", "original"}, {"description", "Detour start only: patched exposes E9/detour bytes to target reads; integrity checks/self-code reads can change"}}},
+                {"transaction_policy", {{"type", "string"}, {"enum", json::array({"omit", "rollback"})}, {"default", "omit"}, {"description", "Detour start only: omit all transactional records; rollback stages until commit and discards aborted records"}}},
+                {"include_ip", {{"type", "boolean"}, {"default", true}, {"description", "Detour start only: request instruction addresses; unavailable IP remains null"}}},
 			{"address", {{"type", "string"}, {"description", "Standard trace address or detour/detailed start function entry"}}},
                 {"stack_bytes", {{"type", "integer"}, {"minimum", 0}, {"maximum", 4096}, {"description", "Detailed start: bytes copied at each hit from SP; default min(256, backend limit)"}}},
                 {"max_hits", {{"type", "string"}, {"description", "Detailed start: exact decimal hit limit, default 1000; 0 disables; duration_ms or max_hits must be nonzero"}}},

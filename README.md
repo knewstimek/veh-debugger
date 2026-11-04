@@ -138,6 +138,12 @@ handler occurrence만 필요하면 `target_window={address,occurrence,before_ste
 
 ---
 
+### 상세 호출 기록(MCP)
+
+`veh_trace_callers(mode="detailed", operation="status")`로 현재 대상 아키텍처에서 사용 가능한지 먼저 확인한다. 지원하는 백엔드에서는 `start`에 함수 진입점 `address`, `stack_bytes`, 정확한 십진 문자열 `max_hits`, `duration_ms`와 레지스터 `filters`를 지정할 수 있다. 반환된 문자열 `trace_id`로 `stop`한 뒤 `read`에 `max=64`처럼 양수를 지정해 페이지를 보거나 `export`로 전체 기록을 JSON/JSONL 파일에 저장한다. `read`의 기본 `max=0`은 요약만 반환한다. 다음 페이지에는 문자열 `nextCursor`를 `cursor`로 전달하며, 큰 페이지는 파일 receipt로 반환될 수 있다. 파일 경로는 `output_file={path,format}`으로 선택하며 보존·정리는 호출자가 담당한다.
+
+상세 수집은 대상을 자동 재개·정지하지 않는다. 기본 VEH DLL은 이 모드를 제공하지 않으며, 스택 원본·레지스터 기록은 전체 콜스택 복원이나 인자 타입 해석을 보장하지 않는다. [사용 옵션과 백엔드 규약](docs/CALLER_CAPTURE_PROTOCOL.md)을 참고한다.
+
 ## 특징
 
 - **VEH 기반**: Windows Debug API 대신 VEH를 사용하여 안티디버그 우회에 유리
@@ -473,7 +479,7 @@ VM 자체에 연결할 때는 외부 백엔드를 VM 범위로 등록한 뒤
 | `veh_trace_memory` | `address, size?, timeout_ms?, duration_ms?, access?, max_entries?` | 기본은 첫 쓰기 감지. `duration_ms` 지정 시 쓰기 또는 읽기·쓰기 접근 횟수 수집 |
 | `veh_resolve_imports` | `threadId, addresses, max_steps?, follow_exceptions?, system_only?, target_modules?` | 난독화 import 일괄 해석 (thunk -> DLL 스텝 추적, 최대 2000개) |
 | `veh_batch` | `steps, inputs?, input_variable?, stop_on_error?` | 다중 명령 일괄 실행 및 동일 세션의 입력별 순차 실행. 결과 참조, 제어 흐름, 입력별 status/count/첫 실패/trace artifact 요약을 반환한다. |
-| `veh_trace_callers` | `address?, duration_sec?, duration_ms?, mode?, operation?` | 기본 호출자별 횟수 수집. 명시적 `mode="detour"`는 별도 계측·요약·페이지 조회([규약](docs/INSTRUMENTATION.md), 백엔드 지원 필요). `duration_ms` 우선, 호출 0회도 정상 결과. VEH만 수집 전 재개·후 정지하며 하이퍼바이저는 실행 상태 유지. x64: unwind, x86: 함수 진입점의 [ESP] |
+| `veh_trace_callers` | `mode?, operation?, address?, duration_sec?, duration_ms?, trace_id?, stack_bytes?, max_hits?, filters?, buffer_records?, buffer_bytes?, cursor?, max?, output_file?` | 기본 `standard`는 호출자별 횟수 수집(`duration_ms` 우선). `detour`는 [계측·요약·페이지](docs/INSTRUMENTATION.md), `detailed`는 [hit 시점 레지스터·스택 원본, 필터·한도·파일 내보내기](docs/CALLER_CAPTURE_PROTOCOL.md). 별도 모드는 백엔드 지원 필요. 기본 VEH만 재개·정지하며 detour/detailed는 실행 상태 유지. 전체 스택 복원은 보장하지 않음 |
 | `veh_trace_calls` | `addresses, duration_sec?, duration_ms?, resolve?, system_only?` | call/jmp 명령이 런타임에 어디로 가는지 모니터링. 콜 사이트에 BP 설치 후 N초간 실행, 실제 타겟 주소 + API 이름 수집. `resolve=true`: thunk/trampoline을 자연스러운 call 컨텍스트에서 따라가 최종 API까지 추적 (예외 기반 난독화 대응). `system_only=true`: 시스템 DLL 타겟만 반환. 패킹된 바이너리의 IAT 복원용. |
 | `veh_trace_basic_blocks` | `threadId, start, end, ..., collect_hardware_events?, hardware_kinds?, collect_snapshots?, compress_paths?, stop_on_return?, collect_events?, collect_memory_events?, collect_register_events?, collect_code?, output_mode?, output_file?, output_format?, events_output?, ...` | 기본은 결과 파일+요약, 명시적 `output_mode="inline"`은 전체 JSON. DLL 내부 bounded trace. 선택적 function-return scope, ordered block/code/memory/register occurrence stream 및 block/edge, delta, memory, dependency, region, exception을 반환한다. |
 | `veh_targeted_capture` | `inputs, steps?, trace, trigger, window, environment?, output_directory, stop_on_error?` | 입력별 setup 후 occurrence 전후 ordered trace와 환경 snapshot을 서버 파일에 저장한다. instruction이 1개 이상 완료되고 요청한 target-window stop으로 끝난 입력만 성공으로 집계한다. |

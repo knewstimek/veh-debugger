@@ -136,6 +136,12 @@ For function-scoped evidence, set `stop_on_return=true`. The trace fixes the ent
 
 ---
 
+### Detailed caller capture (MCP)
+
+Check `veh_trace_callers(mode="detailed", operation="status")` for availability on the attached target architecture. On a supporting backend, `start` accepts a function-entry `address`, `stack_bytes`, exact decimal-string `max_hits`, `duration_ms` and register `filters`. Keep the returned string `trace_id`: `stop` freezes the capture, `read` with a positive `max` (for example 64) pages records, and `export` saves all records as JSON/JSONL. The default `max=0` returns only a summary. Pass the exact returned `nextCursor` string as `cursor` for the next page; large pages can return file receipts. Optional `output_file={path,format}` chooses a new host file; the caller owns retention and cleanup.
+
+Detailed collection never resumes or pauses the target. The built-in VEH DLL does not provide this mode; raw stacks/registers do not guarantee complete unwinding or typed argument decoding. See [options and the backend contract](docs/CALLER_CAPTURE_PROTOCOL.md).
+
 ## Features
 
 - **VEH-based**: Uses VEH instead of Windows Debug API - bypasses PEB/NtQuery-based anti-debug checks (Themida, VMProtect, etc.)
@@ -434,7 +440,7 @@ The table below documents the complete public tool surface. Treat the running se
 | `veh_trace_memory` | `address, size?, timeout_ms?, duration_ms?, access?, max_entries?` | First-write detection by default; `duration_ms` selects write or combined read/write collection |
 | `veh_resolve_imports` | `threadId, addresses, max_steps?, follow_exceptions?, system_only?, target_modules?` | Batch-resolve obfuscated imports (step from thunk to DLL, up to 2000) |
 | `veh_batch` | `steps, inputs?, input_variable?, stop_on_error?` | Execute commands and repeat them sequentially per input in one session, with references/control flow plus per-input status, counts, first failure, trace summaries, and artifact metadata. |
-| `veh_trace_callers` | `address?, duration_sec?, duration_ms?, mode?, operation?` | Default caller hit-count profile; explicit `mode="detour"` adds backend instrumentation summaries/pages ([contract](docs/INSTRUMENTATION.md)). Includes zero hits; `duration_ms` wins. VEH resumes then pauses; hypervisor tracing preserves execution state. x64: unwind; x86: [ESP] at function entry |
+| `veh_trace_callers` | `mode?, operation?, address?, duration_sec?, duration_ms?, trace_id?, stack_bytes?, max_hits?, filters?, buffer_records?, buffer_bytes?, cursor?, max?, output_file?` | Default standard caller counts (`duration_ms` wins). Detour adds [instrumentation summaries/pages](docs/INSTRUMENTATION.md); detailed adds [hit-time registers/raw stacks, filters, limits and file export](docs/CALLER_CAPTURE_PROTOCOL.md). Optional modes require backend support. Standard VEH resumes/pauses; detour/detailed preserve execution state. Complete stack unwinding is not guaranteed |
 | `veh_trace_calls` | `addresses, duration_sec?, duration_ms?, resolve?, system_only?` | Monitor where call/jmp instructions go at runtime. Sets BPs on call sites, runs program for N seconds, collects actual targets with API names. `resolve=true`: follow thunks/trampolines in natural call context to final API (handles exception-based obfuscation). `system_only=true`: return only system DLL targets. For IAT reconstruction on packed binaries. |
 | `veh_trace_basic_blocks` | `threadId, start, end, ..., collect_hardware_events?, hardware_kinds?, collect_snapshots?, compress_paths?, stop_on_return?, collect_events?, collect_memory_events?, collect_register_events?, collect_code?, output_mode?, output_file?, output_format?, events_output?, ...` | Result file plus receipt by default; explicit `output_mode="inline"` returns full JSON. Bounded trace with optional function-return scope and ordered block/code/memory/register-occurrence streams, block/edge coverage, memory observations, dependencies, summaries, regions, and exceptions. |
 | `veh_targeted_capture` | `inputs, steps?, trace, trigger, window, environment?, output_directory, stop_on_error?` | Apply per-input setup and write occurrence-centered ordered trace/environment artifacts; only nonzero traces completed by the requested target-window stop count as successful. |
