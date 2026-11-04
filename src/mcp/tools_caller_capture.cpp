@@ -149,11 +149,17 @@ json McpServer::ToolCallerCapture(const json& args) {
         ((q.features&cc::Timestamp)==0)!=(q.clock==cc::Clock::None)||
         (q.clock==cc::Clock::None&&(q.clockFrequency||(q.features&cc::SynchronizedClock)))||(q.clock==cc::Clock::MonotonicNs&&q.clockFrequency!=1000000000ULL))
         return {{"error","Invalid caller capture version, capabilities, clock or limits"}};
-    const bool available=(q.features&cc::Available)&&(q.features&cc::Registers)&&(q.features&(cc::X86|cc::X64))&&
+    const auto targetBits=session_.TargetAddressBits();
+    const bool targetSupported=targetBits==32 ? bool(q.features&cc::X86) :
+        targetBits==64 ? bool(q.features&cc::X64) : false;
+    const bool available=targetSupported&&(q.features&cc::Available)&&(q.features&cc::Registers)&&
         q.maxRecords&&q.maxBufferBytes>=sizeof(cc::Record)&&q.maxPageBytes>=sizeof(cc::Response)+sizeof(cc::Record)+q.maxStackBytes&&
         supports(IpcCommand::StartCallerCapture)&&supports(IpcCommand::StopCallerCapture)&&supports(IpcCommand::ReadCallerCapture);
     if(operation=="status")return {{"mode","detailed"},{"protocol_version",cc::kVersion},{"protocolSupported",true},{"available",available},
-        {"provider",Text(q.provider)},{"reason",Text(q.reason)},{"trace_id",q.currentTraceId?json(std::to_string(q.currentTraceId)):json(nullptr)},
+        {"provider",Text(q.provider)},{"reason",targetSupported ? Text(q.reason) :
+            (targetBits==32||targetBits==64 ? "Collector does not support the attached target address width" :
+                "Detailed capture requires a process target with a known x86/x64 address width")},
+        {"trace_id",q.currentTraceId?json(std::to_string(q.currentTraceId)):json(nullptr)},
         {"maxStackBytes",q.maxStackBytes},{"maxBufferRecords",q.maxRecords},{"maxBufferBytes",q.maxBufferBytes},
         {"maxPageBytes",q.maxPageBytes},{"maxFilters",q.maxFilters},{"x86",bool(q.features&cc::X86)},{"x64",bool(q.features&cc::X64)},
         {"clock",{{"kind",ClockName(q.clock)},{"frequency_hz",q.clockFrequency?json(std::to_string(q.clockFrequency)):json(nullptr)},

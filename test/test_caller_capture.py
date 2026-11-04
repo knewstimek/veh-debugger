@@ -120,8 +120,13 @@ def run(directory, owned):
             assert "error" in call(client, "read", **invalid), invalid
         for mode in ("cc-no-filters", "cc-no-x64"):
             attach(client, mode)
+            if mode == "cc-no-x64":
+                status = good(call(client))
+                assert not status["available"] and status["x86"] and not status["x64"], status
+                assert "address width" in status["reason"], status
             assert "error" in call(client, "start", address="0x1000",
                 filters=[{"register": "rcx", "mask": "0xff", "equals": "0x1"}])
+            assert good(call(client))["trace_id"] is None
         for mode in ("cc-query-short", "cc-query-version", "cc-query-limits", "cc-query-clock"):
             attach(client, mode)
             assert "error" in call(client), mode

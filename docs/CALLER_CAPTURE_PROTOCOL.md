@@ -33,7 +33,9 @@ Limits: stack <=4096 bytes, <=65536 retained records, <=64 MiB retained record
 bytes, <=8 register predicates, reply <=65536 bytes including its header.
 Advertised page capacity must hold a largest supported record plus Response.
 All limits may be lower; explicit user requests are rejected, never clamped.
-Only defaults adapt to provider limits. Limits concern retained payload;
+Only defaults adapt to provider limits. MCP status.available additionally requires
+support for the attached target address width, not merely some other supported
+architecture. Limits concern retained payload;
 providers must separately bound bookkeeping and preallocate safely.
 
 ## Collection semantics
