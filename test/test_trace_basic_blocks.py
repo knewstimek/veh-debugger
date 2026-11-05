@@ -1220,6 +1220,22 @@ def main():
             "collect_register_events": True, "max_register_events": 20000,
             "collect_code": True, "max_code_bytes": 1024, "max_code_versions": 8,
         }), timeout=80)
+        assert "error" not in stress_trace, stress_trace
+        if stress_trace.get("mode") == "file":
+            # Large explicit-inline replies spill to a JSON artifact. Verify
+            # the receipt before checking the same full event data as inline.
+            output = stress_trace["output_file"]
+            artifact_paths.append(output["path"])  # cleanup also on assertion failure
+            assert output["format"] == "json" and output["storage_complete"], output
+            with open(output["path"], "rb") as trace_file:
+                data = trace_file.read()
+            assert len(data) == output["size"], output
+            assert hashlib.sha256(data).hexdigest() == output["sha256"], output
+            full_trace = json.loads(data)
+            assert full_trace["steps_executed"] == stress_trace["steps_executed"], output
+            for name in ("events", "memory_events", "register_events"):
+                assert len(full_trace[name]) == stress_trace["counts"][name], (name, output)
+            stress_trace = full_trace
         assert stress_trace.get("steps_executed") == 20000, stress_trace
         assert len(stress_trace["register_events"]) == 20000, stress_trace
         assert stress_trace["register_events_dropped"] == 0, stress_trace
