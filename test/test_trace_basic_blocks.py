@@ -964,6 +964,49 @@ def main():
         }).get("success")
         assert client.tool("veh_free_memory", {"address": hex(stack_start)}).get("success")
 
+        # POP to memory addressed through SP computes the address after the
+        # increment: PUSH AX; POP [SP] reads the pushed slot and stores one slot
+        # higher, at the SP the code started with.
+        entry_slot = int(saved[sp_name], 0)
+        original_entry_slot = client.tool("veh_read_memory", {
+            "address": hex(entry_slot), "size": pointer_size,
+        })["hex"]
+        pop_code = client.tool("veh_allocate_memory", {"size": 4096, "protection": "rwx"})
+        assert pop_code.get("success"), pop_code
+        pop_start = int(pop_code["address"], 0)
+        if is_32bit:
+            code = (bytes.fromhex("50 8F 04 24 FF 25") + (pop_start + 10).to_bytes(4, "little") +
+                    resume_address.to_bytes(4, "little"))
+        else:
+            code = bytes.fromhex("50 8F 04 24 FF 25 00 00 00 00") + resume_address.to_bytes(8, "little")
+        assert client.tool("veh_write_memory", {
+            "address": hex(pop_start), "data": code.hex(" "),
+        }).get("success")
+        assert client.tool("veh_set_register", {
+            "threadId": checkpoint_thread, "name": accumulator_name, "value": hex(pushed_value),
+        }).get("success")
+        assert client.tool("veh_set_register", {
+            "threadId": checkpoint_thread, "name": ip_name, "value": hex(pop_start),
+        }).get("success")
+        pop_trace = client.tool("veh_trace_basic_blocks", inline_trace_args({
+            "threadId": checkpoint_thread, "start": hex(pop_start),
+            "end": hex(pop_start + len(code)), "max_steps": 8,
+            "timeout_ms": 5000, "stack_bytes": 0,
+            "collect_memory_events": True, "max_memory_events": 8,
+        }), timeout=15)
+        assert pop_trace.get("stop_reason") == "left_range", pop_trace
+        pop_read = next(event for event in pop_trace["memory_events"]
+                        if event["kind"] == "read" and int(event["instruction"], 0) == pop_start + 1)
+        pop_write = next(event for event in pop_trace["memory_events"]
+                         if event["kind"] == "write" and int(event["instruction"], 0) == pop_start + 1)
+        assert int(pop_read["address"], 0) == entry_slot - pointer_size, pop_trace
+        assert int(pop_write["address"], 0) == entry_slot, pop_trace
+        assert pop_write["after"] == expected_value, pop_trace
+        assert client.tool("veh_write_memory", {
+            "address": hex(entry_slot), "data": original_entry_slot,
+        }).get("success")
+        assert client.tool("veh_free_memory", {"address": hex(pop_start)}).get("success")
+
         # LEA's source is a Zydis memory-form operand even though the
         # instruction reads no memory. Its base/index origins must reach the
         # largest enclosing destination register; writing EAX defines RAX via

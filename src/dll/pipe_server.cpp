@@ -225,6 +225,10 @@ static uint8_t DecodeTraceInstruction(const ZydisDecoder& decoder, ZydisMachineM
 			// operand relative to the pre-instruction SP.
 			parsed.preDecrementStack = writable && (decoded.meta.category == ZYDIS_CATEGORY_PUSH ||
 				decoded.meta.category == ZYDIS_CATEGORY_CALL) && parsed.base == 7 ? 1 : 0;
+			// POP to memory addressed through SP computes the address after the increment (Intel SDM POP);
+			// Zydis reports it relative to the pre-instruction SP, so `pop [rsp]` stores one slot higher.
+			parsed.postIncrementStack = writable && decoded.meta.category == ZYDIS_CATEGORY_POP &&
+				parsed.base == 7 ? 1 : 0;
 			if ((!parsed.ripRelative && operand.mem.base != ZYDIS_REGISTER_NONE && parsed.base == 0xFF) ||
 				(operand.mem.index != ZYDIS_REGISTER_NONE && parsed.index == 0xFF)) {
 				if (writable) meta.unsupportedWrites++;
