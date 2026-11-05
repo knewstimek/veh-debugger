@@ -239,10 +239,9 @@ json McpServer::ToolEnumLocals(const json& args) {
 		else if (v.is_number()) frameBase = v.get<uint64_t>();
 	}
 
-	auto locals = session_.EnumLocals(threadId, instrAddr, frameBase);
-	if (locals.empty() && instrAddr == 0) {
-		return {{"error", "Could not determine instruction address. Provide instructionAddress or ensure target is stopped."}};
-	}
+    std::string error;
+	auto locals = session_.EnumLocals(threadId, instrAddr, frameBase, &error);
+    if(!error.empty())return {{"error",error}};
 
 	json vars = json::array();
 	char buf[32];

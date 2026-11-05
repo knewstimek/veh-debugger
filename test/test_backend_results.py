@@ -71,6 +71,62 @@ def check_trace_policy_results():
         client.close(terminate_target=False)
 
 
+def check_locals_results():
+    import json
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="veh-locals-results-") as directory:
+        log = Path(directory) / "mcp.log"
+        client = OwnedMcpClient(args=["--log=" + str(log)])
+        expected_errors = []
+        try:
+            client.initialize("locals-receipts")
+            for mode in ("locals-empty", "locals-ok", "locals-error", "locals-status-ok",
+                         "locals-count-short", "locals-long", "locals-value-size", "locals-name"):
+                attached = client.tool("veh_attach", {"pid": 424242, "target_scope": "guest",
+                    "agent": AGENT, "agent_args": ["--metadata", mode]})
+                assert attached.get("success"), attached
+                with dap_session(mode) as dap:
+                    stack = dap.request("stackTrace", {"threadId": 77})
+                    assert stack["success"] and stack["body"]["stackFrames"], stack
+                    scopes = dap.request("scopes", {"frameId": stack["body"]["stackFrames"][0]["id"]})
+                    assert scopes["success"] and "scopes" in scopes.get("body", {}), scopes
+                    ref = next(s["variablesReference"] for s in scopes["body"]["scopes"] if s["name"] == "Locals")
+                    variables = dap.request("variables", {"variablesReference": ref})
+                    if mode in ("locals-empty", "locals-ok"):
+                        assert variables["success"], variables
+                        rows = variables["body"]["variables"]
+                        assert len(rows) == (mode == "locals-ok"), variables
+                        if rows: assert rows[0]["name"] == "[param] value", variables
+                    else:
+                        assert not variables["success"] and variables["message"], variables
+                        assert not variables.get("body", {}).get("variables"), variables
+                result = client.tool("veh_enum_locals", {"threadId": 77})
+                valid = mode in ("locals-empty", "locals-ok")
+                if valid:
+                    assert "error" not in result and result["count"] == (mode == "locals-ok"), (mode, result)
+                else:
+                    assert "error" in result and "variables" not in result, (mode, result)
+                batch = client.tool("veh_batch", {"steps": [
+                    {"tool": "veh_enum_locals", "args": {"threadId": 77}}]})
+                assert batch["results"][0]["result"] == result and batch["failed"] == (not valid), (mode, batch)
+                installed = client.tool("veh_set_breakpoint", {"address": "0x1000", "action": [
+                    {"tool": "veh_enum_locals", "args": {"threadId": 77}}]})
+                assert installed.get("success") and installed.get("hasAction"), installed
+                stop = client.tool("veh_continue", {"wait": True, "timeout": 4})
+                assert stop.get("breakpointId") == 7, stop
+                threads = client.tool("veh_threads")
+                assert threads["threads"][0]["name"] == "locals-calls:3", (mode, threads)
+                if not valid: expected_errors.append(result)
+                assert client.tool("veh_detach").get("success")
+        finally:
+            client.close(terminate_target=False)
+        marker = "Breakpoint action completed with an error: "
+        reports = [json.loads(line.split(marker, 1)[1]) for line in log.read_text(encoding="utf-8").splitlines()
+                   if marker in line]
+        assert [row["results"][0]["result"] for row in reports] == expected_errors, reports
+    print("PASS locals empty/success/refusal/malformed MCP direct/batch/action and DAP variables parity")
+
+
 def run():
     for mode in ("control-error", "control-short", "control-long"):
         with dap_session(mode) as client:
@@ -147,4 +203,9 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    import sys
+    if "--locals-only" in sys.argv:
+        check_locals_results()
+    else:
+        run()
+        check_locals_results()

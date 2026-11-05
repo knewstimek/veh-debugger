@@ -83,6 +83,8 @@ int wmain(int argc, wchar_t** argv) {
     const bool hardwareMode = mode.rfind(L"hardware-", 0) == 0;
     uint32_t fixtureBreakpointId = 0, shellcodeRequests=0, localThreadQueries=0;
     const bool importMode=mode.rfind(L"resolve-",0)==0;
+    const bool localsMode=mode.rfind(L"locals-",0)==0;
+    uint32_t localsRequests=0;
     const bool scanMode=mode.rfind(L"scan-",0)==0;
     uint32_t symbolLookupRequests = 0;
     uint64_t annotationEpoch = 1;
@@ -253,7 +255,12 @@ int wmain(int argc, wchar_t** argv) {
                 if(mode!=L"deferred-unsupported")veh::SetCommandSupported(caps.commands,veh::IpcCommand::SetModuleLoadStop);
             }
             if(mode.rfind(L"shellcode-",0)==0)veh::SetCommandSupported(caps.commands,veh::IpcCommand::ExecuteShellcode);
-            if(mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode)for(auto op:{veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue})veh::SetCommandSupported(caps.commands,op);
+            if(localsMode) {
+                veh::SetCommandSupported(caps.commands,veh::IpcCommand::EnumLocals);
+                veh::SetCommandSupported(caps.commands,veh::IpcCommand::GetStackTrace);
+                veh::SetCommandSupported(caps.commands,veh::IpcCommand::GetRegisters);
+            }
+            if(mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode||localsMode)for(auto op:{veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue})veh::SetCommandSupported(caps.commands,op);
             if(mode.rfind(L"control-",0)==0) {
                 for(auto op:{veh::IpcCommand::Continue,veh::IpcCommand::Pause,veh::IpcCommand::StepInto,
                     veh::IpcCommand::StepOver,veh::IpcCommand::StepOut,veh::IpcCommand::WriteMemory,veh::IpcCommand::TerminateThread})
@@ -1163,7 +1170,7 @@ int wmain(int argc, wchar_t** argv) {
                     if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::StepCompleted),stopped))break;
                 }
             }
-        } else if ((mode.rfind(L"stack-",0)==0 || mode.rfind(L"control-",0)==0) &&
+        } else if ((localsMode || mode.rfind(L"stack-",0)==0 || mode.rfind(L"control-",0)==0) &&
                    command==veh::IpcCommand::GetStackTrace) {
             if(mode==L"stack-exit")break;
             if(mode==L"stack-error"){if(!reply(pipe,header.command,veh::IpcStatus::Error))break;continue;}
@@ -1178,7 +1185,27 @@ int wmain(int argc, wchar_t** argv) {
             strcpy_s(response.frame.sourceFile,"sample.cpp");
             if(mode==L"stack-name")std::memset(response.frame.functionName,'A',sizeof(response.frame.functionName));
             if(!send(pipe,header.command,&response,mode==L"stack-empty"?sizeof(response.head):sizeof(response)))break;
-        } else if ((mode.rfind(L"stack-",0)==0 || mode.rfind(L"control-",0)==0) &&
+        } else if(localsMode&&command==veh::IpcCommand::EnumLocals) {
+            ++localsRequests;
+            if(mode==L"locals-error"){if(!reply(pipe,header.command,veh::IpcStatus::InvalidState))break;continue;}
+            if(mode==L"locals-status-ok"){if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;continue;}
+            struct {veh::EnumLocalsResponse head;veh::LocalVariableInfo local;} response{};
+            response.head.status=veh::IpcStatus::Ok;
+            response.head.count=mode==L"locals-empty"?0u:mode==L"locals-count-short"?2u:1u;
+            strcpy_s(response.local.name,"value");strcpy_s(response.local.typeName,"uint32_t");
+            response.local.size=response.local.valueSize=4;response.local.value[0]=42;
+            response.local.flags=0x40; // SYMFLAG_PARAMETER
+            if(mode==L"locals-value-size")response.local.valueSize=sizeof(response.local.value)+1;
+            if(mode==L"locals-name")std::memset(response.local.name,'A',sizeof(response.local.name));
+            if(mode==L"locals-long") {
+                std::vector<uint8_t> oversized(sizeof(response)+1);
+                std::memcpy(oversized.data(),&response,sizeof(response));
+                if(!send(pipe,header.command,oversized.data(),static_cast<uint32_t>(oversized.size())))break;
+            } else {
+                const size_t size=mode==L"locals-empty"?sizeof(response.head):sizeof(response);
+                if(!send(pipe,header.command,&response,static_cast<uint32_t>(size)))break;
+            }
+        } else if ((localsMode || mode.rfind(L"stack-",0)==0 || mode.rfind(L"control-",0)==0) &&
                    command==veh::IpcCommand::GetRegisters) {
             veh::GetRegistersResponse response{};
             response.status=veh::IpcStatus::Ok;response.regs.rip=0x1234;response.regs.is32bit=1;
@@ -1216,12 +1243,12 @@ int wmain(int argc, wchar_t** argv) {
                 response.exitCode=7;
                 if(!reply(pipe,header.command,response))break;
             }
-        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode)&&command==veh::IpcCommand::SetBreakpoint){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode||localsMode)&&command==veh::IpcCommand::SetBreakpoint){
             fixtureBreakpointId=mode==L"path-file-output"?(fixtureBreakpointId?fixtureBreakpointId+1:9001):9001;
             if(!reply(pipe,header.command,veh::SetBreakpointResponse{veh::IpcStatus::Ok,fixtureBreakpointId}))break;
-        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode)&&command==veh::IpcCommand::RemoveBreakpoint){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode||localsMode)&&command==veh::IpcCommand::RemoveBreakpoint){
             if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
-        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode)&&command==veh::IpcCommand::Continue){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode||localsMode)&&command==veh::IpcCommand::Continue){
             veh::ContinueRequest request{};
             if(bytes.size()!=sizeof(request))break;
             std::memcpy(&request,bytes.data(),sizeof(request));
@@ -1299,6 +1326,7 @@ int wmain(int argc, wchar_t** argv) {
             }
             if(mode.rfind(L"local-",0)==0)sprintf_s(threads.thread.name,"fixture-agent:%lu",GetCurrentProcessId());
             if(mode==L"shellcode-action")sprintf_s(threads.thread.name,"shellcode-calls:%u",shellcodeRequests);
+            if(localsMode)sprintf_s(threads.thread.name,"locals-calls:%u",localsRequests);
             if(stopIdentityMode)std::snprintf(threads.thread.name,sizeof(threads.thread.name),
                 "a=%u,n=%u,h=%u,c=%u,i=%u,l=%u,e=%u,s=%llu",conditionalResumes,conditionalCalls,moduleHeld?1u:0u,
                 deferredContinueCalls,identityQueries,legacyStopQueries,exceptionHeld?1u:0u,static_cast<unsigned long long>(lastConditionalSequence));

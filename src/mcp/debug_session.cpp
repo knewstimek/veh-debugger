@@ -1434,17 +1434,23 @@ bool DebugSession::DisplayType(const DisplayTypeRequest& request, DisplayTypeRes
 	return true;
 }
 
-std::vector<LocalVarEntry> DebugSession::EnumLocals(uint32_t threadId, uint64_t instrAddr, uint64_t frameBase) {
+std::vector<LocalVarEntry> DebugSession::EnumLocals(uint32_t threadId, uint64_t instrAddr, uint64_t frameBase, std::string* error) {
 	std::vector<LocalVarEntry> result;
+    if(error)error->clear();
+    std::string detail;
 
 	// If not provided, get from top frame
 	if (instrAddr == 0 || frameBase == 0) {
-		auto frames = GetStackTrace(threadId, 1);
+		auto frames = GetStackTrace(threadId, 1, &detail);
+        if(!detail.empty()) {if(error)*error=detail;return result;}
 		if (!frames.empty()) {
 			if (instrAddr == 0) instrAddr = frames[0].address;
 			if (frameBase == 0) frameBase = frames[0].frameBase;
 		}
-		if (instrAddr == 0) return result;
+		if (instrAddr == 0) {
+            if(error)*error="EnumLocals: selected frame instruction address is unavailable";
+            return result;
+        }
 	}
 
 	EnumLocalsRequest req{};
@@ -1453,18 +1459,14 @@ std::vector<LocalVarEntry> DebugSession::EnumLocals(uint32_t threadId, uint64_t 
 	req.frameBase = frameBase;
 
 	std::vector<uint8_t> respData;
-	if (!ipcTransport_->SendAndReceive(IpcCommand::EnumLocals, &req, sizeof(req), respData))
-		return result;
-
-	if (respData.size() < sizeof(EnumLocalsResponse)) return result;
-	auto* resp = reinterpret_cast<const EnumLocalsResponse*>(respData.data());
-	if (resp->status != IpcStatus::Ok) return result;
-
-	auto* locals = reinterpret_cast<const LocalVariableInfo*>(respData.data() + sizeof(EnumLocalsResponse));
-	uint32_t count = resp->count;
-	const size_t maxItems = (respData.size() > sizeof(EnumLocalsResponse))
-		? (respData.size() - sizeof(EnumLocalsResponse)) / sizeof(LocalVariableInfo) : 0;
-	if (count > maxItems) count = static_cast<uint32_t>(maxItems);
+    EnumLocalsResponse header{};
+    if(!ReceiveBackendReply(IpcCommand::EnumLocals,&req,sizeof(req),respData,"EnumLocals",detail)||
+       !ValidateEnumLocalsReply(respData,header,detail)) {
+        if(error)*error=detail;
+        return result;
+    }
+    const auto* locals=reinterpret_cast<const LocalVariableInfo*>(respData.data()+sizeof(header));
+    const uint32_t count=header.count;
 
 	result.reserve(count);
 	for (uint32_t i = 0; i < count; i++) {

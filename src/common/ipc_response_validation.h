@@ -55,4 +55,22 @@ inline bool ValidateStackTraceReply(const std::vector<uint8_t>& bytes,
     return true;
 }
 
+inline bool ValidateEnumLocalsReply(const std::vector<uint8_t>& bytes,
+    EnumLocalsResponse& header, std::string& error) {
+    if(!ValidateBackendStatus(bytes,"EnumLocals",error))return false;
+    if(bytes.size()<sizeof(header))return false;
+    std::memcpy(&header,bytes.data(),sizeof(header));
+    const size_t payload=bytes.size()-sizeof(header);
+    if(payload%sizeof(LocalVariableInfo)||header.count!=payload/sizeof(LocalVariableInfo)||
+       header.count>kMaxLocals)return false;
+    for(uint32_t i=0;i<header.count;++i) {
+        LocalVariableInfo local{};
+        std::memcpy(&local,bytes.data()+sizeof(header)+size_t(i)*sizeof(local),sizeof(local));
+        if(!std::memchr(local.name,'\0',sizeof(local.name))||
+           !std::memchr(local.typeName,'\0',sizeof(local.typeName))||
+           local.valueSize>sizeof(local.value))return false;
+    }
+    error.clear();return true;
+}
+
 } // namespace veh

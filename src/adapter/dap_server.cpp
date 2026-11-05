@@ -2187,26 +2187,22 @@ void DapServer::OnVariables(const Request& req) {
 			}
 		}
 
-		if (instrAddr == 0) {
-			Variable v;
-			v.name = "(no frame info)";
-			v.value = "Frame data not available";
-			v.type = "string";
-			varsJson.push_back(v.ToJson());
-		} else {
+        if(instrAddr==0) {
+            Response failed;failed.request_seq=req.seq;failed.command="variables";
+            failed.success=false;failed.message="EnumLocals: selected frame instruction address is unavailable";
+            SendResponse(failed);return;
+        } else {
 			EnumLocalsRequest locReq{};
 			locReq.threadId = threadId;
 			locReq.instructionAddress = instrAddr;
 			locReq.frameBase = fBase;
 
 			std::vector<uint8_t> locData;
-			if (ipcTransport_->SendAndReceive(IpcCommand::EnumLocals, &locReq, sizeof(locReq), locData)
-				&& locData.size() >= sizeof(EnumLocalsResponse)) {
-				auto* locResp = reinterpret_cast<const EnumLocalsResponse*>(locData.data());
-				auto* locals = reinterpret_cast<const LocalVariableInfo*>(
-					locData.data() + sizeof(EnumLocalsResponse));
-				uint32_t maxCount = (uint32_t)((locData.size() - sizeof(EnumLocalsResponse)) / sizeof(LocalVariableInfo));
-				uint32_t count = std::min(locResp->count, maxCount);
+            EnumLocalsResponse header{};std::string error;
+            if(ReceiveBackendReply(IpcCommand::EnumLocals,&locReq,sizeof(locReq),locData,error)&&
+               ValidateEnumLocalsReply(locData,header,error)) {
+                const auto* locals=reinterpret_cast<const LocalVariableInfo*>(locData.data()+sizeof(header));
+                const uint32_t count=header.count;
 
 				for (uint32_t i = 0; i < count; i++) {
 					// IPC 고정 크기 char[] null 종단 강제 (손상된 데이터 방어)
@@ -2323,27 +2319,18 @@ void DapServer::OnVariables(const Request& req) {
 					v.evaluateName = addrBuf;
 
 					// Flags info: parameter vs local
-					if (locals[i].flags & 0x00000008) { // SYMFLAG_PARAMETER
+					if (locals[i].flags & 0x00000040) { // SYMFLAG_PARAMETER
 						v.name = "[param] " + v.name;
 					}
 
 					varsJson.push_back(v.ToJson());
 				}
 
-				if (count == 0) {
-					Variable v;
-					v.name = "(no locals)";
-					v.value = "No local variables found in this frame";
-					v.type = "string";
-					varsJson.push_back(v.ToJson());
-				}
-			} else {
-				Variable v;
-				v.name = "(error)";
-				v.value = "Failed to enumerate local variables";
-				v.type = "string";
-				varsJson.push_back(v.ToJson());
-			}
+            } else {
+                Response failed;failed.request_seq=req.seq;failed.command="variables";
+                failed.success=false;failed.message=error;
+                SendResponse(failed);return;
+            }
 		}
 	}
 

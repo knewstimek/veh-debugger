@@ -277,7 +277,7 @@ public:
 	std::vector<ModuleEntry> GetModules(std::string* error = nullptr);
     bool GetModuleIdentity(uint64_t base, GetModuleIdentityResponse& identity, std::string& error);
 	std::string DescribeIpcFailure(const PipeExchangeDiagnostics* diagnostics = nullptr) const;
-	std::vector<LocalVarEntry> EnumLocals(uint32_t threadId, uint64_t instrAddr, uint64_t frameBase);
+	std::vector<LocalVarEntry> EnumLocals(uint32_t threadId, uint64_t instrAddr, uint64_t frameBase, std::string* error = nullptr);
 	// At most kSymbolizeMaxAddresses; empty on failure
 	std::vector<SymbolizeEntry> Symbolize(const std::vector<uint64_t>& addresses);
 	// false when the type is unknown or the call failed
