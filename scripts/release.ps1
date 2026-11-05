@@ -276,7 +276,8 @@ function Invoke-ReleaseTests {
         'test/test_operation_lifetime.py',
         'test/test_address_space_deadline.py',
         'test/test_pipe_write_failure.py',
-        'test/test_dap_deferred_loader_stop.py'
+        'test/test_dap_deferred_loader_stop.py',
+        'test/test_dap_stop_identity.py'
     )
     foreach ($test in $tests) {
         $name = [System.IO.Path]::GetFileNameWithoutExtension($test)
@@ -298,7 +299,7 @@ function Invoke-ReleaseTests {
         'test_session_receipts.py', 'test_system_receipts.py',
         'test_session_operations.py', 'test_operation_lifetime.py',
         'test_address_space_deadline.py', 'test_pipe_write_failure.py',
-        'test_dap_deferred_loader_stop.py',
+        'test_dap_deferred_loader_stop.py', 'test_dap_stop_identity.py',
         '--build-dir', 'build32', '--jobs', '1', '--timeout', '180'
     )
     Invoke-Logged 'trace-parity-x64-x86' 'py' @(

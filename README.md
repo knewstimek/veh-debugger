@@ -96,7 +96,7 @@ veh_trace_basic_blocks(threadId=..., start="game.exe+0x12000", end="game.exe+0x1
 				       collect_code=true, max_code_bytes=262144, max_code_versions=4096,
                        dependency_sources=["rcx", {"address":"game.exe+0x5000","size":4,"label":"input"}])
 ```
-프로세스 트레이스의 기본값은 `output_mode="file"`이다. 전체 결과는 MCP 호스트의 임시 `veh-mcp-artifacts` 폴더에 고유 JSON 파일로 저장하고, 응답에는 경로·SHA-256·크기·개수·중단 사유·누락 및 잘림 여부를 반환한다. 짧은 결과를 직접 받으려면 `output_mode="inline"`을 명시한다. 파일 보존·정리는 호출자가 담당한다. 위 긴 수집 예제의 `events_output="file"`은 별도의 이벤트 스트리밍 옵션이며, 지원하는 로컬 백엔드에서 inline 이벤트 개수 제한 대신 파일 용량 제한을 사용한다.
+프로세스 트레이스의 기본값은 `output_mode="file"`이다. 전체 결과는 MCP 호스트의 임시 `veh-mcp-artifacts` 폴더에 고유 JSON 파일로 저장하고, 응답에는 경로·SHA-256·크기·개수·중단 사유·누락 및 잘림 여부를 반환한다. 짧은 결과를 직접 받으려면 `output_mode="inline"`을 명시한다. JSON 응답이 64KiB를 넘으면 inline 요청도 전체 결과를 파일로 저장하고 경로·크기·해시를 반환한다. 파일 보존·정리는 호출자가 담당한다. 위 긴 수집 예제의 `events_output="file"`은 별도의 이벤트 스트리밍 옵션이며, 지원하는 로컬 백엔드에서 inline 이벤트 개수 제한 대신 파일 용량 제한을 사용한다.
 
 wire12 process 백엔드는 실행이 도달한 블록을 lazy decode한다. `max_steps`(기본 100만 실행)와 `max_decoded_instructions`(기본 100만 캐시 항목)는 독립적이며, 큰 실행량은 정확한 문자열로도 지정할 수 있다. 지원 여부는 `backend.basicTrace`, 적용값은 `resource_limits`로 확인한다. [옵션·메모리 한도·호환 규약](docs/TRACE_LAZY_DECODE.md)을 참고한다.
 

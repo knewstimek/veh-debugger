@@ -251,7 +251,8 @@ collection continues and marks the ordered register stream incomplete.
 Process MCP results default to `output_mode="file"` independently of the backend
 wire format. The host writes a generated JSON/JSONL artifact when `output_file` is
 omitted and returns the existing bounded receipt. Explicit `output_mode="inline"`
-returns the full prior JSON shape. Direct, batch and breakpoint actions share this
+returns the full prior JSON shape up to 64KiB; larger replies return a file
+receipt whose JSON artifact contains the full result. Direct, batch and breakpoint actions share this
 policy; callers own retained files. Result storage does not remove inline event
 caps or enable unsupported remote data pipes. Long ordered captures still require
 explicit, backend-supported `events_output="file"`. KD uses its separate capture

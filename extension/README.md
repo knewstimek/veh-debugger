@@ -29,7 +29,7 @@ Function-breakpoint module guards support automatic release after loader-safe bi
 - **MCP tool server** — Debugger operations exposed directly to AI agents (Claude, Cursor, Codex, etc.)
 - **Bounded semantic tracing** — Aggregate blocks/edges plus optional ordered block, memory-access, register-delta, and runtime-code events in one sequence space without per-instruction MCP traffic
 - **Kernel and hardware instruction tracing (MCP)** — Selected-CPU KD tracing and capability-negotiated CR/MSR/scalar I/O events, with portable files, exact values and offline read/analysis
-- **File-backed trace results** — Process basic-block traces save JSON/JSONL results to generated host files by default and return compact path/hash/count/drop/truncation receipts. Explicit `output_mode="inline"` returns full JSON. Separately stream ordered events to `.vte` or up to 400 MiB of runtime code to `.vtc` on supported local backends
+- **File-backed trace results** — Process basic-block traces save JSON/JSONL results to generated host files by default and return compact path/hash/count/drop/truncation receipts. Explicit `output_mode="inline"` returns full JSON up to 64KiB; larger replies return a file receipt. Separately stream ordered events to `.vte` or up to 400 MiB of runtime code to `.vtc` on supported local backends
 - **Occurrence-scoped capture** — Collect selected dispatcher/instruction visits and combine them explicitly with start, stop, and collection conditions
 - **Repeatable analysis sessions** — Capture bounded thread checkpoints including TEB and FS/GS metadata, run input matrices through `veh_batch`, or write occurrence-centered code/register/memory/environment artifacts with `veh_targeted_capture`
 
@@ -150,7 +150,8 @@ share the same trace semantics. Process results default to `output_mode="file"`:
 `output_file` optionally selects a new path, otherwise a unique file is generated
 under the MCP host temporary `veh-mcp-artifacts` directory. `output_format` selects
 JSON or JSONL for either path. Explicit `output_mode="inline"` returns full JSON
-and cannot be combined with `output_file` or `output_format`. Callers own file
+up to 64KiB; larger replies return a file receipt with path, size and hash.
+Inline requests cannot be combined with `output_file` or `output_format`. Callers own file
 retention and cleanup. This result policy does not change collection limits:
 `events_output="file"` separately enables ordered-event streaming on supported
 local backends; remote target-side file pipes remain unsupported.
