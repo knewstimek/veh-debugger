@@ -1,5 +1,7 @@
 # MCP trace development tools
 
+The additive [register-context v1 contract](REGISTER_CONTEXT.md) separates stopped register width from process bitness. Build and run `register-context-contract` to check legacy discovery, explicit selection, invalid requests and unchanged wire layouts. `test/test_caller_capture.py` covers existing direct/batch/action replies and malformed peers.
+
 These bounded command-line helpers are the preferred way to reproduce and validate MCP trace changes. Run them from the repository root. Examples use only synthetic build targets; do not commit local machine paths, credentials, private target names, trace artifacts, or details that identify a real analyzed program.
 
 ## Release metadata boundary

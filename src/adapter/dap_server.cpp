@@ -341,7 +341,7 @@ bool DapServer::AttachGuestAgent(const Request& req, std::string& error) {
 	}
 	std::vector<uint8_t> bytes;
 	GetCapabilitiesResponse caps{};
-	if (!ipcTransport_->SendAndReceive(IpcCommand::GetCapabilities, nullptr, 0, bytes) ||
+	if (!ipcTransport_->QueryContextCapabilities(bytes) ||
 		bytes.size() != sizeof(caps)) {
 		error = "Guest agent did not provide complete capabilities";
 		abort();
@@ -697,7 +697,10 @@ void DapServer::OnLaunch(const Request& req) {
 	// VEH 설치 완료(Ready) 대기 (reader 시작 후 -- condvar). 실패해도 진행(보수적).
 	if (!ipcTransport_->WaitForReady(3000)) {
 		LOG_WARN("No Ready after connect (pid=%u); proceeding (VEH may not be installed yet)", targetPid_);
-	}
+	} else {
+        std::vector<uint8_t> capabilities;
+        ipcTransport_->QueryContextCapabilities(capabilities);
+    }
 	ipcTransport_->StartHeartbeat();
 
 	// 타겟 비트니스에 맞게 디스어셈블러 재생성
@@ -793,7 +796,10 @@ void DapServer::OnAttach(const Request& req) {
 	// VEH 설치 완료(Ready) 대기 (reader 시작 후 -- condvar). 실패해도 진행(보수적).
 	if (!ipcTransport_->WaitForReady(3000)) {
 		LOG_WARN("No Ready after connect (pid=%u); proceeding (VEH may not be installed yet)", targetPid_);
-	}
+	} else {
+        std::vector<uint8_t> capabilities;
+        ipcTransport_->QueryContextCapabilities(capabilities);
+    }
 	ipcTransport_->StartHeartbeat();
 
 	// 타겟 비트니스에 맞게 디스어셈블러 재생성
@@ -2959,7 +2965,10 @@ void DapServer::OnRestart(const Request& req) {
 		// VEH 설치 완료(Ready) 대기 (reader 시작 후 -- condvar). 실패해도 진행(보수적).
 		if (!ipcTransport_->WaitForReady(3000)) {
 			LOG_WARN("No Ready after reconnect (pid=%u); proceeding", targetPid_);
-		}
+		} else {
+            std::vector<uint8_t> capabilities;
+            ipcTransport_->QueryContextCapabilities(capabilities);
+        }
 		ipcTransport_->StartHeartbeat();
 
 		// targetProcess_ + symbolEngine_ 재초기화 (attach 모드)
@@ -3035,7 +3044,10 @@ void DapServer::OnRestart(const Request& req) {
 		// VEH 설치 완료(Ready) 대기 (reader 시작 후 -- condvar). 실패해도 진행(보수적).
 		if (!ipcTransport_->WaitForReady(3000)) {
 			LOG_WARN("No Ready after reconnect (pid=%u); proceeding", targetPid_);
-		}
+		} else {
+            std::vector<uint8_t> capabilities;
+            ipcTransport_->QueryContextCapabilities(capabilities);
+        }
 		ipcTransport_->StartHeartbeat();
 
 		// targetProcess_ + symbolEngine_ 재초기화

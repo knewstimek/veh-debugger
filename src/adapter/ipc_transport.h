@@ -45,6 +45,20 @@ public:
 		std::vector<uint8_t>& response, int timeoutMs = 3000,
 		PipeExchangeDiagnostics* diagnostics = nullptr) = 0;
 	virtual bool WaitForReady(int timeoutMs = 3000) = 0;
+    bool QueryContextCapabilities(std::vector<uint8_t>& response,int timeoutMs=1500) {
+        // Discover with the unchanged request first. Never send an extension
+        // payload to a legacy peer which has not advertised support.
+        if(!SendAndReceive(IpcCommand::GetCapabilities,nullptr,0,response,timeoutMs))return false;
+        GetCapabilitiesResponse caps{};
+        if(response.size()<sizeof(caps))return true;
+        std::memcpy(&caps,response.data(),sizeof(caps));
+        if(caps.status!=IpcStatus::Ok||!(caps.flags&kCapRegisterContextV1))return true;
+        const GetCapabilitiesRequestV1 request={1,kCapRegisterContextV1};
+        if(!SendAndReceive(IpcCommand::GetCapabilities,&request,sizeof(request),response,timeoutMs)||
+           response.size()<sizeof(caps))return false;
+        std::memcpy(&caps,response.data(),sizeof(caps));
+        return caps.status==IpcStatus::Ok&&(caps.flags&kCapRegisterContextV1);
+    }
 	virtual void StartEventListener(EventCallback cb) = 0;
 	virtual void StopEventListener() = 0;
 	virtual void StartHeartbeat() = 0;

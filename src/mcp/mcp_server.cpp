@@ -1101,7 +1101,8 @@ bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
         address = found.matches[0].address;
     };
     const auto inTargetWidth = [&](uint64_t address) {
-        return !session_.IsAttached() || session_.TargetAddressBits() != 32 || address <= UINT32_MAX;
+        return !session_.IsAttached() || session_.TargetAddressBits() != 32 || address <= UINT32_MAX ||
+            (session_.GetBackendInfo().reported&&(session_.GetBackendInfo().flags&kCapRegisterContextV1));
     };
     if (literal(text, out)) return inTargetWidth(out);
     const auto plus = text.find('+');
@@ -1362,7 +1363,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}, {"required", json::array({"threadId"})}}}}),
 
 		Tool(&McpServer::ToolRegisters, "inspect", kLite | kInteractive, true,
-			{{"name", "veh_registers"}, {"description", "Get CPU registers for a thread. 32-bit targets return eax/ebx/.../esp/eip; 64-bit targets return rax/.../rsp/rip plus r8-r15. The is32bit flag tells which set to expect."},
+			{{"name", "veh_registers"}, {"description", "Get CPU registers for a thread. With context-register capability, names follow the observed context independently of process bitness: eax/ebx/.../esp/eip for32-bit, rax/.../rsp/rip plus r8-r15 for64-bit. The is32bit flag tells which set to expect; legacy backends use process bitness."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}},
 			{"fields", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Return only these registers (e.g. [\"rsp\",\"rip\"]); is32bit is always included"}}}

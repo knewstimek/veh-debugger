@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <cstring>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -408,7 +409,7 @@ struct RegisterSet {
 	uint64_t dr6, dr7;
 	// XMM registers
 	uint8_t  xmm[16][16]; // XMM0~XMM15
-	uint8_t  is32bit;      // 1이면 32비트 프로세스 (eax~eip만 유효)
+	uint8_t  is32bit;      // Legacy: process bitness. kCapRegisterContextV1: this context is32-bit (eax..eip valid), independently of process bitness.
 };
 
 struct GetRegistersRequest {
@@ -2108,6 +2109,9 @@ static_assert(sizeof(VirtualCpuInstructionRecord)==96);
 // everything it knows".
 enum class IpcBackend : uint32_t { VehDll = 0, Hypervisor = 1 };
 
+// Opt-in register context v1: shape follows the observed stopped code width;
+// process image bitness remains separate target metadata. Wire layouts unchanged.
+constexpr uint32_t kCapRegisterContextV1 = 1u << 10;
 constexpr uint32_t kCapStopIdentityV1 = 1u << 9; // opt-in hold identity and atomic ContinueIfStopped
 constexpr uint32_t kCapBasicTraceLazy = 1u << 8; // wire12 lazy decode, cache budget and 64-bit steps
 constexpr uint32_t kCapValueScanV2 = 1u << 7; // transactional disk/undo and event-driven async value scans
@@ -2133,6 +2137,19 @@ struct GetTargetInfoResponse {
 };
 static_assert(sizeof(GetTargetInfoResponse) == 16);
 
+// Empty requests discover support without changing legacy register semantics.
+// Version1 explicitly enables the requested opt-in flags for this connection.
+struct GetCapabilitiesRequestV1 { uint32_t version,flags; };
+static_assert(sizeof(GetCapabilitiesRequestV1)==8);
+// Parse selection before changing connection state. Empty discovery retains the
+// current selection; malformed/unknown requests leave it unchanged.
+inline bool SelectRegisterContext(const void* payload,uint32_t size,uint32_t current,uint32_t* selected) {
+    if(!size){*selected=current;return true;}
+    if(!payload||size!=sizeof(GetCapabilitiesRequestV1))return false;
+    GetCapabilitiesRequestV1 request{};std::memcpy(&request,payload,sizeof(request));
+    if(request.version!=1||(request.flags&~kCapRegisterContextV1))return false;
+    *selected=request.flags;return true;
+}
 struct GetCapabilitiesResponse {
 	IpcStatus  status;
 	IpcBackend backend;

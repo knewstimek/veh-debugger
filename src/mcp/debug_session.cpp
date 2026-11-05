@@ -181,7 +181,7 @@ bool DebugSession::ConnectExternalAgent(uint32_t pid, const ExternalAgent& agent
 void DebugSession::QueryBackendInfo() {
 	backendInfo_ = {};
 	std::vector<uint8_t> resp;
-	if (!ipcTransport_->SendAndReceive(IpcCommand::GetCapabilities, nullptr, 0, resp, 1500)) return;
+	if (!ipcTransport_->QueryContextCapabilities(resp,1500)) return;
 	if (resp.size() < sizeof(GetCapabilitiesResponse)) return;   // older DLL: bare InvalidArgs
 	GetCapabilitiesResponse caps;
 	memcpy(&caps, resp.data(), sizeof(caps));

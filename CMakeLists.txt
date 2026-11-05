@@ -4,6 +4,10 @@ project(VEHDebugger VERSION 1.2.4 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(register-context-contract test_target/register_context_contract.cpp)
+target_include_directories(register-context-contract PRIVATE src/common src)
+target_compile_options(register-context-contract PRIVATE /utf-8)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # MSVC 설정

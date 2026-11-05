@@ -150,8 +150,11 @@ json McpServer::ToolCallerCapture(const json& args) {
         (q.clock==cc::Clock::None&&(q.clockFrequency||(q.features&cc::SynchronizedClock)))||(q.clock==cc::Clock::MonotonicNs&&q.clockFrequency!=1000000000ULL))
         return {{"error","Invalid caller capture version, capabilities, clock or limits"}};
     const auto targetBits=session_.TargetAddressBits();
-    const bool targetSupported=targetBits==32 ? bool(q.features&cc::X86) :
-        targetBits==64 ? bool(q.features&cc::X64) : false;
+    const bool contextWidths=session_.GetBackendInfo().reported&&
+        (session_.GetBackendInfo().flags&kCapRegisterContextV1);
+    const bool targetSupported=(targetBits==32||targetBits==64)&&
+        (contextWidths?bool(q.features&(cc::X86|cc::X64)):
+         targetBits==32?bool(q.features&cc::X86):bool(q.features&cc::X64));
     const bool available=targetSupported&&(q.features&cc::Available)&&(q.features&cc::Registers)&&
         q.maxRecords&&q.maxBufferBytes>=sizeof(cc::Record)&&q.maxPageBytes>=sizeof(cc::Response)+sizeof(cc::Record)+q.maxStackBytes&&
         supports(IpcCommand::StartCallerCapture)&&supports(IpcCommand::StopCallerCapture)&&supports(IpcCommand::ReadCallerCapture);
@@ -172,10 +175,10 @@ json McpServer::ToolCallerCapture(const json& args) {
         if(!args.contains("address")||!args["address"].is_string()||
             !ParseAddress(args["address"].get<std::string>(),start.address)||!start.address)
             return {{"error","A nonzero function-entry address is required"}};
-        const auto bits=session_.TargetAddressBits();
+        auto bits=session_.TargetAddressBits();
         if(bits!=32&&bits!=64)return {{"error","Target address width is unknown"}};
-        if(bits==32&&(start.address>UINT32_MAX||!(q.features&cc::X86)))return {{"error","Address or capture architecture is unsupported"}};
-        if(bits==64&&!(q.features&cc::X64))return {{"error","Backend does not support x64 caller capture"}};
+        if(!contextWidths&&bits==32&&(start.address>UINT32_MAX||!(q.features&cc::X86)))return {{"error","Address or capture architecture is unsupported"}};
+        if(((!contextWidths&&bits==64)||start.address>UINT32_MAX)&&!(q.features&cc::X64))return {{"error","Backend does not support x64 caller capture"}};
         if(!U32(args,"stack_bytes",(std::min)(256u,q.maxStackBytes),q.maxStackBytes,start.stackBytes)||
             !U32(args,"buffer_records",(std::min)(4096u,q.maxRecords),q.maxRecords,start.bufferRecords)||
             !U32(args,"buffer_bytes",(std::min)(4u*1024*1024,q.maxBufferBytes),q.maxBufferBytes,start.bufferBytes)||
@@ -249,7 +252,10 @@ json McpServer::ToolCallerCapture(const json& args) {
             if(r.recordBytes!=sizeof(r)+r.stackCaptured||r.recordBytes>bytes.size()-offset||
                 r.stackRequested!=h.config.stackBytes||r.stackCaptured>r.stackRequested||
                 r.sequence!=h.cursor+i+1||r.functionAddress!=h.config.address||
-                r.pid!=session_.GetTargetPid()||!r.tid||r.addressBits!=session_.TargetAddressBits()||
+                r.pid!=session_.GetTargetPid()||!r.tid||(r.addressBits!=32&&r.addressBits!=64)||
+                (!contextWidths&&r.addressBits!=targetBits)||
+                (r.addressBits==32&&(!(q.features&cc::X86)||(contextWidths&&(r.validRegisters&0xFF00u))))||
+                (r.addressBits==64&&!(q.features&cc::X64))||
                 r.registers[cc::Rip]!=r.functionAddress||
                 (r.flags&~3u)||(r.validRegisters&~cc::kRegisterMask)||
                 (r.validRegisters&cc::kRequiredRegisters)!=cc::kRequiredRegisters||
