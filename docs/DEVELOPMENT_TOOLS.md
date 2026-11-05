@@ -4,7 +4,7 @@ The additive [register-context v1 contract](REGISTER_CONTEXT.md) separates stopp
 
 These bounded command-line helpers are the preferred way to reproduce and validate MCP trace changes. Run them from the repository root. Examples use only synthetic build targets; do not commit local machine paths, credentials, private target names, trace artifacts, or details that identify a real analyzed program.
 
-`veh_enum_locals` returns a successful empty `variables` array when the selected frame has no local symbols. Backend refusal, transport failure and malformed replies remain errors. MCP direct/batch/breakpoint actions and DAP variables use the same response validator; DAP does not insert placeholder variables for empty or failed queries. This does not change the wire layout or the actual `frameBase` used for frame selection.
+`veh_enum_locals` returns a successful empty `variables` array when the selected frame has no local symbols. Backend refusal, transport failure and malformed replies remain errors. MCP direct/batch/breakpoint actions and DAP variables use the same response validator; DAP does not insert placeholder variables for empty or failed queries. This does not change the wire layout or the actual `frameBase` used for frame selection. `veh_stack_trace` also preserves each backend frame's `returnAddress` as a hexadecimal string; zero means unavailable. The existing locals-only regression checks direct/batch/action forwarding of that field.
 
 ## Release metadata boundary
 

@@ -86,6 +86,7 @@ json McpServer::ToolStackTrace(const json& args) {
 		json frame = {
 			{"address", addrBuf},
 			{"frameBase", HexAddr(f.frameBase)},
+            {"returnAddress", HexAddr(f.returnAddress)},
 			{"module", f.moduleName},
 			{"function", f.functionName}
 		};

@@ -1231,7 +1231,7 @@ std::vector<StackFrame> DebugSession::GetStackTrace(uint32_t threadId, uint32_t 
 	for (uint32_t i = 0; i < count; i++) {
 		StackFrame f;
 		f.address = infos[i].address;
-		f.returnAddress = 0; // not in IPC struct
+		f.returnAddress = infos[i].returnAddress;
 		f.frameBase = infos[i].frameBase;
 		f.moduleBase = infos[i].moduleBase;
 		f.moduleName = infos[i].moduleName;

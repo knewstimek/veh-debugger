@@ -100,6 +100,9 @@ def check_locals_results():
                     else:
                         assert not variables["success"] and variables["message"], variables
                         assert not variables.get("body", {}).get("variables"), variables
+                frame_args = {"threadId": 77, "maxFrames": 1, "include_annotations": False}
+                wire_stack = client.tool("veh_stack_trace", frame_args)
+                assert wire_stack["frames"][0]["returnAddress"] == "0x5678", wire_stack
                 result = client.tool("veh_enum_locals", {"threadId": 77})
                 valid = mode in ("locals-empty", "locals-ok")
                 if valid:
@@ -107,10 +110,13 @@ def check_locals_results():
                 else:
                     assert "error" in result and "variables" not in result, (mode, result)
                 batch = client.tool("veh_batch", {"steps": [
-                    {"tool": "veh_enum_locals", "args": {"threadId": 77}}]})
+                    {"tool": "veh_enum_locals", "args": {"threadId": 77}},
+                    {"tool": "veh_stack_trace", "args": frame_args}]})
                 assert batch["results"][0]["result"] == result and batch["failed"] == (not valid), (mode, batch)
+                assert batch["results"][1]["result"] == wire_stack, (mode, batch)
                 installed = client.tool("veh_set_breakpoint", {"address": "0x1000", "action": [
-                    {"tool": "veh_enum_locals", "args": {"threadId": 77}}]})
+                    {"tool": "veh_enum_locals", "args": {"threadId": 77}},
+                    {"tool": "veh_stack_trace", "args": frame_args}]})
                 assert installed.get("success") and installed.get("hasAction"), installed
                 stop = client.tool("veh_continue", {"wait": True, "timeout": 4})
                 assert stop.get("breakpointId") == 7, stop
@@ -124,6 +130,7 @@ def check_locals_results():
         reports = [json.loads(line.split(marker, 1)[1]) for line in log.read_text(encoding="utf-8").splitlines()
                    if marker in line]
         assert [row["results"][0]["result"] for row in reports] == expected_errors, reports
+        assert all(row["results"][1]["result"] == wire_stack for row in reports), reports
     print("PASS locals empty/success/refusal/malformed MCP direct/batch/action and DAP variables parity")
 
 

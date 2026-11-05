@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve the backend's `returnAddress` in each `veh_stack_trace` frame, including direct, batch and breakpoint-action replies. A zero address means that no usable return address was recovered; the wire layout is unchanged.
+
 - Treat empty local-variable scopes as successful empty results across MCP and DAP. Preserve backend state/transport failures, reject malformed locals replies, and keep direct, batch and breakpoint-action results consistent. DAP uses the correct parameter flag.
 
 - Preserve the reported 1/2/4/8-byte width when formatting local integers and pointers, including 64-bit values and 32-bit pointers; identify parameters using the protocol's parameter flag. Stack replies expose each frame's `frameBase` for selecting caller locals.

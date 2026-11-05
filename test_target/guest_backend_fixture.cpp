@@ -1180,6 +1180,7 @@ int wmain(int argc, wchar_t** argv) {
             response.head.count=mode==L"stack-empty"?0u:mode==L"stack-short"?2u:1u;
             response.head.totalFrames=response.head.count;
             response.frame.address=0x1234;response.frame.frameBase=0x8000;
+            response.frame.returnAddress=0x5678;
             strcpy_s(response.frame.moduleName,"sample.dll");
             strcpy_s(response.frame.functionName,"SampleFunction");
             strcpy_s(response.frame.sourceFile,"sample.cpp");
