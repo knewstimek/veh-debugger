@@ -1354,7 +1354,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}}}}),
 
 		Tool(&McpServer::ToolStackTrace, "trace", 0, true,
-			{{"name", "veh_stack_trace"}, {"description", "Get stack trace for a thread. Backend/transport failures return errors; a successful empty stack returns zero frames."},
+			{{"name", "veh_stack_trace"}, {"description", "Get stack frames with address, frameBase and returnAddress (0x0 if unavailable). To inspect caller locals, pass that frame's address and frameBase to veh_enum_locals. Backend failures return errors; an empty stack is successful."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}},
 			{"maxFrames", {{"type", "integer"}, {"description", "Max frames to return (default: 20)"}}}
@@ -1396,7 +1396,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
 
 		Tool(&McpServer::ToolDisassemble, "inspect", kInteractive, true,
-			{{"name", "veh_disassemble"}, {"description", "Disassemble instructions at an address. threadId selects that stopped code context; address_bits explicitly selects32 or64 for other code. At the current stop PC, context width is automatic; otherwise process width is the default. Includes bounded saved annotation previews when an analysis directory is open; stale marks changed instruction bytes. Comments are user/AI assertions, not trusted symbols."},
+			{{"name", "veh_disassemble"}, {"description", "Disassemble at address; count defaults to20. At the current stop PC, negotiated context width is automatic; elsewhere process width is the default. Override with threadId for a stopped thread or address_bits=32|64, never both. Returns addressBits. Includes bounded saved annotation previews when an analysis directory is open; stale marks changed instruction bytes. Comments are user/AI assertions, not trusted symbols."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Address: hex, module+RVA or unique [module!]function"}}},
 			{"count", {{"type", "integer"}, {"description", "Number of instructions (default: 20)"}}},
@@ -1406,7 +1406,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}, {"required", json::array({"address"})}}}}),
 
 		Tool(&McpServer::ToolEnumLocals, "inspect", 0, true,
-			{{"name", "veh_enum_locals"}, {"description", "Enumerate local variables and parameters for a stopped thread's stack frame. Returns variable names, types, addresses, and values."},
+			{{"name", "veh_enum_locals"}, {"description", "Inspect locals/parameters for a stopped thread. Only threadId is needed for the top frame. For a caller frame, pass its address as instructionAddress and its frameBase from veh_stack_trace. Empty variables is success; invalid addresses and backend failures return errors."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}},
 			{"instructionAddress", {{"type", "string"}, {"description", "RIP/EIP hex address of the frame (auto-detected from top frame if omitted)"}}},
@@ -1972,7 +1972,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}, {"required", json::array({"address"})}}}}),
 
 		Tool(&McpServer::ToolResolveImports, "trace", 0, true,
-			{{"name", "veh_resolve_imports"}, {"description", "Resolve obfuscated/packed imports by single-stepping from thunk addresses until RIP enters a loaded DLL. Returns API names (module!function) for each thunk. Processes up to 2000 imports in a single call. With follow_exceptions=true, passes non-single-step exceptions (INT3, AV, PRIV_INSTRUCTION) to SEH handlers while keeping trace active -- enables resolving exception-based obfuscated thunks (Themida, VMProtect style). Thread must be stopped at a breakpoint."},
+			{{"name", "veh_resolve_imports"}, {"description", "Resolve obfuscated/packed imports by single-stepping from thunk addresses until RIP enters a loaded DLL. Returns API names (module!function) for each thunk. Backend failures return errors; unresolved entries remain per-thunk results. Processes up to 2000 imports in a single call. With follow_exceptions=true, passes non-single-step exceptions (INT3, AV, PRIV_INSTRUCTION) to SEH handlers while keeping trace active -- enables resolving exception-based obfuscated thunks (Themida, VMProtect style). Thread must be stopped at a breakpoint."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (must be stopped at breakpoint)"}}},
 			{"addresses", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Array of thunk addresses (hex or module+RVA)"}}},

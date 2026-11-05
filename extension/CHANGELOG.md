@@ -2,13 +2,9 @@
 
 ## Unreleased
 
-- Preserve the backend's `returnAddress` in each `veh_stack_trace` frame, including direct, batch and breakpoint-action replies. A zero address means that no usable return address was recovered; the wire layout is unchanged.
-
-- Treat empty local-variable scopes as successful empty results across MCP and DAP. Preserve backend state/transport failures, reject malformed locals replies, and keep direct, batch and breakpoint-action results consistent. DAP uses the correct parameter flag.
-
-- Preserve the reported 1/2/4/8-byte width when formatting local integers and pointers, including 64-bit values and 32-bit pointers; identify parameters using the protocol's parameter flag. Stack replies expose each frame's `frameBase` for selecting caller locals.
-
 ### Changed
+- **Mixed-mode inspection** -- optional register-context v1 negotiation separates stopped code width from process bitness. Disassembly selects the current stopped context automatically on supporting backends, with mutually exclusive `threadId`/`address_bits` overrides and an `addressBits` result. Legacy layouts and connections remain supported.
+- **Inspection guidance** -- synchronize READMEs, MCP descriptions and CLI help for automatic decode defaults, caller-frame locals, empty results versus errors, and the 64KiB inline trace limit.
 - **Caller-capture guidance** -- align Korean/English and extension READMEs, extension metadata, CLI help and MCP descriptions with the optional detailed workflow, backend/architecture checks, raw-snapshot limits and detour-only options. Compact common tool descriptions preserve the default profile's schema budget.
 - **Detailed caller capture (MCP)** -- optional capability-gated caller-capture v1 adds hit-time integer registers and raw stack prefixes, exact timestamps, bounded register filters, hit/time/storage limits, immutable pages and JSON/JSONL exports through `veh_trace_callers(mode="detailed")`. Direct, batch and breakpoint actions share the contract. Existing standard/detour modes and wire formats remain unchanged; collection requires backend support. Complete stack unwinding and typed arguments are not implied.
 - **Guest MCP entry launch** -- registered local guest backends can opt in with `guest_launch=true`. Validate nonce-bound creation receipts and actual PID/TID, address width and stopped entry registers before reporting success; continue once for `stopOnEntry=false`. Preserve uncertain requests without replay. DAP and remote guest launch remain unsupported.
@@ -19,6 +15,9 @@
 - **Process trace resource budgets** -- capability-gated wire12 decodes entered blocks lazily, checks changed instruction bytes before reuse, accepts large ranges and 64-bit execution ceilings, and exposes an independent `max_decoded_instructions` cache budget (default1,000,000). Process execution defaults to1,000,000 steps; explicit long timeouts and event files remain independent. Cache exhaustion stops precisely before an uncached instruction. x86 retains its address-space limits; unsupported peers reject new options before execution. See [lazy trace contract](../docs/TRACE_LAZY_DECODE.md).
 
 ### Fixed
+- **Local-variable address validation** -- malformed, negative, overflowing or non-integral explicit frame addresses now return an actionable error before IPC instead of silently selecting the top frame. Omitted/zero addresses keep automatic selection; direct, batch and breakpoint actions agree.
+- **Inspector results** -- preserve empty local scopes as success and backend/malformed-reply failures as errors across MCP/DAP. Format integer/pointer locals at their reported width and use the correct parameter flag. Stack frames preserve backend `frameBase` and `returnAddress` (zero means no usable return address), including nested calls; wire layouts stay unchanged.
+- **Import-probe errors** -- backend failures remain errors through direct, batch and breakpoint-action paths rather than appearing as successful empty analyses.
 - **POP to stack-addressed memory** -- memory write events of `pop [rsp]` / `pop [esp+disp]` report the address after the stack-pointer increment, as the CPU stores it; they were one slot low (the read slot), so traces showed the popped slot rewritten and the real destination untouched.
 - **Deferred module guard continuation (DAP)** -- optional stop-identity v1 lets the adapter release only its own internal module-load hold after a loader-safe breakpoint binding pass. Atomic conditional continuation preserves replaced/user/exception stops and rapid restops; missing proof keeps explicit pause behavior. Legacy messages and public MCP/DAP arguments remain unchanged. Backend implementation is required.
 - **Caller-capture availability** -- detailed status checks the attached target's address width, so an x86-only collector no longer appears available for an x64 target. Unsupported starts remain blocked before collection.

@@ -10,6 +10,8 @@ Persistent MCP comments and labels are managed through `veh_symbolize(analysis=.
 
 Function-breakpoint module guards support automatic release after loader-safe binding on backends implementing [stop identity v1](https://github.com/knewstimek/veh-debugger/blob/master/docs/STOP_IDENTITY.md). Exact identity/ownership is checked atomically; user/replaced holds remain stopped. Older backends keep explicit pause/continue behavior. Public DAP/MCP arguments are unchanged.
 
+For ordinary inspection, `veh_disassemble(address="...")` uses the observed mode at the current stop PC on supporting backends and the process width elsewhere; it returns `addressBits`. Only specify `threadId` or `address_bits=32|64` when an override is needed, never both. `veh_enum_locals(threadId=...)` defaults to the top frame. To inspect a caller, pass its `veh_stack_trace` frame's `address` as `instructionAddress` and its `frameBase` together. A zero `returnAddress` means unavailable. Empty `variables` is successful; invalid addresses and backend failures return errors. See [register context](https://github.com/knewstimek/veh-debugger/blob/master/docs/REGISTER_CONTEXT.md).
+
 ## Features
 
 - **Anti-debug friendly** — Uses VEH instead of `ntdll!DbgUiRemoteBreakin`, bypasses common anti-debug checks

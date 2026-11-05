@@ -103,6 +103,18 @@ def check_locals_results():
                 frame_args = {"threadId": 77, "maxFrames": 1, "include_annotations": False}
                 wire_stack = client.tool("veh_stack_trace", frame_args)
                 assert wire_stack["frames"][0]["returnAddress"] == "0x5678", wire_stack
+                if mode == "locals-ok":
+                    invalid_args = [{"threadId": 77, field: value}
+                        for field in ("instructionAddress", "frameBase")
+                        for value in ("bad-address", "0x1000junk", "-1",
+                                      "18446744073709551616", 1.5, True, None)]
+                    failures = [client.tool("veh_enum_locals", args) for args in invalid_args]
+                    assert all("unsigned decimal or 0x" in item.get("error", "")
+                               and "variables" not in item for item in failures), failures
+                    refused = client.tool("veh_batch", {"steps": [
+                        {"tool": "veh_enum_locals", "args": args} for args in invalid_args]})
+                    assert refused["failed"] == len(invalid_args), refused
+                    assert [item["result"] for item in refused["results"]] == failures, refused
                 result = client.tool("veh_enum_locals", {"threadId": 77})
                 valid = mode in ("locals-empty", "locals-ok")
                 if valid:
@@ -123,6 +135,18 @@ def check_locals_results():
                 threads = client.tool("veh_threads")
                 assert threads["threads"][0]["name"] == "locals-calls:3", (mode, threads)
                 if not valid: expected_errors.append(result)
+                if mode == "locals-ok":
+                    # The fixture dispatches actions on its first continue only.
+                    assert client.tool("veh_detach").get("success")
+                    assert client.tool("veh_attach", {"pid": 424242, "target_scope": "guest",
+                        "agent": AGENT, "agent_args": ["--metadata", mode]}).get("success")
+                    installed = client.tool("veh_set_breakpoint", {"address": "0x1000", "action": [
+                        {"tool": "veh_enum_locals", "args": invalid_args[0]},
+                        {"tool": "veh_stack_trace", "args": frame_args}]})
+                    assert installed.get("success") and installed.get("hasAction"), installed
+                    assert client.tool("veh_continue", {"wait": True, "timeout": 4}).get("breakpointId") == 7
+                    assert client.tool("veh_threads")["threads"][0]["name"] == "locals-calls:0"
+                    expected_errors.append(failures[0])
                 assert client.tool("veh_detach").get("success")
         finally:
             client.close(terminate_target=False)

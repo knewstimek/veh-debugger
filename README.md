@@ -10,6 +10,10 @@ Windows 프로세스를 VEH(Vectored Exception Handler)로 디버깅하는 인-�
 
 분석 코멘트·라벨은 기존 `veh_symbolize(analysis=...)`로 관리하고 MCP 디스어셈블·심볼 결과에서 확인합니다. 지정한 폴더의 JSON에 자동 저장하며, 빌드 변경·코드 변경·수정 충돌을 구분합니다. [분석 메모 사용법](docs/ANALYSIS_NOTES.md).
 
+`veh_disassemble(address="...")`는 기본 20개 명령을 보여 준다. 현재 정지 PC에서는 지원 백엔드의 실제 32/64비트 컨텍스트를 자동 선택하고, 다른 주소에서는 프로세스 비트수를 기본으로 쓴다. 필요할 때만 정지 스레드의 `threadId` 또는 명시적 `address_bits=32|64` 중 하나를 지정하며, 결과의 `addressBits`로 선택된 모드를 확인한다. [혼합 모드 규약](docs/REGISTER_CONTEXT.md).
+
+`veh_enum_locals(threadId=...)`만으로 최상위 프레임의 변수를 조회한다. 호출자 프레임은 `veh_stack_trace`에서 받은 해당 프레임의 `address`를 `instructionAddress`로, `frameBase`를 같은 이름의 인자로 함께 넘긴다. 스택의 `returnAddress="0x0"`은 복원할 수 없는 복귀 주소다. 정상 빈 범위는 `variables=[]`로, 잘못된 주소와 백엔드 실패는 `error`로 구분한다.
+
 ## 왜 VEH인가
 
 Windows Debug API를 쓰지 않는다. `DebugActiveProcess` / `NtSetInformationThread` 대신 타겟 안에서 VEH로 예외를 잡으므로 `PEB.BeingDebugged`가 0으로 유지된다. Themida, VMProtect의 PEB/NtQuery 기반 안티디버그 체크에 디버거가 보이지 않는다. (VEH 등록 자체를 스캔하는 EAC류 커널 안티치트는 예외.)
@@ -455,7 +459,7 @@ VM 자체에 연결할 때는 외부 백엔드를 VM 범위로 등록한 뒤
 | `veh_pause` | `threadId?` | 일시정지 |
 | `veh_threads` | - | 스레드 목록 (얼린 스레드는 `frozen` 표시) |
 | `veh_freeze_thread` | `threadId, frozen?` | 스레드 하나를 얼리거나 푼다. 얼린 스레드는 `veh_continue` 후에도 멈춰 있고(일시정지와 별도 카운트), detach 시 자동으로 풀린다. `threadId:0, frozen:false`는 전체 해제 |
-| `veh_stack_trace` | `threadId, maxFrames?` | 스택 트레이스. PDB 없는 모듈은 PE export 테이블을 직접 파싱해 정확한 함수명 제공 (DbgHelp의 부정확한 `OrdinalNNNNN` 라벨 대신) |
+| `veh_stack_trace` | `threadId, maxFrames?` | 스택 트레이스 (`address`, `frameBase`, `returnAddress`). PDB 없는 모듈은 PE export 테이블을 직접 파싱해 정확한 함수명 제공 (DbgHelp의 부정확한 `OrdinalNNNNN` 라벨 대신) |
 | `veh_enum_locals` | `threadId, instructionAddress?, frameBase?` | 정지된 스레드의 스택 프레임에서 지역변수/파라미터 열거 (이름/타입/주소/값). 생략 시 최상위 프레임 자동 감지 (PDB 필요) |
 | `veh_display_type` | `type, address?, depth?, max_members?` | WinDbg `dt`처럼 PDB 구조체 레이아웃 표시 (오프셋/타입/크기/비트필드/기본 클래스/중첩 멤버). `address`를 주면 스칼라/포인터/enum/비트필드 값까지 읽음. `module!Type` 형식 지원 (PDB 필요) |
 | `veh_symbolize` | `address`/`addresses` 또는 `name, max_results?` | 이름 검색은 최대 10개 후보와 중복·잘림 여부 반환. 유일한 후보만 자동 주소 해석. 주소를 `module!function+offset`으로 변환 (PDB 심볼, 없으면 export, 없으면 module+RVA) + 소스 파일/줄. 최대 256개 |
@@ -475,7 +479,7 @@ VM 자체에 연결할 때는 외부 백엔드를 VM 범위로 등록한 뒤
 | `veh_free_memory` | `address` | 할당된 메모리 해제 (VirtualFree) |
 | `veh_execute_shellcode` | `shellcode, timeout_ms?` | 셸코드 실행 (RWX 할당+복사+스레드 생성+대기+해제) |
 | `veh_modules` | - | 모듈 목록 |
-| `veh_disassemble` | `address, count?` | 디스어셈블리 (Zydis) |
+| `veh_disassemble` | `address, count?, threadId?, address_bits?` | 현재 정지 모드 자동 선택, 그 밖은 프로세스 비트수. 선택 인자 둘은 함께 사용 불가. 결과에 `addressBits` 표시 (Zydis) |
 | `veh_exception_info` | - | 마지막 예외 정보 조회 |
 | `veh_trace_register` | `threadId, register, mode?, value?, max_steps?` | 레지스터 변화 추적 (DLL 내부 스텝 루프, IPC 오버헤드 0) |
 | `veh_trace_memory` | `address, size?, timeout_ms?, duration_ms?, access?, max_entries?` | 기본은 첫 쓰기 감지. `duration_ms` 지정 시 쓰기 또는 읽기·쓰기 접근 횟수 수집 |

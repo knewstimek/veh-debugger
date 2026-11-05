@@ -10,6 +10,10 @@ Use `veh_symbolize(name="Function", max_results=10)` to list symbol candidates. 
 
 Persistent comments and labels use the existing `veh_symbolize(analysis=...)` interface and appear in MCP disassembly/symbol results. A chosen local directory holds JSON notes with build isolation, code-change markers and revision-checked edits. See [analysis notes](docs/ANALYSIS_NOTES.md).
 
+`veh_disassemble(address="...")` returns 20 instructions by default. At the current stop PC, supporting backends automatically select the observed 32/64-bit context; elsewhere process width is the default. Only override with a stopped `threadId` or explicit `address_bits=32|64` when needed, never both. The result's `addressBits` reports the selected mode. See [mixed-mode context](docs/REGISTER_CONTEXT.md).
+
+`veh_enum_locals(threadId=...)` selects the top frame. For caller locals, copy that `veh_stack_trace` frame's `address` into `instructionAddress` and pass its `frameBase` together. A stack `returnAddress="0x0"` means no usable return address was recovered. A valid empty scope returns `variables=[]`; invalid addresses and backend failures return `error`.
+
 ## Why VEH
 
 It doesn't use the Windows Debug API. Instead of `DebugActiveProcess` / `NtSetInformationThread`, it catches exceptions from inside the target via VEH, so `PEB.BeingDebugged` stays 0. The PEB/NtQuery-based anti-debug checks in Themida and VMProtect don't see the debugger. (Kernel anti-cheats that scan for VEH registration itself, like EAC, are the exception.)
@@ -416,7 +420,7 @@ The table below documents the complete public tool surface. Treat the running se
 | `veh_pause` | `threadId?` | Pause |
 | `veh_threads` | - | List threads (frozen threads are marked `frozen`) |
 | `veh_freeze_thread` | `threadId, frozen?` | Freeze or thaw one thread. A frozen thread stays suspended across `veh_continue` (separate from pause) and is thawed on detach. `threadId:0, frozen:false` thaws all |
-| `veh_stack_trace` | `threadId, maxFrames?` | Stack trace. For PDB-less modules, parses the PE export table directly for accurate function names (instead of DbgHelp's inaccurate `OrdinalNNNNN` labels) |
+| `veh_stack_trace` | `threadId, maxFrames?` | Stack trace with `address`, `frameBase` and `returnAddress`. For PDB-less modules, parses the PE export table directly for accurate function names (instead of DbgHelp's inaccurate `OrdinalNNNNN` labels) |
 | `veh_enum_locals` | `threadId, instructionAddress?, frameBase?` | Enumerate locals/parameters in a stopped thread's stack frame (name/type/address/value). Auto-detects the top frame if omitted (PDB required) |
 | `veh_display_type` | `type, address?, depth?, max_members?` | PDB struct layout like WinDbg `dt` (offsets, types, sizes, bitfields, base classes, nested members); with `address`, also scalar/pointer/enum/bitfield values. Accepts `module!Type` (PDB required) |
 | `veh_symbolize` | `address`/`addresses` or `name, max_results?` | Name search lists up to 10 candidates with ambiguity/truncation; only a complete unique match auto-resolves. Addresses to `module!function+offset` (PDB symbol, else export, else module+RVA) plus source file/line. Up to 256 |
@@ -436,7 +440,7 @@ The table below documents the complete public tool surface. Treat the running se
 | `veh_free_memory` | `address` | Free allocated memory (VirtualFree) |
 | `veh_execute_shellcode` | `shellcode, timeout_ms?` | Execute shellcode (alloc RWX + copy + CreateThread + wait + free) |
 | `veh_modules` | - | List modules |
-| `veh_disassemble` | `address, count?` | Disassemble (Zydis) |
+| `veh_disassemble` | `address, count?, threadId?, address_bits?` | Automatic current-stop mode, process width elsewhere; optional overrides are mutually exclusive. Returns `addressBits` (Zydis) |
 | `veh_exception_info` | - | Last exception info |
 | `veh_trace_register` | `threadId, register, mode?, value?, max_steps?` | Trace register changes (DLL-internal step loop, zero IPC overhead) |
 | `veh_trace_memory` | `address, size?, timeout_ms?, duration_ms?, access?, max_entries?` | First-write detection by default; `duration_ms` selects write or combined read/write collection |

@@ -10,6 +10,8 @@ Module enumeration and named-symbol candidates expose image bases, paths and PE 
 
 Analysis annotations are frontend-owned JSON metadata managed through existing MCP inspection tools. A selected directory is remembered, edits use lock/revision/atomic replacement, and backing-image identity plus RVA controls automatic binding. Unverifiable identities remain explicit unbound records. See [analysis notes](docs/ANALYSIS_NOTES.md).
 
+Inspection keeps process image width separate from the negotiated stopped register context ([v1 contract](docs/REGISTER_CONTEXT.md)). MCP disassembly needs only an address for the current stop; other addresses default to process width, with mutually exclusive `threadId`/`address_bits` overrides. Each request owns its decoder and reports `addressBits`. Stack replies preserve `frameBase` and `returnAddress`; caller-local lookup uses that frame's address and base together. Omitted/zero local addresses select the top frame, malformed explicit addresses fail before IPC, and successful empty scopes stay distinct from backend failures.
+
 ## Architecture
 
 ```

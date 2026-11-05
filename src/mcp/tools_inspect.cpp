@@ -227,17 +227,34 @@ json McpServer::ToolEnumLocals(const json& args) {
 	uint32_t threadId = JsonUint32(args, "threadId");
 	if (threadId == 0) return {{"error", "threadId is required"}};
 
-	uint64_t instrAddr = 0, frameBase = 0;
-	if (args.contains("instructionAddress")) {
-		auto& v = args["instructionAddress"];
-		if (v.is_string()) instrAddr = std::strtoull(v.get<std::string>().c_str(), nullptr, 0);
-		else if (v.is_number()) instrAddr = v.get<uint64_t>();
-	}
-	if (args.contains("frameBase")) {
-		auto& v = args["frameBase"];
-		if (v.is_string()) frameBase = std::strtoull(v.get<std::string>().c_str(), nullptr, 0);
-		else if (v.is_number()) frameBase = v.get<uint64_t>();
-	}
+    // Only omission/zero requests top-frame inference. Invalid text must not
+    // silently select another frame.
+    const auto address = [&](const char* key, uint64_t& value) {
+        if (!args.contains(key)) return true;
+        const auto& input = args[key];
+        if (input.is_number_unsigned()) { value = input.get<uint64_t>(); return true; }
+        if (input.is_number_integer() && input.get<int64_t>() >= 0) {
+            value = input.get<uint64_t>(); return true;
+        }
+        if (!input.is_string()) return false;
+        auto text = input.get<std::string>();
+        const auto first = text.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) return false;
+        text = text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
+        if (text.front() == '-' || text.front() == '+') return false;
+        try {
+            size_t consumed = 0;
+            value = std::stoull(text, &consumed, 0);
+            return consumed == text.size();
+        } catch (...) { return false; }
+    };
+    uint64_t instrAddr = 0, frameBase = 0;
+    for (const auto& field : {std::make_pair("instructionAddress", &instrAddr),
+                              std::make_pair("frameBase", &frameBase)}) {
+        if (!address(field.first, *field.second))
+            return {{"error", std::string(field.first) +
+                " must be an unsigned decimal or 0x hexadecimal address; omit it to use the top frame"}};
+    }
 
     std::string error;
 	auto locals = session_.EnumLocals(threadId, instrAddr, frameBase, &error);
@@ -387,7 +404,7 @@ json McpServer::ToolDisassemble(const json& args) {
     uint32_t bits = JsonUint32(args, "address_bits");
     if (bits && threadId) return {{"error", "Select threadId or address_bits, not both"}};
     if (!bits) bits = session_.DisassemblyAddressBits(addr, threadId);
-    if (bits != 32 && bits != 64) return {{"error", "Cannot determine the requested code context"}};
+    if (bits != 32 && bits != 64) return {{"error", "Cannot read the stopped code context; verify threadId is stopped, or select address_bits for known code"}};
     const auto annotationEpoch = JsonBool(args, "include_annotations", true) ? AnnotationEpoch() : std::string{};
 	auto insns = session_.Disassemble(addr, static_cast<uint32_t>(count), bits);
 	if (insns.empty()) {
