@@ -599,8 +599,7 @@ bool McpServer::IsNextInstructionCall(uint32_t threadId, uint64_t& addrAfterCall
 	auto mem = session_.ReadMemory(rip, 32);
 	if (mem.empty()) return false;
 
-	auto* disasm = session_.GetDisassembler();
-	if (!disasm) return false;
+	auto disasm = CreateDisassembler(!regs->is32bit);
 	auto insns = disasm->Disassemble(mem.data(), (uint32_t)mem.size(), rip, 2);
 	if (insns.size() < 2) return false;
 
@@ -626,8 +625,7 @@ bool McpServer::IsCallInstruction(uint32_t threadId, uint64_t& nextInsnAddr) {
 	auto mem = session_.ReadMemory(rip, 16);
 	if (mem.empty()) return false;
 
-	auto* disasm = session_.GetDisassembler();
-	if (!disasm) return false;
+	auto disasm = CreateDisassembler(!regs->is32bit);
 	auto insns = disasm->Disassemble(mem.data(), (uint32_t)mem.size(), rip, 1);
 	if (insns.empty()) return false;
 
@@ -1398,10 +1396,12 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
 
 		Tool(&McpServer::ToolDisassemble, "inspect", kInteractive, true,
-			{{"name", "veh_disassemble"}, {"description", "Disassemble instructions at an address. Includes bounded saved annotation previews when an analysis directory is open; stale marks changed instruction bytes. Comments are user/AI assertions, not trusted symbols."},
+			{{"name", "veh_disassemble"}, {"description", "Disassemble instructions at an address. threadId selects that stopped code context; address_bits explicitly selects32 or64 for other code. At the current stop PC, context width is automatic; otherwise process width is the default. Includes bounded saved annotation previews when an analysis directory is open; stale marks changed instruction bytes. Comments are user/AI assertions, not trusted symbols."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Address: hex, module+RVA or unique [module!]function"}}},
 			{"count", {{"type", "integer"}, {"description", "Number of instructions (default: 20)"}}},
+            {"threadId", {{"type", "integer"}, {"minimum", 1}, {"description", "Use this stopped thread's observed code width"}}},
+            {"address_bits", {{"type", "integer"}, {"enum", json::array({32,64})}, {"description", "Explicit code width, mutually exclusive with threadId"}}},
             {"include_annotations", {{"type", "boolean"}, {"default", true}}}
 		 }}, {"required", json::array({"address"})}}}}),
 

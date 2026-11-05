@@ -76,6 +76,9 @@ int wmain(int argc, wchar_t** argv) {
     const bool machineMode=mode.rfind(L"machine",0)==0;
     const bool vmMode=mode.rfind(L"vm",0)==0||machineMode;uint32_t vmState=2,detachFailures=0;
     uint32_t continueRequests = 0, pauseRequests = 0, resolveRequests = 0;
+    const bool contextMode = mode == L"control-context";
+    uint32_t contextSelection = 0;
+    bool contextNative = false;
     uint32_t pathRequests = 0, hardwareQueries = 0;
     const bool hardwareMode = mode.rfind(L"hardware-", 0) == 0;
     uint32_t fixtureBreakpointId = 0, shellcodeRequests=0, localThreadQueries=0;
@@ -172,7 +175,14 @@ int wmain(int argc, wchar_t** argv) {
             if (mode == L"cap-exit") ExitProcess(0xC0000135U);
             veh::GetCapabilitiesResponse caps{};
             caps.status = veh::IpcStatus::Ok; caps.backend = veh::IpcBackend::Hypervisor;
-            caps.flags = veh::kCapNoTargetFootprint | (mode == L"host-cap" || mode == L"hardware-host" ? 0 : machineMode ? veh::kCapVirtualMachineTarget : veh::kCapGuestTarget);
+            if (contextMode) {
+                if (!veh::SelectRegisterContext(bytes.data(), static_cast<uint32_t>(bytes.size()), contextSelection, &contextSelection)) {
+                    if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break;
+                    continue;
+                }
+                caps.flags |= veh::kCapRegisterContextV1;
+            }
+            caps.flags |= veh::kCapNoTargetFootprint | (mode == L"host-cap" || mode == L"hardware-host" ? 0 : machineMode ? veh::kCapVirtualMachineTarget : veh::kCapGuestTarget);
             if(scanMode){veh::SetCommandSupported(caps.commands,veh::IpcCommand::ValueScan);if(mode!=L"scan-legacy")caps.flags|=veh::kCapValueScanV2;}
             if(mode==L"machine-guest-cap")caps.flags=veh::kCapNoTargetFootprint|veh::kCapGuestTarget;
             for (auto op : {veh::IpcCommand::GetCapabilities, veh::IpcCommand::GetTargetInfo, veh::IpcCommand::GetThreads,
@@ -1133,6 +1143,14 @@ int wmain(int argc, wchar_t** argv) {
                     (mode==L"control-partial"||mode==L"control-retained")?1u:0u};
                 response.ids[0]=77;response.ids[1]=88;
                 if(!send(pipe,header.command,&response,sizeof(response.head)+4*(response.head.resumedCount+response.head.stillStoppedCount)))break;
+                if (contextMode) {
+                    contextNative = !contextNative;
+                    veh::BreakpointHitEvent stop{};
+                    stop.threadId = 77; stop.breakpointId = 1;
+                    stop.address = contextNative ? 0x120000000ULL : 0x1000ULL;
+                    stop.regs.rip = stop.address; stop.regs.is32bit = !contextNative;
+                    if (!reply(pipe, static_cast<uint32_t>(veh::IpcEvent::BreakpointHit), stop)) break;
+                }
             }else{
                 if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
                 if(command==veh::IpcCommand::Pause){
@@ -1162,6 +1180,16 @@ int wmain(int argc, wchar_t** argv) {
                    command==veh::IpcCommand::GetRegisters) {
             veh::GetRegistersResponse response{};
             response.status=veh::IpcStatus::Ok;response.regs.rip=0x1234;response.regs.is32bit=1;
+            if (contextMode) {
+                veh::GetRegistersRequest request{};
+                if (bytes.size() != sizeof(request)) response.status = veh::IpcStatus::InvalidArgs;
+                else {
+                    std::memcpy(&request, bytes.data(), sizeof(request));
+                    if (request.threadId != 77) response.status = veh::IpcStatus::NotFound;
+                }
+                response.regs.is32bit = !(contextNative && contextSelection);
+                response.regs.rip = contextNative ? 0x120000000ULL : 0x1000ULL;
+            }
             if(!reply(pipe,header.command,response))break;
         } else if(mode==L"address-delay" && command==veh::IpcCommand::ResolveAddressSpace){
             if(resolveRequests++==0)Sleep(31000); // longer than the old 30s guest-pipe floor
@@ -1310,6 +1338,10 @@ int wmain(int argc, wchar_t** argv) {
             // x86 INC EDX; RET, versus the x64 REX prefix. Tests metadata bitness.
             if (request.size) response[sizeof(status)] = 0x42;
             if (request.size > 1) response[sizeof(status) + 1] = 0xc3;
+            if (contextMode) {
+                const unsigned char code[] = {0x48, 0x89, 0x04, 0x24, 0xC3};
+                std::memcpy(response.data() + sizeof(status), code, (std::min)(request.size, static_cast<uint32_t>(sizeof(code))));
+            }
             if (!send(pipe, header.command, response.data(), static_cast<uint32_t>(response.size()))) break;
             if(deferredMode&&request.address==0x3000&&mode==L"deferred-exit-old"){
                 exceptionHeld=false;const veh::ThreadEvent exited{88};

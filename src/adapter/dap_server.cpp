@@ -378,6 +378,7 @@ bool DapServer::AttachGuestAgent(const Request& req, std::string& error) {
 	stopOnModuleLoadPatterns_.clear();
 	guestAgentProcess_ = process.hProcess;
 	std::memcpy(guestCommands_, caps.commands, sizeof(guestCommands_));
+    guestContextRegisters_.store((caps.flags & kCapRegisterContextV1) != 0);
     guestStopIdentity_.store((caps.flags & kCapStopIdentityV1) &&
         IsCommandSupported(caps.commands,IpcCommand::ContinueIfStopped) &&
         IsCommandSupported(caps.commands,IpcCommand::IsThreadStopped) &&
@@ -2600,7 +2601,7 @@ void DapServer::OnReadMemory(const Request& req) {
 	resp.command = "readMemory";
 	if (!AddAddressOffset(addr, offset, addr) ||
 		addr > UINT64_MAX - static_cast<uint64_t>(count - 1) ||
-		(guestAddressBits_ == 32 &&
+		(guestAddressBits_ == 32 && !guestContextRegisters_.load() &&
 			(addr > UINT32_MAX || static_cast<uint64_t>(count - 1) > UINT32_MAX - addr))) {
 		resp.success = false;
 		resp.message = "Memory address range is outside the target address space";
@@ -2709,8 +2710,22 @@ void DapServer::OnDisassemble(const Request& req) {
 		SendResponse(resp);
 		return;
 	}
-	if (!AddAddressOffset(addr, offset, addr) ||
-		(guestAddressBits_ == 32 && addr > UINT32_MAX)) {
+	uint32_t codeBits = guestAddressBits_;
+    const auto contextThread = lastStoppedThreadId_.load();
+    if (guestContextRegisters_.load() && contextThread) {
+        const GetRegistersRequest contextRequest{contextThread};
+        std::vector<uint8_t> contextBytes;
+        GetRegistersResponse context{};
+        if (ipcTransport_->SendAndReceive(IpcCommand::GetRegisters, &contextRequest, sizeof(contextRequest), contextBytes) &&
+            contextBytes.size() == sizeof(context)) {
+            std::memcpy(&context, contextBytes.data(), sizeof(context));
+            if (context.status == IpcStatus::Ok && context.regs.rip == addr)
+                codeBits = context.regs.is32bit ? 32u : 64u;
+        }
+    }
+    auto contextDecoder = (codeBits == 32 || codeBits == 64) ? CreateDisassembler(codeBits == 64) : nullptr;
+    if (!AddAddressOffset(addr, offset, addr) ||
+		(codeBits == 32 && addr > UINT32_MAX)) {
 		Response resp;
 		resp.request_seq = req.seq;
 		resp.command = "disassemble";
@@ -2743,7 +2758,7 @@ void DapServer::OnDisassemble(const Request& req) {
 
 	uint32_t readSize = (uint32_t)totalNeeded * 15;
 	if (readSize && (startAddr > UINT64_MAX - (readSize - 1) ||
-		(guestAddressBits_ == 32 &&
+		(codeBits == 32 &&
 			(startAddr > UINT32_MAX || static_cast<uint64_t>(readSize - 1) > UINT32_MAX - startAddr)))) {
 		Response resp;
 		resp.request_seq = req.seq;
@@ -2767,7 +2782,8 @@ void DapServer::OnDisassemble(const Request& req) {
 		*reinterpret_cast<const IpcStatus*>(memData.data()) == IpcStatus::Ok) {
 		const uint8_t* code = memData.data() + sizeof(IpcStatus);
 		uint32_t codeLen = (uint32_t)(memData.size() - sizeof(IpcStatus));
-		auto allInstructions = disassembler_->Disassemble(code, codeLen, startAddr, totalNeeded);
+		auto* decoder = contextDecoder ? contextDecoder.get() : disassembler_.get();
+        auto allInstructions = decoder->Disassemble(code, codeLen, startAddr, totalNeeded);
 
 		// instrOffset < 0: addr(원래 memRef+offset) 위치를 찾아서 그 앞 |instrOffset|개부터 시작
 		size_t startIdx = 0;
@@ -4140,6 +4156,7 @@ void DapServer::Cleanup(bool detachOnly, bool backendDetached) {
 		guestTarget_ = false;
         guestStopIdentity_.store(false);
 		guestAddressBits_ = 0;
+        guestContextRegisters_.store(false);
 		std::memset(guestCommands_, 0, sizeof(guestCommands_));
 		ipcTransport_ = std::make_unique<PipeClient>();
 	}

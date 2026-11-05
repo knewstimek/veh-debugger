@@ -340,7 +340,8 @@ public:
 	ValueScanResultV2 ValueScanV2(const ValueScanRequestV2& request);
 
 	// --- Analysis ---
-	std::vector<DisasmInsn> Disassemble(uint64_t address, uint32_t count);
+	uint32_t DisassemblyAddressBits(uint64_t address, uint32_t threadId = 0);
+	std::vector<DisasmInsn> Disassemble(uint64_t address, uint32_t count, uint32_t addressBits = 0);
 	EvalResult Evaluate(const std::string& expression, uint32_t threadId);
 	TraceResult TraceCallers(uint64_t address, uint32_t durationMs);
 

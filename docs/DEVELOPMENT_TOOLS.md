@@ -887,6 +887,12 @@ arriving inside Continue. It verifies that the returned address matches
 restop is retained. The receipt sequence is frontend-local and changes no IPC
 wire layout or global/single-thread resume scope.
 
+`test/test_mixed_disassembly.py` verifies per-operation MCP/DAP decoders through
+a synthetic guest peer that advertises context v1 while retaining32-bit process
+metadata. It alternates native64/compatibility32/native64 stops, high addresses,
+exact instruction bytes and failed context lookup. The legacy guest attachment
+tests retain their32-bit address limits and process-default decode behavior.
+
 `test/test_trace_receiver_early_close.py` runs `trace_receiver_early_close`,
 which uses the production event/code artifact receivers. A gated producer writes
 and closes before the actual Win32 ConnectNamedPipe call; the test requires

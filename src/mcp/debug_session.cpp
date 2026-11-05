@@ -1800,15 +1800,34 @@ ShellcodeResult DebugSession::ExecuteShellcode(const uint8_t* code, uint32_t siz
 
 // --- Analysis ---
 
-std::vector<DisasmInsn> DebugSession::Disassemble(uint64_t address, uint32_t count) {
+uint32_t DebugSession::DisassemblyAddressBits(uint64_t address, uint32_t threadId) {
+    const bool explicitThread = threadId != 0;
+    if (!threadId && backendInfo_.reported && (backendInfo_.flags & kCapRegisterContextV1)) {
+        std::lock_guard<std::mutex> lock(stopMutex_);
+        if (lastStop_.sessionGeneration == sessionGeneration_.load()) threadId = lastStop_.threadId;
+    }
+    if (threadId) {
+        const auto regs = GetRegisters(threadId);
+        if (regs && (explicitThread || regs->rip == address)) return regs->is32bit ? 32u : 64u;
+        if (explicitThread) return 0;
+    }
+    return targetAddressBits_;
+}
+
+std::vector<DisasmInsn> DebugSession::Disassemble(uint64_t address, uint32_t count, uint32_t addressBits) {
 	std::vector<DisasmInsn> result;
 
-	uint32_t readSize = count * 15;
+	if (!addressBits) addressBits = DisassemblyAddressBits(address);
+    if ((addressBits != 32 && addressBits != 64) || !count || count > 10000) return result;
+    const uint32_t readSize = count * 15;
+    if (address > UINT64_MAX - (readSize - 1) ||
+        (addressBits == 32 && (address > UINT32_MAX || readSize - 1 > UINT32_MAX - address))) return result;
 	auto mem = ReadMemory(address, readSize);
 	if (mem.empty()) return result;
 
-	if (!disassembler_) return result;
-	auto insns = disassembler_->Disassemble(mem.data(), (uint32_t)mem.size(), address, count);
+	// Per-operation decoders cannot change another stopped thread's mode.
+    auto decoder = CreateDisassembler(addressBits == 64);
+	auto insns = decoder->Disassemble(mem.data(), (uint32_t)mem.size(), address, count);
 
 	result.reserve(insns.size());
 	for (auto& insn : insns) {

@@ -375,8 +375,18 @@ json McpServer::ToolDisassemble(const json& args) {
 		return {{"error", "invalid address format"}};
 	}
 
+    if (args.contains("threadId") && (!args["threadId"].is_number_integer() ||
+        args["threadId"] <= 0 || args["threadId"] > UINT32_MAX))
+        return {{"error", "threadId must be a positive32-bit integer"}};
+    if (args.contains("address_bits") && args["address_bits"] != 32 && args["address_bits"] != 64)
+        return {{"error", "address_bits must be32 or64"}};
+    const uint32_t threadId = JsonUint32(args, "threadId");
+    uint32_t bits = JsonUint32(args, "address_bits");
+    if (bits && threadId) return {{"error", "Select threadId or address_bits, not both"}};
+    if (!bits) bits = session_.DisassemblyAddressBits(addr, threadId);
+    if (bits != 32 && bits != 64) return {{"error", "Cannot determine the requested code context"}};
     const auto annotationEpoch = JsonBool(args, "include_annotations", true) ? AnnotationEpoch() : std::string{};
-	auto insns = session_.Disassemble(addr, static_cast<uint32_t>(count));
+	auto insns = session_.Disassemble(addr, static_cast<uint32_t>(count), bits);
 	if (insns.empty()) {
 		return {{"error", "Disassembly failed (address may be invalid or inaccessible)"}};
 	}
@@ -393,7 +403,7 @@ json McpServer::ToolDisassemble(const json& args) {
 	}
 
     if (JsonBool(args, "include_annotations", true)) AddAnnotations(result, true, annotationEpoch);
-	return {{"instructions", result}, {"count", result.size()}};
+	return {{"instructions", result}, {"count", result.size()}, {"addressBits", bits}};
 }
 
 } // namespace veh

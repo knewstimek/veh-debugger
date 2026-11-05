@@ -115,6 +115,7 @@ private:
 	bool launchedByUs_ = false;
 	bool guestTarget_ = false;
     std::atomic<bool> guestStopIdentity_{false};
+    std::atomic<bool> guestContextRegisters_{false};
 	HANDLE guestAgentProcess_ = nullptr;
 	uint8_t guestCommands_[32] = {};
 	uint32_t guestAddressBits_ = 0;

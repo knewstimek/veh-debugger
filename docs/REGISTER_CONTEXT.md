@@ -41,6 +41,17 @@ because the process image is32-bit. Backends validate the actual mapped source.
 Detailed caller records report each hit's actual width and valid-register mask;
 unavailable high registers in 32-bit hits do not match register filters.
 
+MCP disassembly uses an independent decoder per request. At the current stop PC,
+opted-in peers select the observed context automatically. `veh_disassemble`
+accepts `threadId` to select a held thread's code width, or `address_bits:32|64`
+for other code; these options are mutually exclusive. The result reports
+`addressBits`. Away from the stop PC, omission retains the process-width default.
+Direct, batch and breakpoint actions use the same handler. CALL detection for
+MCP stepping uses the supplied registers' width rather than a shared decoder.
+Standard DAP disassembly at the stopped PC also uses the negotiated context,
+including offsets around that PC; other addresses retain the process default.
+A memory address alone does not prove an instruction's execution mode.
+
 Use synthetic mixed-mode stops with nonzero high GPRs and addresses above 4 GiB
 to verify read/write round trips and resumed effects. Also verify a32-bit edit
 preserves hidden native state. Low addresses or matching CS alone are not proof.
