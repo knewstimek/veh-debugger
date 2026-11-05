@@ -1,0 +1,14 @@
+id: veh.resolve-import-errors
+revision: 1
+summary: Preserve import-probe errors and validate complete replies across MCP entry points
+tags: [integration, mcp, guest]
+execution:
+  kind: cli
+  executable_ref: python
+  cwd: .
+  argv_template: [tools/run_tests.py, test_resolve_import_errors.py, --jobs, "1", --timeout, "60"]
+  trusted_for_run: true
+  timeout_sec: 90
+  artifact_mode: metadata
+docs: [docs/DEVELOPMENT_TOOLS.md]
+cache_policy: disabled

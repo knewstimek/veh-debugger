@@ -393,7 +393,12 @@ public:
 		struct TraceEntry { uint64_t address; uint32_t excCode; };
 		std::vector<TraceEntry> trace;
 	};
-	std::vector<ImportEntry> ResolveImports(uint32_t threadId, const std::vector<uint64_t>& thunks,
+	struct ResolveImportsResult {
+        bool ok=false;
+        std::string error;
+        std::vector<ImportEntry> entries;
+    };
+    ResolveImportsResult ResolveImports(uint32_t threadId, const std::vector<uint64_t>& thunks,
 		uint32_t maxStepsPerThunk = 1000, bool followExceptions = false,
 		bool systemOnly = false, const std::vector<std::string>& targetModules = {});
 

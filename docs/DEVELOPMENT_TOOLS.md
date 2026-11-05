@@ -10,6 +10,8 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 
 ## Tool catalog
 
+`test/test_resolve_import_errors.py` checks import-probe backend errors and malformed replies through direct, batch and breakpoint actions. Successful unresolved probes remain valid results; failed or incomplete replies never publish partial imports. Run `py -3 tools/run_tests.py test_resolve_import_errors.py --jobs 1 --timeout 60` with the synthetic guest fixture.
+
 `test/test_dap_stop_identity.py` extends the existing deferred-loader-stop fixture for stop-identity v1: matching internal guards, exact high-bit sequences, user ownership, pre-release replacement, no hold, immediate restop, malformed/failed replies and capability/legacy fallback. Run it with `test_dap_deferred_loader_stop.py` and `test_session_receipts.py` on x64/x86 using the shared runner. Layouts and live owner/ledger acceptance requirements are in [stop identity v1](STOP_IDENTITY.md).
 
 `test/test_caller_capture.py` verifies detailed caller-capture v1 with the real MCP and host-only guest fixture: exact IDs/TSC, x64/x86 raw snapshots, partial stacks, admission/peer validation, bounded immutable file export and direct/batch/action parity. Run with the shared runner for both build widths. The canonical header and backend acceptance boundaries are in [caller capture v1](CALLER_CAPTURE_PROTOCOL.md); this fixture does not qualify a live provider.

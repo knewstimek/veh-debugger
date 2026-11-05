@@ -283,12 +283,12 @@ json McpServer::ToolResolveImports(const json& args) {
 		}
 	}
 
-	auto results = session_.ResolveImports(threadId, thunks, maxSteps,
+	auto result = session_.ResolveImports(threadId, thunks, maxSteps,
 		followExceptions, systemOnly, targetModules);
-
+    if(!result.ok)return {{"error",result.error}};
 	json arr = json::array();
 	int resolved = 0;
-	for (auto& e : results) {
+	for (auto& e : result.entries) {
 		char thunkBuf[20]; snprintf(thunkBuf, sizeof(thunkBuf), "0x%llX", e.thunkAddress);
 		char targetBuf[20]; snprintf(targetBuf, sizeof(targetBuf), "0x%llX", e.targetAddress);
 		json entry = {{"thunk", thunkBuf}, {"resolved", e.resolved}};

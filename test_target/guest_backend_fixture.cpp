@@ -82,6 +82,7 @@ int wmain(int argc, wchar_t** argv) {
     uint32_t pathRequests = 0, hardwareQueries = 0;
     const bool hardwareMode = mode.rfind(L"hardware-", 0) == 0;
     uint32_t fixtureBreakpointId = 0, shellcodeRequests=0, localThreadQueries=0;
+    const bool importMode=mode.rfind(L"resolve-",0)==0;
     const bool scanMode=mode.rfind(L"scan-",0)==0;
     uint32_t symbolLookupRequests = 0;
     uint64_t annotationEpoch = 1;
@@ -183,6 +184,7 @@ int wmain(int argc, wchar_t** argv) {
                 caps.flags |= veh::kCapRegisterContextV1;
             }
             caps.flags |= veh::kCapNoTargetFootprint | (mode == L"host-cap" || mode == L"hardware-host" ? 0 : machineMode ? veh::kCapVirtualMachineTarget : veh::kCapGuestTarget);
+            if(importMode)veh::SetCommandSupported(caps.commands,veh::IpcCommand::ResolveImport);
             if(scanMode){veh::SetCommandSupported(caps.commands,veh::IpcCommand::ValueScan);if(mode!=L"scan-legacy")caps.flags|=veh::kCapValueScanV2;}
             if(mode==L"machine-guest-cap")caps.flags=veh::kCapNoTargetFootprint|veh::kCapGuestTarget;
             for (auto op : {veh::IpcCommand::GetCapabilities, veh::IpcCommand::GetTargetInfo, veh::IpcCommand::GetThreads,
@@ -251,7 +253,7 @@ int wmain(int argc, wchar_t** argv) {
                 if(mode!=L"deferred-unsupported")veh::SetCommandSupported(caps.commands,veh::IpcCommand::SetModuleLoadStop);
             }
             if(mode.rfind(L"shellcode-",0)==0)veh::SetCommandSupported(caps.commands,veh::IpcCommand::ExecuteShellcode);
-            if(mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode)for(auto op:{veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue})veh::SetCommandSupported(caps.commands,op);
+            if(mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode)for(auto op:{veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue})veh::SetCommandSupported(caps.commands,op);
             if(mode.rfind(L"control-",0)==0) {
                 for(auto op:{veh::IpcCommand::Continue,veh::IpcCommand::Pause,veh::IpcCommand::StepInto,
                     veh::IpcCommand::StepOver,veh::IpcCommand::StepOut,veh::IpcCommand::WriteMemory,veh::IpcCommand::TerminateThread})
@@ -1214,12 +1216,12 @@ int wmain(int argc, wchar_t** argv) {
                 response.exitCode=7;
                 if(!reply(pipe,header.command,response))break;
             }
-        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode)&&command==veh::IpcCommand::SetBreakpoint){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode)&&command==veh::IpcCommand::SetBreakpoint){
             fixtureBreakpointId=mode==L"path-file-output"?(fixtureBreakpointId?fixtureBreakpointId+1:9001):9001;
             if(!reply(pipe,header.command,veh::SetBreakpointResponse{veh::IpcStatus::Ok,fixtureBreakpointId}))break;
-        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode)&&command==veh::IpcCommand::RemoveBreakpoint){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode)&&command==veh::IpcCommand::RemoveBreakpoint){
             if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
-        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode)&&command==veh::IpcCommand::Continue){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode)&&command==veh::IpcCommand::Continue){
             veh::ContinueRequest request{};
             if(bytes.size()!=sizeof(request))break;
             std::memcpy(&request,bytes.data(),sizeof(request));
@@ -1329,6 +1331,34 @@ int wmain(int argc, wchar_t** argv) {
             if(mode==L"modules-name")
                 std::memset(modules.module.name,'A',sizeof(modules.module.name));
             if(!reply(pipe,header.command,modules))break;
+        } else if(importMode&&command==veh::IpcCommand::ResolveImport) {
+            if(mode==L"resolve-error"){if(!reply(pipe,header.command,veh::IpcStatus::Error))break;continue;}
+            if(mode==L"resolve-short"){const uint8_t b=0;if(!reply(pipe,header.command,b))break;continue;}
+            if(mode==L"resolve-status-only"){if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;continue;}
+            veh::ResolveImportRequest request{};
+            if(bytes.size()<sizeof(request))break;
+            std::memcpy(&request,bytes.data(),sizeof(request));
+            if(!request.count||request.count>16||bytes.size()<sizeof(request)+request.count*sizeof(uint64_t))break;
+            veh::ResolveImportResponse response{veh::IpcStatus::Ok,request.count};
+            std::vector<uint8_t> data(sizeof(response)+request.count*sizeof(veh::ResolveImportEntry));
+            for(uint32_t i=0;i<request.count;++i) {
+                veh::ResolveImportEntry entry{};
+                std::memcpy(&entry.thunkAddress,bytes.data()+sizeof(request)+i*sizeof(uint64_t),sizeof(uint64_t));
+                entry.resolved=mode!=L"resolve-unresolved";
+                entry.targetAddress=entry.resolved?0x3000+i*16:0;
+                entry.stepsExecuted=1;entry.traceCount=1;entry.traceAddresses[0]=entry.thunkAddress;
+                if(entry.resolved){strcpy_s(entry.moduleName,"system.dll");strcpy_s(entry.functionName,"Example");}
+                if(mode==L"resolve-order")entry.thunkAddress+=8;
+                if(mode==L"resolve-name")std::memset(entry.moduleName,'A',sizeof(entry.moduleName));
+                if(mode==L"resolve-trace")entry.traceCount=17;
+                if(mode==L"resolve-reserved")entry.reserved=1;
+                if(mode==L"resolve-bool")entry.resolved=2;
+                std::memcpy(data.data()+sizeof(response)+i*sizeof(entry),&entry,sizeof(entry));
+            }
+            if(mode==L"resolve-count")++response.count;
+            std::memcpy(data.data(),&response,sizeof(response));
+            if(mode==L"resolve-truncated")data.pop_back();
+            if(!send(pipe,header.command,data.data(),static_cast<uint32_t>(data.size())))break;
         } else if (command == veh::IpcCommand::ReadMemory && bytes.size() == sizeof(veh::ReadMemoryRequest)) {
             if (mode == L"symbols-analysis-race-preview" && !annotationRace) { annotationRace = true; ++annotationEpoch; }
             veh::ReadMemoryRequest request{}; memcpy(&request, bytes.data(), sizeof(request));

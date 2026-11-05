@@ -1993,12 +1993,13 @@ DebugSession::TraceCollectResult DebugSession::TraceMemoryCollect(uint64_t addre
 
 // --- Import resolution ---
 
-std::vector<DebugSession::ImportEntry> DebugSession::ResolveImports(
+DebugSession::ResolveImportsResult DebugSession::ResolveImports(
 	uint32_t threadId, const std::vector<uint64_t>& thunks, uint32_t maxStepsPerThunk,
 	bool followExceptions, bool systemOnly, const std::vector<std::string>& targetModules) {
 
-	std::vector<ImportEntry> result;
-	if (thunks.empty()) return result;
+ResolveImportsResult result;
+    if(thunks.empty()){result.ok=true;return result;}
+    if(thunks.size()>2000){result.error="ResolveImport: too many requested thunks";return result;}
 
 	uint8_t tmCount = static_cast<uint8_t>(targetModules.size() > 255 ? 255 : targetModules.size());
 	size_t payloadSize = sizeof(ResolveImportRequest) + thunks.size() * sizeof(uint64_t) + tmCount * 64;
@@ -2020,38 +2021,32 @@ std::vector<DebugSession::ImportEntry> DebugSession::ResolveImports(
 
 	int timeoutMs = static_cast<int>(thunks.size()) * maxStepsPerThunk / 10 + 30000;
 	std::vector<uint8_t> respData;
-	if (!ipcTransport_->SendAndReceive(IpcCommand::ResolveImport, payload.data(),
-	                                 static_cast<uint32_t>(payload.size()), respData, timeoutMs)) {
-		return result;
-	}
-
-	if (respData.size() < sizeof(ResolveImportResponse)) return result;
-	auto* resp = reinterpret_cast<const ResolveImportResponse*>(respData.data());
-	if (resp->status != IpcStatus::Ok) return result;
-
-	auto* entries = reinterpret_cast<const ResolveImportEntry*>(
-		respData.data() + sizeof(ResolveImportResponse));
-	uint32_t count = resp->count;
-	if (respData.size() < sizeof(ResolveImportResponse) + count * sizeof(ResolveImportEntry))
-		count = static_cast<uint32_t>((respData.size() - sizeof(ResolveImportResponse)) / sizeof(ResolveImportEntry));
-
-	for (uint32_t i = 0; i < count; i++) {
-		ImportEntry e;
-		e.thunkAddress = entries[i].thunkAddress;
-		e.targetAddress = entries[i].targetAddress;
-		char modBuf[129] = {}; memcpy(modBuf, entries[i].moduleName, 128);
-		char funcBuf[129] = {}; memcpy(funcBuf, entries[i].functionName, 128);
-		e.moduleName = modBuf;
-		e.functionName = funcBuf;
-		e.resolved = entries[i].resolved != 0;
-		e.stepsExecuted = entries[i].stepsExecuted;
-		e.exceptionsPassed = entries[i].exceptionsPassed;
-		for (uint8_t t = 0; t < entries[i].traceCount && t < 16; t++) {
-			e.trace.push_back({entries[i].traceAddresses[t], entries[i].traceExcCodes[t]});
-		}
-		result.push_back(e);
-	}
-	return result;
+    if(!ReceiveBackendReply(IpcCommand::ResolveImport,payload.data(),static_cast<uint32_t>(payload.size()),
+                            respData,"ResolveImport",result.error,timeoutMs))return result;
+    result.error="ResolveImport: malformed or incomplete backend response";
+    ResolveImportResponse response{};
+    if(respData.size()<sizeof(response))return result;
+    std::memcpy(&response,respData.data(),sizeof(response));
+    if(response.count!=thunks.size()||
+       respData.size()!=sizeof(response)+thunks.size()*sizeof(ResolveImportEntry))return result;
+    std::vector<ImportEntry> validated;
+    validated.reserve(response.count);
+    for(uint32_t i=0;i<response.count;++i) {
+        ResolveImportEntry wire{};
+        std::memcpy(&wire,respData.data()+sizeof(response)+i*sizeof(wire),sizeof(wire));
+        if(wire.thunkAddress!=thunks[i]||wire.resolved>1||wire.traceCount>16||wire.reserved||
+           (wire.resolved&&!wire.targetAddress)||
+           !std::memchr(wire.moduleName,0,sizeof(wire.moduleName))||
+           !std::memchr(wire.functionName,0,sizeof(wire.functionName)))return result;
+        ImportEntry e{};
+        e.thunkAddress=wire.thunkAddress;e.targetAddress=wire.targetAddress;
+        e.moduleName=wire.moduleName;e.functionName=wire.functionName;
+        e.resolved=wire.resolved!=0;e.stepsExecuted=wire.stepsExecuted;e.exceptionsPassed=wire.exceptionsPassed;
+        for(uint8_t t=0;t<wire.traceCount;++t)e.trace.push_back({wire.traceAddresses[t],wire.traceExcCodes[t]});
+        validated.push_back(std::move(e));
+    }
+    result.entries=std::move(validated);result.ok=true;result.error.clear();
+    return result;
 }
 
 // --- TraceCalls ---
