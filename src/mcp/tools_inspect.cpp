@@ -5,6 +5,7 @@
 #include "assembler.h"
 #include "adapter/disassembler.h"
 #include "common/logger.h"
+#include "common/local_value_format.h"
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
@@ -266,8 +267,10 @@ json McpServer::ToolEnumLocals(const json& args) {
 		snprintf(buf, sizeof(buf), "0x%llX", var.address);
 
 		// Format value based on type
+		const auto rawValue=FormatLocalValueBytes(var.value.data(),static_cast<uint32_t>(var.value.size()),var.size);
 		std::string valueStr;
-		if (var.value.size() >= 4 && (var.typeName.find("float") != std::string::npos)) {
+		if(rawValue)valueStr=rawValue->text;
+		else if (var.value.size() >= 4 && (var.typeName.find("float") != std::string::npos)) {
 			float f;
 			memcpy(&f, var.value.data(), sizeof(f));
 			char fBuf[64];
@@ -304,6 +307,11 @@ json McpServer::ToolEnumLocals(const json& args) {
 			{"value", valueStr},
 			{"size", var.size}
 		};
+		if(rawValue) {
+			v["valueBytes"]=rawValue->hex;
+			v["valueSize"]=var.value.size();
+			if(var.size)v["valueTruncated"]=rawValue->truncated;
+		}
 		if (var.flags & 0x40) v["isParameter"] = true; // SYMFLAG_PARAMETER
 		vars.push_back(v);
 	}

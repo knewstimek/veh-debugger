@@ -1196,6 +1196,23 @@ int wmain(int argc, wchar_t** argv) {
             strcpy_s(response.local.name,"value");strcpy_s(response.local.typeName,"uint32_t");
             response.local.size=response.local.valueSize=4;response.local.value[0]=42;
             response.local.flags=0x40; // SYMFLAG_PARAMETER
+            if(mode==L"locals-bytes"||mode==L"locals-bytes-partial"||mode==L"locals-size-unknown") {
+                strcpy_s(response.local.typeName,"opaque");
+                response.local.size=mode==L"locals-size-unknown"?0:mode==L"locals-bytes-partial"?32:16;
+                response.local.valueSize=mode==L"locals-size-unknown"?3:16;
+                for(uint32_t n=0;n<response.local.valueSize;++n)response.local.value[n]=static_cast<uint8_t>(n);
+            }
+            if(mode==L"locals-scalar-partial") {
+                strcpy_s(response.local.typeName,"uint64_t");
+                response.local.size=8;response.local.valueSize=4;
+                const uint8_t prefix[]={0xFE,0xDC,0xBA,0x98};std::memcpy(response.local.value,prefix,4);
+            }
+            if(mode==L"locals-no-value") {response.local.size=16;response.local.valueSize=0;}
+            if(mode==L"locals-pointer32") {
+                strcpy_s(response.local.typeName,"void*");
+                response.local.size=response.local.valueSize=4;
+                const uint32_t pointer=0xFEDCBA98;std::memcpy(response.local.value,&pointer,4);
+            }
             if(mode==L"locals-value-size")response.local.valueSize=sizeof(response.local.value)+1;
             if(mode==L"locals-name")std::memset(response.local.name,'A',sizeof(response.local.name));
             if(mode==L"locals-long") {

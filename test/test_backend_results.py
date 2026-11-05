@@ -78,9 +78,17 @@ def check_locals_results():
         log = Path(directory) / "mcp.log"
         client = OwnedMcpClient(args=["--log=" + str(log)])
         expected_errors = []
+        raw_values = {
+            "locals-bytes": (" ".join(f"{n:02X}" for n in range(16)), bytes(range(16)).hex().upper(), 16, False),
+            "locals-bytes-partial": (" ".join(f"{n:02X}" for n in range(16)) + " (16/32 bytes)",
+                                     bytes(range(16)).hex().upper(), 16, True),
+            "locals-scalar-partial": ("FE DC BA 98 (4/8 bytes)", "FEDCBA98", 4, True),
+            "locals-size-unknown": ("00 01 02 (3 bytes; size unknown)", "000102", 3, None),
+        }
+        success_modes = {"locals-empty", "locals-ok", "locals-no-value", "locals-pointer32", *raw_values}
         try:
             client.initialize("locals-receipts")
-            for mode in ("locals-empty", "locals-ok", "locals-error", "locals-status-ok",
+            for mode in ("locals-empty", "locals-ok", *raw_values, "locals-no-value", "locals-pointer32", "locals-error", "locals-status-ok",
                          "locals-count-short", "locals-long", "locals-value-size", "locals-name"):
                 attached = client.tool("veh_attach", {"pid": 424242, "target_scope": "guest",
                     "agent": AGENT, "agent_args": ["--metadata", mode]})
@@ -92,11 +100,14 @@ def check_locals_results():
                     assert scopes["success"] and "scopes" in scopes.get("body", {}), scopes
                     ref = next(s["variablesReference"] for s in scopes["body"]["scopes"] if s["name"] == "Locals")
                     variables = dap.request("variables", {"variablesReference": ref})
-                    if mode in ("locals-empty", "locals-ok"):
+                    if mode in success_modes:
                         assert variables["success"], variables
                         rows = variables["body"]["variables"]
-                        assert len(rows) == (mode == "locals-ok"), variables
+                        assert len(rows) == (mode != "locals-empty"), variables
                         if rows: assert rows[0]["name"] == "[param] value", variables
+                        if mode in raw_values:assert rows[0]["value"].strip() == raw_values[mode][0], variables
+                        if mode == "locals-no-value":assert rows[0]["value"] == "(unreadable)", variables
+                        if mode == "locals-pointer32":assert rows[0]["value"] == "0xFEDCBA98", variables
                     else:
                         assert not variables["success"] and variables["message"], variables
                         assert not variables.get("body", {}).get("variables"), variables
@@ -116,9 +127,16 @@ def check_locals_results():
                     assert refused["failed"] == len(invalid_args), refused
                     assert [item["result"] for item in refused["results"]] == failures, refused
                 result = client.tool("veh_enum_locals", {"threadId": 77})
-                valid = mode in ("locals-empty", "locals-ok")
+                valid = mode in success_modes
                 if valid:
-                    assert "error" not in result and result["count"] == (mode == "locals-ok"), (mode, result)
+                    assert "error" not in result and result["count"] == (mode != "locals-empty"), (mode, result)
+                    if mode in raw_values:
+                        text, data, count, truncated = raw_values[mode]
+                        row = result["variables"][0]
+                        assert row["value"] == text and row.get("valueBytes") == data and row.get("valueSize") == count, (mode, result)
+                        assert row.get("valueTruncated") is truncated, (mode, result)
+                    if mode == "locals-no-value":assert result["variables"][0]["value"] == "(unreadable)", result
+                    if mode == "locals-pointer32":assert result["variables"][0]["value"] == "0xFEDCBA98", result
                 else:
                     assert "error" in result and "variables" not in result, (mode, result)
                 batch = client.tool("veh_batch", {"steps": [
@@ -126,15 +144,18 @@ def check_locals_results():
                     {"tool": "veh_stack_trace", "args": frame_args}]})
                 assert batch["results"][0]["result"] == result and batch["failed"] == (not valid), (mode, batch)
                 assert batch["results"][1]["result"] == wire_stack, (mode, batch)
-                installed = client.tool("veh_set_breakpoint", {"address": "0x1000", "action": [
-                    {"tool": "veh_enum_locals", "args": {"threadId": 77}},
-                    {"tool": "veh_stack_trace", "args": frame_args}]})
+                actions = [{"tool": "veh_enum_locals", "args": {"threadId": 77}},
+                           {"tool": "veh_stack_trace", "args": frame_args}]
+                if mode in raw_values:
+                    # Force the existing action-error receipt to retain the successful raw-value result too.
+                    actions.append({"tool": "veh_enum_locals", "args": {"threadId": 77, "instructionAddress": "bad-address"}})
+                installed = client.tool("veh_set_breakpoint", {"address": "0x1000", "action": actions})
                 assert installed.get("success") and installed.get("hasAction"), installed
                 stop = client.tool("veh_continue", {"wait": True, "timeout": 4})
                 assert stop.get("breakpointId") == 7, stop
                 threads = client.tool("veh_threads")
                 assert threads["threads"][0]["name"] == "locals-calls:3", (mode, threads)
-                if not valid: expected_errors.append(result)
+                if not valid or mode in raw_values: expected_errors.append(result)
                 if mode == "locals-ok":
                     # The fixture dispatches actions on its first continue only.
                     assert client.tool("veh_detach").get("success")

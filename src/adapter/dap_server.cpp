@@ -3,6 +3,7 @@
 #include "pipe_client.h"
 #include "logger.h"
 #include "ipc_response_validation.h"
+#include "local_value_format.h"
 #include <filesystem>
 #include <sstream>
 #include <algorithm>
@@ -2216,7 +2217,10 @@ void DapServer::OnVariables(const Request& req) {
 					v.type = safeType[0] ? safeType : "unknown";
 
 					// Format value based on type name and size
-					if (locals[i].valueSize == 0) {
+					const auto rawValue=FormatLocalValueBytes(locals[i].value,locals[i].valueSize,locals[i].size);
+					if(rawValue) {
+						v.value=rawValue->text;
+					} else if (locals[i].valueSize == 0) {
 						v.value = "(unreadable)";
 					} else {
 						std::string tn = v.type;
@@ -2227,10 +2231,10 @@ void DapServer::OnVariables(const Request& req) {
 						bool isChar = (tn == "char");
 						char buf[64];
 
-						if (isPointer && locals[i].valueSize >= sizeof(void*)) {
+						if (isPointer && (locals[i].size==4||locals[i].size==8) && locals[i].valueSize>=locals[i].size) {
 							// Pointer: show as hex address
-							uint64_t ptr;
-							memcpy(&ptr, locals[i].value, sizeof(ptr));
+							uint64_t ptr=0;
+							memcpy(&ptr, locals[i].value, locals[i].size);
 							snprintf(buf, sizeof(buf), "0x%llX", ptr);
 
 							if (tn.find("char*") != std::string::npos && ptr != 0) {
@@ -2299,17 +2303,6 @@ void DapServer::OnVariables(const Request& req) {
 							memcpy(&sval, &val, 8);
 							snprintf(buf, sizeof(buf), "%lld (0x%llX)", sval, val);
 							v.value = buf;
-						} else {
-							// Large type: show hex bytes
-							std::string hex;
-							uint32_t showBytes = std::min(locals[i].valueSize, (uint32_t)16);
-							for (uint32_t b = 0; b < showBytes; b++) {
-								char byte[4];
-								snprintf(byte, sizeof(byte), "%02X ", locals[i].value[b]);
-								hex += byte;
-							}
-							if (locals[i].valueSize > 16) hex += "...";
-							v.value = hex;
 						}
 					}
 
