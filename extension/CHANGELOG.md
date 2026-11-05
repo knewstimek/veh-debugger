@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve the reported 1/2/4/8-byte width when formatting local integers and pointers, including 64-bit values and 32-bit pointers; identify parameters using the protocol's parameter flag. Stack replies expose each frame's `frameBase` for selecting caller locals.
+
 ### Changed
 - **Caller-capture guidance** -- align Korean/English and extension READMEs, extension metadata, CLI help and MCP descriptions with the optional detailed workflow, backend/architecture checks, raw-snapshot limits and detour-only options. Compact common tool descriptions preserve the default profile's schema budget.
 - **Detailed caller capture (MCP)** -- optional capability-gated caller-capture v1 adds hit-time integer registers and raw stack prefixes, exact timestamps, bounded register filters, hit/time/storage limits, immutable pages and JSON/JSONL exports through `veh_trace_callers(mode="detailed")`. Direct, batch and breakpoint actions share the contract. Existing standard/detour modes and wire formats remain unchanged; collection requires backend support. Complete stack unwinding and typed arguments are not implied.

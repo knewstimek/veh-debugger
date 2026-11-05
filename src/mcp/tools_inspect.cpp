@@ -263,16 +263,20 @@ json McpServer::ToolEnumLocals(const json& args) {
 			char dBuf[64];
 			snprintf(dBuf, sizeof(dBuf), "%.10g", d);
 			valueStr = dBuf;
-		} else if (var.value.size() >= 8 && (var.typeName.find('*') != std::string::npos)) {
-			uint64_t ptr;
-			memcpy(&ptr, var.value.data(), sizeof(ptr));
-			char pBuf[32];
-			snprintf(pBuf, sizeof(pBuf), "0x%llX", ptr);
-			valueStr = pBuf;
-		} else if (var.value.size() >= 4) {
-			int32_t val;
-			memcpy(&val, var.value.data(), sizeof(val));
-			valueStr = std::to_string(val);
+		} else if (var.size && var.size <= 8 && var.value.size() >= var.size) {
+			uint64_t raw = 0;
+			memcpy(&raw, var.value.data(), var.size);
+			if (var.typeName.find('*') != std::string::npos) {
+				valueStr = HexAddr(raw);
+			} else if (var.typeName.find("unsigned") != std::string::npos ||
+					   var.typeName.find("uint") != std::string::npos ||
+					   var.typeName == "size_t" || var.typeName == "bool") {
+				valueStr = std::to_string(raw);
+			} else {
+				const unsigned shift = 64 - var.size * 8;
+				const auto signedValue = static_cast<int64_t>(raw << shift) >> shift;
+				valueStr = std::to_string(signedValue);
+			}
 		} else {
 			valueStr = "(unreadable)";
 		}
@@ -284,7 +288,7 @@ json McpServer::ToolEnumLocals(const json& args) {
 			{"value", valueStr},
 			{"size", var.size}
 		};
-		if (var.flags & 0x100) v["isParameter"] = true;
+		if (var.flags & 0x40) v["isParameter"] = true; // SYMFLAG_PARAMETER
 		vars.push_back(v);
 	}
 

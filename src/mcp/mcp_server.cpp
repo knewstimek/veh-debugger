@@ -1410,7 +1410,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}},
 			{"instructionAddress", {{"type", "string"}, {"description", "RIP/EIP hex address of the frame (auto-detected from top frame if omitted)"}}},
-			{"frameBase", {{"type", "string"}, {"description", "RBP/EBP hex address (auto-detected from top frame if omitted)"}}}
+			{"frameBase", {{"type", "string"}, {"description", "Frame base from veh_stack_trace (auto-detected from top frame if omitted)"}}}
 		 }}, {"required", json::array({"threadId"})}}}}),
 
 		Tool(&McpServer::ToolSymbolize, "inspect", 0, true,
