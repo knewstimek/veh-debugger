@@ -95,7 +95,9 @@ IpcStatus PageBreakpointManager::Add(uint64_t address,uint32_t size,uint8_t acce
         auto& page=pages_[indices[applied]];
         ++page.refs;
         bool borrowed=false;
-        for(const auto& lease:pending_)if(lease.tid&&(lease.pages&(1ULL<<indices[applied])))borrowed=true;
+        // A parked lease is safe to arm, including remove/recreate at a stop.
+        // Only an executing retry must retain its temporarily open page.
+        for(const auto& lease:pending_)if(lease.tid&&!lease.parked&&(lease.pages&(1ULL<<indices[applied])))borrowed=true;
         if(!borrowed&&!Protect(page,true)){--page.refs;break;}
     }
     if(applied!=count) {
@@ -142,6 +144,7 @@ PageBreakpointManager::Fault PageBreakpointManager::OnGuard(uint32_t tid,uint64_
         // internal control thread, which must remain able to remove watches.
         Protect(pages_[index],false);result.failed=true;return result;
     }
+    pending->parked=false;
     pending->pages|=1ULL<<index;
     result.originalTF=pending->originalTF;
     ctx.EFlags|=0x100;
@@ -171,17 +174,19 @@ bool PageBreakpointManager::Complete(uint32_t tid,CONTEXT& ctx,bool& originalTF,
 void PageBreakpointManager::Cancel(uint32_t tid,CONTEXT& ctx) {bool original=false;Complete(tid,ctx,original);}
 bool PageBreakpointManager::Park(uint32_t tid) {
     std::lock_guard<std::mutex> lock(mutex_);
-    for(const auto& lease:pending_)if(lease.tid==tid) {
+    for(auto& lease:pending_)if(lease.tid==tid) {
         bool ok=true;
         for(size_t i=0;i<pages_.size();++i)if((lease.pages&(1ULL<<i))&&pages_[i].refs)
             if(!Protect(pages_[i],true))ok=false;
+        lease.parked=ok;
         return ok;
     }
     return false;
 }
 bool PageBreakpointManager::OpenForStep(uint32_t tid) {
     std::lock_guard<std::mutex> lock(mutex_);
-    for(const auto& lease:pending_)if(lease.tid==tid) {
+    for(auto& lease:pending_)if(lease.tid==tid) {
+        lease.parked=false;
         bool ok=true;
         for(size_t i=0;i<pages_.size();++i)if((lease.pages&(1ULL<<i))&&pages_[i].refs)
             if(!Protect(pages_[i],false))ok=false;

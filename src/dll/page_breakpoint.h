@@ -25,7 +25,7 @@ public:
 private:
     struct Watch { uint32_t id=0; uint64_t address=0; uint32_t size=0; uint8_t access=0; };
     struct Page { uintptr_t base=0, allocation=0; DWORD original=0; uint32_t refs=0; };
-    struct Pending { uint32_t tid=0; uint64_t pages=0; bool originalTF=false; HANDLE thread=nullptr; };
+    struct Pending { uint32_t tid=0; uint64_t pages=0; bool originalTF=false; HANDLE thread=nullptr; bool parked=false; };
     std::array<Watch,32> watches_{};
     std::array<Page,64> pages_{};
     std::array<Pending,128> pending_{};

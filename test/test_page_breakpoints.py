@@ -151,6 +151,20 @@ def run():
         assert tool(c, "veh_continue", {"wait":True,"timeout":4})["breakpointId"] == terminal["id"]
         tool(c, "veh_remove_breakpoint", {"id": terminal["id"]})
 
+        # Recreating a removed watch at a parked guard stop must arm immediately.
+        terminal = program(c, tid, bits, data, code, [(0, 31), (0, 32)])
+        previous = watch(c, data)
+        hit(c, previous, data)
+        tool(c, "veh_remove_data_breakpoint", {"id":previous["id"]})
+        assert protect(pid, data) == 4
+        recreated = watch(c, data)
+        assert recreated["id"] != previous["id"]
+        assert protect(pid, data) & 0x100, "recreated parked watch was not armed"
+        hit(c, recreated, data)  # first write retried; second access is a new hit
+        tool(c, "veh_remove_data_breakpoint", {"id":recreated["id"]})
+        assert tool(c, "veh_continue", {"wait":True,"timeout":4})["breakpointId"] == terminal["id"]
+        tool(c, "veh_remove_breakpoint", {"id":terminal["id"]})
+
         # Original read-only protection survives removal after a read watch.
         tool(c, "veh_protect_memory", {"address":hex(data),"size":4096,"protection":"r"})
         terminal = program(c, tid, bits, data, code, [(0, None)])

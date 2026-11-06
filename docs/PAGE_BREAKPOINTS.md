@@ -69,7 +69,10 @@ policy. No new MCP tool or separate polling loop is introduced.
 ## Lifecycle
 
 Page ownership is process-wide; pending rearm and original TF are per thread.
-Thread handles retain the identity of a pending lease. Unrelated accesses are
+Thread handles retain the identity of a pending lease. Parked and executing
+leases are distinct: removing/recreating a watch at a parked guard stop arms the
+replacement immediately; only an executing retry keeps a page temporarily open.
+Unrelated accesses are
 continued through the internal one-step/rearm path without a user stop. A normal
 debugger step and simultaneous DR hit retain their existing stop semantics.
 An intervening target exception rearms/cleans the page lease before the ordinary
