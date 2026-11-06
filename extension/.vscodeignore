@@ -7,3 +7,11 @@ node_modules/**
 *.zip
 *.vsix
 *.log
+
+# Include only the current shipped runtime files, never local rollback copies.
+bin/**
+!bin/veh-debug-adapter.exe
+!bin/veh-mcp-server.exe
+!bin/veh-remote-runner.exe
+!bin/vcruntime_net.dll
+!bin/vcruntime_net32.dll

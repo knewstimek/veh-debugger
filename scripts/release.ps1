@@ -220,6 +220,13 @@ function Assert-Archives {
             $entry = $vsixArchive.GetEntry("extension/bin/$name")
             if ($null -eq $entry) { throw "VSIX is missing required binary: $name" }
         }
+        $binaryPrefix = 'extension/bin/'
+        $actualBinaries = @($vsixArchive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') } |
+            Where-Object { $_.StartsWith($binaryPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and -not $_.EndsWith('/') } |
+            ForEach-Object { $_.Substring($binaryPrefix.Length) } | Sort-Object)
+        if (($actualBinaries -join "`n") -ne ($expected -join "`n")) {
+            throw "VSIX binary contents differ from the five declared release files: $($actualBinaries -join ', ')"
+        }
         $unsafe = @($vsixArchive.Entries | Where-Object {
             $_.FullName -match '(?i)(^|/)(test|challenges)(/|$)|\.log$|[A-Za-z]:|(^|/)\.env($|\.)'
         })
@@ -238,6 +245,7 @@ function Assert-Archives {
 function Invoke-ReleaseTests {
     $tests = @(
         'test/test_release_metadata.py',
+        'test/test_release_archives.py',
         'test/test_step.py',
         'test/test_stepin.py',
         'test/test_bp_masking.py',

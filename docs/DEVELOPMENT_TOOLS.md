@@ -8,9 +8,11 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 
 Captured aggregate/vector bytes and incomplete scalars use the same raw-byte formatter in MCP and DAP, in backend byte order. MCP adds uppercase contiguous `valueBytes`, captured `valueSize` and, when the declared size is known, `valueTruncated`. Partial values show `(captured/declared bytes)`; unknown-size values explicitly say `size unknown`. No captured bytes remains unreadable; complete 1/2/4/8-byte scalars retain their typed format. Run `py -3 test/test_backend_results.py --locals-only` after building `veh-mcp-server`, `veh-debug-adapter` and `guest_backend_fixture` to check complete/partial/unknown/missing bytes, partial scalars and 32-bit pointers through direct, batch, breakpoint actions and DAP. These checks qualify presentation, not backend memory capture or unwind.
 
-## Release metadata boundary
+## Release boundaries
 
 `test/test_release_metadata.py` runs metadata-only preparation in isolated LF and CRLF Git fixtures. It verifies synchronized versions, unchanged dependency versions, preserved line endings and idempotent headings/notes. Run it with `py -3 tools/run_tests.py test_release_metadata.py --jobs 1 --timeout 90`; it is also included in the release test set.
+
+`test/test_release_archives.py` loads only the release archive validator and exercises small synthetic ZIP/VSIX fixtures. It accepts the five shipped runtime files and rejects backup EXEs/DLLs and undeclared nested files. Run with the shared runner; this host-only check is included in the release test set. Actual `vsce ls --no-dependencies` must also contain only the five allowlisted `bin/` files before packaging.
 
 ## Tool catalog
 

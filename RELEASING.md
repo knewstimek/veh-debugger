@@ -15,6 +15,11 @@ powershell -NoProfile -File scripts/prepare-release.ps1 -Version VERSION -Valida
 This mode does not package or publish. Actual packaging/publishing keeps the
 strict dated-heading checks below and still requires explicit authorization.
 
+The version-independent [next-release draft](docs/releases/next.md) can be reviewed
+without changing versions, freezing `Unreleased`, or creating release assets.
+After the version is chosen, adapt it into `docs/releases/vVERSION.md` and follow
+the publishing authorization and release steps below.
+
 ## 1. Prepare the release
 
 1. Finish all feature, bug-fix, audit, documentation, and test work intended for
@@ -97,7 +102,10 @@ Expected assets:
   - `vcruntime_net.dll`
   - `vcruntime_net32.dll`
 
-Inspect both archives before continuing.
+Inspect both archives before continuing. The VSIX runtime directory must contain
+exactly the same five declared files as the binary ZIP. `.vscodeignore` allows
+only those runtime names; local rollback copies and undeclared sidecar files must
+never be included. The release gate rejects extra runtime entries.
 
 ## 4. Commit and publish
 

@@ -1,0 +1,78 @@
+# VEH Debugger — Unreleased
+
+This update expands process tracing and data watches, improves native breakpoint
+thread coverage, and fixes kernel packet handling and interrupted stepping.
+
+## Upgrade notes
+
+- **Thread control is consolidated.** The separate `veh_freeze_thread` tool is
+  removed, including its call route. Use the existing `veh_threads` tool:
+  `action="freeze"` or `action="thaw"` with an explicit `threadId`.
+  Only explicit `action="thaw", threadId=0` releases all freezes.
+  Default listing is unchanged. `action="terminate"` requires backend support,
+  is forceful, can leave target locks held, and supports direct/batch calls only.
+- **New backend features are optional.** Detailed caller capture, lazy process
+  trace budgets, mixed-mode inspection, guest entry launch and loader-stop
+  identity use their advertised backend capabilities. Existing wire layouts
+  remain available; unsupported options return errors.
+- **Page watches remain best effort.** They are optional local VEH data watches,
+  consume no DR slots and stop before the attempted instruction. Guard dispatch,
+  internal threads and kernel accesses can still escape observation.
+- **Large trace replies may be file receipts.** Ordered process captures above
+  256 steps prefer event files outside target windows. Replies above 64 KiB use
+  artifact receipts, including explicit inline requests. Check storage completion
+  separately from capture completion and retain or remove files as needed.
+
+## Added and changed
+
+- **Detailed caller capture.** `veh_trace_callers(mode="detailed")` collects
+  hit-time registers, raw stack prefixes, exact timestamps and bounded register
+  filters on supporting backends. Start/stop/read/export support hit, time and
+  storage limits, immutable pages and JSON/JSONL output. Raw capture does not
+  imply complete stack unwinding or typed arguments.
+- **Independent trace budgets.** Supporting process backends decode entered
+  blocks lazily. Execution and decode-cache defaults are each 1,000,000
+  instructions; `max_decoded_instructions` controls the cache independently.
+  Cache exhaustion preserves the verified prefix and stops before an uncached
+  instruction.
+- **Page data breakpoints.** Set `method="page"` through
+  `veh_set_data_breakpoint`. Watches filter reported access addresses, share
+  page protection and support existing conditions and actions within the
+  [page-watch limits](../PAGE_BREAKPOINTS.md). Hardware remains the default.
+- **Native thread coverage.** Software INT3 stays installed while stopped.
+  During instruction retry, peer threads are held until INT3/page protection is
+  restored, preserving user Pause/Freeze state. DR watches apply at supported
+  Windows thread entry; failed application/removal is an error.
+- **Guest entry launch.** Registered local guest backends can opt in with
+  `guest_launch=true`. Validate creation receipts, process/thread identity,
+  address width and stopped entry registers before reporting success. DAP and
+  remote guest launch remain unsupported.
+- **Mixed-mode inspection.** Supporting backends distinguish stopped code width
+  from process width. Disassembly selects the observed mode automatically;
+  caller locals accept the stack frame's instruction address and frame base.
+  Captured aggregate/vector bytes and incomplete scalar values retain their
+  actual width and available bytes.
+
+## Fixed
+
+- **Kernel exchanges.** Handle duplicate/late stop packets, ACK-mode NAK retries,
+  monitor completion and fragmented replies without shifting response ownership.
+  Incomplete replies prevent new commands; malformed data remains an error.
+- **Step outcomes.** Process steps finish on actual same-thread exceptions,
+  breakpoints and exits. Kernel faults and uncertain progress do not count as
+  completed instructions; optional stop metadata preserves exception details.
+  Missing stop confirmation never becomes a successful empty-register result.
+- **Owned module stops.** Optional stop identity lets DAP release its own
+  module-load hold after binding while preserving user, replaced and exception
+  stops. Older backends retain explicit pause/continue behavior.
+- **Native stop cleanup.** Preserve simultaneous SW/DR hits and clear parked/live
+  DR state on detach. Terminating a thread clears its tracked stop, freeze and
+  page-retry state after confirmed native exit.
+- **Trace and inspection results.** Drain early-close artifact streams, preserve
+  partial captures and exact uncertainty, and report backend failures as errors
+  rather than successful empty results. POP-to-stack memory events use the
+  post-increment stack address.
+- **Thread validation.** Reject missing control IDs, invalid/overflowing IDs and
+  malformed or unconfirmed freeze receipts.
+- **Package contents.** VSIX and binary ZIP runtime contents are restricted to
+  the five declared shipped files; local rollback binaries are excluded.
