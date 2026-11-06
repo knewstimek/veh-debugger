@@ -150,7 +150,7 @@ handler occurrence만 필요하면 `target_window={address,occurrence,before_ste
 
 함수 중단점용 모듈 guard는 백엔드가 [정지 식별 v1](docs/STOP_IDENTITY.md)을 지원하면 로더 안전 바인딩 뒤 자동 재개할 수 있다. 어댑터는 자기 내부 정지의 종류·일련번호·소유권이 모두 일치할 때만 조건부 재개하며, 사용자 정지나 바뀐 정지는 유지한다. 구버전 백엔드는 기존 pause·명시적 continue 경로를 사용하고, 공개 DAP/MCP 인자는 바뀌지 않는다.
 
-페이지 예외 기반 데이터 감시는 기존 `veh_set_data_breakpoint(address="0x...", method="page", type="write", size=4)`로 설정하고 `veh_remove_data_breakpoint(id=...)`로 해제한다. 기본 VEH DLL의 선택 기능으로 DR 슬롯을 쓰지 않으며, 접근 명령 실행 전에 정지한다. private 데이터 페이지와 direct/batch/action을 지원한다. 명령 한 개를 재실행하는 동안 다른 대상 스레드를 잠시 보류하고 기존 Pause/Freeze 상태를 보존한다. `coverage="best_effort"`이며 guard 전달 구간·내부 스레드·커널 접근까지 무유실로 보장하지 않는다. 소프트 INT3는 사용자 정지 중에도 유지하며, DR 감시는 새 Windows 스레드의 사용자 코드 실행 전에 적용한다. [범위·제약·복원 규칙](docs/PAGE_BREAKPOINTS.md).
+페이지 예외 기반 데이터 감시는 기존 `veh_set_data_breakpoint(address="0x...", method="page", type="write", size=4)`로 설정하고 `veh_remove_data_breakpoint(id=...)`로 해제한다. 기본 VEH DLL의 선택 기능으로 DR 슬롯을 쓰지 않으며, 접근 명령 실행 전에 정지한다. private 데이터 페이지와 direct/batch/action을 지원한다. 명령 한 개를 재실행하는 동안 다른 대상 스레드를 잠시 보류하고 기존 Pause/Freeze 상태를 보존한다. `coverage="best_effort"`이며 guard 전달 구간·내부 스레드·커널 접근까지 무유실로 보장하지 않는다. 소프트 INT3는 사용자 정지 중에도 유지하며, DR 감시는 지원되는 Windows 스레드 시작 경로에서 사용자 코드 실행 전에 적용한다. [범위·제약·복원 규칙](docs/PAGE_BREAKPOINTS.md).
 
 ## 특징
 
@@ -459,7 +459,7 @@ VM 자체에 연결할 때는 외부 백엔드를 VM 범위로 등록한 뒤
 | `veh_step_over` | `threadId` | Step Over |
 | `veh_step_out` | `threadId` | Step Out |
 | `veh_pause` | `threadId?` | 일시정지 |
-| `veh_threads` | `action?, threadId?` | 기본은 스레드 목록. `freeze`·`thaw`·`terminate`로 지정 스레드를 동결·해제·강제 종료한다. `thaw`의 ID 0은 전체 동결 해제. 종료는 백엔드 지원이 필요하고 브레이크포인트 액션에서는 제외하며, 대상이 잡은 잠금을 남길 수 있다. |
+| `veh_threads` | `action?, threadId?` | 기본은 스레드 목록. `freeze`·`thaw`·`terminate`로 지정 스레드를 동결·해제·강제 종료한다. 제어 시 `threadId`를 명시해야 하며 `thaw`에 명시한 ID 0만 전체 동결 해제다. 손상되거나 요청 결과를 확인하지 못한 응답은 오류다. 종료는 백엔드 지원이 필요하고 브레이크포인트 액션에서는 제외하며, 대상이 잡은 잠금을 남길 수 있다. |
 | `veh_freeze_thread` | `threadId, frozen?` | 스레드 하나를 얼리거나 푼다. 얼린 스레드는 `veh_continue` 후에도 멈춰 있고(일시정지와 별도 카운트), detach 시 자동으로 풀린다. `threadId:0, frozen:false`는 전체 해제 |
 | `veh_stack_trace` | `threadId, maxFrames?` | 스택 트레이스 (`address`, `frameBase`, `returnAddress`). PDB 없는 모듈은 PE export 테이블을 직접 파싱해 정확한 함수명 제공 (DbgHelp의 부정확한 `OrdinalNNNNN` 라벨 대신) |
 | `veh_enum_locals` | `threadId, instructionAddress?, frameBase?` | 정지된 스레드의 스택 프레임에서 지역변수/파라미터 열거 (이름/타입/주소/값). 생략 시 최상위 프레임 자동 감지 (PDB 필요) |

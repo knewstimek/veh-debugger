@@ -48,7 +48,7 @@ void PrintUsage() {
         "  Callers: veh_trace_callers defaults to caller counts; mode=detour uses instrumentation.\n"
         "  mode=detailed: hit-time registers/raw stack, filters and hit limits on supported process backends.\n"
         "  Detailed workflow: status/start/stop/read/export; no implicit resume/pause or complete-unwind guarantee.\n"
-        "  Threads: veh_threads defaults to list; action=freeze|thaw|terminate with threadId controls one thread.\n"
+        "  Threads: veh_threads defaults to list; action=freeze|thaw|terminate requires explicit threadId (thaw ID0 releases all).\n"
         "  Terminate is forceful, backend-dependent and direct/batch only; existing veh_freeze_thread stays supported.\n"
         "  Page watches: veh_set_data_breakpoint(method=page) on local VEH; no DR slots, best_effort coverage.\n"
         "  Use private data pages; remove watches before traces/protection changes. Describe the tool for limits.\n"

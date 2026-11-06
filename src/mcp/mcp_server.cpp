@@ -1349,14 +1349,14 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}}}}),
 
         Tool(&McpServer::ToolThreads, "session", 0, true,
-            {{"name", "veh_threads"}, {"description", "List target threads (default action=list), or freeze, thaw, terminate one explicit threadId. thaw with threadId=0 thaws all. Terminate requires backend support, is forceful and can leave target locks held; unavailable in breakpoint actions. Existing veh_freeze_thread remains supported."},
+            {{"name", "veh_threads"}, {"description", "List target threads (default action=list), or freeze, thaw, terminate one explicit threadId. Control requires explicit threadId; thaw with threadId=0 thaws all. Terminate requires backend support, is forceful and can leave target locks held; unavailable in breakpoint actions. Existing veh_freeze_thread remains supported."},
              {"inputSchema", {{"type", "object"}, {"properties", {
                  {"action", {{"type", "string"}, {"enum", json::array({"list","freeze","thaw","terminate"})}, {"default","list"}}},
-                 {"threadId", {{"type","integer"}, {"minimum",0}, {"maximum",UINT32_MAX}, {"description","Required positive OS thread ID for freeze/terminate; 0 thaws all"}}}
+                 {"threadId", {{"type","integer"}, {"minimum",0}, {"maximum",UINT32_MAX}, {"description","Required for freeze/thaw/terminate; positive OS ID, or explicit 0 to thaw all"}}}
              }}}}}),
 
 		Tool(&McpServer::ToolFreezeThread, "session", 0, true,
-			{{"name", "veh_freeze_thread"}, {"description", "Freeze or thaw one thread. A frozen thread stays suspended across veh_continue until thawed (or detach), e.g. to hold a watchdog or worker thread while the rest runs. frozen=false with threadId 0 thaws all. veh_threads marks frozen threads. Caution: freezing a thread that holds a heap or loader lock can stall other threads."},
+			{{"name", "veh_freeze_thread"}, {"description", "Freeze or thaw one thread. A frozen thread stays suspended across veh_continue until thawed (or detach), e.g. to hold a watchdog or worker thread while the rest runs. frozen=false with threadId 0 thaws all. Unsupported or malformed replies are errors. veh_threads marks frozen threads. Caution: freezing a thread that holds a heap or loader lock can stall other threads."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}},
 			{"frozen", {{"type", "boolean"}, {"description", "true freezes (default), false thaws"}}}

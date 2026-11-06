@@ -1126,21 +1126,38 @@ void DebugSession::SignalStop(const std::string& reason, uint64_t addr, uint32_t
 
 // --- State queries ---
 
-bool DebugSession::FreezeThread(FreezeOp op, uint32_t threadId, std::vector<uint32_t>& frozen) {
-	FreezeThreadRequest req{};
-	req.threadId = threadId;
-	req.op = op;
-	std::vector<uint8_t> respData;
-	frozen.clear();
-	if (!ipcTransport_->SendAndReceive(IpcCommand::FreezeThread, &req, sizeof(req), respData))
-		return false;
-	if (respData.size() < sizeof(FreezeThreadResponse)) return false;
-	auto* resp = reinterpret_cast<const FreezeThreadResponse*>(respData.data());
-	size_t count = (std::min)(static_cast<size_t>(resp->count),
-		(respData.size() - sizeof(FreezeThreadResponse)) / sizeof(uint32_t));
-	auto* ids = reinterpret_cast<const uint32_t*>(respData.data() + sizeof(FreezeThreadResponse));
-	frozen.assign(ids, ids + count);
-	return resp->status == IpcStatus::Ok;
+bool DebugSession::FreezeThread(FreezeOp op,uint32_t threadId,std::vector<uint32_t>& frozen,std::string* error) {
+    frozen.clear();if(error)error->clear();
+    const auto fail=[&](const std::string& detail){if(error)*error=detail;return false;};
+    if(!backendInfo_.Supports(IpcCommand::FreezeThread))return fail("FreezeThread is unsupported by this backend");
+    const FreezeThreadRequest request{threadId,op};
+    std::vector<uint8_t> reply;PipeExchangeDiagnostics diagnostics{};
+    if(!ipcTransport_->SendAndReceive(IpcCommand::FreezeThread,&request,sizeof(request),reply,10000,&diagnostics))
+        return fail("FreezeThread: "+DescribeIpcFailure(&diagnostics));
+    if(reply.size()<sizeof(IpcStatus))return fail("FreezeThread: malformed backend response");
+    IpcStatus status{};memcpy(&status,reply.data(),sizeof(status));
+    if(status==IpcStatus::Unsupported)return fail("FreezeThread is unsupported by this backend");
+    if(reply.size()==sizeof(IpcStatus)&&status!=IpcStatus::Ok)
+        return fail("FreezeThread: backend rejected request (status "+std::to_string(static_cast<uint32_t>(status))+")");
+    if(reply.size()<sizeof(FreezeThreadResponse))return fail("FreezeThread: malformed backend response");
+    FreezeThreadResponse header{};memcpy(&header,reply.data(),sizeof(header));
+    const auto bytes=reply.size()-sizeof(header);
+    if(bytes%sizeof(uint32_t)||header.count!=bytes/sizeof(uint32_t))
+        return fail("FreezeThread: malformed frozen thread list (count does not match payload)");
+    std::vector<uint32_t> ids(header.count);
+    if(bytes)memcpy(ids.data(),reply.data()+sizeof(header),bytes);
+    auto sorted=ids;std::sort(sorted.begin(),sorted.end());
+    if((!sorted.empty()&&!sorted.front())||std::adjacent_find(sorted.begin(),sorted.end())!=sorted.end())
+        return fail("FreezeThread: malformed frozen thread list (zero or duplicate ID)");
+    if(status!=IpcStatus::Ok&&status!=IpcStatus::Error)
+        return fail("FreezeThread: backend rejected request (status "+std::to_string(static_cast<uint32_t>(status))+")");
+    if(status==IpcStatus::Ok) {
+        const bool included=std::find(ids.begin(),ids.end(),threadId)!=ids.end();
+        if((op==FreezeOp::Freeze&&!included)||(op==FreezeOp::Thaw&&(threadId?included:!ids.empty())))
+            return fail("FreezeThread: backend success did not confirm the requested frozen state");
+    }
+    frozen=std::move(ids);
+    return status==IpcStatus::Ok;
 }
 
 bool DebugSession::TerminateThread(uint32_t threadId,std::string& error) {

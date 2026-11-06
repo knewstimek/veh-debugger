@@ -4,7 +4,16 @@ Windows debugger based on **VEH (Vectored Exception Handler)** instead of the Wi
 
 ## Thread control
 
-`veh_threads()` lists threads. Use `veh_threads(action="freeze"|"thaw"|"terminate", threadId=...)` for control; `thaw` with ID 0 releases all freezes. Existing `veh_freeze_thread` calls stay supported. Termination requires backend support, is forceful and can leave target locks held. List/freeze/thaw support breakpoint actions; termination supports direct/batch calls only.
+`veh_threads()` lists threads. Controls require an explicit `threadId`:
+
+```text
+veh_threads(action="freeze", threadId=123)
+veh_threads(action="thaw", threadId=123)
+veh_threads(action="thaw", threadId=0)       // release all freezes explicitly
+veh_threads(action="terminate", threadId=123)
+```
+
+Existing `veh_freeze_thread` calls stay supported. Malformed or unconfirmed control replies are errors. Termination requires backend support, is forceful and can leave target locks held. List/freeze/thaw support breakpoint actions; termination supports direct/batch calls only. During a pending run-until operation, thread listing remains available; cancel the operation before a thread control action.
 
 ## Module and symbol selection
 
@@ -16,7 +25,7 @@ Function-breakpoint module guards support automatic release after loader-safe bi
 
 For ordinary inspection, `veh_disassemble(address="...")` uses the observed mode at the current stop PC on supporting backends and the process width elsewhere; it returns `addressBits`. Only specify `threadId` or `address_bits=32|64` when an override is needed, never both. `veh_enum_locals(threadId=...)` defaults to the top frame. To inspect a caller, pass its `veh_stack_trace` frame's `address` as `instructionAddress` and its `frameBase` together. A zero `returnAddress` means unavailable. Empty `variables` is successful; invalid addresses and backend failures return errors. See [register context](https://github.com/knewstimek/veh-debugger/blob/master/docs/REGISTER_CONTEXT.md).
 
-Page-exception data watches use existing `veh_set_data_breakpoint(address="0x...", method="page", type="write", size=4)` and `veh_remove_data_breakpoint(id=...)`. This optional local VEH mode uses no DR slots, stops before the attempted instruction and supports direct/batch/actions. It supports private data pages only and reports `coverage="best_effort"`: peer threads are held during the one-instruction retry, but guard dispatch, internal threads and kernel accesses can still escape observation. Software INT3 stays installed while stopped; DR watches cover new Windows threads before user code. See [page watches](https://github.com/knewstimek/veh-debugger/blob/master/docs/PAGE_BREAKPOINTS.md) for limits and restoration.
+Page-exception data watches use existing `veh_set_data_breakpoint(address="0x...", method="page", type="write", size=4)` and `veh_remove_data_breakpoint(id=...)`. This optional local VEH mode uses no DR slots, stops before the attempted instruction and supports direct/batch/actions. It supports private data pages only and reports `coverage="best_effort"`: peer threads are held during the one-instruction retry, but guard dispatch, internal threads and kernel accesses can still escape observation. Software INT3 stays installed while stopped; DR watches cover supported Windows thread starts before user code. See [page watches](https://github.com/knewstimek/veh-debugger/blob/master/docs/PAGE_BREAKPOINTS.md) for limits and restoration.
 
 ## Features
 

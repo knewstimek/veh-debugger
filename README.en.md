@@ -148,7 +148,7 @@ Detailed collection never resumes or pauses the target. The built-in VEH DLL doe
 
 Function-breakpoint module guards can resume automatically after a loader-safe binding pass when the backend provides [stop identity v1](docs/STOP_IDENTITY.md). The adapter conditionally releases only its own exact internal hold; changed/user stops remain stopped. Older backends retain the explicit pause/continue path. Public DAP/MCP arguments are unchanged.
 
-Page-exception data watches use existing `veh_set_data_breakpoint(address="0x...", method="page", type="write", size=4)` and `veh_remove_data_breakpoint(id=...)`. This optional local VEH mode uses no DR slots, stops before the attempted instruction and supports direct/batch/actions. It supports private data pages only and reports `coverage="best_effort"`: peer threads are held during the one-instruction retry, but guard dispatch, internal threads and kernel accesses can still escape observation. Software INT3 stays installed while stopped; DR watches cover new Windows threads before user code. See [page watches](docs/PAGE_BREAKPOINTS.md) for limits and restoration.
+Page-exception data watches use existing `veh_set_data_breakpoint(address="0x...", method="page", type="write", size=4)` and `veh_remove_data_breakpoint(id=...)`. This optional local VEH mode uses no DR slots, stops before the attempted instruction and supports direct/batch/actions. It supports private data pages only and reports `coverage="best_effort"`: peer threads are held during the one-instruction retry, but guard dispatch, internal threads and kernel accesses can still escape observation. Software INT3 stays installed while stopped; DR watches cover supported Windows thread starts before user code. See [page watches](docs/PAGE_BREAKPOINTS.md) for limits and restoration.
 
 ## Features
 
@@ -420,7 +420,7 @@ The table below documents the complete public tool surface. Treat the running se
 | `veh_step_over` | `threadId` | Step Over |
 | `veh_step_out` | `threadId` | Step Out |
 | `veh_pause` | `threadId?` | Pause |
-| `veh_threads` | `action?, threadId?` | List threads by default; `freeze`, `thaw`, or forcefully `terminate` an explicit thread. `thaw` with ID 0 releases all freezes. Termination requires backend support and is excluded from breakpoint actions; it can leave target locks held. |
+| `veh_threads` | `action?, threadId?` | List threads by default; `freeze`, `thaw`, or forcefully `terminate` an explicit thread. Controls require an explicit `threadId`; only `thaw` with explicit ID 0 releases all freezes. Malformed or unconfirmed control replies are errors. Termination requires backend support and is excluded from breakpoint actions; it can leave target locks held. |
 | `veh_freeze_thread` | `threadId, frozen?` | Freeze or thaw one thread. A frozen thread stays suspended across `veh_continue` (separate from pause) and is thawed on detach. `threadId:0, frozen:false` thaws all |
 | `veh_stack_trace` | `threadId, maxFrames?` | Stack trace with `address`, `frameBase` and `returnAddress`. For PDB-less modules, parses the PE export table directly for accurate function names (instead of DbgHelp's inaccurate `OrdinalNNNNN` labels) |
 | `veh_enum_locals` | `threadId, instructionAddress?, frameBase?` | Enumerate locals/parameters in a stopped thread's stack frame (name/type/address/value). Auto-detects the top frame if omitted (PDB required) |

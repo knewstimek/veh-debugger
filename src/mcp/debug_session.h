@@ -271,7 +271,7 @@ public:
 	// --- State queries ---
 	std::vector<ThreadEntry> GetThreads(std::string* error = nullptr);
 	// List/freeze/thaw; frozen receives the frozen thread ids after the operation
-	bool FreezeThread(FreezeOp op, uint32_t threadId, std::vector<uint32_t>& frozen);
+	bool FreezeThread(FreezeOp op, uint32_t threadId, std::vector<uint32_t>& frozen, std::string* error=nullptr);
     bool TerminateThread(uint32_t threadId, std::string& error);
 	std::vector<StackFrame> GetStackTrace(uint32_t threadId, uint32_t maxFrames = 20, std::string* error = nullptr);
 	std::optional<RegisterSet> GetRegisters(uint32_t threadId);

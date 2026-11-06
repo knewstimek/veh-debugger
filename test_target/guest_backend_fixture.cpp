@@ -82,6 +82,8 @@ int wmain(int argc, wchar_t** argv) {
     uint32_t pathRequests = 0, hardwareQueries = 0;
     const bool hardwareMode = mode.rfind(L"hardware-", 0) == 0;
     uint32_t fixtureBreakpointId = 0, shellcodeRequests=0, localThreadQueries=0;
+    const bool freezeMode=mode.rfind(L"freeze-",0)==0;
+    uint32_t freezeRequests=0;
     const bool importMode=mode.rfind(L"resolve-",0)==0;
     const bool localsMode=mode.rfind(L"locals-",0)==0;
     uint32_t localsRequests=0;
@@ -261,6 +263,7 @@ int wmain(int argc, wchar_t** argv) {
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::GetRegisters);
             }
             if(mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode||localsMode)for(auto op:{veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue})veh::SetCommandSupported(caps.commands,op);
+            if(freezeMode&&mode!=L"freeze-no-caps")veh::SetCommandSupported(caps.commands,veh::IpcCommand::FreezeThread);
             if(mode.rfind(L"control-",0)==0) {
                 for(auto op:{veh::IpcCommand::Continue,veh::IpcCommand::Pause,veh::IpcCommand::StepInto,
                     veh::IpcCommand::StepOver,veh::IpcCommand::StepOut,veh::IpcCommand::WriteMemory,veh::IpcCommand::TerminateThread})
@@ -1133,6 +1136,24 @@ int wmain(int argc, wchar_t** argv) {
             for(auto tid:resumed){std::memcpy(wire.data()+offset,&tid,sizeof(tid));offset+=sizeof(tid);}
             for(auto tid:remaining){std::memcpy(wire.data()+offset,&tid,sizeof(tid));offset+=sizeof(tid);}
             if(!send(pipe,header.command,wire.data(),static_cast<uint32_t>(wire.size())))break;
+        } else if(freezeMode&&command==veh::IpcCommand::FreezeThread) {
+            ++freezeRequests;
+            if(mode==L"freeze-unsupported"){if(!reply(pipe,header.command,veh::IpcStatus::Unsupported))break;continue;}
+            if(mode==L"freeze-short") {
+                if(!reply(pipe,header.command,veh::FreezeThreadResponse{veh::IpcStatus::Ok,1}))break;
+            } else {
+                struct {veh::FreezeThreadResponse head;uint32_t ids[2];} response{};
+                response.head={veh::IpcStatus::Ok,1};response.ids[0]=77;response.ids[1]=77;
+                if(mode==L"freeze-zero")response.ids[0]=0;
+                if(mode==L"freeze-no-effect") {
+                    veh::FreezeThreadRequest request{};
+                    if(bytes.size()==sizeof(request))memcpy(&request,bytes.data(),sizeof(request));
+                    response.ids[0]=request.op==veh::FreezeOp::Freeze?88:77;
+                }
+                if(mode==L"freeze-duplicate")response.head.count=2;
+                const auto length=mode==L"freeze-extra"||mode==L"freeze-duplicate"?sizeof(response):sizeof(response.head)+sizeof(uint32_t);
+                if(!send(pipe,header.command,&response,static_cast<uint32_t>(length)))break;
+            }
         } else if (mode.rfind(L"control-",0)==0 &&
             (command==veh::IpcCommand::Continue || command==veh::IpcCommand::Pause ||
              command==veh::IpcCommand::StepInto || command==veh::IpcCommand::StepOver ||
@@ -1344,6 +1365,7 @@ int wmain(int argc, wchar_t** argv) {
             }
             if(mode.rfind(L"local-",0)==0)sprintf_s(threads.thread.name,"fixture-agent:%lu",GetCurrentProcessId());
             if(mode==L"shellcode-action")sprintf_s(threads.thread.name,"shellcode-calls:%u",shellcodeRequests);
+            if(freezeMode)sprintf_s(threads.thread.name,"freeze-requests:%u",freezeRequests);
             if(localsMode)sprintf_s(threads.thread.name,"locals-calls:%u",localsRequests);
             if(stopIdentityMode)std::snprintf(threads.thread.name,sizeof(threads.thread.name),
                 "a=%u,n=%u,h=%u,c=%u,i=%u,l=%u,e=%u,s=%llu",conditionalResumes,conditionalCalls,moduleHeld?1u:0u,

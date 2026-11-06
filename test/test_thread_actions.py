@@ -54,6 +54,13 @@ def check_actions():
             assert "error" in direct and batch(c,args) == direct, (args,direct)
         frozen = tool(c,"veh_threads",{"action":"freeze","threadId":worker})
         assert frozen == tool(c,"veh_freeze_thread",{"threadId":worker})
+        missing=c.tool("veh_threads",{"action":"thaw"})
+        assert "error" in missing, ("missing thaw ID released every frozen thread",missing)
+        assert batch(c,{"action":"thaw"}) == missing
+        for invalid in [-1,2**32+worker,2**32,1.5,True,"4294967296","12oops"]:
+            rejected=c.tool("veh_freeze_thread",{"threadId":invalid,"frozen":False})
+            assert "error" in rejected, (invalid,rejected)
+        assert next(t for t in tool(c,"veh_threads")["threads"] if t["id"]==worker).get("frozen"), "invalid controls released a freeze"
         assert batch(c,{"action":"thaw","threadId":0})["frozenThreads"] == []
         assert batch(c,{"action":"freeze","threadId":worker}) == frozen
         assert tool(c,"veh_freeze_thread",{"threadId":worker,"frozen":False})["frozenThreads"] == []
@@ -149,9 +156,33 @@ def check_peers():
     print("PASS backend capability refusal, execution errors and exact termination reply validation")
 
 
+def check_freeze_receipts():
+    for mode in ["freeze-short","freeze-extra","freeze-zero","freeze-duplicate","freeze-no-effect","freeze-unsupported","freeze-no-caps"]:
+        with OwnedMcpClient() as c:
+            c.initialize("freeze-receipt-validation")
+            tool(c,"veh_attach",{"pid":4242,"target_scope":"guest","agent":AGENT,
+                                "agent_args":["--metadata",mode]})
+            for action in ["freeze","thaw"]:
+                args={"action":action,"threadId":77}
+                direct=c.tool("veh_threads",args)
+                assert "error" in direct and not direct.get("success"),(mode,action,direct)
+                assert batch(c,args)==direct,(mode,action,direct)
+                legacy=c.tool("veh_freeze_thread",{"threadId":77,"frozen":action=="freeze"})
+                assert legacy==direct,(mode,legacy,direct)
+            listed=c.tool("veh_threads")
+            if mode=="freeze-no-caps":
+                assert listed["threads"][0]["name"]=="freeze-requests:0",listed
+            elif mode=="freeze-no-effect":
+                assert listed["threads"][0].get("frozen"),listed
+            else:
+                assert "error" in listed,(mode,listed)
+    print("PASS invalid freeze receipts are errors; missing capabilities send no freeze request")
+
+
 if __name__=="__main__":
     check_actions()
     check_running_termination()
     check_page_cleanup()
     check_action_parity()
     check_peers()
+    check_freeze_receipts()
