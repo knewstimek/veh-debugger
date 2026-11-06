@@ -2,6 +2,7 @@
 #include "breakpoint.h"
 #include "memory.h"
 #include "syscall_resolver.h"
+#include "rearm_guard.h"
 #include "../common/logger.h"
 #include <cstring>
 
@@ -27,6 +28,8 @@ std::vector<SoftBreakpoint> BreakpointManager::InRange(uint64_t address, uint32_
 
 // INT3(0xCC) 패치로 소프트웨어 브레이크포인트 설정
 uint32_t BreakpointManager::Add(uint64_t address) {
+    RearmMutation mutation;
+    if(!mutation||!RearmGuard::Instance().Ready()||RearmGuard::Instance().Reserved(address))return 0;
 	std::lock_guard<std::mutex> lock(mutex_);
 
 	// 이미 동일 주소에 브레이크포인트가 있는지 확인
@@ -65,6 +68,7 @@ uint32_t BreakpointManager::Add(uint64_t address) {
 
 // 원본 바이트 복원으로 브레이크포인트 제거
 bool BreakpointManager::Remove(uint32_t id) {
+    RearmMutation mutation;if(!mutation)return false;
 	std::lock_guard<std::mutex> lock(mutex_);
 
 	auto it = breakpoints_.find(id);
@@ -86,6 +90,7 @@ bool BreakpointManager::Remove(uint32_t id) {
 }
 
 bool BreakpointManager::RemoveByAddress(uint64_t address) {
+    RearmMutation mutation;if(!mutation)return false;
 	std::lock_guard<std::mutex> lock(mutex_);
 
 	auto addrIt = addressToId_.find(address);
@@ -106,6 +111,7 @@ bool BreakpointManager::RemoveByAddress(uint64_t address) {
 }
 
 void BreakpointManager::RemoveAll() {
+    RearmMutation mutation;if(!mutation)return;
 	std::lock_guard<std::mutex> lock(mutex_);
 
 	for (auto& [id, bp] : breakpoints_) {
@@ -119,6 +125,7 @@ void BreakpointManager::RemoveAll() {
 }
 
 bool BreakpointManager::Enable(uint32_t id) {
+    RearmMutation mutation;if(!mutation)return false;
 	std::lock_guard<std::mutex> lock(mutex_);
 
 	auto it = breakpoints_.find(id);
@@ -135,6 +142,7 @@ bool BreakpointManager::Enable(uint32_t id) {
 }
 
 bool BreakpointManager::Disable(uint32_t id) {
+    RearmMutation mutation;if(!mutation)return false;
 	std::lock_guard<std::mutex> lock(mutex_);
 
 	auto it = breakpoints_.find(id);
@@ -212,6 +220,7 @@ bool BreakpointManager::WasRecentlyRemoved(uint64_t address) {
 }
 
 void BreakpointManager::RearmBreakpoint(uint64_t address) {
+    RearmMutation mutation;if(!mutation)return;
 	std::lock_guard<std::mutex> lock(mutex_);
 
 	auto addrIt = addressToId_.find(address);
@@ -294,6 +303,14 @@ bool BreakpointManager::PatchByte(uint64_t address, uint8_t byte, uint8_t* origi
 	resolver.FlushInstructionCache(ptr, 1);
 
 	return true;
+}
+
+bool BreakpointManager::PrepareStep(uint64_t address,uint8_t& original,bool& exists) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found=addressToId_.find(address);
+    exists=found!=addressToId_.end();
+    if(exists)original=breakpoints_.at(found->second).originalByte;
+    return true;
 }
 
 } // namespace veh

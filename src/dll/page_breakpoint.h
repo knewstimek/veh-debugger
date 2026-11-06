@@ -4,6 +4,7 @@
 #include <mutex>
 #include <atomic>
 #include "../common/ipc_protocol.h"
+#include "rearm_guard.h"
 
 namespace veh {
 // Process-wide page protection; no allocation or callback under this lock.
@@ -21,7 +22,7 @@ public:
     bool Complete(uint32_t tid, CONTEXT& ctx, bool& originalTF, bool* failed=nullptr);
     void Cancel(uint32_t tid, CONTEXT& ctx);
     bool Park(uint32_t tid);
-    bool OpenForStep(uint32_t tid);
+    bool PrepareStep(uint32_t tid,RearmGuard::Page* pages,size_t& count);
 private:
     struct Watch { uint32_t id=0; uint64_t address=0; uint32_t size=0; uint8_t access=0; };
     struct Page { uintptr_t base=0, allocation=0; DWORD original=0; uint32_t refs=0; };

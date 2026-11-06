@@ -5,6 +5,7 @@
 #include "breakpoint.h"
 #include "hw_breakpoint.h"
 #include "page_breakpoint.h"
+#include "rearm_guard.h"
 #include "threads.h"
 #include "stack_walk.h"
 #include "memory.h"
@@ -688,8 +689,9 @@ void PipeServer::EmergencyCleanup() {
 	LOG_WARN("Emergency cleanup: adapter presumed dead");
 	ValueScanner::Instance().Reset();
 	BreakpointManager::Instance().RemoveAll();
-	HwBreakpointManager::Instance().RemoveAll();
-	VehHandler::Instance().Uninstall();
+    RearmMutation mutation;
+    if(!mutation||!ClearHardwareBreakpoints())return;
+	if(!VehHandler::Instance().Uninstall())return;
 	ThreadManager::Instance().ResumeAll();
 	ThreadManager::Instance().ThawAll();
 	LOG_INFO("Emergency cleanup done: VEH uninstalled, all BPs removed, threads resumed");
@@ -833,7 +835,7 @@ void PipeServer::ServerThread() {
         // A broken pipe exits before heartbeat recovery. Page watches cannot
         // outlive their client: release guards/TF and their dependent stops now.
         // Keep the historical reconnect policy unchanged when no page lease exists.
-        if(PageBreakpointManager::Instance().Active())EmergencyCleanup();
+        if(PageBreakpointManager::Instance().Active()||HwBreakpointManager::Instance().HasActive())EmergencyCleanup();
 		ValueScanner::Instance().Reset(); // Also release staging/history on abrupt pipe loss.
 		// Detach 후: 파이프 연결만 끊고 외부 루프에서 새 클라이언트 대기
 		// Shutdown 후: running_=false이므로 외부 루프도 종료
@@ -850,6 +852,30 @@ void PipeServer::ServerThread() {
 
 void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize) {
 	auto cmd = static_cast<IpcCommand>(command);
+    const bool mutationCommand=cmd==IpcCommand::WriteMemory||cmd==IpcCommand::PatchCode||
+        cmd==IpcCommand::ProtectMemory||cmd==IpcCommand::FreeMemory||
+        cmd==IpcCommand::SetHwBreakpoint||cmd==IpcCommand::RemoveHwBreakpoint||
+        cmd==IpcCommand::Detach||cmd==IpcCommand::Shutdown;
+    RearmMutation mutation(mutationCommand);
+    if(!mutation){const auto status=IpcStatus::InvalidState;SendResponse(command,&status,sizeof(status));return;}
+    uint64_t mutationAddress=0,mutationSize=0;
+    if(cmd==IpcCommand::WriteMemory&&payloadSize>=sizeof(WriteMemoryRequest)) {
+        const auto* request=reinterpret_cast<const WriteMemoryRequest*>(payload);
+        mutationAddress=request->address;mutationSize=request->size;
+    } else if(cmd==IpcCommand::PatchCode&&payloadSize>=sizeof(PatchCodeRequest)) {
+        const auto* request=reinterpret_cast<const PatchCodeRequest*>(payload);
+        mutationAddress=request->address;mutationSize=std::max(request->codeSize,request->overwriteSize);
+    } else if(cmd==IpcCommand::ProtectMemory&&payloadSize>=sizeof(ProtectMemoryRequest)) {
+        const auto* request=reinterpret_cast<const ProtectMemoryRequest*>(payload);
+        mutationAddress=request->address;mutationSize=request->size;
+        mutationAddress&=~uint64_t(4095);mutationSize+=4095;
+    } else if(cmd==IpcCommand::FreeMemory&&payloadSize>=sizeof(FreeMemoryRequest)) {
+        const auto* request=reinterpret_cast<const FreeMemoryRequest*>(payload);
+        mutationAddress=request->address;mutationSize=4096;
+    }
+    if(RearmGuard::Instance().Reserved(mutationAddress,mutationSize)) {
+        const auto status=IpcStatus::InvalidState;SendResponse(command,&status,sizeof(status));return;
+    }
     if(PageBreakpointManager::Instance().Active() &&
        (cmd==IpcCommand::TraceRegister||cmd==IpcCommand::TraceMemory||
         cmd==IpcCommand::TraceMemoryCollect||cmd==IpcCommand::ResolveImport||
@@ -1060,7 +1086,10 @@ void PipeServer::HandleBreakpointCommand(uint32_t command, const uint8_t* payloa
 			return;
 		}
 
-		uint32_t id = HwBreakpointManager::Instance().Add(req->address, type, bpSize);
+		if(!RearmGuard::Instance().Ready()||RearmGuard::Instance().Reserved(req->address,req->size)) {
+                const SetHwBreakpointResponse failed{IpcStatus::InvalidState,0,0};SendResponse(command,&failed,sizeof(failed));return;
+            }
+            uint32_t id = HwBreakpointManager::Instance().Add(req->address, type, bpSize);
 		SetHwBreakpointResponse resp;
 		resp.status = id ? IpcStatus::Ok : IpcStatus::LimitReached; // Add fails only when DR0-DR3 are all used
 		resp.id = id;
@@ -1070,7 +1099,11 @@ void PipeServer::HandleBreakpointCommand(uint32_t command, const uint8_t* payloa
 			if (hwbp) resp.slot = hwbp->slot;
 
 			// 모든 스레드의 DR 레지스터에 즉시 적용
-			ApplyHwBreakpointsToAllThreads();
+			if(!ApplyHwBreakpointsToAllThreads()) {
+				HwBreakpointManager::Instance().Remove(id);
+				ApplyHwBreakpointsToAllThreads(); // restore the authoritative previous configuration
+				resp.status=IpcStatus::InvalidState;resp.id=0;
+			}
 		}
 		SendResponse(command, &resp, sizeof(resp));
 		break;
@@ -1082,12 +1115,14 @@ void PipeServer::HandleBreakpointCommand(uint32_t command, const uint8_t* payloa
 			return;
 		}
 		auto* req = reinterpret_cast<const RemoveHwBreakpointRequest*>(payload);
+		const auto previous=HwBreakpointManager::Instance().FindById(req->id);
 		bool ok = HwBreakpointManager::Instance().Remove(req->id);
-		if (ok) {
-			// 제거된 HW BP를 모든 스레드에서 반영
-			ApplyHwBreakpointsToAllThreads();
-		}
 		IpcStatus status = ok ? IpcStatus::Ok : IpcStatus::NotFound;
+		if(ok&&!ApplyHwBreakpointsToAllThreads()) {
+			if(previous)HwBreakpointManager::Instance().Restore(*previous);
+			ApplyHwBreakpointsToAllThreads();
+			status=IpcStatus::InvalidState;
+		}
 		SendResponse(command, &status, sizeof(status));
 		break;
 	}
@@ -3398,7 +3433,7 @@ void PipeServer::HandleLifecycleCommand(uint32_t command, const uint8_t* payload
 		GetCapabilitiesResponse resp{};
 		resp.status = IpcStatus::Ok;
 		resp.backend = IpcBackend::VehDll;
-		resp.flags = kCapPageBreakpointV1 | kCapStopsThreads | kCapBasicTracePolicies | kCapValueScanV2 | kCapBasicTraceLazy;
+		resp.flags = (RearmGuard::Instance().Ready()?kCapPageBreakpointV1:0) | kCapStopsThreads | kCapBasicTracePolicies | kCapValueScanV2 | kCapBasicTraceLazy;
 		strcpy_s(resp.name, "veh-dll");
 		// Every command HandleCommand routes to a handler.
 		static constexpr IpcCommand kImplemented[] = {
@@ -3442,9 +3477,12 @@ void PipeServer::HandleLifecycleCommand(uint32_t command, const uint8_t* payload
         }
 		ValueScanner::Instance().Reset();
 		BreakpointManager::Instance().RemoveAll();
-		HwBreakpointManager::Instance().RemoveAll();
-		VehHandler::Instance().ResumeAllStoppedThreads(true);  // forDetach=true
-		VehHandler::Instance().Uninstall();
+            if(!ClearHardwareBreakpoints()) {
+                const auto status=IpcStatus::InvalidState;SendResponse(command,&status,sizeof(status));return;
+            }
+			if(!VehHandler::Instance().Uninstall()) {
+            const auto status=IpcStatus::InvalidState;SendResponse(command,&status,sizeof(status));return;
+        }
 		ThreadManager::Instance().ResumeAll();
 		ThreadManager::Instance().ThawAll();
 		IpcStatus status = IpcStatus::Ok;
@@ -3479,8 +3517,12 @@ void PipeServer::HandleLifecycleCommand(uint32_t command, const uint8_t* payload
         }
 		ValueScanner::Instance().Reset();
 		BreakpointManager::Instance().RemoveAll();
-		HwBreakpointManager::Instance().RemoveAll();
-		VehHandler::Instance().Uninstall();
+		if(!ClearHardwareBreakpoints()) {
+			const auto status=IpcStatus::InvalidState;SendResponse(command,&status,sizeof(status));return;
+		}
+		if(!VehHandler::Instance().Uninstall()) {
+            const auto status=IpcStatus::InvalidState;SendResponse(command,&status,sizeof(status));return;
+        }
 		ThreadManager::Instance().ThawAll();
 		IpcStatus status = IpcStatus::Ok;
 		SendResponse(command, &status, sizeof(status));
@@ -3507,35 +3549,30 @@ bool PipeServer::SendResponse(uint32_t command, const void* payload, uint32_t pa
 	return AsyncWriteExact(msg.data(), static_cast<DWORD>(msg.size()), timeoutMs);
 }
 
-void PipeServer::ApplyHwBreakpointsToAllThreads() {
-	DWORD currentTid = GetCurrentThreadId();
-	auto threads = ThreadManager::Instance().EnumerateThreads();
+bool PipeServer::ApplyHwBreakpointsToAllThreads(bool disarming) {
+    bool complete=false;
+    const auto threads=ThreadManager::Instance().EnumerateThreads(&complete);
+    bool ok=complete;
+    for(const auto& thread:threads) {
+        if(thread.id==GetCurrentThreadId())continue;
+        CONTEXT stopped{};
+        if(VehHandler::Instance().GetStoppedContext(thread.id,stopped)) {
+            HwBreakpointManager::Instance().ApplyToContext(stopped);
+            if(!VehHandler::Instance().SetStoppedContext(thread.id,stopped))ok=false;
+            if(disarming&&!ThreadManager::Instance().ApplyHardwareBreakpoints(thread.id))ok=false;
+        } else if(!ThreadManager::Instance().ApplyHardwareBreakpoints(thread.id))ok=false;
+    }
+    return ok;
+}
 
-	for (const auto& t : threads) {
-		if (t.id == currentTid) continue; // pipe server 스레드 자신은 skip
-
-		// VEH 핸들러에서 정지된 스레드는 stoppedContexts에 직접 반영
-		// (SetThreadContext로는 VEH resume 시 info->ContextRecord에 의해 덮어씌워짐)
-		CONTEXT stoppedCtx;
-		if (VehHandler::Instance().GetStoppedContext(t.id, stoppedCtx)) {
-			HwBreakpointManager::Instance().ClearFromContext(stoppedCtx);
-			HwBreakpointManager::Instance().ApplyToContext(stoppedCtx);
-			VehHandler::Instance().SetStoppedContext(t.id, stoppedCtx);
-			continue;
-		}
-
-		// 실행 중인 스레드는 SetThreadContext로 적용
-		CONTEXT ctx;
-		if (!ThreadManager::Instance().GetContext(t.id, ctx)) continue;
-
-		HwBreakpointManager::Instance().ClearFromContext(ctx);
-		HwBreakpointManager::Instance().ApplyToContext(ctx);
-
-		ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-		ThreadManager::Instance().SetContext(t.id, ctx);
-	}
-
-	LOG_DEBUG("Applied HW breakpoints to %zu threads", threads.size());
+bool PipeServer::ClearHardwareBreakpoints() {
+    std::array<std::optional<HwBreakpoint>,4> previous{};
+    for(uint8_t slot=0;slot<4;++slot)previous[slot]=HwBreakpointManager::Instance().FindBySlot(slot);
+    HwBreakpointManager::Instance().RemoveAll();
+    if(ApplyHwBreakpointsToAllThreads(true))return true;
+    for(const auto& entry:previous)if(entry)HwBreakpointManager::Instance().Restore(*entry);
+    ApplyHwBreakpointsToAllThreads();
+    return false;
 }
 
 } // namespace veh

@@ -2,10 +2,20 @@
 #include "hw_breakpoint.h"
 
 namespace veh {
+namespace {std::atomic<HwBreakpointManager*> publishedManager{nullptr};}
 
 HwBreakpointManager& HwBreakpointManager::Instance() {
 	static HwBreakpointManager instance;
+    publishedManager.store(&instance,std::memory_order_release);
 	return instance;
+}
+
+bool HwBreakpointManager::ApplyAtThreadEntry(CONTEXT& context,bool internal) {
+    auto* manager=publishedManager.load(std::memory_order_acquire);
+    if(!manager)return false;
+    if(!manager->HasActive())return true;
+    if(internal)manager->ClearFromContext(context);else manager->ApplyToContext(context);
+    return true;
 }
 
 // 빈 DR 슬롯(0~3) 찾아서 하드웨어 브레이크포인트 할당
@@ -30,8 +40,16 @@ uint32_t HwBreakpointManager::Add(uint64_t address, HwBreakType type, HwBreakSiz
 	slots_[slot] = bp;
 	slotUsed_[slot] = true;
 	idToSlot_[id] = static_cast<uint8_t>(slot);
+    Publish();
 
 	return id;
+}
+
+bool HwBreakpointManager::Restore(const HwBreakpoint& breakpoint) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if(breakpoint.slot>=4||slotUsed_[breakpoint.slot])return false;
+    slots_[breakpoint.slot]=breakpoint;slotUsed_[breakpoint.slot]=true;
+    idToSlot_[breakpoint.id]=breakpoint.slot;Publish();return true;
 }
 
 // 슬롯 해제
@@ -47,6 +65,7 @@ bool HwBreakpointManager::Remove(uint32_t id) {
 	slots_[slot] = {};
 	slotUsed_[slot] = false;
 	idToSlot_.erase(it);
+    Publish();
 
 	return true;
 }
@@ -59,6 +78,7 @@ void HwBreakpointManager::RemoveAll() {
 		slotUsed_[i] = false;
 	}
 	idToSlot_.clear();
+    Publish();
 }
 
 std::optional<HwBreakpoint> HwBreakpointManager::FindBySlot(uint8_t slot) {
@@ -91,25 +111,32 @@ std::optional<HwBreakpoint> HwBreakpointManager::FindByAddress(uint64_t address)
 	return std::nullopt;
 }
 
-// 활성 HW 브레이크포인트를 스레드 컨텍스트에 적용
-void HwBreakpointManager::ApplyToContext(CONTEXT& ctx) {
-	std::lock_guard<std::mutex> lock(mutex_);
-
-	for (int i = 0; i < 4; ++i) {
-		if (slotUsed_[i] && slots_[i].enabled) {
-			// DR0~DR3에 주소 설정
-			switch (i) {
-			case 0: ctx.Dr0 = slots_[i].address; break;
-			case 1: ctx.Dr1 = slots_[i].address; break;
-			case 2: ctx.Dr2 = slots_[i].address; break;
-			case 3: ctx.Dr3 = slots_[i].address; break;
-			}
-
-			// DR7에 enable/type/size 비트 설정
-			SetDr7Bits(ctx, static_cast<uint8_t>(i), true, slots_[i].type, slots_[i].size);
-		}
-	}
+// Lock-free published state keeps loader callbacks away from debugger mutexes.
+void HwBreakpointManager::Publish() {
+    publication_.fetch_add(1,std::memory_order_acq_rel);
+    CONTEXT snapshot{};
+    for(uint8_t i=0;i<4;++i) {
+        const bool active=slotUsed_[i]&&slots_[i].enabled;
+        publishedAddress_[i].store(active?static_cast<uintptr_t>(slots_[i].address):0,std::memory_order_relaxed);
+        if(active)SetDr7Bits(snapshot,i,true,slots_[i].type,slots_[i].size);
+    }
+    publishedDr7_.store(static_cast<uint32_t>(snapshot.Dr7),std::memory_order_release);
+    publication_.fetch_add(1,std::memory_order_release);
 }
+void HwBreakpointManager::ApplyToContext(CONTEXT& ctx) {
+    for(;;) {
+        const auto before=publication_.load(std::memory_order_acquire);
+        if(before&1){YieldProcessor();continue;}
+        uintptr_t values[4];
+        for(size_t i=0;i<4;++i)values[i]=publishedAddress_[i].load(std::memory_order_relaxed);
+        const auto dr7=publishedDr7_.load(std::memory_order_acquire);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if(before!=publication_.load(std::memory_order_relaxed))continue;
+        ctx.Dr0=values[0];ctx.Dr1=values[1];ctx.Dr2=values[2];ctx.Dr3=values[3];ctx.Dr7=dr7;
+        return;
+    }
+}
+
 
 // 컨텍스트에서 모든 HW 브레이크포인트 비트 클리어
 void HwBreakpointManager::ClearFromContext(CONTEXT& ctx) {

@@ -1,5 +1,7 @@
 #include <windows.h>
 #include "threads.h"
+#include "hw_breakpoint.h"
+#include "rearm_guard.h"
 #include "../common/logger.h"
 #include <tlhelp32.h>
 
@@ -14,7 +16,8 @@ ThreadManager& ThreadManager::Instance() {
 }
 
 // 현재 프로세스의 모든 스레드 열거
-std::vector<ThreadEntry> ThreadManager::EnumerateThreads() {
+std::vector<ThreadEntry> ThreadManager::EnumerateThreads(bool* complete) {
+    if(complete)*complete=false;
 	std::vector<ThreadEntry> result;
 	const DWORD pid = GetCurrentProcessId();
 	const DWORD currentTid = GetCurrentThreadId();
@@ -65,7 +68,9 @@ std::vector<ThreadEntry> ThreadManager::EnumerateThreads() {
 		} while (Thread32Next(snap, &te));
 	}
 
+    const DWORD enumerationError=GetLastError();
 	CloseHandle(snap);
+    if(complete)*complete=enumerationError==ERROR_NO_MORE_FILES;
 	size_t internalCount;
 	{
 		std::lock_guard<std::mutex> lock(internalMutex_);
@@ -276,18 +281,40 @@ bool ThreadManager::SetSingleStep(uint32_t threadId) {
 void ThreadManager::RegisterInternalThread(uint32_t threadId) {
 	std::lock_guard<std::mutex> lock(internalMutex_);
 	internalThreads_.insert(threadId);
+    RearmGuard::Instance().RegisterInternal(threadId);
 	LOG_DEBUG("Registered internal thread %u", threadId);
 }
 
 void ThreadManager::UnregisterInternalThread(uint32_t threadId) {
 	std::lock_guard<std::mutex> lock(internalMutex_);
 	internalThreads_.erase(threadId);
+    RearmGuard::Instance().UnregisterInternal(threadId);
 	LOG_DEBUG("Unregistered internal thread %u", threadId);
 }
 
 bool ThreadManager::IsInternalThread(uint32_t threadId) {
 	std::lock_guard<std::mutex> lock(internalMutex_);
 	return internalThreads_.count(threadId) > 0;
+}
+
+bool ThreadManager::ApplyHardwareBreakpoints(uint32_t threadId) {
+    if(IsInternalThread(threadId))return true;
+    HANDLE thread=OpenThread(threadId);
+    if(!thread)return false;
+    struct Close {HANDLE h;~Close(){::CloseHandle(h);}} close{thread};
+    if(GetProcessIdOfThread(thread)!=GetCurrentProcessId())return false;
+    DWORD exit=STILL_ACTIVE;
+    if(GetExitCodeThread(thread,&exit)&&exit!=STILL_ACTIVE)return true;
+    if(::SuspendThread(thread)==DWORD(-1))return false;
+    CONTEXT context{};context.ContextFlags=CONTEXT_DEBUG_REGISTERS;
+    bool ok=::GetThreadContext(thread,&context)!=FALSE;
+    if(ok) {
+        HwBreakpointManager::Instance().ApplyToContext(context);
+        ok=::SetThreadContext(thread,&context)!=FALSE;
+    }
+    // Release exactly the suspend increment owned by this operation.
+    if(::ResumeThread(thread)==DWORD(-1))ok=false;
+    return ok;
 }
 
 } // namespace veh

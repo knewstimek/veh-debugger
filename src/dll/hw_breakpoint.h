@@ -3,6 +3,8 @@
 #include <optional>
 #include <unordered_map>
 #include <mutex>
+#include <atomic>
+#include <array>
 #include <windows.h>
 
 namespace veh {
@@ -36,6 +38,7 @@ public:
 	// Returns breakpoint ID, or 0 on failure
 	uint32_t Add(uint64_t address, HwBreakType type, HwBreakSize size);
 	bool Remove(uint32_t id);
+    bool Restore(const HwBreakpoint& breakpoint);
 	void RemoveAll();
 
 	std::optional<HwBreakpoint> FindBySlot(uint8_t slot);
@@ -45,8 +48,15 @@ public:
 	// Apply HW breakpoints to a thread's context
 	void ApplyToContext(CONTEXT& ctx);
 	void ClearFromContext(CONTEXT& ctx);
+    // Loader/exception paths read a published snapshot without taking manager locks.
+    bool HasActive() const { return publishedDr7_.load(std::memory_order_acquire)!=0; }
+    static bool ApplyAtThreadEntry(CONTEXT& context,bool internal);
 
 private:
+    void Publish();
+    std::atomic<uint32_t> publication_{0};
+    std::array<std::atomic<uintptr_t>,4> publishedAddress_{};
+    std::atomic<uint32_t> publishedDr7_{0};
 	int FindFreeSlot();
 	void SetDr7Bits(CONTEXT& ctx, uint8_t slot, bool enable, HwBreakType type, HwBreakSize size);
 

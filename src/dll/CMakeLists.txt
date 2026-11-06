@@ -4,6 +4,7 @@ set(DLL_SOURCES
     breakpoint.cpp
     hw_breakpoint.cpp
     page_breakpoint.cpp
+    rearm_guard.cpp
     memory.cpp
     value_scan.cpp
     threads.cpp

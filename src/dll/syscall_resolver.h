@@ -51,13 +51,21 @@ public:
 	NTSTATUS WaitForSingleObject(HANDLE handle, PLARGE_INTEGER timeout);
 
 	// --- CreateEventW 대체 (auto-reset, non-signaled) ---
-	NTSTATUS CreateEvent(PHANDLE eventHandle);
+	NTSTATUS CreateEvent(PHANDLE eventHandle,bool manual=false);
 
 	// --- CloseHandle 대체 ---
 	NTSTATUS Close(HANDLE handle);
 
 	// --- SetEvent 대체 ---
 	NTSTATUS SetEvent(HANDLE handle);
+
+    NTSTATUS NextThread(HANDLE previous, ACCESS_MASK access, PHANDLE next);
+    NTSTATUS ThreadIdentity(HANDLE thread, uint32_t& tid, bool& exited);
+    NTSTATUS Suspend(HANDLE thread);
+    NTSTATUS Resume(HANDLE thread);
+    NTSTATUS GetThreadContext(HANDLE thread, CONTEXT* context);
+    NTSTATUS SetThreadContext(HANDLE thread, const CONTEXT* context);
+    NTSTATUS ResetEvent(HANDLE event);
 
 	// 명령어 길이 디코더 (public -- import resolve static analysis에서도 사용)
 	struct InsnInfo {
@@ -98,6 +106,17 @@ private:
 	FnClose pfnClose_ = nullptr;
 	FnSetEvent pfnSetEvent_ = nullptr;
 
+    using FnNextThread=NTSTATUS(NTAPI*)(HANDLE,HANDLE,ACCESS_MASK,ULONG,ULONG,PHANDLE);
+    using FnQueryThread=NTSTATUS(NTAPI*)(HANDLE,ULONG,PVOID,ULONG,PULONG);
+    using FnSuspendThread=NTSTATUS(NTAPI*)(HANDLE,PULONG);
+    using FnGetContext=NTSTATUS(NTAPI*)(HANDLE,CONTEXT*);
+    using FnSetContext=NTSTATUS(NTAPI*)(HANDLE,const CONTEXT*);
+    FnNextThread pfnNextThread_=nullptr;
+    FnQueryThread pfnQueryThread_=nullptr;
+    FnSuspendThread pfnSuspend_=nullptr,pfnResume_=nullptr;
+    FnGetContext pfnGetContext_=nullptr;
+    FnSetContext pfnSetContext_=nullptr;
+    FnSetEvent pfnResetEvent_=nullptr;
 	bool initialized_ = false;
 };
 

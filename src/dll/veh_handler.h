@@ -44,7 +44,7 @@ public:
 	static VehHandler& Instance();
 
 	bool Install();
-	void Uninstall();
+	bool Uninstall();
 
 	void SetEventCallback(DebugEventCallback cb);
 
@@ -649,6 +649,8 @@ private:
 	};
 	DWORD pendingRearmTlsSlot_ = TLS_OUT_OF_INDEXES;
 	PendingRearm& GetPendingRearm();
+    bool BeginBreakpointRetry(PEXCEPTION_POINTERS info,uint32_t tid);
+    bool RetryOrStop(PEXCEPTION_POINTERS info,uint32_t tid);
 };
 
 // Decodes one instruction into trace metadata (defined with the range sweep in

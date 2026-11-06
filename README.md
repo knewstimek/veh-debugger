@@ -150,7 +150,7 @@ handler occurrence만 필요하면 `target_window={address,occurrence,before_ste
 
 함수 중단점용 모듈 guard는 백엔드가 [정지 식별 v1](docs/STOP_IDENTITY.md)을 지원하면 로더 안전 바인딩 뒤 자동 재개할 수 있다. 어댑터는 자기 내부 정지의 종류·일련번호·소유권이 모두 일치할 때만 조건부 재개하며, 사용자 정지나 바뀐 정지는 유지한다. 구버전 백엔드는 기존 pause·명시적 continue 경로를 사용하고, 공개 DAP/MCP 인자는 바뀌지 않는다.
 
-페이지 예외 기반 데이터 감시는 기존 `veh_set_data_breakpoint(address="0x...", method="page", type="write", size=4)`로 설정하고 `veh_remove_data_breakpoint(id=...)`로 해제한다. 기본 VEH DLL의 선택 기능으로 DR 슬롯을 쓰지 않으며, 접근 명령 실행 전에 정지한다. private 데이터 페이지와 direct/batch/action을 지원한다. `coverage="best_effort"`이며 guard·재보호 창의 다른 스레드 접근을 무유실로 보장하지 않는다. [범위·제약·복원 규칙](docs/PAGE_BREAKPOINTS.md).
+페이지 예외 기반 데이터 감시는 기존 `veh_set_data_breakpoint(address="0x...", method="page", type="write", size=4)`로 설정하고 `veh_remove_data_breakpoint(id=...)`로 해제한다. 기본 VEH DLL의 선택 기능으로 DR 슬롯을 쓰지 않으며, 접근 명령 실행 전에 정지한다. private 데이터 페이지와 direct/batch/action을 지원한다. 명령 한 개를 재실행하는 동안 다른 대상 스레드를 잠시 보류하고 기존 Pause/Freeze 상태를 보존한다. `coverage="best_effort"`이며 guard 전달 구간·내부 스레드·커널 접근까지 무유실로 보장하지 않는다. 소프트 INT3는 사용자 정지 중에도 유지하며, DR 감시는 새 Windows 스레드의 사용자 코드 실행 전에 적용한다. [범위·제약·복원 규칙](docs/PAGE_BREAKPOINTS.md).
 
 ## 특징
 

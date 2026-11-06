@@ -13,6 +13,23 @@ limits. Page mode is optional, local VEH DLL only. It consumes no DR slot.
 External/hypervisor/legacy backends do not have to implement this mode and return
 an explicit unsupported error before a new page-watch command is sent.
 
+## Native thread coordination
+
+Software INT3 remains installed while its hit is stopped. Only the instruction
+retry temporarily restores the original byte, holding other target threads until
+INT3/page protection is restored. User Pause/Freeze state is preserved.
+Hardware watches are applied at ordinary Windows thread entry, before its first
+user instruction. Failed application/removal is an error, retaining prior tracking.
+Detach clears DR state in both parked exception contexts and live threads.
+
+This coordination requires a supported Windows thread-start prologue; unsupported
+or already modified entry code refuses new native breakpoints. Direct syscall
+instructions cannot be retried with peers held. A retry that cannot be prepared or
+restored returns an exception stop with code `0xE0564802`; remove the breakpoint or
+change the stopped instruction before continuing. The reserved thread-entry span
+cannot be patched through debugger memory commands. These are native VEH details;
+MCP arguments and shared IPC layouts are unchanged.
+
 ## Meaning and limits
 
 Page mode uses PAGE_GUARD plus a one-instruction TF lease. Microsoft describes
@@ -36,9 +53,10 @@ entire operand span or promise that every overlapping vector/REP access is obser
 - coverage is always best_effort. The OS clears a guard before dispatch; the page
   is guarded again while a reported hit is parked. On continuation it is opened
   for one instruction and rearmed before the internal single-step is consumed.
-  Other threads or kernel memory accesses can pass during these windows. There is
-  no claim of zero loss, no exact missed-hit count, and no implicit suspension of
-  all other threads. Use a hardware/EPT watch when that guarantee matters.
+  Other target threads are held during that one-instruction retry; their existing
+  Pause/Freeze counts are preserved. Guard dispatch, excluded internal threads and
+  kernel accesses can still escape observation. There is no claim of zero loss
+  or an exact missed-hit count. Prefer a hardware/EPT watch for stronger coverage.
 - Remove watches before freeing/reallocating/changing protection of their backing
   allocation. Concurrent target-side remapping/protection changes are unsupported.
   Tracing, shellcode execution, writes/patches and protection/free commands are refused with

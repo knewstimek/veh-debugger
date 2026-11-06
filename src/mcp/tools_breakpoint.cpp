@@ -349,7 +349,7 @@ json McpServer::ToolSetDataBreakpoint(const json& args) {
         if(args.contains("action"))StoreBreakpointAction(result.id,args["action"]);
         return {{"success",true},{"id",result.id},{"address",HexAddr(addr)},{"type",typeStr},{"size",size},
             {"method","page"},{"coverage","best_effort"},{"accessTiming","before_instruction"},
-            {"rearmWindow","Other threads can access the page without a hit until it is rearmed"}};
+            {"rearmWindow","Peer threads are held during instruction retry; guard dispatch, internal threads and kernel accesses remain best effort"}};
     }
 	if (size != 1 && size != 2 && size != 4 && size != 8) {
 		return {{"error", "size must be 1, 2, 4, or 8"}};

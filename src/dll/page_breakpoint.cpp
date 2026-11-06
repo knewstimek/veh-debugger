@@ -28,7 +28,9 @@ bool PageBreakpointManager::Active() {
     return false;
 }
 IpcStatus PageBreakpointManager::Add(uint64_t address,uint32_t size,uint8_t access,uint32_t& id) {
+    RearmMutation mutation;
     id=0;
+    if(!mutation||!RearmGuard::Instance().Ready())return IpcStatus::InvalidState;
     if (!address||!size||size>65536||address>UINTPTR_MAX||
         size-1>UINTPTR_MAX-static_cast<uintptr_t>(address)||(access!=1&&access!=3))return IpcStatus::InvalidArgs;
     SYSTEM_INFO system{};GetSystemInfo(&system);
@@ -110,6 +112,7 @@ IpcStatus PageBreakpointManager::Add(uint64_t address,uint32_t size,uint8_t acce
     id=assigned;return IpcStatus::Ok;
 }
 IpcStatus PageBreakpointManager::Remove(uint32_t id) {
+    RearmMutation mutation;if(!mutation)return IpcStatus::InvalidState;
     std::lock_guard<std::mutex> lock(mutex_);
     Watch* watch=nullptr;
     for(auto& value:watches_)if(value.id==id){watch=&value;break;}
@@ -183,18 +186,25 @@ bool PageBreakpointManager::Park(uint32_t tid) {
     }
     return false;
 }
-bool PageBreakpointManager::OpenForStep(uint32_t tid) {
+bool PageBreakpointManager::PrepareStep(uint32_t tid,RearmGuard::Page* pages,size_t& count) {
     std::lock_guard<std::mutex> lock(mutex_);
+    count=0;
     for(auto& lease:pending_)if(lease.tid==tid) {
+        for(size_t i=0;i<pages_.size();++i)if((lease.pages&(1ULL<<i))&&pages_[i].refs) {
+            MEMORY_BASIC_INFORMATION region{};
+            const auto& page=pages_[i];
+            if(!VirtualQuery(reinterpret_cast<void*>(page.base),&region,sizeof(region))||
+               region.State!=MEM_COMMIT||reinterpret_cast<uintptr_t>(region.AllocationBase)!=page.allocation||
+               (region.Protect!=page.original&&region.Protect!=(page.original|PAGE_GUARD)))return false;
+            pages[count++]={page.base,page.original};
+        }
         lease.parked=false;
-        bool ok=true;
-        for(size_t i=0;i<pages_.size();++i)if((lease.pages&(1ULL<<i))&&pages_[i].refs)
-            if(!Protect(pages_[i],false))ok=false;
-        return ok;
+        break;
     }
-    return true; //already removed/detached
+    return true;
 }
 bool PageBreakpointManager::RemoveAll() {
+    RearmMutation mutation;if(!mutation)return false;
     std::array<Pending,128> leases{};
     struct Handles {
         std::array<HANDLE,128> values{};

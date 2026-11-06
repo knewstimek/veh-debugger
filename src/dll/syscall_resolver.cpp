@@ -264,6 +264,13 @@ bool SyscallResolver::Initialize() {
 		{"NtCreateEvent",           reinterpret_cast<void**>(&pfnCreateEvent_)},
 		{"NtClose",                 reinterpret_cast<void**>(&pfnClose_)},
 		{"NtSetEvent",              reinterpret_cast<void**>(&pfnSetEvent_)},
+        {"NtGetNextThread", reinterpret_cast<void**>(&pfnNextThread_)},
+        {"NtQueryInformationThread", reinterpret_cast<void**>(&pfnQueryThread_)},
+        {"NtSuspendThread", reinterpret_cast<void**>(&pfnSuspend_)},
+        {"NtResumeThread", reinterpret_cast<void**>(&pfnResume_)},
+        {"NtGetContextThread", reinterpret_cast<void**>(&pfnGetContext_)},
+        {"NtSetContextThread", reinterpret_cast<void**>(&pfnSetContext_)},
+        {"NtResetEvent", reinterpret_cast<void**>(&pfnResetEvent_)},
 	};
 
 	bool allOk = true;
@@ -347,17 +354,17 @@ NTSTATUS SyscallResolver::WaitForSingleObject(HANDLE handle, PLARGE_INTEGER time
 	return direct ? direct(handle, FALSE, timeout) : STATUS_UNSUCCESSFUL;
 }
 
-NTSTATUS SyscallResolver::CreateEvent(PHANDLE eventHandle) {
+NTSTATUS SyscallResolver::CreateEvent(PHANDLE eventHandle,bool manual) {
 	if (pfnCreateEvent_) {
 		// SynchronizationEvent (auto-reset), non-signaled, no name
 		return pfnCreateEvent_(eventHandle, EVENT_ALL_ACCESS, nullptr,
-			NtSynchronizationEvent, FALSE);
+			manual?NtNotificationEvent:NtSynchronizationEvent, FALSE);
 	}
 	using Fn = FnCreateEvent;
 	static Fn direct = reinterpret_cast<Fn>(
 		GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtCreateEvent"));
 	return direct ? direct(eventHandle, EVENT_ALL_ACCESS, nullptr,
-		NtSynchronizationEvent, FALSE) : STATUS_UNSUCCESSFUL;
+		manual?NtNotificationEvent:NtSynchronizationEvent, FALSE) : STATUS_UNSUCCESSFUL;
 }
 
 NTSTATUS SyscallResolver::Close(HANDLE handle) {
@@ -379,5 +386,21 @@ NTSTATUS SyscallResolver::SetEvent(HANDLE handle) {
 		GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtSetEvent"));
 	return direct ? direct(handle, nullptr) : STATUS_UNSUCCESSFUL;
 }
+
+NTSTATUS SyscallResolver::NextThread(HANDLE previous,ACCESS_MASK access,PHANDLE next) {
+    return pfnNextThread_?pfnNextThread_(reinterpret_cast<HANDLE>(-1),previous,access,0,0,next):STATUS_UNSUCCESSFUL;
+}
+NTSTATUS SyscallResolver::ThreadIdentity(HANDLE thread,uint32_t& tid,bool& exited) {
+    struct Basic { NTSTATUS exitStatus;PVOID teb;HANDLE process,thread;ULONG_PTR affinity;LONG priority,basePriority; } basic{};
+    if(!pfnQueryThread_)return STATUS_UNSUCCESSFUL;
+    const auto status=pfnQueryThread_(thread,0,&basic,sizeof(basic),nullptr);
+    tid=static_cast<uint32_t>(reinterpret_cast<uintptr_t>(basic.thread));exited=basic.exitStatus!=259;
+    return status;
+}
+NTSTATUS SyscallResolver::Suspend(HANDLE thread) {return pfnSuspend_?pfnSuspend_(thread,nullptr):STATUS_UNSUCCESSFUL;}
+NTSTATUS SyscallResolver::Resume(HANDLE thread) {return pfnResume_?pfnResume_(thread,nullptr):STATUS_UNSUCCESSFUL;}
+NTSTATUS SyscallResolver::GetThreadContext(HANDLE thread,CONTEXT* context) {return pfnGetContext_?pfnGetContext_(thread,context):STATUS_UNSUCCESSFUL;}
+NTSTATUS SyscallResolver::SetThreadContext(HANDLE thread,const CONTEXT* context) {return pfnSetContext_?pfnSetContext_(thread,context):STATUS_UNSUCCESSFUL;}
+NTSTATUS SyscallResolver::ResetEvent(HANDLE event) {return pfnResetEvent_?pfnResetEvent_(event,nullptr):STATUS_UNSUCCESSFUL;}
 
 } // namespace veh

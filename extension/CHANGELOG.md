@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Changed
+
+- **Native breakpoint thread coverage** -- keep software INT3 installed while stopped; hold peer threads during instruction retry and restore INT3/page protection before releasing them, preserving Pause/Freeze state. Page watches retain best-effort coverage.
+- **Hardware watch reliability** -- apply DR watches before new Windows threads execute user code, report partial application/removal failures, preserve hardware hits during software breakpoint retry, and clear parked/live DR state on detach.
 - **VEH page data breakpoints** -- `veh_set_data_breakpoint(method="page")` optionally uses shared PAGE_GUARD pages and per-thread TF rearm without DR slots. Pre-instruction fault address/type/registers, same-page reference counting, immediate rearming on remove/recreate at a parked stop, step/DR stop preservation and cleanup use existing direct/batch/action paths. Private single-page ranges only; coverage is explicitly best effort during guard/rearm windows. Unsupported external peers are refused. Hardware remains the default.
 - **Mixed-mode inspection** -- optional register-context v1 negotiation separates stopped code width from process bitness. Disassembly selects the current stopped context automatically on supporting backends, with mutually exclusive `threadId`/`address_bits` overrides and an `addressBits` result. Legacy layouts and connections remain supported.
 - **Inspection guidance** -- synchronize READMEs, MCP descriptions and CLI help for automatic decode defaults, caller-frame locals, empty results versus errors, and the 64KiB inline trace limit.

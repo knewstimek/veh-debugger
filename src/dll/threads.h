@@ -18,7 +18,8 @@ class ThreadManager {
 public:
 	static ThreadManager& Instance();
 
-	std::vector<ThreadEntry> EnumerateThreads();
+	std::vector<ThreadEntry> EnumerateThreads(bool* complete=nullptr);
+    bool ApplyHardwareBreakpoints(uint32_t threadId);
 	bool SuspendThread(uint32_t threadId);
 	bool ResumeThread(uint32_t threadId);
 	void SuspendAllExcept(uint32_t excludeThreadId);

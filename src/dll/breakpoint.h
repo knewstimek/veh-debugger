@@ -27,6 +27,7 @@ public:
 
 	bool Enable(uint32_t id);
 	bool Disable(uint32_t id);
+    bool PrepareStep(uint64_t address,uint8_t& original,bool& exists);
 
 	std::optional<SoftBreakpoint> FindByAddress(uint64_t address);
 	std::optional<SoftBreakpoint> FindById(uint32_t id);

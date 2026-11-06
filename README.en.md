@@ -148,7 +148,7 @@ Detailed collection never resumes or pauses the target. The built-in VEH DLL doe
 
 Function-breakpoint module guards can resume automatically after a loader-safe binding pass when the backend provides [stop identity v1](docs/STOP_IDENTITY.md). The adapter conditionally releases only its own exact internal hold; changed/user stops remain stopped. Older backends retain the explicit pause/continue path. Public DAP/MCP arguments are unchanged.
 
-Page-exception data watches use existing `veh_set_data_breakpoint(address="0x...", method="page", type="write", size=4)` and `veh_remove_data_breakpoint(id=...)`. This optional local VEH mode uses no DR slots, stops before the attempted instruction and supports direct/batch/actions. It supports private data pages only and reports `coverage="best_effort"`: other threads can access during guard/rearm windows. See [page watches](docs/PAGE_BREAKPOINTS.md) for limits and restoration.
+Page-exception data watches use existing `veh_set_data_breakpoint(address="0x...", method="page", type="write", size=4)` and `veh_remove_data_breakpoint(id=...)`. This optional local VEH mode uses no DR slots, stops before the attempted instruction and supports direct/batch/actions. It supports private data pages only and reports `coverage="best_effort"`: peer threads are held during the one-instruction retry, but guard dispatch, internal threads and kernel accesses can still escape observation. Software INT3 stays installed while stopped; DR watches cover new Windows threads before user code. See [page watches](docs/PAGE_BREAKPOINTS.md) for limits and restoration.
 
 ## Features
 

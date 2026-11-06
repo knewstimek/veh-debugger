@@ -5,6 +5,7 @@
 #include "breakpoint.h"
 #include "hw_breakpoint.h"
 #include "page_breakpoint.h"
+#include "rearm_guard.h"
 #include "memory.h"
 #include "threads.h"
 #include "syscall_resolver.h"
@@ -36,6 +37,7 @@ static uint64_t ReadCallerFromStack(const CONTEXT* ctx) {
 }
 
 namespace veh {
+namespace {std::atomic<VehHandler*> activeHandler{nullptr};}
 
 VehHandler::PendingRearm& VehHandler::GetPendingRearm() {
 	auto* p = static_cast<PendingRearm*>(SafeTlsGetValue(pendingRearmTlsSlot_));
@@ -52,6 +54,37 @@ VehHandler::PendingRearm& VehHandler::GetPendingRearm() {
 	return *p;
 }
 
+bool VehHandler::BeginBreakpointRetry(PEXCEPTION_POINTERS info,uint32_t tid) {
+    // Allocate legacy per-thread bookkeeping before any peer can be suspended.
+    auto& rearm=GetPendingRearm();
+    auto& guard=RearmGuard::Instance();
+    if(!guard.Enter(tid))return false;
+    uint64_t software=0;uint8_t original=0;bool exists=false;
+#ifdef _WIN64
+    const auto ip=info->ContextRecord->Rip;
+#else
+    const auto ip=info->ContextRecord->Eip;
+#endif
+    if(rearm.active&&rearm.address==ip) {
+        if(!BreakpointManager::Instance().PrepareStep(ip,original,exists)){guard.Finish(tid);return false;}
+        if(exists)software=ip;
+    }
+    RearmGuard::Page pages[64]{};size_t count=0;
+    if(!PageBreakpointManager::Instance().PrepareStep(tid,pages,count)||
+       !guard.Open(software,original,pages,count)) {guard.Finish(tid);return false;}
+    info->ContextRecord->EFlags|=0x100;
+    return true;
+}
+bool VehHandler::RetryOrStop(PEXCEPTION_POINTERS info,uint32_t tid) {
+    while(!BeginBreakpointRetry(info,tid)) {
+        // Restore/release always precede callbacks, heap use and debugger locks.
+        PageBreakpointManager::Instance().Park(tid);
+        if(NotifyAndWait(info,tid,DebugEventType::Exception,
+            reinterpret_cast<uint64_t>(info->ExceptionRecord->ExceptionAddress),0,RearmGuard::kFailure)==WaitResult::Detached)
+            return false;
+    }
+    return true;
+}
 VehHandler& VehHandler::Instance() {
 	static VehHandler instance;
 	return instance;
@@ -83,7 +116,8 @@ bool VehHandler::Install() {
 	}
 
 	// 첫 번째 핸들러로 등록 (1 = first handler)
-	handler_ = AddVectoredExceptionHandler(1, ExceptionHandler);
+	activeHandler.store(this,std::memory_order_release);
+    handler_ = AddVectoredExceptionHandler(1, ExceptionHandler);
 	if (!handler_) {
 		LOG_ERROR("AddVectoredExceptionHandler failed: %lu", GetLastError());
 		TlsFree(reentryTlsSlot_);
@@ -96,14 +130,16 @@ bool VehHandler::Install() {
 		LOG_WARN("AddVectoredContinueHandler failed: %lu (exception edges may be unavailable)", GetLastError());
 	}
 
+    RearmGuard::Instance().Initialize();
 	installed_ = true;
 	LOG_INFO("VEH handler installed");
 	return true;
 }
 
-void VehHandler::Uninstall() {
-	if (!installed_) return;
-    if(!PageBreakpointManager::Instance().RemoveAll())return;
+bool VehHandler::Uninstall() {
+	if (!installed_) return true;
+    if(!PageBreakpointManager::Instance().RemoveAll())return false;
+    if(!RearmGuard::Instance().Shutdown())return false;
 	installed_ = false;  // 먼저 설정하여 새 예외 진입 차단
 
 	// 대기 중인 모든 스레드 깨우기 (detach이므로 TF/rearm 취소 유도)
@@ -135,6 +171,7 @@ void VehHandler::Uninstall() {
 	// 깨어난 스레드가 NotifyAndWait에서 NtClose를 호출하므로 여기서 추가 정리 불요.
 
 	LOG_INFO("VEH handler uninstalled");
+	return true;
 }
 
 void VehHandler::SetEventCallback(DebugEventCallback cb) {
@@ -279,11 +316,13 @@ bool VehHandler::SetStoppedContext(uint32_t threadId, const CONTEXT& ctx) {
 
 // 정적 콜백 → 싱글톤 인스턴스의 HandleException 호출
 LONG CALLBACK VehHandler::ExceptionHandler(PEXCEPTION_POINTERS info) {
-	return Instance().HandleException(info);
+	auto* handler=activeHandler.load(std::memory_order_acquire);
+    return handler?handler->HandleException(info):EXCEPTION_CONTINUE_SEARCH;
 }
 
 LONG CALLBACK VehHandler::ContinueHandler(PEXCEPTION_POINTERS info) {
-	return Instance().HandleContinue(info);
+	auto* handler=activeHandler.load(std::memory_order_acquire);
+    return handler?handler->HandleContinue(info):EXCEPTION_CONTINUE_SEARCH;
 }
 
 // RAII guard for TLS reentry flag (all return paths auto-clear)
@@ -342,6 +381,10 @@ VehHandler::WaitResult VehHandler::NotifyAndWait(
 			return WaitResult::Resumed;
 		}
 	}
+    // Detach discards the cached context. Do not let the original exception
+    // frame restore debug registers that the control thread just disarmed.
+    HwBreakpointManager::Instance().ClearFromContext(*info->ContextRecord);
+    info->ContextRecord->ContextFlags|=CONTEXT_DEBUG_REGISTERS;
 	return WaitResult::Detached;
 }
 
@@ -2286,10 +2329,6 @@ bool VehHandler::HandleBasicTraceException(PEXCEPTION_POINTERS info, uint32_t ti
 LONG VehHandler::HandleContinue(PEXCEPTION_POINTERS info) {
 	if (!installed_.load(std::memory_order_acquire) || !info || !info->ContextRecord)
 		return EXCEPTION_CONTINUE_SEARCH;
-	ScopedThreadLogSilence logSilence;
-	if (reentryTlsSlot_ != TLS_OUT_OF_INDEXES && SafeTlsGetValue(reentryTlsSlot_))
-		return EXCEPTION_CONTINUE_SEARCH;
-	TlsReentryGuard reentryGuard(reentryTlsSlot_);
 #ifdef _WIN64
 	const uint32_t tid = __readgsdword(0x48);
 	const uint64_t destination = info->ContextRecord->Rip;
@@ -2300,6 +2339,9 @@ LONG VehHandler::HandleContinue(PEXCEPTION_POINTERS info) {
 	auto& tb = traceBasicBlocks_;
 	if (!tb.active.load(std::memory_order_acquire) || tid != tb.threadId || !tb.pendingException)
 		return EXCEPTION_CONTINUE_SEARCH;
+	ScopedThreadLogSilence logSilence;
+	if(reentryTlsSlot_!=TLS_OUT_OF_INDEXES&&SafeTlsGetValue(reentryTlsSlot_))return EXCEPTION_CONTINUE_SEARCH;
+	TlsReentryGuard reentryGuard(reentryTlsSlot_);
 	const bool destinationInRange = destination >= tb.rangeStart && destination < tb.rangeEnd;
 	if (destinationInRange && !AdvanceBasicTraceOccurrence(destination)) {
 		tb.stopPending = true;
@@ -2380,7 +2422,20 @@ LONG VehHandler::HandleContinue(PEXCEPTION_POINTERS info) {
 }
 
 LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
+    // Private thread-entry and rearm completion run before any debugger/CRT lock.
+#ifdef _WIN64
+    const uint32_t entryTid=__readgsdword(0x48);
+#else
+    const uint32_t entryTid=__readfsdword(0x24);
+#endif
+    if(RearmGuard::Instance().HandleThreadEntry(info,entryTid))return EXCEPTION_CONTINUE_EXECUTION;
+    const bool restored=RearmGuard::Instance().Finish(entryTid);
 	if (!installed_) return EXCEPTION_CONTINUE_SEARCH;
+    if(!restored) {
+        NotifyAndWait(info,entryTid,DebugEventType::Exception,
+            reinterpret_cast<uint64_t>(info->ExceptionRecord->ExceptionAddress),0,RearmGuard::kFailure);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
 	// Never enter stdio/WriteFile or the logger mutex from a VEH callback. The
 	// interrupted code may itself be the logger, and users may breakpoint any API
 	// that logging depends on.
@@ -2422,15 +2477,12 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
                     info->ContextRecord->EFlags=(info->ContextRecord->EFlags&~0x100UL)|(fault.originalTF?0x100UL:0);
                     return EXCEPTION_CONTINUE_EXECUTION;
                 }
-                while(!pages.OpenForStep(tid)) {
-                    if(NotifyAndWait(info,tid,DebugEventType::PageBreakpointHit,addr,fault.id,code,accessed,access,1)==WaitResult::Detached) {
-                        pages.Cancel(tid,*info->ContextRecord);
-                        info->ContextRecord->EFlags=(info->ContextRecord->EFlags&~0x100UL)|(fault.originalTF?0x100UL:0);
-                        return EXCEPTION_CONTINUE_EXECUTION;
-                    }
+                if(!RetryOrStop(info,tid)) {
+                    pages.Cancel(tid,*info->ContextRecord);
+                    info->ContextRecord->EFlags=(info->ContextRecord->EFlags&~0x100UL)|(fault.originalTF?0x100UL:0);
                 }
-                if(!fault.failed)info->ContextRecord->EFlags|=0x100;
             }
+            if(!fault.id&&!fault.failed)RetryOrStop(info,tid);
             return EXCEPTION_CONTINUE_EXECUTION;
         }
     }
@@ -2579,11 +2631,8 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 
 		LOG_INFO("Breakpoint #%u hit at 0x%llX (tid=%u)", bp->id, addr, tid);
 
-		// 원본 바이트 복원 (INT3 -> 원래 명령어)
-		BreakpointManager::Instance().Disable(bp->id);
-
-		// Trap Flag 설정 -> 한 명령어 실행 후 SINGLE_STEP 예외 발생
-		info->ContextRecord->EFlags |= 0x100;
+		// Keep INT3 installed throughout the user stop. Only the guarded
+		// one-instruction retry may expose the original byte.
 
 		// 싱글스텝 후 브레이크포인트 재활성화를 위해 기록
 		auto& rearm = GetPendingRearm();
@@ -2599,11 +2648,13 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 				traceBuffer_[idx % kTraceBufferSize] = caller;
 				traceTotalHits_.fetch_add(1, std::memory_order_relaxed);
 			}
+                RetryOrStop(info,tid);
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 
 		// TraceCalls: auto-continue, target will be recorded in SINGLE_STEP rearm
 		if (traceCalls_.active.load(std::memory_order_acquire) && traceCalls_.IsTraced(addr)) {
+                RetryOrStop(info,tid);
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 
@@ -2612,6 +2663,7 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		// callback/wait 없이 바로 실행 재개하여 IPC 파이프가 블록되지 않도록 함.
 		if (IsInternalWorker(tid)) {
 			LOG_DEBUG("Internal thread %u hit BP #%u at 0x%llX -- transparent skip", tid, bp->id, addr);
+                RetryOrStop(info,tid);
 			return EXCEPTION_CONTINUE_EXECUTION;
 		}
 
@@ -2655,6 +2707,7 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		// HW BP를 context에 반영 (정지 중 설정/제거된 HW BP가 DR 레지스터에 적용됨)
 		HwBreakpointManager::Instance().ClearFromContext(*info->ContextRecord);
 		HwBreakpointManager::Instance().ApplyToContext(*info->ContextRecord);
+            RetryOrStop(info,tid);
 
 		return EXCEPTION_CONTINUE_EXECUTION;
 	}
@@ -2718,7 +2771,8 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 				info->ContextRecord->EFlags |= 0x100;
 				LOG_DEBUG("Step requested after rearm — TF set again at 0x%llX", addr);
 			}
-			return EXCEPTION_CONTINUE_EXECUTION;
+			// A single #DB may carry both our TF retry and a DR hit.
+                if((info->ContextRecord->Dr6&15)==0)return EXCEPTION_CONTINUE_EXECUTION;
 		}
 
 		// 2) 하드웨어 브레이크포인트 확인 (DR6 상태)
@@ -3040,11 +3094,13 @@ std::unordered_map<uint64_t, uint32_t> VehHandler::GetTraceResults(uint32_t& tot
 }
 
 void VehHandler::RegisterShellcodeThread(uint32_t tid) {
+    RearmGuard::Instance().RegisterInternal(tid);
 	std::lock_guard<std::mutex> lock(shellcodeThreadMutex_);
 	shellcodeThreads_.insert(tid);
 }
 
 void VehHandler::UnregisterShellcodeThread(uint32_t tid) {
+    RearmGuard::Instance().UnregisterInternal(tid);
 	std::lock_guard<std::mutex> lock(shellcodeThreadMutex_);
 	shellcodeThreads_.erase(tid);
 }
