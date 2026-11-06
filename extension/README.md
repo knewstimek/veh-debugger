@@ -13,7 +13,7 @@ veh_threads(action="thaw", threadId=0)       // release all freezes explicitly
 veh_threads(action="terminate", threadId=123)
 ```
 
-Existing `veh_freeze_thread` calls stay supported. Malformed or unconfirmed control replies are errors. Termination requires backend support, is forceful and can leave target locks held. List/freeze/thaw support breakpoint actions; termination supports direct/batch calls only. During a pending run-until operation, thread listing remains available; cancel the operation before a thread control action.
+Malformed or unconfirmed control replies are errors. Termination requires backend support, is forceful and can leave target locks held. List/freeze/thaw support breakpoint actions; termination supports direct/batch calls only. During a pending run-until operation, thread listing remains available; cancel the operation before a thread control action.
 
 ## Module and symbol selection
 

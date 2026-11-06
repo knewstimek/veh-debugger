@@ -129,7 +129,6 @@ private:
 	json ToolStepOut(const json& args);
 	json ToolPause(const json& args);
 	json ToolThreads(const json& args);
-	json ToolFreezeThread(const json& args);
 	json ToolStackTrace(const json& args);
 	json ToolRegisters(const json& args);
 	json ToolReadMemory(const json& args);

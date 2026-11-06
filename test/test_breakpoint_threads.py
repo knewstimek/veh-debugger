@@ -65,13 +65,13 @@ def check_parked_software():
         other = tool(c, "veh_continue", {"threadId":main,"wait":True,"timeout":4})
         assert other.get("breakpointId") == bp["id"], ("peer passed a parked software breakpoint",other)
         assert byte_at(pid,address) == 0xCC
-        tool(c, "veh_freeze_thread", {"threadId":worker,"frozen":True})
+        tool(c, "veh_threads", {"action":"freeze","threadId":worker})
         end = tool(c, "veh_continue", {"threadId":main,"wait":True,"timeout":4})
         assert end["breakpointId"] == terminal["id"], end
         assert byte_at(pid,address) == 0xCC
         rows = tool(c, "veh_threads")["threads"]
         assert next(row for row in rows if row["id"]==worker)["frozen"], rows
-        tool(c, "veh_freeze_thread", {"threadId":worker,"frozen":False})
+        tool(c, "veh_threads", {"action":"thaw","threadId":worker})
         end = tool(c, "veh_continue", {"threadId":worker,"wait":True,"timeout":4})
         assert end["breakpointId"] == terminal["id"], end
     print("PASS INT3 stays installed while two threads are parked at the same breakpoint")

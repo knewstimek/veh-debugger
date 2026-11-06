@@ -56,6 +56,30 @@ def test_named_profiles_are_bounded_and_full_remains_available():
     assert _serialized_size(full) > _serialized_size(interactive) * 4
 
 
+def test_removed_freeze_tool_has_no_public_or_compatibility_route():
+    removed = "veh_freeze_thread"
+    for profile in ("lite", "interactive", "capture", "analysis", "vmguest", "full"):
+        _, tools = _inventory(profile)
+        assert removed not in {tool["name"] for tool in tools}
+    with McpClient(executable=_executable()) as client:
+        client.initialize("removed-freeze-tool")
+        found = client.tool("veh_toolbox", {"operation":"list","query":"freeze"})
+        names = {tool["name"] for tool in found["tools"]}
+        assert "veh_threads" in names and removed not in names, found
+        hidden = client.tool("veh_toolbox", {"operation":"list","query":removed})
+        assert hidden["count"] == 0, hidden
+        manifest = client.tool("veh_toolbox", {"operation":"manifest","query":"freeze"})
+        assert "veh_threads" in {tool["name"] for tool in manifest["tools"]}
+        assert removed not in {tool["name"] for tool in manifest["tools"]}
+        error = {"error":"Unknown tool: " + removed}
+        rpc=client.call("tools/call",{"name":removed,"arguments":{"threadId":123}})
+        assert rpc.get("error")=={"code":-32602,"message":error["error"]},rpc
+        for operation in ("describe", "call"):
+            result = client.tool("veh_toolbox", {"operation":operation,"tool":removed,"arguments":{"threadId":123}})
+            assert result == error, result
+        assert client.tool("veh_toolbox", {"operation":"manifest","tools":[removed]}) == error
+
+
 def test_toolbox_describe_handle_and_hidden_call():
     with McpClient(executable=_executable()) as client:
         client.initialize("toolbox-test")

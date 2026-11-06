@@ -40,6 +40,11 @@ def check_actions():
         worker = start_worker(c, bits, code)
         listed = tool(c, "veh_threads")
         assert listed == tool(c, "veh_threads", {"action":"list"}) == batch(c, {})
+        rpc=c.call("tools/call",{"name":"veh_freeze_thread","arguments":{"threadId":worker}})
+        assert rpc.get("error")=={"code":-32602,"message":"Unknown tool: veh_freeze_thread"},rpc
+        removed={"error":rpc["error"]["message"]}
+        rejected=tool(c,"veh_batch",{"steps":[{"tool":"veh_freeze_thread","args":{"threadId":worker}}]})
+        assert rejected["results"][0]["result"]==removed,rejected
         hidden=set(native_threads(pid))-{row["id"] for row in listed["threads"]}
         assert hidden, "expected protected debugger threads"
         for tid in hidden:
@@ -53,17 +58,17 @@ def check_actions():
             direct = c.tool("veh_threads", args)
             assert "error" in direct and batch(c,args) == direct, (args,direct)
         frozen = tool(c,"veh_threads",{"action":"freeze","threadId":worker})
-        assert frozen == tool(c,"veh_freeze_thread",{"threadId":worker})
+        assert frozen == tool(c,"veh_threads",{"action":"freeze","threadId":worker})
         missing=c.tool("veh_threads",{"action":"thaw"})
         assert "error" in missing, ("missing thaw ID released every frozen thread",missing)
         assert batch(c,{"action":"thaw"}) == missing
         for invalid in [-1,2**32+worker,2**32,1.5,True,"4294967296","12oops"]:
-            rejected=c.tool("veh_freeze_thread",{"threadId":invalid,"frozen":False})
+            rejected=c.tool("veh_threads",{"action":"thaw","threadId":invalid})
             assert "error" in rejected, (invalid,rejected)
         assert next(t for t in tool(c,"veh_threads")["threads"] if t["id"]==worker).get("frozen"), "invalid controls released a freeze"
         assert batch(c,{"action":"thaw","threadId":0})["frozenThreads"] == []
         assert batch(c,{"action":"freeze","threadId":worker}) == frozen
-        assert tool(c,"veh_freeze_thread",{"threadId":worker,"frozen":False})["frozenThreads"] == []
+        assert tool(c,"veh_threads",{"action":"thaw","threadId":worker})["frozenThreads"] == []
         # A real foreign thread must never be terminated by the in-target command.
         foreign = c.tool("veh_threads",{"action":"terminate","threadId":KERNEL.GetCurrentThreadId()})
         assert "error" in foreign, foreign
@@ -79,7 +84,7 @@ def check_actions():
         end = tool(c,"veh_continue",{"threadId":main,"wait":True,"timeout":4})
         assert end["threadId"] == main and end["breakpointId"] == terminal["id"], end
         assert "error" in c.tool("veh_threads",{"action":"terminate","threadId":worker})
-    print("PASS thread actions default/list, legacy parity, direct/batch controls, strict IDs and stopped/frozen termination")
+    print("PASS thread actions default/list, direct/batch controls, strict IDs and stopped/frozen termination")
 
 
 def check_running_termination():
@@ -137,7 +142,13 @@ def check_action_parity():
         assert any(t["id"]==worker and not t.get("frozen") for t in rows)
         assert "termination is unavailable in breakpoint actions" in (Path(directory)/"mcp.log").read_text(encoding="utf-8",errors="replace")
         tool(c,"veh_remove_breakpoint",{"id":bp["id"]})
-    print("PASS freeze/thaw breakpoint actions and explicit termination exclusion")
+        tool(c,"veh_set_breakpoint",{"address":hex(address),"action":[
+            {"tool":"veh_freeze_thread","args":{"threadId":worker}}]})
+        tool(c,"veh_set_register",{"threadId":main,"name":"eip" if bits==32 else "rip","value":hex(code)})
+        end=tool(c,"veh_continue",{"threadId":main,"wait":True,"timeout":4})
+        assert end["threadId"]==main and end["breakpointId"]==terminal["id"],end
+        assert "Unknown tool: veh_freeze_thread" in (Path(directory)/"mcp.log").read_text(encoding="utf-8",errors="replace")
+    print("PASS freeze/thaw actions, termination exclusion and removed-tool action rejection")
 
 
 def check_peers():
@@ -167,8 +178,6 @@ def check_freeze_receipts():
                 direct=c.tool("veh_threads",args)
                 assert "error" in direct and not direct.get("success"),(mode,action,direct)
                 assert batch(c,args)==direct,(mode,action,direct)
-                legacy=c.tool("veh_freeze_thread",{"threadId":77,"frozen":action=="freeze"})
-                assert legacy==direct,(mode,legacy,direct)
             listed=c.tool("veh_threads")
             if mode=="freeze-no-caps":
                 assert listed["threads"][0]["name"]=="freeze-requests:0",listed

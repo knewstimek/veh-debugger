@@ -677,7 +677,20 @@ json McpServer::ToolThreads(const json& args) {
     if(action!="list"&&!args.contains("threadId"))
         return {{"error","threadId is required for thread control; use threadId=0 explicitly to thaw all"}};
     const auto thread=args.value("threadId",uint32_t(0));
-    if(action=="freeze"||action=="thaw")return ToolFreezeThread({{"threadId",thread},{"frozen",action=="freeze"}});
+    if(action=="freeze"||action=="thaw") {
+        const bool freeze=action=="freeze";
+        if(freeze&&!thread)return {{"error","threadId must be positive to freeze (use veh_pause to stop all threads)"}};
+        std::vector<uint32_t> frozen;std::string error;
+        const bool ok=session_.FreezeThread(freeze?FreezeOp::Freeze:FreezeOp::Thaw,thread,frozen,&error);
+        json result={{"frozenThreads",frozen}};
+        if(!ok) {
+            result["error"]=!error.empty()?error:freeze
+                ?"freeze failed (thread not found or a debugger-internal thread)"
+                :"thread is not frozen";
+            return result;
+        }
+        result["success"]=true;return result;
+    }
     if(action=="terminate") {
         if(!thread)return {{"error","terminate requires a positive explicit threadId"}};
         if(inBreakpointAction_)return {{"error","Thread termination is unavailable in breakpoint actions; use veh_threads directly or veh_batch"}};
@@ -717,39 +730,5 @@ json McpServer::ToolThreads(const json& args) {
 	return {{"threads", arr}, {"count", threads.size()}};
 }
 
-json McpServer::ToolFreezeThread(const json& args) {
-	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
-	uint32_t threadId=0;
-    if(args.contains("threadId")) {
-        const auto& value=args["threadId"];
-        uint64_t parsed=0;
-        try {
-            if(value.is_string()) {
-                const auto text=value.get<std::string>();size_t end=0;
-                if(text.empty()||text.front()=='-'||text.front()=='+')throw std::invalid_argument("threadId");
-                parsed=std::stoull(text,&end,0);
-                if(end!=text.size())throw std::invalid_argument("threadId");
-            } else if(value.is_number_unsigned())parsed=value.get<uint64_t>();
-            else if(value.is_number_integer()&&value.get<int64_t>()>=0)parsed=value.get<uint64_t>();
-            else throw std::invalid_argument("threadId");
-            if(parsed>UINT32_MAX)throw std::out_of_range("threadId");
-        } catch(const std::exception&) {return {{"error","threadId must be a 32-bit nonnegative integer"}};}
-        threadId=static_cast<uint32_t>(parsed);
-    }
-    bool freeze = JsonBool(args, "frozen", true);
-	if (freeze && threadId == 0) return {{"error", "threadId is required to freeze (use veh_pause to stop all threads)"}};
-	std::vector<uint32_t> frozen;
-	std::string error;
-    bool ok = session_.FreezeThread(freeze ? FreezeOp::Freeze : FreezeOp::Thaw, threadId, frozen,&error);
-	json result = {{"frozenThreads", frozen}};
-	if (!ok) {
-		result["error"] = !error.empty()?error:freeze
-            ? "freeze failed (thread not found or a debugger-internal thread)"
-            : "thread is not frozen";
-		return result;
-	}
-	result["success"] = true;
-	return result;
-}
 
 } // namespace veh
