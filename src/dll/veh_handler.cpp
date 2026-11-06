@@ -251,6 +251,17 @@ void VehHandler::ResumeAllStoppedThreads(bool forDetach, std::vector<uint32_t>* 
 	}
 }
 
+void VehHandler::ForgetTerminatedThread(uint32_t tid) {
+    // Only after the retained OS handle confirms exit: no waiter can close this again.
+    {
+        std::lock_guard<std::mutex> lock(eventMapMutex_);
+        const auto found=threadEvents_.find(tid);
+        if(found!=threadEvents_.end()){SyscallResolver::Instance().Close(found->second);threadEvents_.erase(found);}
+    }
+    {std::lock_guard<std::mutex> lock(contextMapMutex_);stoppedContexts_.erase(tid);}
+    {std::lock_guard<std::mutex> lock(stepFlagMutex_);stepFlags_.erase(tid);passExceptionFlags_.erase(tid);}
+}
+
 bool VehHandler::IsThreadStopped(uint32_t threadId) {
 	std::lock_guard<std::mutex> lock(eventMapMutex_);
 	return threadEvents_.find(threadId) != threadEvents_.end();

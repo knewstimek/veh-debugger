@@ -87,7 +87,9 @@ HANDLE ThreadManager::OpenThread(uint32_t threadId) {
 		FALSE, threadId);
 	if (!h) {
 		LOG_ERROR("OpenThread(%u) failed: %lu", threadId, GetLastError());
-	}
+    } else if(GetProcessIdOfThread(h)!=GetCurrentProcessId()) {
+        CloseHandle(h);return nullptr;
+    }
 	return h;
 }
 
@@ -195,6 +197,11 @@ bool ThreadManager::ThawThread(uint32_t threadId) {
 	::ResumeThread(h);
 	CloseHandle(h);
 	return true;
+}
+
+void ThreadManager::ForgetTerminatedThread(uint32_t tid) {
+    {std::lock_guard<std::mutex> lock(frozenMutex_);frozenThreads_.erase(tid);}
+    {std::lock_guard<std::mutex> lock(suspendedMutex_);suspendedThreads_.erase(tid);}
 }
 
 void ThreadManager::ThawAll() {

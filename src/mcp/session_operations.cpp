@@ -142,6 +142,7 @@ bool McpServer::OperationAllowed(const std::string& name, const json& args) {
         name == "veh_toolbox" || name == "veh_batch") return true;
     if (name == "veh_continue" && JsonBool(args, "wait")) return true;
     if (name == "veh_value_freeze") return args.value("operation", "list") != "add";
+    if (name == "veh_threads") return !args.contains("action") || args["action"] == "list";
     static const char* reads[] = {"veh_threads", "veh_registers", "veh_stack_trace", "veh_read_memory",
         "veh_read_pointer_chain", "veh_modules", "veh_disassemble", "veh_list_breakpoints",
         "veh_processes", "veh_symbolize", "veh_exception_info"};

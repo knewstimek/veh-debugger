@@ -1348,9 +1348,12 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"threadId", {{"type", "integer"}, {"description", "Thread ID (0 = all)"}}}
 		 }}}}}),
 
-		Tool(&McpServer::ToolThreads, "session", 0, true,
-			{{"name", "veh_threads"}, {"description", "List all threads in the target process."},
-		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
+        Tool(&McpServer::ToolThreads, "session", 0, true,
+            {{"name", "veh_threads"}, {"description", "List target threads (default action=list), or freeze, thaw, terminate one explicit threadId. thaw with threadId=0 thaws all. Terminate requires backend support, is forceful and can leave target locks held; unavailable in breakpoint actions. Existing veh_freeze_thread remains supported."},
+             {"inputSchema", {{"type", "object"}, {"properties", {
+                 {"action", {{"type", "string"}, {"enum", json::array({"list","freeze","thaw","terminate"})}, {"default","list"}}},
+                 {"threadId", {{"type","integer"}, {"minimum",0}, {"maximum",UINT32_MAX}, {"description","Required positive OS thread ID for freeze/terminate; 0 thaws all"}}}
+             }}}}}),
 
 		Tool(&McpServer::ToolFreezeThread, "session", 0, true,
 			{{"name", "veh_freeze_thread"}, {"description", "Freeze or thaw one thread. A frozen thread stays suspended across veh_continue until thawed (or detach), e.g. to hold a watchdog or worker thread while the rest runs. frozen=false with threadId 0 thaws all. veh_threads marks frozen threads. Caution: freezing a thread that holds a heap or loader lock can stall other threads."},

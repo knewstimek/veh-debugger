@@ -1143,6 +1143,27 @@ bool DebugSession::FreezeThread(FreezeOp op, uint32_t threadId, std::vector<uint
 	return resp->status == IpcStatus::Ok;
 }
 
+bool DebugSession::TerminateThread(uint32_t threadId,std::string& error) {
+    error.clear();
+    if(!threadId){error="TerminateThread requires a positive threadId";return false;}
+    if(!backendInfo_.Supports(IpcCommand::TerminateThread)) {
+        error="Thread termination is unsupported by this backend";return false;
+    }
+    const TerminateThreadRequest request{threadId};
+    std::vector<uint8_t> reply;
+    if(!ReceiveBackendReply(IpcCommand::TerminateThread,&request,sizeof(request),reply,
+                           "TerminateThread",error))return false;
+    if(reply.size()!=sizeof(IpcStatus)) {
+        error="TerminateThread: malformed backend response; termination outcome is unknown";return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(stopMutex_);
+        if(lastStop_.threadId==threadId){stopOccurred_=false;lastStop_.stopped=false;}
+    }
+    if(launchedMainThreadId_==threadId)mainThreadResumed_=true;
+    error.clear();return true;
+}
+
 std::string DebugSession::DescribeIpcFailure(const PipeExchangeDiagnostics* diagnostics) const {
 	if (GetTargetProcess() && WaitForSingleObject(GetTargetProcess(), 0) == WAIT_OBJECT_0) {
 		DWORD code = 0;

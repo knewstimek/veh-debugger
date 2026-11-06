@@ -459,7 +459,7 @@ VM 자체에 연결할 때는 외부 백엔드를 VM 범위로 등록한 뒤
 | `veh_step_over` | `threadId` | Step Over |
 | `veh_step_out` | `threadId` | Step Out |
 | `veh_pause` | `threadId?` | 일시정지 |
-| `veh_threads` | - | 스레드 목록 (얼린 스레드는 `frozen` 표시) |
+| `veh_threads` | `action?, threadId?` | 기본은 스레드 목록. `freeze`·`thaw`·`terminate`로 지정 스레드를 동결·해제·강제 종료한다. `thaw`의 ID 0은 전체 동결 해제. 종료는 백엔드 지원이 필요하고 브레이크포인트 액션에서는 제외하며, 대상이 잡은 잠금을 남길 수 있다. |
 | `veh_freeze_thread` | `threadId, frozen?` | 스레드 하나를 얼리거나 푼다. 얼린 스레드는 `veh_continue` 후에도 멈춰 있고(일시정지와 별도 카운트), detach 시 자동으로 풀린다. `threadId:0, frozen:false`는 전체 해제 |
 | `veh_stack_trace` | `threadId, maxFrames?` | 스택 트레이스 (`address`, `frameBase`, `returnAddress`). PDB 없는 모듈은 PE export 테이블을 직접 파싱해 정확한 함수명 제공 (DbgHelp의 부정확한 `OrdinalNNNNN` 라벨 대신) |
 | `veh_enum_locals` | `threadId, instructionAddress?, frameBase?` | 정지된 스레드의 스택 프레임에서 지역변수/파라미터 열거 (이름/타입/주소/값). 생략 시 최상위 프레임 자동 감지 (PDB 필요) |

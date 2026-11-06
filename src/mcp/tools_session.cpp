@@ -666,7 +666,38 @@ json McpServer::ToolPause(const json& args) {
 }
 
 json McpServer::ToolThreads(const json& args) {
-	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+    if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+    if(args.contains("action")&&!args["action"].is_string())return {{"error","action must be list, freeze, thaw or terminate"}};
+    const auto action=args.value("action",std::string("list"));
+    if(action!="list"&&action!="freeze"&&action!="thaw"&&action!="terminate")return {{"error","action must be list, freeze, thaw or terminate"}};
+    if(args.contains("threadId")&&(!args["threadId"].is_number_integer()||
+       (args["threadId"].is_number_unsigned()?args["threadId"].get<uint64_t>()>UINT32_MAX:
+        args["threadId"].get<int64_t>()<0||args["threadId"].get<int64_t>()>UINT32_MAX)))
+        return {{"error","threadId must be a 32-bit nonnegative integer"}};
+    const auto thread=args.value("threadId",uint32_t(0));
+    if(action=="freeze"||action=="thaw")return ToolFreezeThread({{"threadId",thread},{"frozen",action=="freeze"}});
+    if(action=="terminate") {
+        if(!thread)return {{"error","terminate requires a positive explicit threadId"}};
+        if(inBreakpointAction_)return {{"error","Thread termination is unavailable in breakpoint actions; use veh_threads directly or veh_batch"}};
+        std::string error;
+        if(!session_.TerminateThread(thread,error))return {{"error",error},{"threadId",thread}};
+        {
+            std::lock_guard<std::mutex> lock(eventMutex_);
+            std::queue<uint32_t> resumes;
+            while(!pendingAutoContinue_.empty()) {
+                auto tid=pendingAutoContinue_.front();pendingAutoContinue_.pop();
+                if(tid!=thread)resumes.push(tid);
+            }
+            pendingAutoContinue_.swap(resumes);
+            std::queue<PendingBreakpointAction> actions;
+            while(!pendingBreakpointActions_.empty()) {
+                auto pending=std::move(pendingBreakpointActions_.front());pendingBreakpointActions_.pop();
+                if(pending.threadId!=thread)actions.push(std::move(pending));
+            }
+            pendingBreakpointActions_.swap(actions);
+        }
+        return {{"success",true},{"action","terminate"},{"threadId",thread},{"terminated",true}};
+    }
 
 	std::string error;
 	auto threads = session_.GetThreads(&error);

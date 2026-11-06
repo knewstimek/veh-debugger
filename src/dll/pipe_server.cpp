@@ -855,7 +855,7 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
     const bool mutationCommand=cmd==IpcCommand::WriteMemory||cmd==IpcCommand::PatchCode||
         cmd==IpcCommand::ProtectMemory||cmd==IpcCommand::FreeMemory||
         cmd==IpcCommand::SetHwBreakpoint||cmd==IpcCommand::RemoveHwBreakpoint||
-        cmd==IpcCommand::Detach||cmd==IpcCommand::Shutdown;
+        cmd==IpcCommand::Detach||cmd==IpcCommand::Shutdown||cmd==IpcCommand::TerminateThread;
     RearmMutation mutation(mutationCommand);
     if(!mutation){const auto status=IpcStatus::InvalidState;SendResponse(command,&status,sizeof(status));return;}
     uint64_t mutationAddress=0,mutationSize=0;
@@ -1237,22 +1237,33 @@ void PipeServer::HandleExecutionCommand(uint32_t command, const uint8_t* payload
 		SendResponse(command, &status, sizeof(status));
 		break;
 	}
-	case IpcCommand::TerminateThread: {
-		if (payloadSize < sizeof(TerminateThreadRequest)) {
-			IpcStatus status = IpcStatus::InvalidArgs;
-			SendResponse(command, &status, sizeof(status));
-			return;
-		}
-		auto* req = reinterpret_cast<const TerminateThreadRequest*>(payload);
-		HANDLE hThread = ::OpenThread(THREAD_TERMINATE, FALSE, req->threadId);
-		IpcStatus status = IpcStatus::Error;
-		if (hThread) {
-			if (::TerminateThread(hThread, 0)) status = IpcStatus::Ok;
-			CloseHandle(hThread);
-		}
-		SendResponse(command, &status, sizeof(status));
-		break;
-	}
+    case IpcCommand::TerminateThread: {
+        IpcStatus status=IpcStatus::InvalidArgs;
+        if(payloadSize!=sizeof(TerminateThreadRequest)){SendResponse(command,&status,sizeof(status));return;}
+        const auto tid=reinterpret_cast<const TerminateThreadRequest*>(payload)->threadId;
+        auto& threads=ThreadManager::Instance();
+        if(!tid||tid==GetCurrentThreadId()||threads.IsInternalThread(tid)||RearmGuard::Instance().Internal(tid)) {
+            status=IpcStatus::InvalidState;SendResponse(command,&status,sizeof(status));return;
+        }
+        HANDLE thread=::OpenThread(THREAD_TERMINATE|THREAD_QUERY_INFORMATION|SYNCHRONIZE,FALSE,tid);
+        status=IpcStatus::NotFound;
+        if(thread) {
+            if(GetProcessIdOfThread(thread)!=GetCurrentProcessId())status=IpcStatus::InvalidArgs;
+            else if(WaitForSingleObject(thread,0)==WAIT_OBJECT_0)status=IpcStatus::NotFound;
+            else {
+                status=IpcStatus::Error;
+                if(::TerminateThread(thread,0)&&WaitForSingleObject(thread,1000)==WAIT_OBJECT_0) {
+                    VehHandler::Instance().ForgetTerminatedThread(tid);
+                    threads.ForgetTerminatedThread(tid);
+                    CONTEXT ignored{};bool originalTF=false,failed=false;
+                    PageBreakpointManager::Instance().Complete(tid,ignored,originalTF,&failed);
+                    status=failed?IpcStatus::InvalidState:IpcStatus::Ok;
+                }
+            }
+            CloseHandle(thread);
+        }
+        SendResponse(command,&status,sizeof(status));break;
+    }
 	case IpcCommand::SetInstructionPointer: {
 		if (payloadSize < sizeof(SetInstructionPointerRequest)) {
 			IpcStatus status = IpcStatus::InvalidArgs;

@@ -2,6 +2,10 @@
 
 Windows debugger based on **VEH (Vectored Exception Handler)** instead of the Windows Debug API. Ideal for reverse engineering targets with anti-debug protection.
 
+## Thread control
+
+`veh_threads()` lists threads. Use `veh_threads(action="freeze"|"thaw"|"terminate", threadId=...)` for control; `thaw` with ID 0 releases all freezes. Existing `veh_freeze_thread` calls stay supported. Termination requires backend support, is forceful and can leave target locks held. List/freeze/thaw support breakpoint actions; termination supports direct/batch calls only.
+
 ## Module and symbol selection
 
 MCP symbol search lists up to ten candidates with image bases, paths and available address widths. Use `veh_symbolize(name="Function", module_base="0x...")` or `0xBASE!Function` in address expressions to select a duplicate image. Unknown widths stay unknown; external backend support is required for the new queries. See [the changelog](CHANGELOG.md) for upgrade notes.

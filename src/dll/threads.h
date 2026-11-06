@@ -30,6 +30,7 @@ public:
 	// ResumeAll (Continue) does not release it. Thaw on detach/cleanup.
 	bool FreezeThread(uint32_t threadId);
 	bool ThawThread(uint32_t threadId);
+    void ForgetTerminatedThread(uint32_t threadId);
 	void ThawAll();
 	std::vector<uint32_t> GetFrozenThreadIds();
 

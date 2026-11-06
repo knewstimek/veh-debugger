@@ -138,6 +138,13 @@ def run():
         snapshot = state()
         assert snapshot["runUntil"]["active"] and snapshot["runUntil"]["uncertain"], snapshot
         assert "error" in run_to("0x1900")
+        assert tool("veh_threads").get("count") == 1
+        for action in ("freeze", "thaw", "terminate"):
+            mutation = {"action": action, "threadId": 77}
+            blocked = tool("veh_threads", mutation)
+            assert "run-until operation is pending" in blocked.get("error", ""), blocked
+            nested = tool("veh_batch", {"steps":[{"tool":"veh_threads","args":mutation}]})
+            assert nested["results"][0]["result"] == blocked, nested
         assert "error" in tool("veh_execution", {"operation": "cancel"})
         # Explicit detach/reattach must remain available despite unknown creation.
         assert tool("veh_detach").get("success")
