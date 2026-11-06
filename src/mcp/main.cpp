@@ -48,6 +48,8 @@ void PrintUsage() {
         "  Callers: veh_trace_callers defaults to caller counts; mode=detour uses instrumentation.\n"
         "  mode=detailed: hit-time registers/raw stack, filters and hit limits on supported process backends.\n"
         "  Detailed workflow: status/start/stop/read/export; no implicit resume/pause or complete-unwind guarantee.\n"
+        "  Page watches: veh_set_data_breakpoint(method=page) on local VEH; no DR slots, best_effort coverage.\n"
+        "  Use private data pages; remove watches before traces/protection changes. Describe the tool for limits.\n"
         "  Inspect: veh_disassemble(address=...) selects the current stop mode automatically when supported.\n"
         "  Elsewhere process width is the default; threadId or address_bits is an optional override, never both.\n"
         "  Locals: veh_enum_locals(threadId=...) selects the top frame; empty variables is success.\n"

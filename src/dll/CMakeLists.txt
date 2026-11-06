@@ -3,6 +3,7 @@ set(DLL_SOURCES
     veh_handler.cpp
     breakpoint.cpp
     hw_breakpoint.cpp
+    page_breakpoint.cpp
     memory.cpp
     value_scan.cpp
     threads.cpp

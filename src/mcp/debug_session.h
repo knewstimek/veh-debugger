@@ -39,7 +39,10 @@ struct StopEvent {
 	bool timeout = false;
 	bool sessionChanged = false;
 	std::string reason;   // "breakpoint", "exception", "pause", "step", "exit"
-	std::string bpType;   // "software", "hardware", ""
+	std::string bpType;   // "software", "hardware", "page", ""
+    uint64_t accessedAddress=0;
+    uint32_t access=0, pageFlags=0;
+    RegisterSet pageRegisters{};
 	uint64_t address = 0;
 	uint32_t threadId = 0;
 	uint32_t breakpointId = 0;
@@ -141,7 +144,8 @@ struct HwBpInfo {
 	uint32_t id;
 	uint64_t address;
 	uint8_t type;
-	uint8_t size;
+	uint32_t size;
+    bool page=false;
 	std::string condition;      // 'value != 0', '[0x..]>5' 등. value = 감시 주소의 현재 값
 	std::string hitCondition;   // N번째 히트에만 발화 (앞 N-1회 스킵)
 	uint32_t hitCount = 0;
@@ -231,6 +235,7 @@ public:
 	bool RemoveBreakpointByAddress(uint64_t address);
 	HwBpResult SetHwBreakpoint(uint64_t address, uint8_t type, uint8_t size);
 	bool RemoveHwBreakpoint(uint32_t id);
+    BpResult SetPageBreakpoint(uint64_t address,uint32_t size,uint8_t type,std::string& error);
 
 	// Module-load breakpoint: stop when a matching module loads.
 	// action: 0 = add pattern, 1 = remove pattern, 2 = clear all.
@@ -549,7 +554,8 @@ public:
 
 	// Stop event signaling (called from event callback)
 	void SignalStop(const std::string& reason, uint64_t addr, uint32_t threadId,
-	                uint32_t bpId, const std::string& bpType = "");
+	                uint32_t bpId, const std::string& bpType = "",
+                    const PageBreakpointHitEvent* page=nullptr);
 
 	// Process monitor
 	void StartProcessMonitor();

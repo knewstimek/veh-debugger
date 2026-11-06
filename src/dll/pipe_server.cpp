@@ -4,6 +4,7 @@
 #include "veh_handler.h"
 #include "breakpoint.h"
 #include "hw_breakpoint.h"
+#include "page_breakpoint.h"
 #include "threads.h"
 #include "stack_walk.h"
 #include "memory.h"
@@ -829,6 +830,10 @@ void PipeServer::ServerThread() {
 			lastCommandTime_ = GetTickCount64();
 		}
 
+        // A broken pipe exits before heartbeat recovery. Page watches cannot
+        // outlive their client: release guards/TF and their dependent stops now.
+        // Keep the historical reconnect policy unchanged when no page lease exists.
+        if(PageBreakpointManager::Instance().Active())EmergencyCleanup();
 		ValueScanner::Instance().Reset(); // Also release staging/history on abrupt pipe loss.
 		// Detach 후: 파이프 연결만 끊고 외부 루프에서 새 클라이언트 대기
 		// Shutdown 후: running_=false이므로 외부 루프도 종료
@@ -845,9 +850,26 @@ void PipeServer::ServerThread() {
 
 void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize) {
 	auto cmd = static_cast<IpcCommand>(command);
+    if(PageBreakpointManager::Instance().Active() &&
+       (cmd==IpcCommand::TraceRegister||cmd==IpcCommand::TraceMemory||
+        cmd==IpcCommand::TraceMemoryCollect||cmd==IpcCommand::ResolveImport||
+        cmd==IpcCommand::TraceCalls||cmd==IpcCommand::TraceCallers||
+        cmd==IpcCommand::TraceBasicBlocks||cmd==IpcCommand::ExecuteShellcode||
+        cmd==IpcCommand::ProtectMemory||cmd==IpcCommand::FreeMemory||
+        cmd==IpcCommand::WriteMemory||cmd==IpcCommand::PatchCode)) {
+        if(cmd==IpcCommand::ProtectMemory) {
+            ProtectMemoryRequest request{};
+            if(payloadSize==sizeof(request))memcpy(&request,payload,sizeof(request));
+            const ProtectMemoryResponse response{IpcStatus::InvalidState,0,ERROR_BUSY,request.method,{}};
+            SendResponse(command,&response,sizeof(response));return;
+        }
+        const auto status=IpcStatus::InvalidState;SendResponse(command,&status,sizeof(status));return;
+    }
 
 	switch (cmd) {
 
+    case IpcCommand::SetPageBreakpoint:
+    case IpcCommand::RemovePageBreakpoint:
 	case IpcCommand::SetBreakpoint:
 	case IpcCommand::SetModuleLoadStop:
 	case IpcCommand::RemoveBreakpoint:
@@ -931,6 +953,28 @@ void PipeServer::HandleCommand(uint32_t command, const uint8_t* payload, uint32_
 
 void PipeServer::HandleBreakpointCommand(uint32_t command, const uint8_t* payload, uint32_t payloadSize) {
 	auto cmd = static_cast<IpcCommand>(command);
+    if(cmd==IpcCommand::SetPageBreakpoint) {
+        SetPageBreakpointResponse response{IpcStatus::InvalidArgs,0};
+        SetPageBreakpointRequest request{};
+        if(payloadSize==sizeof(request)) {
+            memcpy(&request,payload,sizeof(request));
+            auto& veh=VehHandler::Instance();
+            if(veh.traceBasicBlocks_.active.load()||veh.traceReg_.active.load()||
+               veh.importResolve_.active.load()||veh.traceCalls_.following.load())
+                response.status=IpcStatus::InvalidState;
+            else if(!(request.reserved[0]||request.reserved[1]||request.reserved[2]))
+                response.status=PageBreakpointManager::Instance().Add(request.address,request.size,request.access,response.id);
+        }
+        SendResponse(command,&response,sizeof(response));return;
+    }
+    if(cmd==IpcCommand::RemovePageBreakpoint) {
+        IpcStatus status=IpcStatus::InvalidArgs;
+        if(payloadSize==sizeof(RemoveHwBreakpointRequest)) {
+            RemoveHwBreakpointRequest request{};memcpy(&request,payload,sizeof(request));
+            if(request.id)status=PageBreakpointManager::Instance().Remove(request.id);
+        }
+        SendResponse(command,&status,sizeof(status));return;
+    }
 
 	switch (cmd) {
 
@@ -3354,10 +3398,11 @@ void PipeServer::HandleLifecycleCommand(uint32_t command, const uint8_t* payload
 		GetCapabilitiesResponse resp{};
 		resp.status = IpcStatus::Ok;
 		resp.backend = IpcBackend::VehDll;
-		resp.flags = kCapStopsThreads | kCapBasicTracePolicies | kCapValueScanV2 | kCapBasicTraceLazy;
+		resp.flags = kCapPageBreakpointV1 | kCapStopsThreads | kCapBasicTracePolicies | kCapValueScanV2 | kCapBasicTraceLazy;
 		strcpy_s(resp.name, "veh-dll");
 		// Every command HandleCommand routes to a handler.
 		static constexpr IpcCommand kImplemented[] = {
+            IpcCommand::SetPageBreakpoint, IpcCommand::RemovePageBreakpoint,
 			IpcCommand::SetBreakpoint, IpcCommand::RemoveBreakpoint, IpcCommand::SetHwBreakpoint,
 			IpcCommand::RemoveHwBreakpoint, IpcCommand::RemoveBreakpointByAddr, IpcCommand::SetModuleLoadStop,
 			IpcCommand::Continue, IpcCommand::StepOver, IpcCommand::StepInto, IpcCommand::StepOut,
@@ -3392,6 +3437,9 @@ void PipeServer::HandleLifecycleCommand(uint32_t command, const uint8_t* payload
 		// connected_=false로 내부 커맨드 루프만 탈출 → 외부 루프에서 새 클라이언트 대기
 		// 이를 통해 어댑터가 다시 attach 할 때 DLL 재주입 없이 즉시 연결 가능
 		LOG_INFO("Detach requested");
+        if(!PageBreakpointManager::Instance().RemoveAll()) {
+            const auto status=IpcStatus::InvalidState;SendResponse(command,&status,sizeof(status));return;
+        }
 		ValueScanner::Instance().Reset();
 		BreakpointManager::Instance().RemoveAll();
 		HwBreakpointManager::Instance().RemoveAll();
@@ -3426,6 +3474,9 @@ void PipeServer::HandleLifecycleCommand(uint32_t command, const uint8_t* payload
 		// Shutdown: 완전 종료. running_=false로 ServerThread 자체가 종료된다.
 		// 프로세스 종료 또는 DLL 언로드 시 사용
 		LOG_INFO("Shutdown requested");
+        if(!PageBreakpointManager::Instance().RemoveAll()) {
+            const auto status=IpcStatus::InvalidState;SendResponse(command,&status,sizeof(status));return;
+        }
 		ValueScanner::Instance().Reset();
 		BreakpointManager::Instance().RemoveAll();
 		HwBreakpointManager::Instance().RemoveAll();

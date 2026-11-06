@@ -282,13 +282,15 @@ json McpServer::ToolListBreakpoints(const json& args) {
 			swList.push_back(entry);
 		}
 	}
-	json hwList = json::array();
+	json hwList = json::array(), pageList=json::array();
 	{
 		std::lock_guard<std::mutex> lock(session_.GetBpMutex());
 		for (auto& bp : session_.GetHwBreakpoints()) {
 			char buf[32]; snprintf(buf, sizeof(buf), "0x%llX", bp.address);
 			const char* typeStr = bp.type == 0 ? "execute" : bp.type == 1 ? "write" : "readwrite";
-			hwList.push_back({{"id", bp.id}, {"address", buf}, {"type", typeStr}, {"size", bp.size}});
+            json row={{"id",bp.id},{"address",buf},{"type",typeStr},{"size",bp.size}};
+            if(bp.page){row["method"]="page";row["coverage"]="best_effort";pageList.push_back(std::move(row));}
+            else hwList.push_back(std::move(row));
 		}
 	}
     // One shared lookup/preview budget for both lists; no backend IPC while the BP mutex is held.
@@ -303,6 +305,7 @@ json McpServer::ToolListBreakpoints(const json& args) {
         else hwList[i - softwareCount] = std::move(combined[i]);
     }
     json out = {{"software", swList}, {"hardware", hwList}};
+    if(!pageList.empty())out["page"]=std::move(pageList);
     if (truncated) out["annotations_truncated"] = true;
     return out;
 }
@@ -313,6 +316,9 @@ json McpServer::ToolSetDataBreakpoint(const json& args) {
 	std::string addrStr = args.value("address", "");
 	std::string typeStr = args.value("type", "write");
 	int size = JsonInt(args, "size", 4);
+    const auto method=args.value("method",std::string("hardware"));
+    if(method!="hardware"&&method!="page")return {{"error","method must be hardware or page"}};
+    if(args.contains("action")&&!args["action"].is_array())return {{"error","action must be an array of batch steps"}};
 
 	if (addrStr.empty()) return {{"error", "address is required"}};
 
@@ -326,6 +332,25 @@ json McpServer::ToolSetDataBreakpoint(const json& args) {
 	else if (typeStr == "write")     type = 1;
 	else if (typeStr == "readwrite") type = 3;
 	else return {{"error", "type must be execute, write, or readwrite"}};
+    if(method=="page") {
+        auto condition=args.value("condition",std::string{});
+        std::transform(condition.begin(),condition.end(),condition.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
+        if(condition.find("value")!=std::string::npos||condition.find('[')!=std::string::npos)
+            return {{"error","Page watches support register conditions only; value/memory conditions require method=hardware"}};
+        if((type!=1&&type!=3)||size<1||size>4096||addr>UINT64_MAX-static_cast<uint64_t>(size-1)||
+           (addr>>12)!=((addr+size-1)>>12))
+            return {{"error","Page watches require type=write|readwrite and size1..4096 within one private data page"}};
+        std::string error;
+        const auto result=session_.SetPageBreakpoint(addr,static_cast<uint32_t>(size),type,error);
+        if(!result.ok)return {{"error",error}};
+        HwBpInfo info{result.id,addr,type,static_cast<uint32_t>(size)};
+        info.page=true;info.condition=args.value("condition","");info.hitCondition=args.value("hitCondition","");
+        {std::lock_guard<std::mutex> lock(session_.GetBpMutex());session_.GetHwBreakpoints().push_back(std::move(info));}
+        if(args.contains("action"))StoreBreakpointAction(result.id,args["action"]);
+        return {{"success",true},{"id",result.id},{"address",HexAddr(addr)},{"type",typeStr},{"size",size},
+            {"method","page"},{"coverage","best_effort"},{"accessTiming","before_instruction"},
+            {"rearmWindow","Other threads can access the page without a hit until it is rearmed"}};
+    }
 	if (size != 1 && size != 2 && size != 4 && size != 8) {
 		return {{"error", "size must be 1, 2, 4, or 8"}};
 	}
@@ -344,6 +369,7 @@ json McpServer::ToolSetDataBreakpoint(const json& args) {
 		session_.GetHwBreakpoints().push_back(std::move(info));
 	}
 
+    if(args.contains("action"))StoreBreakpointAction(result.id,args["action"]);
 	char buf[32]; snprintf(buf, sizeof(buf), "0x%llX", addr);
 	return {{"success", true}, {"id", result.id}, {"slot", result.slot},
 	        {"address", buf}, {"type", typeStr}, {"size", size}};
@@ -373,6 +399,7 @@ json McpServer::ToolRemoveDataBreakpoint(const json& args) {
 			std::remove_if(bps.begin(), bps.end(),
 				[id](const HwBpInfo& bp) { return bp.id == id; }),
 			bps.end());
+        bpActions_.erase(id);
 	}
 
 	return {{"success", true}, {"id", id}};

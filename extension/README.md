@@ -12,6 +12,8 @@ Function-breakpoint module guards support automatic release after loader-safe bi
 
 For ordinary inspection, `veh_disassemble(address="...")` uses the observed mode at the current stop PC on supporting backends and the process width elsewhere; it returns `addressBits`. Only specify `threadId` or `address_bits=32|64` when an override is needed, never both. `veh_enum_locals(threadId=...)` defaults to the top frame. To inspect a caller, pass its `veh_stack_trace` frame's `address` as `instructionAddress` and its `frameBase` together. A zero `returnAddress` means unavailable. Empty `variables` is successful; invalid addresses and backend failures return errors. See [register context](https://github.com/knewstimek/veh-debugger/blob/master/docs/REGISTER_CONTEXT.md).
 
+Page-exception data watches use existing `veh_set_data_breakpoint(address="0x...", method="page", type="write", size=4)` and `veh_remove_data_breakpoint(id=...)`. This optional local VEH mode uses no DR slots, stops before the attempted instruction and supports direct/batch/actions. It supports private data pages only and reports `coverage="best_effort"`: other threads can access during guard/rearm windows. See [page watches](https://github.com/knewstimek/veh-debugger/blob/master/docs/PAGE_BREAKPOINTS.md) for limits and restoration.
+
 ## Features
 
 - **Anti-debug friendly** — Uses VEH instead of `ntdll!DbgUiRemoteBreakin`, bypasses common anti-debug checks

@@ -18,6 +18,7 @@ namespace veh {
 // Debug event types
 enum class DebugEventType {
 	BreakpointHit,
+    PageBreakpointHit,
 	SingleStepComplete,
 	AccessViolation,
 	Exception,
@@ -30,6 +31,8 @@ struct DebugEvent {
 	uint64_t       address;
 	uint32_t       breakpointId;  // for breakpoint events
 	uint32_t       exceptionCode; // for exception events
+    uint64_t accessedAddress=0;
+    uint32_t access=0, pageFlags=0;
 	const CONTEXT* context;       // VEH 정지 시점의 컨텍스트 (BP 히트 시 전달)
 };
 
@@ -586,7 +589,8 @@ private:
 	// 공통 패턴: 컨텍스트 저장 -> 이벤트 생성 -> 콜백 -> 대기 -> 컨텍스트 복원
 	// 4개 예외 경로(BP, HW BP, step complete, exception)에서 공유
 	WaitResult NotifyAndWait(PEXCEPTION_POINTERS info, uint32_t tid,
-		DebugEventType type, uint64_t addr, uint32_t bpId, DWORD code);
+		DebugEventType type, uint64_t addr, uint32_t bpId, DWORD code,
+        uint64_t accessedAddress=0, uint32_t access=0, uint32_t pageFlags=0);
 
 	// 스레드가 stopped 상태에서 대기할 이벤트 가져오기/생성
 	HANDLE GetOrCreateThreadEvent(uint32_t threadId);

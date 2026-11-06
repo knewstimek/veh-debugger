@@ -124,6 +124,15 @@ __declspec(noinline) void SymbolReloadMarker(int phase) {
     (void)observed;
 }
 
+// Test-owned worker: the harness supplies a bounded executable buffer and owns
+// the containing target process. No background helper process or persistent file.
+extern "C" __declspec(dllexport) DWORD __cdecl PageWatchStart(void* entry) {
+    DWORD tid=0;
+    HANDLE thread=CreateThread(nullptr,0,reinterpret_cast<LPTHREAD_START_ROUTINE>(entry),nullptr,0,&tid);
+    if(thread)CloseHandle(thread);
+    return thread?tid:0;
+}
+
 int main(int argc, char* argv[]) {
 	printf("=== VEH Debugger Test Target ===\n");
 	printf("PID: %u\n", GetCurrentProcessId());

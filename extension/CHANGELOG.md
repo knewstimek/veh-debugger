@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Changed
+- **VEH page data breakpoints** -- `veh_set_data_breakpoint(method="page")` optionally uses shared PAGE_GUARD pages and per-thread TF rearm without DR slots. Pre-instruction fault address/type/registers, same-page reference counting, step/DR stop preservation and cleanup use existing direct/batch/action paths. Private single-page ranges only; coverage is explicitly best effort during guard/rearm windows. Unsupported external peers are refused. Hardware remains the default.
 - **Mixed-mode inspection** -- optional register-context v1 negotiation separates stopped code width from process bitness. Disassembly selects the current stopped context automatically on supporting backends, with mutually exclusive `threadId`/`address_bits` overrides and an `addressBits` result. Legacy layouts and connections remain supported.
 - **Inspection guidance** -- synchronize READMEs, MCP descriptions and CLI help for automatic decode defaults, caller-frame locals, empty results versus errors, and the 64KiB inline trace limit.
 - **Caller-capture guidance** -- align Korean/English and extension READMEs, extension metadata, CLI help and MCP descriptions with the optional detailed workflow, backend/architecture checks, raw-snapshot limits and detour-only options. Compact common tool descriptions preserve the default profile's schema budget.

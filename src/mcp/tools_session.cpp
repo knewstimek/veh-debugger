@@ -21,6 +21,25 @@ namespace veh {
 
 namespace {
 
+static void AddPageStop(json& result,const StopEvent& stop) {
+    if(stop.bpType!="page")return;
+    result["accessedAddress"]=HexAddr(stop.accessedAddress);
+    result["access"]=stop.access==1?"write":stop.access==0?"read":"execute";
+    result["coverage"]="best_effort";result["rearmFailed"]=stop.pageFlags!=0;
+    result["registersAt"]=stop.pageFlags?"rearm_failure":"before_instruction";
+    const auto& r=stop.pageRegisters;
+    const uint64_t values[]={r.rax,r.rbx,r.rcx,r.rdx,r.rsi,r.rdi,r.rbp,r.rsp,
+        r.r8,r.r9,r.r10,r.r11,r.r12,r.r13,r.r14,r.r15,r.rip,r.rflags};
+    const char* names64[]={"rax","rbx","rcx","rdx","rsi","rdi","rbp","rsp",
+        "r8","r9","r10","r11","r12","r13","r14","r15","rip","rflags"};
+    const char* names32[]={"eax","ebx","ecx","edx","esi","edi","ebp","esp"};
+    auto& regs=result["registers"];regs=json::object();
+    for(size_t i=0;i<18;++i) {
+        if(r.is32bit&&i>=8&&i<16)continue;
+        const char* name=r.is32bit?(i<8?names32[i]:i==16?"eip":"eflags"):names64[i];
+        regs[name]=HexAddr(r.is32bit?values[i]&UINT32_MAX:values[i]);
+    }
+}
 // Commands a backend may leave out, named after the tools that need them.
 struct CommandName {
 	IpcCommand cmd;
@@ -459,6 +478,7 @@ json McpServer::ToolContinue(const json& args) {
                     {"threadId", cached->threadId}, {"breakpointId", cached->breakpointId}
                 };
                 if (!cached->bpType.empty()) ret["breakpointType"] = cached->bpType;
+                AddPageStop(ret,*cached);
                 return ret;
             }
         }
@@ -516,6 +536,7 @@ json McpServer::ToolContinue(const json& args) {
 		{"breakpointId", stopEvent.breakpointId}
 	};
 	if (!stopEvent.bpType.empty()) ret["breakpointType"] = stopEvent.bpType;
+    AddPageStop(ret,stopEvent);
 	addResumeDetails(ret);
 	return ret;
 }
@@ -592,6 +613,8 @@ json McpServer::StepAndWait(uint32_t threadId, IpcCommand command, int timeoutSe
         {"reason", stop.reason}, {"threadId", stop.threadId}};
     if (stopped) result["instructionPointer"] = HexAddr(stop.address);
     if (stop.breakpointId) result["breakpointId"] = stop.breakpointId;
+    if(stop.bpType=="page")result["breakpointType"]="page";
+    AddPageStop(result,stop);
     if (!exception.is_null()) result["exception"] = exception;
     return result;
 }

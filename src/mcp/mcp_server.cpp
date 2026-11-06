@@ -781,6 +781,10 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 	case IpcEvent::BreakpointHit: {
 		if (size >= sizeof(BreakpointHitEvent)) {
 			auto* e = reinterpret_cast<const BreakpointHitEvent*>(payload);
+            const PageBreakpointHitEvent* page=size==sizeof(PageBreakpointHitEvent)&&
+                session_.GetBackendInfo().backend==IpcBackend::VehDll&&
+                (session_.GetBackendInfo().flags&kCapPageBreakpointV1)?
+                reinterpret_cast<const PageBreakpointHitEvent*>(payload):nullptr;
 
 			// Check if this is our temp step-over breakpoint
 			bool isTempBp = false;
@@ -804,7 +808,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 			} else {
 				// Look up BpMapping for condition/hitCondition/logMessage
 				bool shouldStop = true;
-				std::string bpType; // backend IDs have no portable software/hardware ranges
+				std::string bpType=page?"page":""; //never infer kind from ID ranges
 				std::string logOutput;
 				{
 					std::lock_guard<std::mutex> lock(session_.GetBpMutex());
@@ -842,7 +846,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 					// 'value' 토큰 = 감시 주소의 현재 값 (예: 'value != 0' -> 0 쓰기 노이즈 무시)
 					for (auto& bp : session_.GetHwBreakpoints()) {
 						if (bp.id != e->breakpointId) continue;
-						bpType = "hardware";
+						bpType = bp.page?"page":"hardware";
 						bp.hitCount++;
 						if (!bp.condition.empty()) {
 							std::string cond = bp.condition;
@@ -920,7 +924,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 							std::lock_guard<std::mutex> lock(eventMutex_);
 							pendingEvents_.push({"notifications/logging", {{"level", "info"}, {"logger", "veh-debugger"}, {"data", buf}}}); SetEvent(eventsReady_);
 						}
-						session_.SignalStop("breakpoint", e->address, e->threadId, e->breakpointId, bpType);
+						session_.SignalStop("breakpoint", e->address, e->threadId, e->breakpointId, bpType,page);
                             QueueExecutionStop("breakpoint", e->address, e->threadId, e->breakpointId);
 					}
 				}
@@ -1269,21 +1273,23 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}, {"required", json::array({"name"})}}}}),
 
 		Tool(&McpServer::ToolListBreakpoints, "breakpoint", 0, true,
-			{{"name", "veh_list_breakpoints"}, {"description", "List all active software and hardware breakpoints with their properties."},
+			{{"name", "veh_list_breakpoints"}, {"description", "List software, hardware and optional VEH page breakpoints with their properties."},
 		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
 
 		Tool(&McpServer::ToolSetDataBreakpoint, "breakpoint", kInteractive, true,
-			{{"name", "veh_set_data_breakpoint"}, {"description", "Set a hardware data breakpoint (DR0-DR3). Like Cheat Engine's 'Find out what writes/accesses'. Max 4 simultaneous. Supports condition/hitCondition to filter noisy writes (e.g. a clear-helper writing 0)."},
+			{{"name", "veh_set_data_breakpoint"}, {"description", "Watch memory. Default method=hardware uses DR0-DR3 (4 slots). Optional method=page uses PAGE_GUARD/TF on supporting local VEH DLLs, no DR slot: write/readwrite, a single private data page, pre-instruction address/registers. Page coverage is best_effort: other threads can access during rearm. Remove before freeing/protecting memory or tracing. Supports register-only condition/hitCondition and batch actions; value/memory conditions require hardware."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"address", {{"type", "string"}, {"description", "Hex address to watch (also accepts module+RVA)"}}},
 			{"type", {{"type", "string"}, {"enum", json::array({"write", "readwrite", "execute"})}, {"description", "Breakpoint type (default: write)"}}},
-			{"size", {{"type", "integer"}, {"enum", json::array({1, 2, 4, 8})}, {"description", "Watch size in bytes (default: 4)"}}},
-			{"condition", {{"type", "string"}, {"description", "Only stop when true. Token 'value' = current value at the watched address (e.g. 'value != 0' skips zero-writes; 'value > 100'). Registers and [0xADDR] deref also allowed."}}},
+			{"size", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4096}, {"description", "Default4 bytes; hardware1/2/4/8; page1..4096, entirely within one page"}}},
+            {"method", {{"type","string"},{"enum",json::array({"hardware","page"})},{"default","hardware"}}},
+            {"action", {{"type","array"},{"items",{{"type","object"}}},{"description","Batch steps to execute on hit; same exclusions as veh_batch"}}},
+			{"condition", {{"type", "string"}, {"description", "Hardware supports value (current watched value), registers and [0xADDR] dereferences. Page mode supports register-only conditions; value/memory conditions are rejected before installation."}}},
 			{"hitCondition", {{"type", "string"}, {"description", "Stop only on the Nth hit (skips first N-1). E.g. '5' = stop on 5th write."}}}
 		 }}, {"required", json::array({"address"})}}}}),
 
 		Tool(&McpServer::ToolRemoveDataBreakpoint, "breakpoint", 0, true,
-			{{"name", "veh_remove_data_breakpoint"}, {"description", "Remove a hardware data breakpoint by ID."},
+			{{"name", "veh_remove_data_breakpoint"}, {"description", "Remove a hardware or VEH page data breakpoint by ID; the creating method is remembered."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"id", {{"type", "integer"}, {"description", "Data breakpoint ID"}}}
 		 }}, {"required", json::array({"id"})}}}}),

@@ -429,6 +429,9 @@ json McpServer::ToolProtectMemory(const json& args) {
 		}
 	};
 	if (!result.ok) {
+        if(result.errorCode==ERROR_BUSY&&(session_.GetBackendInfo().flags&kCapPageBreakpointV1))
+            return {{"error","Memory protection change is busy: remove page watches and continue/step past any pending rearm first"},
+                {"code","page_watch_active"},{"method",methodName(result.method)}};
 		char code[16];
 		snprintf(code, sizeof(code), "0x%08X", result.errorCode);
 		const std::string kind = result.method == ProtectMemoryMethod::Api ? "Win32" : "NTSTATUS";

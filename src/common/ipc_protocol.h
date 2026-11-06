@@ -48,6 +48,8 @@ enum class IpcCommand : uint32_t {
 	SetHwBreakpoint        = 0x0003,
 	RemoveHwBreakpoint     = 0x0004,
 	SetModuleLoadStop      = 0x0006,  // stop when a matching module is loaded
+    SetPageBreakpoint     = 0x0007, // optional VEH page guard, no DR slots
+    RemovePageBreakpoint  = 0x0008,
 
 	// Execution control
 	Continue               = 0x0010,
@@ -247,6 +249,16 @@ struct ModuleLoadStopEvent {
 struct RemoveHwBreakpointRequest {
 	uint32_t id;
 };
+// VEH-only opt-in commands; no existing request/event layout changes.
+struct SetPageBreakpointRequest {
+    uint64_t address;
+    uint32_t size; //1..4096, single private data page per watch
+    uint8_t access; //1=write,3=readwrite; pre-instruction fault address filter
+    uint8_t reserved[3];
+};
+struct SetPageBreakpointResponse { IpcStatus status; uint32_t id; };
+static_assert(sizeof(SetPageBreakpointRequest)==16);
+
 
 struct ContinueRequest {
 	uint32_t threadId;
@@ -546,6 +558,14 @@ struct BreakpointHitEvent {
 	RegisterSet regs;  // VEH 정지 시점의 레지스터 (조건부 BP 평가에 사용, SendAndReceive 데드락 방지)
 };
 
+// Only page-watch hits append this tail to the unchanged BreakpointHitEvent.
+struct PageBreakpointHitEvent {
+    BreakpointHitEvent base;
+    uint64_t accessedAddress;
+    uint32_t access; //exception access:0=read,1=write,8=execute
+    uint32_t flags; //bit0=rearm failure; coverage always best_effort
+};
+static_assert(sizeof(PageBreakpointHitEvent)==sizeof(BreakpointHitEvent)+16);
 struct StepCompletedEvent {
 	uint32_t threadId;
 	uint64_t address;
@@ -2111,6 +2131,7 @@ enum class IpcBackend : uint32_t { VehDll = 0, Hypervisor = 1 };
 
 // Opt-in register context v1: shape follows the observed stopped code width;
 // process image bitness remains separate target metadata. Wire layouts unchanged.
+constexpr uint32_t kCapPageBreakpointV1 = 1u << 11; //VEH-only guard/TF watches
 constexpr uint32_t kCapRegisterContextV1 = 1u << 10;
 constexpr uint32_t kCapStopIdentityV1 = 1u << 9; // opt-in hold identity and atomic ContinueIfStopped
 constexpr uint32_t kCapBasicTraceLazy = 1u << 8; // wire12 lazy decode, cache budget and 64-bit steps

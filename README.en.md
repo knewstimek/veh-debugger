@@ -148,6 +148,8 @@ Detailed collection never resumes or pauses the target. The built-in VEH DLL doe
 
 Function-breakpoint module guards can resume automatically after a loader-safe binding pass when the backend provides [stop identity v1](docs/STOP_IDENTITY.md). The adapter conditionally releases only its own exact internal hold; changed/user stops remain stopped. Older backends retain the explicit pause/continue path. Public DAP/MCP arguments are unchanged.
 
+Page-exception data watches use existing `veh_set_data_breakpoint(address="0x...", method="page", type="write", size=4)` and `veh_remove_data_breakpoint(id=...)`. This optional local VEH mode uses no DR slots, stops before the attempted instruction and supports direct/batch/actions. It supports private data pages only and reports `coverage="best_effort"`: other threads can access during guard/rearm windows. See [page watches](docs/PAGE_BREAKPOINTS.md) for limits and restoration.
+
 ## Features
 
 - **VEH-based**: Uses VEH instead of Windows Debug API - bypasses PEB/NtQuery-based anti-debug checks (Themida, VMProtect, etc.)
@@ -408,7 +410,7 @@ The table below documents the complete public tool surface. Treat the running se
 | `veh_set_source_breakpoint` | `source, line, condition?, hitCondition?, logMessage?` | Source file + line BP (PDB required; unresolved modules kept `pending` and bound automatically on module load) |
 | `veh_set_function_breakpoint` | `name, condition?, hitCondition?, logMessage?` | Function name BP (PDB required; unresolved modules kept `pending` until module loads) |
 | `veh_list_breakpoints` | - | List active SW/HW breakpoints |
-| `veh_set_data_breakpoint` | `address, type, size, condition?, hitCondition?` | HW BP (write/readwrite/execute). `condition`'s `value` token = current value at the watched address (e.g. `value != 0` filters zero-write noise); `hitCondition:"5"` stops only on the 5th hit |
+| `veh_set_data_breakpoint` | `address, type?, size?, method?, condition?, hitCondition?, action?` | Hardware by default (write/readwrite/execute); local VEH page mode supports write/readwrite. Value conditions require hardware. `condition`'s `value` token = current value at the watched address (e.g. `value != 0` filters zero-write noise); `hitCondition:"5"` stops only on the 5th hit |
 | `veh_remove_data_breakpoint` | `id` | Remove HW BP |
 | `veh_set_module_breakpoint` | `module, enabled?, clear?` | Stop when a module (DLL) whose name matches is loaded (case-insensitive substring, e.g. `"D2Common"`). Freezes the loading thread right after the module is mapped (LdrRegisterDllNotification; no INT3/patching) so you can set BPs inside it or dump it. Fires after the module's DllMain on modern Windows. `enabled:false` removes a pattern, `clear:true` clears all |
 | `veh_execution` | `operation?, threadId?, address?, enabled?` | Confirmed thread state, selected-thread run-to, temporary ownership cancellation and opt-in stop notifications; lazy discovery |

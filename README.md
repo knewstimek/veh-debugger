@@ -150,6 +150,8 @@ handler occurrence만 필요하면 `target_window={address,occurrence,before_ste
 
 함수 중단점용 모듈 guard는 백엔드가 [정지 식별 v1](docs/STOP_IDENTITY.md)을 지원하면 로더 안전 바인딩 뒤 자동 재개할 수 있다. 어댑터는 자기 내부 정지의 종류·일련번호·소유권이 모두 일치할 때만 조건부 재개하며, 사용자 정지나 바뀐 정지는 유지한다. 구버전 백엔드는 기존 pause·명시적 continue 경로를 사용하고, 공개 DAP/MCP 인자는 바뀌지 않는다.
 
+페이지 예외 기반 데이터 감시는 기존 `veh_set_data_breakpoint(address="0x...", method="page", type="write", size=4)`로 설정하고 `veh_remove_data_breakpoint(id=...)`로 해제한다. 기본 VEH DLL의 선택 기능으로 DR 슬롯을 쓰지 않으며, 접근 명령 실행 전에 정지한다. private 데이터 페이지와 direct/batch/action을 지원한다. `coverage="best_effort"`이며 guard·재보호 창의 다른 스레드 접근을 무유실로 보장하지 않는다. [범위·제약·복원 규칙](docs/PAGE_BREAKPOINTS.md).
+
 ## 특징
 
 - **VEH 기반**: Windows Debug API 대신 VEH를 사용하여 안티디버그 우회에 유리
@@ -447,7 +449,7 @@ VM 자체에 연결할 때는 외부 백엔드를 VM 범위로 등록한 뒤
 | `veh_set_source_breakpoint` | `source, line, condition?, hitCondition?, logMessage?` | 소스 파일+줄번호 BP (PDB 필요; 미로드 모듈은 `pending` 후 모듈 로드 시 자동 바인딩) |
 | `veh_set_function_breakpoint` | `name, condition?, hitCondition?, logMessage?` | 함수명 BP (PDB 필요; 미로드 모듈은 `pending` 후 자동 바인딩) |
 | `veh_list_breakpoints` | - | 활성 SW/HW BP 목록 조회 |
-| `veh_set_data_breakpoint` | `address, type, size, condition?, hitCondition?` | HW BP (write/readwrite/execute). `condition`의 `value` 토큰=감시 주소 현재값 (예: `value != 0`으로 0-write 노이즈 필터), `hitCondition:"5"`=5번째 hit에서만 정지 |
+| `veh_set_data_breakpoint` | `address, type?, size?, method?, condition?, hitCondition?, action?` | 기본 HW BP (write/readwrite/execute); `method="page"`는 VEH의 write/readwrite 감시. value 조건은 hardware에서만 사용. `condition`의 `value` 토큰=감시 주소 현재값 (예: `value != 0`으로 0-write 노이즈 필터), `hitCondition:"5"`=5번째 hit에서만 정지 |
 | `veh_remove_data_breakpoint` | `id` | HW BP 제거 |
 | `veh_set_module_breakpoint` | `module, enabled?, clear?` | 모듈(DLL) 로드 시 정지. 이름 부분일치(대소문자 무시, 예: `"D2Common"`). 매핑 직후 로더 스레드 정지(LdrRegisterDllNotification, INT3/패치 없음) -> 내부 함수에 BP 설치나 덤프 가능. 모던 Windows에선 DllMain 실행 후 발화. `enabled:false`로 패턴 제거, `clear:true`로 전체 제거 |
 | `veh_execution` | `operation?, threadId?, address?, enabled?` | 정지/실행/미확인 상태 조회, 단일 스레드 Run Till, 임시 BP 취소, 선택적 정지 알림. 지연 도구 검색으로 조회 |

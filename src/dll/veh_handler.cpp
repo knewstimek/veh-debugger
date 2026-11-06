@@ -4,6 +4,7 @@
 #include "veh_handler.h"
 #include "breakpoint.h"
 #include "hw_breakpoint.h"
+#include "page_breakpoint.h"
 #include "memory.h"
 #include "threads.h"
 #include "syscall_resolver.h"
@@ -102,6 +103,7 @@ bool VehHandler::Install() {
 
 void VehHandler::Uninstall() {
 	if (!installed_) return;
+    if(!PageBreakpointManager::Instance().RemoveAll())return;
 	installed_ = false;  // 먼저 설정하여 새 예외 진입 차단
 
 	// 대기 중인 모든 스레드 깨우기 (detach이므로 TF/rearm 취소 유도)
@@ -294,7 +296,8 @@ struct TlsReentryGuard {
 
 VehHandler::WaitResult VehHandler::NotifyAndWait(
 		PEXCEPTION_POINTERS info, uint32_t tid,
-		DebugEventType type, uint64_t addr, uint32_t bpId, DWORD code) {
+		DebugEventType type, uint64_t addr, uint32_t bpId, DWORD code,
+        uint64_t accessedAddress, uint32_t access, uint32_t pageFlags) {
 	if (!callback_) return WaitResult::NoCallback;
 
 	// 1) 예외 컨텍스트 저장 (stackTrace/레지스터 검사용)
@@ -319,6 +322,7 @@ VehHandler::WaitResult VehHandler::NotifyAndWait(
 	evt.address = addr;
 	evt.breakpointId = bpId;
 	evt.exceptionCode = code;
+    evt.accessedAddress=accessedAddress;evt.access=access;evt.pageFlags=pageFlags;
 	evt.context = info->ContextRecord;
 	callback_(evt);
 
@@ -2402,6 +2406,50 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 	if (IsShellcodeThread(tid)) {
 		return EXCEPTION_CONTINUE_SEARCH;
 	}
+
+    auto& pages=PageBreakpointManager::Instance();
+    if(code==STATUS_GUARD_PAGE_VIOLATION&&info->ExceptionRecord->NumberParameters>=2) {
+        const auto accessed=static_cast<uint64_t>(info->ExceptionRecord->ExceptionInformation[1]);
+        const auto access=static_cast<uint32_t>(info->ExceptionRecord->ExceptionInformation[0]);
+        const auto fault=pages.OnGuard(tid,accessed,access,*info->ContextRecord);
+        if(fault.handled) {
+            if((fault.id||fault.failed)&&!ThreadManager::Instance().IsInternalThread(tid)) {
+                const bool parked=!fault.failed&&pages.Park(tid);
+                const auto result=NotifyAndWait(info,tid,DebugEventType::PageBreakpointHit,addr,fault.id,code,
+                    accessed,access,((fault.failed||!parked)?1u:0u)|(fault.originalTF?2u:0u));
+                if(result==WaitResult::Detached) {
+                    pages.Cancel(tid,*info->ContextRecord);
+                    info->ContextRecord->EFlags=(info->ContextRecord->EFlags&~0x100UL)|(fault.originalTF?0x100UL:0);
+                    return EXCEPTION_CONTINUE_EXECUTION;
+                }
+                while(!pages.OpenForStep(tid)) {
+                    if(NotifyAndWait(info,tid,DebugEventType::PageBreakpointHit,addr,fault.id,code,accessed,access,1)==WaitResult::Detached) {
+                        pages.Cancel(tid,*info->ContextRecord);
+                        info->ContextRecord->EFlags=(info->ContextRecord->EFlags&~0x100UL)|(fault.originalTF?0x100UL:0);
+                        return EXCEPTION_CONTINUE_EXECUTION;
+                    }
+                }
+                if(!fault.failed)info->ContextRecord->EFlags|=0x100;
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
+    if(code==EXCEPTION_SINGLE_STEP) {
+        bool original=false,failed=false;
+        if(pages.Complete(tid,*info->ContextRecord,original,&failed)) {
+            if(failed) {
+                NotifyAndWait(info,tid,DebugEventType::PageBreakpointHit,addr,0,code,0,0,1);
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            bool requested=false;
+            {std::lock_guard<std::mutex> lock(stepFlagMutex_);requested=stepFlags_.count(tid)!=0;}
+            const bool other=GetPendingRearm().active||traceBasicBlocks_.active.load()||
+                traceReg_.active.load()||importResolve_.active.load()||traceCalls_.following.load()||
+                (info->ContextRecord->Dr6&15)!=0;
+            if(!other&&!requested)
+                return original?EXCEPTION_CONTINUE_SEARCH:EXCEPTION_CONTINUE_EXECUTION;
+        }
+    } else if(code!=STATUS_GUARD_PAGE_VIOLATION)pages.Cancel(tid,*info->ContextRecord);
 
 	switch (code) {
 	case EXCEPTION_BREAKPOINT: { // 0x80000003 — INT3 히트

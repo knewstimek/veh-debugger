@@ -769,8 +769,10 @@ bool DebugSession::SetModuleLoadStop(const std::string& name, int action) {
 std::optional<IpcStatus> DebugSession::RemoveBreakpointStatus(uint32_t id, bool hardware,
     std::string* error) {
     if (error) error->clear();
-    const auto command = hardware ? IpcCommand::RemoveHwBreakpoint : IpcCommand::RemoveBreakpoint;
-    const std::string operation = hardware ? "RemoveHwBreakpoint" : "RemoveBreakpoint";
+    bool page=false;
+    if(hardware){std::lock_guard<std::mutex> lock(bpMutex_);for(const auto& bp:hwBreakpoints_)if(bp.id==id){page=bp.page;break;}}
+    const auto command = page?IpcCommand::RemovePageBreakpoint:hardware?IpcCommand::RemoveHwBreakpoint:IpcCommand::RemoveBreakpoint;
+    const std::string operation = page?"RemovePageBreakpoint":hardware?"RemoveHwBreakpoint":"RemoveBreakpoint";
     const auto fail = [&](const std::string& reason) {
         if (error) *error = operation + ": " + reason;
     };
@@ -842,6 +844,25 @@ bool DebugSession::RemoveHwBreakpoint(uint32_t id) {
     return status && *status == IpcStatus::Ok;
 }
 
+BpResult DebugSession::SetPageBreakpoint(uint64_t address,uint32_t size,uint8_t type,std::string& error) {
+    BpResult result;
+    if(IsRemoteTarget()||guestTarget_||vmTarget_||!backendInfo_.reported||backendInfo_.backend!=IpcBackend::VehDll||
+       !(backendInfo_.flags&kCapPageBreakpointV1)||!backendInfo_.Supports(IpcCommand::SetPageBreakpoint)||
+       !backendInfo_.Supports(IpcCommand::RemovePageBreakpoint)) {
+        error="Page breakpoints require the supporting local VEH DLL; this backend does not advertise page-watch v1";
+        return result;
+    }
+    const SetPageBreakpointRequest request{address,size,type,{}};
+    std::vector<uint8_t> bytes;
+    if(!ReceiveBackendReply(IpcCommand::SetPageBreakpoint,&request,sizeof(request),bytes,"SetPageBreakpoint",error))
+        return result;
+    if(bytes.size()!=sizeof(SetPageBreakpointResponse)){
+        error="Page breakpoint creation was not confirmed (malformed receipt)";return result;
+    }
+    SetPageBreakpointResponse reply{};memcpy(&reply,bytes.data(),sizeof(reply));
+    if(!reply.id){error="Page breakpoint creation returned no ID";return result;}
+    result.ok=true;result.id=reply.id;return result;
+}
 // --- Execution control ---
 
 bool DebugSession::Continue(uint32_t threadId, bool passException) {
@@ -1083,7 +1104,7 @@ bool DebugSession::IsThreadOwnedByTarget(uint32_t threadId) const {
 }
 
 void DebugSession::SignalStop(const std::string& reason, uint64_t addr, uint32_t threadId,
-                              uint32_t bpId, const std::string& bpType) {
+                              uint32_t bpId, const std::string& bpType,const PageBreakpointHitEvent* page) {
 	{
 		std::lock_guard<std::mutex> lock(stopMutex_);
 		stopOccurred_ = true;
@@ -1094,6 +1115,10 @@ void DebugSession::SignalStop(const std::string& reason, uint64_t addr, uint32_t
 		lastStop_.threadId = threadId;
 		lastStop_.breakpointId = bpId;
 		lastStop_.bpType = bpType;
+        lastStop_.accessedAddress=page?page->accessedAddress:0;
+        lastStop_.access=page?page->access:0;
+        lastStop_.pageFlags=page?page->flags:0;
+        lastStop_.pageRegisters=page?page->base.regs:RegisterSet{};
 		lastStop_.sessionGeneration = sessionGeneration_.load();
 	}
 	stopCv_.notify_all();

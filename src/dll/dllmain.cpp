@@ -6,6 +6,7 @@
 #include "pipe_server.h"
 #include "breakpoint.h"
 #include "hw_breakpoint.h"
+#include "page_breakpoint.h"
 #include "stack_walk.h"
 #include "../common/ipc_protocol.h"
 #include "../common/logger.h"
@@ -157,6 +158,7 @@ DWORD WINAPI InitThread(LPVOID) {
 	auto& veh = veh::VehHandler::Instance();
 	veh.SetEventCallback([&pipe](const veh::DebugEvent& event) {
 		switch (event.type) {
+        case veh::DebugEventType::PageBreakpointHit:
 		case veh::DebugEventType::BreakpointHit: {
 			veh::BreakpointHitEvent payload{};
 			payload.threadId = event.threadId;
@@ -201,7 +203,11 @@ DWORD WINAPI InitThread(LPVOID) {
 				payload.regs.dr6 = ctx.Dr6; payload.regs.dr7 = ctx.Dr7;
 #endif
 			}
-			pipe.SendEvent(static_cast<uint32_t>(veh::IpcEvent::BreakpointHit),
+            if(event.type==veh::DebugEventType::PageBreakpointHit) {
+                if(!(event.pageFlags&1))payload.regs.rflags=(payload.regs.rflags&~0x100ULL)|((event.pageFlags&2)?0x100ULL:0);
+                const veh::PageBreakpointHitEvent page{payload,event.accessedAddress,event.access,event.pageFlags&1u};
+                pipe.SendEvent(static_cast<uint32_t>(veh::IpcEvent::BreakpointHit),&page,sizeof(page));
+            } else pipe.SendEvent(static_cast<uint32_t>(veh::IpcEvent::BreakpointHit),
 			               &payload, sizeof(payload));
 			break;
 		}

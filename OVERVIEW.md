@@ -152,6 +152,10 @@ peers may still return a generic error, which must not be interpreted as exhaust
 - **TlsAlloc PendingRearm**: VEH state is per-thread (TlsAlloc, ManualMap-safe); pipe server communicates via `stepFlags_` map
 - **SyscallResolver**: All WinAPI calls in VEH path replaced with ntdll stub copies (RWX page) + TEB direct reads. Immune to user BPs on VirtualProtect, FlushInstructionCache, GetCurrentThreadId, TlsGetValue etc.
 
+## Page data breakpoints
+
+The optional local VEH [page-watch manager](docs/PAGE_BREAKPOINTS.md) owns original protections/reference counts per private data page and TF leases per faulting thread. It rearms guards while hits are parked, opens one instruction on continue, and restores before consuming its own step. Existing SW/HW stops and target exceptions retain their paths. Coverage is explicitly best effort because page permissions are process-wide; this mode neither reserves DR slots nor requires hypervisor backends to implement it. Existing data-breakpoint MCP handlers carry the optional method through direct/batch/actions.
+
 ## Stepping Mechanism
 
 ### VEH Single-Step Flow
