@@ -191,7 +191,7 @@ int wmain(int argc, wchar_t** argv) {
                 }
                 caps.flags |= veh::kCapRegisterContextV1;
             }
-            caps.flags |= veh::kCapNoTargetFootprint | (mode == L"host-cap" || mode == L"hardware-host" ? 0 : machineMode ? veh::kCapVirtualMachineTarget : veh::kCapGuestTarget);
+            caps.flags |= veh::kCapNoTargetFootprint | (mode == L"host-cap" || mode == L"host-trace" || mode == L"hardware-host" ? 0 : machineMode ? veh::kCapVirtualMachineTarget : veh::kCapGuestTarget);
             if(importMode)veh::SetCommandSupported(caps.commands,veh::IpcCommand::ResolveImport);
             if(scanMode){veh::SetCommandSupported(caps.commands,veh::IpcCommand::ValueScan);if(mode!=L"scan-legacy")caps.flags|=veh::kCapValueScanV2;}
             if(mode==L"machine-guest-cap")caps.flags=veh::kCapNoTargetFootprint|veh::kCapGuestTarget;
@@ -283,7 +283,7 @@ int wmain(int argc, wchar_t** argv) {
                 if (mode == L"path-wide-limits") caps.flags |= veh::kCapBasicTraceLazy;
                 veh::SetCommandSupported(caps.commands, veh::IpcCommand::TraceBasicBlocks);
             }
-            if (mode == L"trace") {
+            if (mode == L"trace" || mode == L"host-trace") {
                 for (auto op : {veh::IpcCommand::Continue, veh::IpcCommand::Pause, veh::IpcCommand::TraceCallers})
                     veh::SetCommandSupported(caps.commands, op);
             }
@@ -1499,7 +1499,7 @@ int wmain(int argc, wchar_t** argv) {
                 if (!event) break;
                 SetEvent(event); CloseHandle(event);
             }
-        } else if ((mode == L"trace" || mode == L"delayed-trace") && command == veh::IpcCommand::TraceCallers && bytes.size() == sizeof(veh::TraceCallersRequest)) {
+        } else if ((mode == L"trace" || mode == L"delayed-trace" || mode == L"host-trace") && command == veh::IpcCommand::TraceCallers && bytes.size() == sizeof(veh::TraceCallersRequest)) {
             veh::TraceCallersRequest request{}; memcpy(&request, bytes.data(), sizeof(request));
             if (mode == L"delayed-trace") Sleep(request.durationMs > 20000 ? 20000 : request.durationMs);
             const veh::TraceCallersResponse response{request.address == 0x2000 ? veh::IpcStatus::Unsupported : veh::IpcStatus::Ok, 0, 0};

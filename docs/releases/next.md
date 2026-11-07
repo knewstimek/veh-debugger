@@ -57,7 +57,8 @@ thread coverage, and fixes kernel packet handling and interrupted stepping.
 
 - **External backend integration.** Standard caller/call traces allow concurrent
   inspection when supported by the backend. Failed external capability negotiation
-  or agent exit fails attachment instead of reporting a successful DLL session.
+  or agent exit fails attach/launch instead of reporting a successful DLL session.
+  Caller collection preserves suspended launch threads, including on refusal.
   Hypervisor kernel detours accept x64 kernel addresses for WoW64 targets.
 
 - **Kernel exchanges.** Handle duplicate/late stop packets, ACK-mode NAK retries,

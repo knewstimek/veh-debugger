@@ -15,6 +15,12 @@ from test_remote_transport import KERNEL, owned_handle
 FIXTURE = Path(RELEASE) / "guest_backend_fixture.exe"
 KERNEL.CreateEventW.argtypes = (ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR)
 KERNEL.CreateEventW.restype = wintypes.HANDLE
+KERNEL.OpenThread.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+KERNEL.OpenThread.restype = wintypes.HANDLE
+KERNEL.SuspendThread.argtypes = (wintypes.HANDLE,)
+KERNEL.SuspendThread.restype = wintypes.DWORD
+KERNEL.ResumeThread.argtypes = (wintypes.HANDLE,)
+KERNEL.ResumeThread.restype = wintypes.DWORD
 
 
 def run():
@@ -27,17 +33,45 @@ def run():
             client.initialize()
             # A selected external host backend must never inherit legacy DLL defaults.
             profile = Path(directory) / "backends.json"
-            for mode in ("early-exit", "cap-exit", "symbols-unreported", "host-cap"):
+            for mode in ("early-exit", "cap-exit", "symbols-unreported", "host-cap", "host-trace"):
                 profile.write_text(json.dumps({"hv": {"path": str(FIXTURE.resolve()),
                     "args": ["--metadata", mode]}}), encoding="utf-8")
                 probe = OwnedMcpClient(env=dict(os.environ, VEH_BACKENDS=str(profile)))
                 try:
                     probe.initialize()
                     result = probe.tool("veh_attach", {"pid": 424242, "backend": "hv"}, timeout=10)
-                    if mode == "host-cap":
+                    if mode in ("host-cap", "host-trace"):
                         assert result.get("success") and result["backend"]["kind"] == "hypervisor", result
                     else:
                         assert "error" in result and not result.get("success"), (mode, result)
+
+                    if result.get("success"):
+                        assert probe.tool("veh_detach").get("success")
+                    launched = probe.tool("veh_launch", {"program": str(FIXTURE.resolve()),
+                        "backend": "hv", "stopOnEntry": True}, timeout=10)
+                    if mode in ("host-cap", "host-trace"):
+                        assert launched.get("success") and launched["backend"]["kind"] == "hypervisor", launched
+                        handle = owned_handle(launched["pid"], FIXTURE, probe.proc.pid, directory)
+                        handles.append(handle)
+                        traced = probe.tool("veh_trace_callers", {"address": "0x1000", "duration_ms": 50})
+                        assert ("error" in traced) == (mode == "host-cap"), traced
+                        # Collection, including refusal, must preserve CREATE_SUSPENDED.
+                        thread = KERNEL.OpenThread(0x0002, False, launched["mainThreadId"])
+                        assert thread, "HV trace ran the suspended target"
+                        previous = 0xFFFFFFFF
+                        try:
+                            previous = KERNEL.SuspendThread(thread)
+                            assert previous == 1, ("HV trace changed suspend count", previous)
+                        finally:
+                            if previous != 0xFFFFFFFF:
+                                KERNEL.ResumeThread(thread)  # release only this test's increment
+                            KERNEL.CloseHandle(thread)
+                        # The completed handshake must retain the owned TERMINATE handle.
+                        assert probe.tool("veh_terminate").get("success")
+                        assert KERNEL.WaitForSingleObject(handle, 5000) == 0, "owned target survived termination"
+                    else:
+                        assert "error" in launched and not launched.get("success"), (mode, launched)
+                        assert "error" in probe.tool("veh_threads"), "failed launch retained a successful session"
                 finally:
                     probe.close(terminate_target=False)
 

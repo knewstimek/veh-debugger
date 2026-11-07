@@ -284,7 +284,8 @@ void DebugSession::FinishAttach(uint32_t pid) {
 	if (externalAttachPending_ || guestTarget_ || vmTarget_ || IsRemoteTarget()) return;
 	// VM_READ: 조건부 BP의 [addr]/value 평가가 이벤트 콜백 스레드에서 ReadProcessMemory로
 	// 값을 읽는다(IPC ReadMemory는 콜백 스레드에서 재진입 불가). 실패 시 VM_READ 없이 폴백.
-	targetProcess_ = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_VM_READ, FALSE, pid);
+	if (!targetProcess_) // Preserve the owned launch handle, including PROCESS_TERMINATE.
+		targetProcess_ = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_VM_READ, FALSE, pid);
 	if (!targetProcess_) {
 		targetProcess_ = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
 		if (!targetProcess_) LOG_WARN("Cannot open process %u for monitoring", pid);
@@ -548,8 +549,9 @@ DebugSession::LaunchResult DebugSession::Launch(const LaunchOptions& opts) {
 			result.error = lastAttachError_.empty() ? "External backend did not come up" : lastAttachError_;
 			return result;
 		}
+		externalAttachPending_ = true;
 		FinishAttach(lr.pid);
-		// Ours: ended with the session (FinishAttach opened it for monitoring only).
+		// Preserve termination rights through deferred backend validation.
 		if (HANDLE own = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE | PROCESS_VM_READ,
 				FALSE, lr.pid)) {
 			if (targetProcess_) CloseHandle(targetProcess_);
@@ -1932,7 +1934,7 @@ TraceResult DebugSession::TraceCallers(uint64_t address, uint32_t durationMs) {
 	// target running: the hypervisor's hook sees calls whatever the target's
 	// state, and its Pause would leave a running target suspended afterwards.
 	const bool stops = backendInfo_.backend != IpcBackend::Hypervisor && backendInfo_.Supports(IpcCommand::Continue);
-	ResumeMainThread();
+	if (backendInfo_.backend != IpcBackend::Hypervisor) ResumeMainThread();
 	if (stops) {
 		ContinueRequest contReq = {};
 		contReq.threadId = 0;
