@@ -251,7 +251,10 @@ def test_same_name_image_metadata_and_scoped_reply_validation():
         assert client.tool("veh_detach").get("success")
         attached = client.tool("veh_attach", {"pid": os.getpid(), "agent": os.path.join(RELEASE, "guest_backend_fixture.exe"),
             "agent_args": ["--metadata", "symbols-unreported"]})
-        assert attached.get("success"), attached
+        assert "did not negotiate capabilities" in attached.get("error", ""), attached
+        assert "error" in client.tool("veh_modules"), "unconfirmed external peer retained a session"
+        # A negotiated peer can still serve the original module response layout.
+        attach("symbols-legacy")
         legacy = client.tool("veh_modules")
         assert legacy["modules"][0]["name"] == "probe_a.dll" and legacy["modules"][0]["addressBits"] is None, legacy
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.2.5 - 2026-11-08
+
 ### Changed
 
 - **Thread control in MCP** -- extend existing `veh_threads` with optional `action=list|freeze|thaw|terminate`; preserve default listing. Remove the separate `veh_freeze_thread` tool; freeze/thaw use `veh_threads`. Termination uses the existing backend command, validates native thread ownership, waits for exit and clears stopped/frozen/page-retry state. Direct/batch calls support termination; breakpoint actions support list/freeze/thaw only.
