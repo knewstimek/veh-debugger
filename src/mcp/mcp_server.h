@@ -105,6 +105,15 @@ private:
         void release();
     };
     static thread_local OperationAdmission* currentAdmission_;
+    size_t activeStandardTraces_ = 0; // operationMutex_; pins the selected session during collection.
+    struct StandardTraceWait {
+        McpServer& server;
+        OperationAdmission* admission = nullptr;
+        explicit StandardTraceWait(McpServer& owner);
+        ~StandardTraceWait();
+        StandardTraceWait(const StandardTraceWait&) = delete;
+        StandardTraceWait& operator=(const StandardTraceWait&) = delete;
+    };
     StopEvent WaitForSessionStop(int seconds, uint64_t generation);
     std::function<uint64_t()> operationClock_; // monotonic ms, never serialized as UTC
     RunUntilState runUntil_;
@@ -254,7 +263,7 @@ private:
             : std::runtime_error(std::move(message)), code(std::move(value)), details(std::move(extra)) {}
     };
     json SymbolCandidates(const std::vector<FindSymbolEntry>& entries);
-	bool ParseAddress(const std::string& addrStr, uint64_t& out);
+	bool ParseAddress(const std::string& addrStr, uint64_t& out, bool allowKernelAddress = false);
 	std::string NotAttachedMessage();
 	std::string IpcErrorMessage();
 	void ResetSessionEventState();

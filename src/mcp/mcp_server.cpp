@@ -1059,7 +1059,7 @@ void McpServer::OnIpcEvent(uint32_t eventId, const uint8_t* payload, uint32_t si
 
 // --- Helpers ---
 
-bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
+bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out, bool allowKernelAddress) {
     auto trim = [](std::string value) {
         const auto first = value.find_first_not_of(" \t\r\n");
         if (first == std::string::npos) return std::string{};
@@ -1104,7 +1104,9 @@ bool McpServer::ParseAddress(const std::string& addrStr, uint64_t& out) {
     };
     const auto inTargetWidth = [&](uint64_t address) {
         return !session_.IsAttached() || session_.TargetAddressBits() != 32 || address <= UINT32_MAX ||
-            (session_.GetBackendInfo().reported&&(session_.GetBackendInfo().flags&kCapRegisterContextV1));
+            (session_.GetBackendInfo().reported && ((session_.GetBackendInfo().flags & kCapRegisterContextV1) ||
+                (allowKernelAddress && session_.GetBackendInfo().backend == IpcBackend::Hypervisor &&
+                 address >= UINT64_C(0xFFFF800000000000))));
     };
     if (literal(text, out)) return inTargetWidth(out);
     const auto plus = text.find('+');
@@ -2111,6 +2113,9 @@ json McpServer::DispatchTool(const std::string& name, const json& args, bool* kn
 	const ToolDef* tool = FindTool(name);
 	if (known) *known = tool != nullptr;
 	if (!tool) return {{"error", "Unknown tool: " + name}};
+    if (activeStandardTraces_ && (name == "veh_attach" || name == "veh_launch" ||
+        name == "veh_detach" || name == "veh_terminate"))
+        return {{"error", "A standard trace is collecting; wait for collection to finish before changing the session"}};
     if (inBreakpointAction_ && (name == "veh_step_over" ||
         (name == "veh_continue" && JsonBool(args, "wait")) ||
         (name == "veh_execution" && args.value("operation", "state") == "run_to")))

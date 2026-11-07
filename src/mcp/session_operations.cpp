@@ -54,6 +54,22 @@ void McpServer::OperationAdmission::release() {
     if (wakeOnRelease) SetEvent(server.eventsReady_);
     if (server.operationRetryPending_.exchange(false)) server.NotifyRetry();
 }
+McpServer::StandardTraceWait::StandardTraceWait(McpServer& owner) : server(owner) {
+    const auto& backend = server.session_.GetBackendInfo();
+    if (!backend.reported || backend.backend != IpcBackend::Hypervisor) return;
+    auto* current = currentAdmission_;
+    if (!current || &current->server != &owner || !current->lock.owns_lock()) return;
+    admission = current;
+    ++server.activeStandardTraces_;
+    admission->lock.unlock();
+    SetEvent(server.eventsReady_);
+}
+McpServer::StandardTraceWait::~StandardTraceWait() {
+    if (!admission) return;
+    admission->lock.lock();
+    --server.activeStandardTraces_;
+}
+
 StopEvent McpServer::WaitForSessionStop(int seconds, uint64_t generation) {
     auto* admission = currentAdmission_;
     if (!admission || &admission->server != this || !admission->lock.owns_lock())

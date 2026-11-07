@@ -305,8 +305,15 @@ void DebugSession::FinishAttach(uint32_t pid) {
 }
 
 bool DebugSession::CompleteBackendAttach() {
-    if (IsRemoteTarget() && !backendInfo_.reported) {
-        lastAttachError_ = "Remote backend did not negotiate capabilities"; return false;
+    if ((externalAttachPending_ || IsRemoteTarget()) && !backendInfo_.reported) {
+        lastAttachError_ = "External backend did not negotiate capabilities; attach was not confirmed"; return false;
+    }
+    if (externalAttachPending_ && !IsRemoteTarget()) {
+        const auto agent = externalAgents_.find(targetPid_);
+        if (!ipcTransport_->IsConnected() || agent == externalAgents_.end() ||
+            !agent->second.process || WaitForSingleObject(agent->second.process.get(), 0) != WAIT_TIMEOUT) {
+            lastAttachError_ = "External backend agent disconnected or exited during attach"; return false;
+        }
     }
     const bool peerGuest = backendInfo_.reported && (backendInfo_.flags & kCapGuestTarget);
     const bool peerVm = backendInfo_.reported && (backendInfo_.flags & kCapVirtualMachineTarget);
@@ -1947,8 +1954,8 @@ TraceResult DebugSession::TraceCallers(uint64_t address, uint32_t durationMs) {
 	if (!received) return result;
 	result.received = true;
 
-	// Drain stale stop events
-	{
+	// HV collection must not consume a user stop delivered concurrently.
+	if (stops) {
 		std::lock_guard<std::mutex> lock(stopMutex_);
 		stopOccurred_ = false;
 	}

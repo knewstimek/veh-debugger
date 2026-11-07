@@ -76,6 +76,8 @@ int wmain(int argc, wchar_t** argv) {
     const bool machineMode=mode.rfind(L"machine",0)==0;
     const bool vmMode=mode.rfind(L"vm",0)==0||machineMode;uint32_t vmState=2,detachFailures=0;
     uint32_t continueRequests = 0, pauseRequests = 0, resolveRequests = 0;
+    uint32_t pendingStandardTrace = 0;
+    const bool concurrentTraceMode = mode == L"concurrent-trace" || mode == L"ops-action-concurrent";
     const bool contextMode = mode == L"control-context";
     uint32_t contextSelection = 0;
     bool contextNative = false;
@@ -94,6 +96,7 @@ int wmain(int argc, wchar_t** argv) {
     const bool symbolsMode = mode.rfind(L"symbols-", 0) == 0 || mode.rfind(L"ops-action-symbol", 0) == 0;
     const bool instrumentationMode = mode.rfind(L"inst-", 0) == 0 || mode == L"ops-action-inst";
     bool captureActive[3]{}, captureCreated[3]{};
+    uint64_t captureAddresses[3]{};
     uint64_t captureIds[3]{}, nextCaptureId = 9007199254740993ULL;
     veh::InstrumentationDataPolicy captureData[3]{};
     veh::InstrumentationTransactionPolicy captureTransaction[3]{};
@@ -180,6 +183,7 @@ int wmain(int argc, wchar_t** argv) {
             if (mode == L"cap-exit") ExitProcess(0xC0000135U);
             veh::GetCapabilitiesResponse caps{};
             caps.status = veh::IpcStatus::Ok; caps.backend = veh::IpcBackend::Hypervisor;
+            if (mode == L"inst-context") caps.flags |= veh::kCapRegisterContextV1;
             if (contextMode) {
                 if (!veh::SelectRegisterContext(bytes.data(), static_cast<uint32_t>(bytes.size()), contextSelection, &contextSelection)) {
                     if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break;
@@ -289,7 +293,10 @@ int wmain(int argc, wchar_t** argv) {
                                veh::IpcCommand::Continue})
                     veh::SetCommandSupported(caps.commands, op);
             }
-            if (mode == L"delayed-trace") veh::SetCommandSupported(caps.commands, veh::IpcCommand::TraceCallers);
+            if (mode == L"delayed-trace" || concurrentTraceMode) {
+                veh::SetCommandSupported(caps.commands, veh::IpcCommand::TraceCallers);
+                veh::SetCommandSupported(caps.commands, veh::IpcCommand::TraceCalls);
+            }
             if(stepStopMode)for(auto op:{veh::IpcCommand::StepInto,veh::IpcCommand::StepOver,veh::IpcCommand::StepOut,
                                         veh::IpcCommand::Continue,veh::IpcCommand::IsThreadStopped,
                                         veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint})
@@ -728,6 +735,7 @@ int wmain(int argc, wchar_t** argv) {
                 captureActive[index] = true; captureCreated[index] = true;
                 captureData[index] = start.dataPolicy; captureTransaction[index] = start.transactionPolicy;
                 captureBuffer[index] = start.bufferRecords;
+                captureAddresses[index] = start.address;
             } else if (!captureCreated[index] || id != requestedId) {
                 if (!reply(pipe, header.command, veh::IpcStatus::NotFound)) break; continue;
             } else if (command == veh::IpcCommand::StopInstrumentation) captureActive[index] = false;
@@ -760,7 +768,7 @@ int wmain(int argc, wchar_t** argv) {
             std::memcpy(result.data(), &response, sizeof(response));
             for (uint32_t i = 0; i < response.count; ++i) {
                 veh::InstrumentationRecord record{};
-                record.value = index == 2 ? 0xfedcba9876543210ULL + cursor + i : 0x1000;
+                record.value = index == 2 ? 0xfedcba9876543210ULL + cursor + i : captureAddresses[index];
                 record.instructionAddress = 0x1000 + (cursor + i) * 5;
                 record.callerAddress = 0x2000 + (cursor + i) * 5;
                 record.threadId = 77;
@@ -843,7 +851,9 @@ int wmain(int argc, wchar_t** argv) {
                 std::memcpy(result.data(), &response, sizeof(response));
                 if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
             }
-        } else if (operationsMode && command != veh::IpcCommand::Heartbeat && command != veh::IpcCommand::Detach) {
+        } else if (operationsMode && command != veh::IpcCommand::Heartbeat && command != veh::IpcCommand::Detach &&
+            !(concurrentTraceMode && (command == veh::IpcCommand::TraceCallers || command == veh::IpcCommand::TraceCalls ||
+                command == veh::IpcCommand::GetThreads))) {
             if (command == veh::IpcCommand::SetBreakpoint) {
                 veh::SetBreakpointRequest request{};
                 if (bytes.size() != sizeof(request)) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
@@ -1379,6 +1389,18 @@ int wmain(int argc, wchar_t** argv) {
                 continueRequests || pauseRequests ? "unexpected-resume-or-pause" : "untouched");
             if(mode==L"machine-thread-name")std::memset(threads.thread.name,'A',sizeof(threads.thread.name));
             if (!reply(pipe, header.command, threads)) break;
+            if (pendingStandardTrace) {
+                bool sent = false;
+                if (pendingStandardTrace == static_cast<uint32_t>(veh::IpcCommand::TraceCallers)) {
+                    const veh::TraceCallersResponse response{veh::IpcStatus::Ok, 0, 0};
+                    sent = reply(pipe, pendingStandardTrace, response);
+                } else {
+                    const veh::TraceCallsResponse response{veh::IpcStatus::Ok, 0, 0};
+                    sent = reply(pipe, pendingStandardTrace, response);
+                }
+                pendingStandardTrace = 0;
+                if (!sent) break;
+            }
         } else if (command == veh::IpcCommand::GetModules) {
             if(mode==L"modules-error") {
                 veh::GetModulesResponse response{veh::IpcStatus::Unsupported,0};
@@ -1470,6 +1492,13 @@ int wmain(int argc, wchar_t** argv) {
                 memcpy(data.data()+sizeof(response)+static_cast<size_t>(i)*sizeof(record),&record,sizeof(record));
             }
             if(!send(pipe,header.command,data.data(),mode==L"vm-truncated"?8:static_cast<uint32_t>(data.size())))break;
+        } else if (concurrentTraceMode && (command == veh::IpcCommand::TraceCallers || command == veh::IpcCommand::TraceCalls)) {
+            pendingStandardTrace = header.command;
+            if (!readyEvent.empty()) {
+                HANDLE event = OpenEventW(EVENT_MODIFY_STATE, FALSE, readyEvent.c_str());
+                if (!event) break;
+                SetEvent(event); CloseHandle(event);
+            }
         } else if ((mode == L"trace" || mode == L"delayed-trace") && command == veh::IpcCommand::TraceCallers && bytes.size() == sizeof(veh::TraceCallersRequest)) {
             veh::TraceCallersRequest request{}; memcpy(&request, bytes.data(), sizeof(request));
             if (mode == L"delayed-trace") Sleep(request.durationMs > 20000 ? 20000 : request.durationMs);

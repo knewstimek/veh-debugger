@@ -110,7 +110,12 @@ bool PipeClient::ConnectToPeer(uint32_t targetPid, int timeoutMs, HANDLE peerPro
 	const std::wstring pipeName = pipeName_.empty() ? GetPipeName(targetPid) : pipeName_;
 
 	stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-	{ std::lock_guard<std::mutex> lock(responseMutex_); desynced_ = false; }
+	{ std::lock_guard<std::mutex> lock(responseMutex_);
+		desynced_ = false;
+		responseFailure_ = PipeExchangeFailure::None;
+		responseSystemError_ = ERROR_SUCCESS;
+		responseAdvertisedPayloadSize_ = 0;
+	}
 
 	auto start = std::chrono::steady_clock::now();
 	while (true) {
@@ -224,7 +229,11 @@ bool PipeClient::SendAndReceive(IpcCommand cmd,
 		diagnostics->advertisedPayloadSize = advertisedPayloadSize;
 	};
 	report(PipeExchangeFailure::None);
-	std::lock_guard<std::mutex> sendLock(sendReceiveMutex_);
+	// Without a reader, one caller must own reads. With a reader, standard
+	// traces use a disjoint lane so inspection can complete during collection.
+	const bool reader = running_.load();
+	const bool trace = reader && (cmd == IpcCommand::TraceCallers || cmd == IpcCommand::TraceCalls);
+	std::unique_lock<std::mutex> sendLock(trace ? traceMutex_ : sendReceiveMutex_);
 	// 요청 뮤텍스를 잡은 뒤 확인한다: 앞선 요청의 타임아웃이 그 사이에 설정할 수 있다.
 	{
 		std::lock_guard<std::mutex> lock(responseMutex_);
@@ -237,18 +246,18 @@ bool PipeClient::SendAndReceive(IpcCommand cmd,
 	}
 	struct RequestInFlightGuard {
 		std::mutex& mutex;
-		bool& active;
-		RequestInFlightGuard(std::mutex& valueMutex, bool& valueActive)
+		size_t& active;
+		RequestInFlightGuard(std::mutex& valueMutex, size_t& valueActive)
 			: mutex(valueMutex), active(valueActive) {
 			std::lock_guard<std::mutex> lock(mutex);
-			active = true;
+			++active;
 		}
 		~RequestInFlightGuard() {
 			std::lock_guard<std::mutex> lock(mutex);
-			active = false;
+			--active;
 		}
-	} requestGuard(requestStateMutex_, requestInFlight_);
-	if (!running_) {
+	} requestGuard(requestStateMutex_, requestsInFlight_);
+	if (!reader) {
 		// 리더 스레드 없으면 직접 읽기 (초기 연결 시)
 		if (!SendCommand(cmd, payload, payloadSize)) {
 			report(PipeExchangeFailure::SendFailed, GetLastError());
@@ -284,50 +293,58 @@ bool PipeClient::SendAndReceive(IpcCommand cmd,
 		return true;
 	}
 
-	// 리더 스레드 활성 → condvar로 응답 대기
+	const auto command = static_cast<uint32_t>(cmd);
+	auto pending = std::make_shared<PendingReply>();
 	{
 		std::lock_guard<std::mutex> lock(responseMutex_);
-		responseReady_ = false;
-		waitingForResponse_ = true;
-		expectedCommand_ = static_cast<uint32_t>(cmd);
-		responseAborted_ = false;
-		responseFailure_ = PipeExchangeFailure::None;
-		responseSystemError_ = ERROR_SUCCESS;
-		responseAdvertisedPayloadSize_ = 0;
+		if (!running_ || !connected_) {
+			report(PipeExchangeFailure::ReaderAborted, ERROR_BROKEN_PIPE); return false;
+		}
+		if (!pendingReplies_.emplace(command, pending).second) {
+			report(PipeExchangeFailure::SendFailed, ERROR_BUSY); return false;
+		}
 	}
 
 	if (!SendCommand(cmd, payload, payloadSize)) {
+		const DWORD error = GetLastError();
 		std::lock_guard<std::mutex> lock(responseMutex_);
-		waitingForResponse_ = false;
-		report(PipeExchangeFailure::SendFailed, GetLastError());
+		pendingReplies_.erase(command);
+		AbortPendingRepliesLocked(PipeExchangeFailure::SendFailed, error);
+		report(PipeExchangeFailure::SendFailed, error);
 		return false;
 	}
 
 	std::unique_lock<std::mutex> lock(responseMutex_);
-	bool ok = responseCv_.wait_for(lock, std::chrono::milliseconds(timeoutMs),
-		[this] { return responseReady_; });
-
-	waitingForResponse_ = false;
-
+	const bool ok = pending->ready.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+		[&] { return pending->completed; });
+	pendingReplies_.erase(command);
 	if (!ok) {
 		desynced_ = true;
-		LOG_ERROR("SendAndReceive timeout for cmd 0x%04X (%dms)", static_cast<uint32_t>(cmd), timeoutMs);
-		report(PipeExchangeFailure::WaitTimeout, WAIT_TIMEOUT, responseAdvertisedPayloadSize_);
+		AbortPendingRepliesLocked(PipeExchangeFailure::WaitTimeout, WAIT_TIMEOUT);
+		LOG_ERROR("SendAndReceive timeout for cmd 0x%04X (%dms)", command, timeoutMs);
+		report(PipeExchangeFailure::WaitTimeout, WAIT_TIMEOUT);
 		return false;
 	}
-
-	if (responseAborted_) {
-		responseAborted_ = false;
-		LOG_WARN("SendAndReceive aborted for cmd 0x%04X (reader thread exited)", static_cast<uint32_t>(cmd));
-		report(responseFailure_ == PipeExchangeFailure::None ?
-			PipeExchangeFailure::ReaderAborted : responseFailure_, responseSystemError_,
-			responseAdvertisedPayloadSize_);
+	if (pending->aborted) {
+		report(pending->failure, pending->systemError, pending->advertisedPayloadSize);
 		return false;
 	}
-
-	response = std::move(responseData_);
+	response = std::move(pending->data);
 	report(PipeExchangeFailure::None, ERROR_SUCCESS, static_cast<uint32_t>(response.size()));
 	return true;
+}
+
+void PipeClient::AbortPendingRepliesLocked(PipeExchangeFailure failure, DWORD error, uint32_t size) {
+	for (auto& entry : pendingReplies_) {
+		auto& pending = *entry.second;
+		if (pending.completed) continue;
+		pending.aborted = true;
+		pending.completed = true;
+		pending.failure = failure;
+		pending.systemError = error;
+		pending.advertisedPayloadSize = size;
+		pending.ready.notify_one();
+	}
 }
 
 // --- Event Listener ---
@@ -441,14 +458,12 @@ void PipeClient::ReaderThread() {
 			}
 		} else {
 			std::lock_guard<std::mutex> lock(responseMutex_);
-			if (waitingForResponse_ && hdr.command == expectedCommand_) {
-				responseData_ = std::move(payload);
-				responseCommand_ = hdr.command;
-				responseReady_ = true;
-				responseCv_.notify_one();
-			} else if (waitingForResponse_) {
-				LOG_WARN("Stale response cmd=0x%04X (expected 0x%04X), dropping",
-					hdr.command, expectedCommand_);
+			const auto found = pendingReplies_.find(hdr.command);
+			if (found != pendingReplies_.end() && !found->second->completed) {
+				auto& pending = *found->second;
+				pending.data = std::move(payload);
+				pending.completed = true;
+				pending.ready.notify_one();
 			} else {
 				LOG_WARN("Unexpected response for cmd 0x%04X (no waiter)", hdr.command);
 			}
@@ -458,15 +473,9 @@ void PipeClient::ReaderThread() {
 	// 종료 시 대기 중인 SendAndReceive 깨우기 (aborted 플래그로 실패 전달)
 	{
 		std::lock_guard<std::mutex> lock(responseMutex_);
-		if (waitingForResponse_ && !responseReady_) {
-			if (responseFailure_ == PipeExchangeFailure::None) {
-				responseFailure_ = PipeExchangeFailure::ReaderAborted;
-				responseSystemError_ = GetLastError();
-			}
-			responseAborted_ = true;
-			responseReady_ = true;
-			responseCv_.notify_one();
-		}
+			AbortPendingRepliesLocked(responseFailure_ == PipeExchangeFailure::None ?
+				PipeExchangeFailure::ReaderAborted : responseFailure_,
+				responseSystemError_, responseAdvertisedPayloadSize_);
 	}
 
 	LOG_DEBUG("PipeClient reader thread exiting");
@@ -498,7 +507,7 @@ void PipeClient::HeartbeatThread() {
 			std::lock_guard<std::mutex> lock(requestStateMutex_);
 			// A synchronous command owns the response channel and its own bounded
 			// timeout. Lack of unrelated heartbeat traffic while it runs is expected.
-			if (requestInFlight_) continue;
+			if (requestsInFlight_) continue;
 		}
 
 		// Heartbeat 전송
@@ -511,7 +520,7 @@ void PipeClient::HeartbeatThread() {
 		uint64_t elapsed = GetTickCount64() - lastRecvTime_;
 		if (elapsed > 30000) {
 			std::lock_guard<std::mutex> lock(requestStateMutex_);
-			if (requestInFlight_) continue;
+			if (requestsInFlight_) continue;
 			LOG_ERROR("Heartbeat timeout: no response for %llu ms", elapsed);
 			connected_ = false;
 			if (stopEvent_) SetEvent(stopEvent_);

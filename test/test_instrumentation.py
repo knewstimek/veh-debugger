@@ -124,6 +124,17 @@ def run(directory):
         assert "error" in call(client, "ptwrite", "start", address="0x1000")
         assert "error" in call(client, "detour", "start", address="0x100000000")
 
+        # Kernel instrumentation uses x64 addresses even for a WoW64 process.
+        kernel = "0xFFFF800000001001"  # odd low bit detects rounded/lost address bits
+        for mode, batch in (("inst-ok", False), ("inst-ok", True), ("inst-context", False), ("inst-context", True)):
+            attach(client, mode)
+            started = good(call(client, "detour", "start", address=kernel, batch=batch))
+            good(call(client, "detour", "stop", trace_id=started["trace_id"], batch=batch))
+            records = good(call(client, "detour", "read", trace_id=started["trace_id"], max=1, batch=batch))
+            assert int(records["records"][0]["functionAddress"], 16) == int(kernel, 16), records
+            for address in ("0x100000000", "0x0000800000000000", "0xFFFF7FFFFFFFFFFF"):
+                assert "error" in call(client, "detour", "start", address=address, batch=batch), address
+
         # Legacy command and duration semantics remain available without new capabilities.
         attach(client, "trace")
         legacy = good(client.tool("veh_trace_callers", {"address": "0x1000", "duration_ms": 50}))
@@ -139,7 +150,7 @@ def run(directory):
             tool, selector = endpoint(kind)
             start_args = dict(selector, operation="start")
             if kind == "detour":
-                start_args["address"] = "0x1000"
+                start_args["address"] = "0xFFFF800000001001"
             steps = [
                 {"tool": tool, "args": start_args, "as": "$capture"},
                 {"tool": tool, "args": dict(selector, operation="stop", trace_id="$capture.trace_id")},
@@ -153,6 +164,8 @@ def run(directory):
             assert not action_errors, action_errors
             result = good(call(client, kind, "read", trace_id="9007199254740994", max=2))
             assert not result["active"] and len(result["records"]) == 2, result
+            if kind == "detour":
+                assert int(result["records"][0]["functionAddress"], 16) == 0xFFFF800000001001, result
             good(client.tool("veh_detach"))
     assert "Breakpoint action completed with an error:" not in logfile.read_text(encoding="utf-8")
     print("PASS explicit detour/PTWRITE contract, bounded pages, policy/capability rejection, exact values and direct/batch/action parity")

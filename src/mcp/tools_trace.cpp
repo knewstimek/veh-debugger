@@ -46,7 +46,10 @@ json McpServer::ToolTraceCallers(const json& args) {
 	}
 
 	const uint32_t durationMs = DurationMs(args);
-	auto result = session_.TraceCallers(addr, durationMs);
+	auto result = [&] {
+		StandardTraceWait wait(*this);
+		return session_.TraceCallers(addr, durationMs);
+	}();
 	if (!result.ok) return {{"error", result.error}};
 
 	json callers = json::array();
@@ -351,8 +354,10 @@ json McpServer::ToolTraceCalls(const json& args) {
 	if (args.contains("system_only") && args["system_only"].is_boolean())
 		systemOnly = args["system_only"].get<bool>();
 
-	auto result = session_.TraceCalls(addresses, durationMs,
-		resolve, systemOnly);
+	auto result = [&] {
+		StandardTraceWait wait(*this);
+		return session_.TraceCalls(addresses, durationMs, resolve, systemOnly);
+	}();
 	if (!result.ok) return {{"error", result.error}};
 
 	json arr = json::array();

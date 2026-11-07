@@ -1,5 +1,7 @@
 """Recover disconnected local agents without weakening a live peer's Detach contract."""
 import ctypes
+import json
+import os
 from ctypes import wintypes
 from pathlib import Path
 import subprocess
@@ -23,6 +25,21 @@ def run():
     with tempfile.TemporaryDirectory(prefix="veh-local-recovery-") as directory:
         try:
             client.initialize()
+            # A selected external host backend must never inherit legacy DLL defaults.
+            profile = Path(directory) / "backends.json"
+            for mode in ("early-exit", "cap-exit", "symbols-unreported", "host-cap"):
+                profile.write_text(json.dumps({"hv": {"path": str(FIXTURE.resolve()),
+                    "args": ["--metadata", mode]}}), encoding="utf-8")
+                probe = OwnedMcpClient(env=dict(os.environ, VEH_BACKENDS=str(profile)))
+                try:
+                    probe.initialize()
+                    result = probe.tool("veh_attach", {"pid": 424242, "backend": "hv"}, timeout=10)
+                    if mode == "host-cap":
+                        assert result.get("success") and result["backend"]["kind"] == "hypervisor", result
+                    else:
+                        assert "error" in result and not result.get("success"), (mode, result)
+                finally:
+                    probe.close(terminate_target=False)
 
             def attach(mode="local-recovery", pid=424240):
                 result = client.tool("veh_attach", {

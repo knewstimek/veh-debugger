@@ -16,6 +16,8 @@ Captured aggregate/vector bytes and incomplete scalars use the same raw-byte for
 
 ## Tool catalog
 
+`test/test_pipe_write_failure.py` exercises the production pipe client with out-of-order trace/inspection replies, same-command serialization, timeout/disconnect wakeup and canceled writes; its MCP fixture also checks standard caller/call traces through direct, batch and breakpoint-action paths during inspection, with explicit lifecycle rejection while collection pins the session. `test/test_local_backend_recovery.py` rejects failed external host capability negotiation and agent exits. `test/test_instrumentation.py` checks exact x64 kernel detours from WoW64 sessions through direct, batch and breakpoint actions while retaining user-address limits. These host fixtures do not qualify a live hypervisor provider.
+
 `test/test_resolve_import_errors.py` checks import-probe backend errors and malformed replies through direct, batch and breakpoint actions. Successful unresolved probes remain valid results; failed or incomplete replies never publish partial imports. Run `py -3 tools/run_tests.py test_resolve_import_errors.py --jobs 1 --timeout 60` with the synthetic guest fixture.
 
 `test/test_dap_stop_identity.py` extends the existing deferred-loader-stop fixture for stop-identity v1: matching internal guards, exact high-bit sequences, user ownership, pre-release replacement, no hold, immediate restop, malformed/failed replies and capability/legacy fallback. Run it with `test_dap_deferred_loader_stop.py` and `test_session_receipts.py` on x64/x86 using the shared runner. Layouts and live owner/ledger acceptance requirements are in [stop identity v1](STOP_IDENTITY.md).

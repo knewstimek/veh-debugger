@@ -7,6 +7,8 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <map>
+#include <memory>
 #include "ipc_transport.h"
 
 namespace veh {
@@ -65,9 +67,10 @@ protected:
 	HANDLE stopEvent_ = nullptr;
 	std::atomic<bool> connected_{false};
 	std::mutex sendMutex_;       // write 직렬화
-	std::mutex sendReceiveMutex_; // SendAndReceive 직렬화
+	std::mutex sendReceiveMutex_; // Ordinary request lane (wire has no request IDs).
+	std::mutex traceMutex_;       // Standard trace replies may overlap ordinary requests.
 	std::mutex requestStateMutex_; // heartbeat timeout과 동기 요청 상태 직렬화
-	bool requestInFlight_ = false;
+	size_t requestsInFlight_ = 0;
 
 	// 단일 리더 스레드
 	std::thread readerThread_;
@@ -93,13 +96,18 @@ protected:
 
 	// 응답 대기용
 	std::mutex responseMutex_;
-	std::condition_variable responseCv_;
-	bool responseReady_ = false;
-	std::vector<uint8_t> responseData_;
-	uint32_t responseCommand_ = 0;
-	bool waitingForResponse_ = false;
-	uint32_t expectedCommand_ = 0;
-	bool responseAborted_ = false;  // reader thread exit signal
+	struct PendingReply {
+		std::condition_variable ready;
+		bool completed = false;
+		bool aborted = false;
+		PipeExchangeFailure failure = PipeExchangeFailure::None;
+		DWORD systemError = ERROR_SUCCESS;
+		uint32_t advertisedPayloadSize = 0;
+		std::vector<uint8_t> data;
+	};
+	// At most one waiter for each command; separate lanes have disjoint command IDs.
+	std::map<uint32_t, std::shared_ptr<PendingReply>> pendingReplies_;
+	void AbortPendingRepliesLocked(PipeExchangeFailure failure, DWORD systemError, uint32_t advertisedPayloadSize = 0);
 	// A timed-out request or failed write may still be answered: the next reply could be
 	// its late response, so the connection refuses requests until reconnect.
 	bool desynced_ = false;

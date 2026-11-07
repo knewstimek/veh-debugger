@@ -130,10 +130,12 @@ json McpServer::ToolInstrumentation(const json& args, InstrumentationKind kind) 
         if ((query.features & required) != required) return {{"error", "Backend cannot guarantee the requested data/transaction/IP policy"}};
         if (kind == InstrumentationKind::DetourCalls) {
             if (!args.contains("address") || !args["address"].is_string() ||
-                !ParseAddress(args["address"].get<std::string>(), start.address) || !start.address)
+                !ParseAddress(args["address"].get<std::string>(), start.address, true) || !start.address)
                 return {{"error", "A detour function entry address is required"}};
             const auto bits = session_.TargetAddressBits();
-            if ((bits != 32 && bits != 64) || (bits == 32 && start.address > UINT32_MAX))
+            const bool kernel = info.reported && info.backend == IpcBackend::Hypervisor &&
+                start.address >= UINT64_C(0xFFFF800000000000);
+            if (!kernel && ((bits != 32 && bits != 64) || (bits == 32 && start.address > UINT32_MAX)))
                 return {{"error", "Detour address is outside the known target address space"}};
         } else if (args.contains("address")) return {{"error", "PTWRITE collection is passive and does not take an address"}};
         command = IpcCommand::StartInstrumentation;
