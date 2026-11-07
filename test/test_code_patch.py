@@ -124,13 +124,16 @@ def run(directory):
         assert work.get("success"), work
         assert client.tool("veh_remove_breakpoint", {"id": work["id"]}).get("success")
         outer = client.tool("veh_set_breakpoint", {"address": work["address"], "action": [{
-            "tool": "veh_assemble", "args": {"code": jump, "address": hex(address), "write": True}}]})
+            "tool": "veh_assemble", "args": {"code": jump, "address": hex(address), "write": True}},
+            {"tool": "veh_assemble", "args": {"code": "fcmovbe st0, st6"}, "as": "$x87"},
+            {"tool": "veh_write_memory", "args": {"address": hex(address + 32), "data": "$x87.bytes"}}]})
         assert outer.get("success"), outer
         next_stop = client.tool("veh_set_function_breakpoint", {"name": "kernel32!SleepEx"})
         assert next_stop.get("success"), next_stop
         stop = client.tool("veh_continue", {"wait": True, "timeout": 5}, timeout=10)
         assert stop.get("breakpointId") == next_stop["id"], stop
         assert read() == bytes.fromhex(automatic["patchedBytes"]) + SEED[7:]
+        assert client.tool("veh_read_memory", {"address": hex(address + 32), "size": 2})["hex"].replace(" ", "").upper() == "DAD6"
         assert client.tool("veh_terminate").get("success")
 
         # Guest metadata selects x86 assembly even though no host process handle exists.

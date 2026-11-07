@@ -13,7 +13,10 @@ from mcp_test_client import McpClient
 
 TARGET = os.path.join(RELEASE, "test_target.exe")
 # Rare legacy forms asmtk does not parse, and far pointers (data decoded as code).
-UNSUPPORTED = ("salc", "insb", "insw", "insd", "outsb", "outsw", "outsd", "xlat", "fcmovu", "fcmovnu")
+UNSUPPORTED = ("salc", "insb", "insw", "insd", "outsb", "outsw", "outsd", "xlat")
+FCMOV_ENCODINGS = (("fcmovb", "DA C6"), ("fcmove", "DA CE"), ("fcmovbe", "DA D6"),
+    ("fcmovu", "DA DE"), ("fcmovnb", "DB C6"), ("fcmovne", "DB CE"),
+    ("fcmovnbe", "DB D6"), ("fcmovnu", "DB DE"))
 
 
 def test_standalone_encodings():
@@ -33,6 +36,17 @@ def test_standalone_encodings():
         rip = client.tool("veh_assemble", {"code": "mov rax, qword ptr [rip+0x10]", "address": "0x140001000"})
         assert rip["bytes"] == "48 8B 05 10 00 00 00", rip
 
+        for arch in ("x86", "x64"):
+            for mnemonic, opcode in FCMOV_ENCODINGS:
+                options = {"code": mnemonic + " st0, st6", "arch": arch}
+                encoded = client.tool("veh_assemble", options)
+                assert encoded.get("bytes") == opcode, encoded
+                assert encoded["listing"][0]["text"] == options["code"], encoded
+            labelled = client.tool("veh_assemble", {"code": "entry: FCMOVBE ST0, ST6; nop", "arch": arch})
+            assert labelled.get("bytes") == "DA D6 90", labelled
+            for invalid in ("fcmovbe st1, st6", "fcmovbe st0, eax", "fcmovbe st0, st6, st7"):
+                assert "error" in client.tool("veh_assemble", {"code": invalid, "arch": arch}), invalid
+
         bad = client.tool("veh_assemble", {"code": "nop; bogus eax"})
         assert "error" in bad and bad["line"] == 2, bad
         assert "error" in client.tool("veh_assemble", {"code": "jmp missing_label"})
@@ -50,6 +64,14 @@ def test_round_trip_against_zydis_and_write():
     with McpClient() as client:
         client.initialize("assemble-roundtrip")
         assert client.tool("veh_launch", {"program": TARGET, "stopOnEntry": True}).get("success")
+        # veh_batch requires an attached session even for pure assembly.
+        for arch in ("x86", "x64"):
+            for mnemonic, opcode in FCMOV_ENCODINGS:
+                options = {"code": mnemonic + " st0, st6", "arch": arch}
+                direct = client.tool("veh_assemble", options)
+                batch = client.tool("veh_batch", {"steps": [{"tool": "veh_assemble", "args": options}]})
+                assert "results" in batch, batch
+                assert batch["results"][0]["result"] == direct and direct.get("bytes") == opcode, batch
         modules = {m["name"].lower(): int(m["baseAddress"], 16) for m in client.tool("veh_modules")["modules"]}
         instructions = []
         for name in ("test_target.exe", "ntdll.dll"):

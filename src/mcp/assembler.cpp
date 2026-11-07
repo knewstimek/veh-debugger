@@ -2,6 +2,8 @@
 
 #include <asmjit/x86.h>
 #include <asmtk/asmtk.h>
+#include <algorithm>
+#include <cctype>
 
 namespace veh {
 
@@ -20,6 +22,38 @@ static std::string StripSizeSpecifiers(const std::string& line) {
 		}
 	}
 	return out;
+}
+
+// Zydis prints the architectural ST0 destination; asmjit models it as implicit.
+static std::string NormalizeX87ConditionalMove(std::string line) {
+    size_t start = line.find_first_not_of(" \t\r");
+    while (start != std::string::npos) {
+        const auto end = line.find_first_of(" \t\r", start);
+        const auto colon = line.find(':', start);
+        if (colon == std::string::npos || (end != std::string::npos && colon >= end)) break;
+        start = line.find_first_not_of(" \t\r", colon + 1); // optional leading labels
+    }
+    if (start == std::string::npos) return line;
+    const auto end = line.find_first_of(" \t\r", start);
+    if (end == std::string::npos) return line;
+    auto mnemonic = line.substr(start, end - start);
+    auto lower = [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); };
+    std::transform(mnemonic.begin(), mnemonic.end(), mnemonic.begin(), lower);
+    if (mnemonic != "fcmovb" && mnemonic != "fcmove" && mnemonic != "fcmovbe" &&
+        mnemonic != "fcmovu" && mnemonic != "fcmovnb" && mnemonic != "fcmovne" &&
+        mnemonic != "fcmovnbe" && mnemonic != "fcmovnu") return line;
+    const auto operand = line.find_first_not_of(" \t\r", end);
+    if (operand == std::string::npos) return line;
+    const auto comma = line.find(',', operand);
+    if (comma == std::string::npos) return line; // preserve asmjit's one-operand form
+    auto destination = line.substr(operand, comma - operand);
+    const auto last = destination.find_last_not_of(" \t\r");
+    if (last == std::string::npos) return line;
+    destination.resize(last + 1);
+    std::transform(destination.begin(), destination.end(), destination.begin(), lower);
+    if (destination == "st0" || destination == "st(0)")
+        line.erase(operand, comma + 1 - operand);
+    return line; // other destinations remain invalid, never silently become ST0
 }
 
 AssembleResult AssembleText(const std::string& text, uint64_t address, bool x64) {
@@ -44,7 +78,8 @@ AssembleResult AssembleText(const std::string& text, uint64_t address, bool x64)
 		std::string line = text.substr(start, end - start);
 		++lineNumber;
 		if (line.find_first_not_of(" \t\r") != std::string::npos) {
-			Error err = parser.parse(line.c_str(), line.size());
+			line = NormalizeX87ConditionalMove(std::move(line));
+				Error err = parser.parse(line.c_str(), line.size());
 			if (err != kErrorOk && line.find(" ptr ") != std::string::npos) {
 				const std::string unsized = StripSizeSpecifiers(line);
 				if (parser.parse(unsized.c_str(), unsized.size()) == kErrorOk) err = kErrorOk;
