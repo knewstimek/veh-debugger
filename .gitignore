@@ -66,6 +66,9 @@ __pycache__/
 /crackme_out.txt
 /test_bp_stderr.txt
 
+# Local RepoPlane state
+/.repoplane/
+
 # Personal config (not for repo)
 CLAUDE.md
 
