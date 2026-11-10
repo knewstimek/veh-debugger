@@ -611,6 +611,21 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		default: return "completed";
 		}
 	};
+    // IO/control errors must not downgrade a known collector gap to a recoverable
+    // error: batch/action chains still need to stop, with both diagnoses retained.
+    const auto withMemoryFailure = [&](json response) {
+        if (!result.unsupportedMemoryReads && !result.unsupportedMemoryWrites) return response;
+        const std::string message = "Memory capture failed for " + std::to_string(result.unsupportedMemoryReads) +
+            " read and " + std::to_string(result.unsupportedMemoryWrites) + " write accesses";
+        if (!response.contains("error")) response["error"] = message;
+        else if (response["error"] != message) response["capture_error"] = message;
+        response["code"] = "memory_capture_incomplete";
+        response["fatal"] = true;
+        response["capture_complete"] = false;
+        response["unsupported_memory_reads"] = result.unsupportedMemoryReads;
+        response["unsupported_memory_writes"] = result.unsupportedMemoryWrites;
+        return response;
+    };
     const auto eventFailure = [&]() -> json {
             const auto& a=result.eventArtifact;
             json failure={{"error",a.error.empty() ? (result.ok ? "event artifact stream failed" :
@@ -622,7 +637,7 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
                 {"storage_complete",true},{"capture_complete",false},{"complete",false},
                 {"counts",{{"events",a.basicBlockEvents},{"memory_events",a.memoryEvents},
                            {"register_events",a.registerEvents}}}};
-            return failure;
+            return withMemoryFailure(std::move(failure));
     };
 
 	if (!result.ok) {
@@ -639,14 +654,14 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
                 {"storage_complete", raw.success}, {"capture_complete", false}, {"complete", false},
                 {"raw_prefix", raw.rawPrefix},
                 {"hardware_events", raw.success ? json(std::to_string(raw.hardwareEvents)) : json(nullptr)}};
-            return failure;
+            return withMemoryFailure(std::move(failure));
         }
         if (fileEventOutput && (!result.eventArtifact.path.empty() ||
             (!result.eventArtifact.error.empty() && (result.controlResponseReceived || !result.controlFailure.empty())))) {
             auto failure = eventFailure();
             if (!result.codeArtifact.error.empty()) failure["code_error"] = result.codeArtifact.error;
             if (!result.controlFailure.empty()) failure["control_error"] = result.controlFailure;
-            return failure;
+            return withMemoryFailure(std::move(failure));
         }
 		// Preserve local artifact-validation errors when no control exchange began.
 		if (!result.controlResponseReceived && result.controlFailure.empty()) {
@@ -721,7 +736,7 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
             error["capture_incomplete"] = true; error["execution_count_incomplete"] = true;
             error["lost_records"] = nullptr; error["final_address"] = nullptr;
         }
-        return error;
+        return withMemoryFailure(std::move(error));
 	}
 	if (fileEventOutput && !result.eventArtifact.success)
         return eventFailure();
@@ -1291,12 +1306,7 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		!result.dependencyIncomplete;
 	for (const auto& value : truncation.items()) if (value.value().get<bool>()) complete = false;
 	fullResult["capture_complete"] = hardware ? hardwareCaptureComplete : complete;
-	if (result.unsupportedMemoryReads || result.unsupportedMemoryWrites) {
-		fullResult["error"] = "Memory capture failed for " + std::to_string(result.unsupportedMemoryReads) +
-			" read and " + std::to_string(result.unsupportedMemoryWrites) + " write accesses";
-		fullResult["code"] = "memory_capture_incomplete";
-		fullResult["fatal"] = true;
-	}
+	fullResult = withMemoryFailure(std::move(fullResult));
 	if (outputMode == "inline" && !TraceReplyNeedsArtifact(fullResult)) return fullResult;
 
 	auto exported = outputFile.empty() ?
@@ -1305,6 +1315,10 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
     if (!exported.success) {
         json failure = {{"error", exported.error}, {"output_file", {{"path", outputFile},
             {"format", outputFormat}, {"storage_complete", false}, {"capture_complete", complete}, {"complete", false}}}};
+        for (const char* key : {"thread_id", "stop_reason", "steps_executed", "final_address"})
+            if (fullResult.contains(key)) failure[key] = fullResult[key];
+        if (result.unsupportedMemoryReads || result.unsupportedMemoryWrites)
+            failure["export_error"] = exported.error;
         if (fileEventOutput) failure["event_file"] = eventFile;
         if (hardware) {
             failure["event_file"] = eventFile;
@@ -1315,7 +1329,7 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
             failure["capture_complete"] = hardwareCaptureComplete;
             failure["complete"] = false;
         }
-        return failure;
+        return withMemoryFailure(std::move(failure));
     }
 	json counts = json::object();
 	for (const char* name : {"blocks", "edges", "events", "memory_events", "register_events",

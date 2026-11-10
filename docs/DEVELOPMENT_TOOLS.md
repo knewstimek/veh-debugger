@@ -25,6 +25,10 @@ qualify a capture for replay. A nonzero unsupported read/write count now returns
 `code=memory_capture_incomplete` and an error through direct calls, batch and
 breakpoint actions. The diagnostic is fatal to the current batch/action chain, including when
 `stop_on_error=false`; breakpoint actions also suppress automatic continuation.
+A simultaneous artifact/control error preserves that fatal classification, exact
+gap counters and both diagnoses. Export errors retain known execution facts and
+leave colliding destination files untouched. The gap regression injects an export
+collision after backend execution and checks batch/action interruption.
 Any written artifact
 retains the diagnostic and captured data. `test/test_trace_memory_gap.py` checks
 this with exact 64-bit counts and inline/artifact replies, nested if/loop/for_each

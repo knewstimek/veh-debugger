@@ -12,7 +12,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="veh-memory-gap-") as temporary:
         root = Path(temporary)
         log = root / "actions.log"
-        with OwnedMcpClient(args=["--log=" + str(log)]) as client:
+        with OwnedMcpClient(args=["--log=" + str(log)],
+                            env=dict(os.environ, TEMP=temporary, TMP=temporary)) as client:
             client.initialize("memory-gap-errors")
             def attach():
                 attached = client.tool("veh_attach", {
@@ -34,6 +35,14 @@ def main():
                     saved = json.loads(Path(artifact["path"]).read_text(encoding="utf-8"))
                     assert saved["code"] == result["code"] and "error" in saved
                 return result
+            def verify_export(result):
+                assert result["code"] == "memory_capture_incomplete" and result["fatal"], result
+                assert result["unsupported_memory_reads"] == 4294967299, result
+                assert result["unsupported_memory_writes"] == 4294967298, result
+                assert result["steps_executed"] == 10000000000, result
+                assert not result["output_file"]["storage_complete"], result
+                assert result["capture_complete"] is False, result
+                assert "capture_error" in result and "export_error" in result, result
             for mode in ("inline", "file"):
                 attach()
                 common = {
@@ -101,13 +110,42 @@ def main():
                     lambda p: "automatic continue was skipped" in p.get("data", ""), timeout=5)
                 client.tool("veh_remove_breakpoint", {"id": bp["id"]})
                 assert client.tool("veh_detach").get("success")
+            attach()
+            collision = root / "export-collision.json"
+            collision_args = dict(common, output_mode="file", output_file=str(collision),
+                                  max_memory_events=17)
+            export_batch = client.tool("veh_batch", {"stop_on_error": False, "steps": [
+                {"tool": "veh_trace_basic_blocks", "args": collision_args},
+                {"tool": "veh_threads", "args": {}},
+            ]})
+            assert export_batch.get("fatal") and export_batch.get("totalSteps") == 1, {
+                "fatal": export_batch.get("fatal"), "steps": export_batch.get("totalSteps")}
+            failed_export = export_batch["results"][0]["result"]
+            verify_export(failed_export)
+            assert collision.read_bytes() == b"collision"
+            assert client.tool("veh_detach").get("success")
+            collision.unlink()
+            attach()
+            bp = client.tool("veh_set_breakpoint", {"address": "0x1000", "action": [
+                {"tool": "veh_trace_basic_blocks", "args": collision_args},
+                {"tool": "veh_threads", "args": {}},
+            ]})
+            assert bp.get("id"), bp
+            client.tool("veh_continue", {"wait": True, "timeout": 2}, timeout=5)
+            client.wait_notification("notifications/logging",
+                lambda p: "automatic continue was skipped" in p.get("data", ""), timeout=5)
+            assert collision.read_bytes() == b"collision"
+            client.tool("veh_remove_breakpoint", {"id": bp["id"]})
+            assert client.tool("veh_detach").get("success")
         marker = "Breakpoint action completed with an error: "
         reports = [json.loads(line.split(marker, 1)[1])
                    for line in log.read_text(encoding="utf-8").splitlines() if marker in line]
-        assert len(reports) == 2, reports
+        assert len(reports) == 3, [r.get("failed") for r in reports]
         for report, mode in zip(reports, ("inline", "file")):
             assert report["totalSteps"] == 1 and report["results"][-1].get("aborted"), report
             verify(report["results"][0]["result"], mode)
+        assert reports[2]["totalSteps"] == 1 and reports[2]["results"][-1].get("aborted"), reports[2]
+        verify_export(reports[2]["results"][0]["result"])
     print("PASS memory-gap errors, exact counters, artifact retention and direct/batch/action refusal")
 
 

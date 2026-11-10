@@ -513,6 +513,19 @@ int wmain(int argc, wchar_t** argv) {
                 response.memoryEventSchemaVersion = 1;
                 response.filteredSteps = response.unsupportedMemoryWrites = response.unsupportedMemoryReads = UINT32_MAX;
                 response.finalAddress = request.rangeStart;
+                // Deterministic post-execution export collision for the gap regression.
+                if (request.maxMemoryEvents == 17) {
+                    wchar_t directory[MAX_PATH]{};
+                    GetEnvironmentVariableW(L"TEMP", directory, MAX_PATH);
+                    const std::wstring collisionPath = std::wstring(directory) + L"\\export-collision.json";
+                    HANDLE collision = CreateFileW(collisionPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                        CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+                    if (collision != INVALID_HANDLE_VALUE) {
+                        const char marker[] = "collision"; DWORD written = 0;
+                        WriteFile(collision, marker, sizeof(marker) - 1, &written, nullptr);
+                        CloseHandle(collision);
+                    }
+                }
             }
             if (mode == L"path-inline-error") {
                 response.status=veh::IpcStatus::Error;response.eventCount=0;response.expandedEventCount=0;
