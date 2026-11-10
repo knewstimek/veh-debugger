@@ -1289,6 +1289,12 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		!result.dependencyIncomplete;
 	for (const auto& value : truncation.items()) if (value.value().get<bool>()) complete = false;
 	fullResult["capture_complete"] = hardware ? hardwareCaptureComplete : complete;
+	if (result.unsupportedMemoryReads || result.unsupportedMemoryWrites) {
+		fullResult["error"] = "Memory capture failed for " + std::to_string(result.unsupportedMemoryReads) +
+			" read and " + std::to_string(result.unsupportedMemoryWrites) + " write accesses";
+		fullResult["code"] = "memory_capture_incomplete";
+		fullResult["fatal"] = true;
+	}
 	if (outputMode == "inline" && !TraceReplyNeedsArtifact(fullResult)) return fullResult;
 
 	auto exported = outputFile.empty() ?
@@ -1334,6 +1340,7 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		{"output_file", {{"path", exported.path}, {"format", exported.format},
 			{"size", exported.size}, {"sha256", exported.sha256},
                 {"storage_complete", true}, {"capture_complete", complete}, {"complete", complete}}}};
+	if (fullResult.contains("error")) { compact["error"] = fullResult["error"]; compact["code"] = fullResult["code"]; compact["fatal"] = true; }
 	if (fullResult.contains("resource_limits")) compact["resource_limits"] = fullResult["resource_limits"];
 	if (collectionFlags) compact["collection"] = fullResult["collection"];
     if (hardware) {

@@ -266,7 +266,7 @@ int wmain(int argc, wchar_t** argv) {
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::GetStackTrace);
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::GetRegisters);
             }
-            if(mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode||localsMode)for(auto op:{veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue})veh::SetCommandSupported(caps.commands,op);
+            if(mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||mode==L"path-wide-limits"||hardwareMode||importMode||localsMode)for(auto op:{veh::IpcCommand::SetBreakpoint,veh::IpcCommand::RemoveBreakpoint,veh::IpcCommand::Continue})veh::SetCommandSupported(caps.commands,op);
             if(freezeMode&&mode!=L"freeze-no-caps")veh::SetCommandSupported(caps.commands,veh::IpcCommand::FreezeThread);
             if(mode.rfind(L"control-",0)==0) {
                 for(auto op:{veh::IpcCommand::Continue,veh::IpcCommand::Pause,veh::IpcCommand::StepInto,
@@ -1292,12 +1292,12 @@ int wmain(int argc, wchar_t** argv) {
                 response.exitCode=7;
                 if(!reply(pipe,header.command,response))break;
             }
-        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode||localsMode)&&command==veh::IpcCommand::SetBreakpoint){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||mode==L"path-wide-limits"||hardwareMode||importMode||localsMode)&&command==veh::IpcCommand::SetBreakpoint){
             fixtureBreakpointId=mode==L"path-file-output"?(fixtureBreakpointId?fixtureBreakpointId+1:9001):9001;
             if(!reply(pipe,header.command,veh::SetBreakpointResponse{veh::IpcStatus::Ok,fixtureBreakpointId}))break;
-        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode||localsMode)&&command==veh::IpcCommand::RemoveBreakpoint){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||mode==L"path-wide-limits"||hardwareMode||importMode||localsMode)&&command==veh::IpcCommand::RemoveBreakpoint){
             if(!reply(pipe,header.command,veh::IpcStatus::Ok))break;
-        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||hardwareMode||importMode||localsMode)&&command==veh::IpcCommand::Continue){
+        } else if((mode==L"shellcode-action"||mode==L"path-file-output"||mode==L"path-stream-compact"||mode==L"path-inline-error"||mode==L"path-wide-limits"||hardwareMode||importMode||localsMode)&&command==veh::IpcCommand::Continue){
             veh::ContinueRequest request{};
             if(bytes.size()!=sizeof(request))break;
             std::memcpy(&request,bytes.data(),sizeof(request));

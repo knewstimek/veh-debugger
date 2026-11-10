@@ -141,7 +141,7 @@ def masked_program(start, data):
     p.emit("66 0F EF C0")  # PXOR XMM0,XMM0
     p.emit("66 0F EF C9")  # PXOR XMM1,XMM1: every mask bit is zero
     p.emit("66 0F F7 C1")  # MASKMOVDQU skips every destination byte
-    p.unsupported_writes = 1
+    p.unsupported_writes = 0
     p.initial = bytes([0xA5] * 64)
     return p
 
@@ -211,6 +211,104 @@ def string_program(start, data):
         string("F3 48 A5", [[(16, 8, int.from_bytes(p.initial[16:24], "little"))]],
                [(56, 8, int.from_bytes(p.initial[56:64], "little"),
                  int.from_bytes(p.initial[16:24], "little"))])
+    return p
+
+
+def sparse_mask_program(start, data, mmx=False):
+    p = Program(start, data)
+    mask = bytes(0x80 if i % 3 != 1 else 0x7f for i in range(16))
+    p.initial = bytes(range(16)) + mask + bytes([0xA5] * 32)
+    p.immediate("BF" if IS_X86 else "48 BF", data + 32, 4 if IS_X86 else 8)
+    width = 8 if mmx else 16
+    prefix = "" if mmx else "66 "
+    for code, offset in [(prefix + "0F 6F 03", 0), (prefix + "0F 6F 4B 10", 16)]:
+        p.emit(code, before=int.from_bytes(p.initial[offset:offset + width], "little"),
+               size=width, address=data + offset)
+    pc = p.emit(prefix + "0F F7 C1")
+    for lane in range(width):
+        if mask[lane] & 0x80:
+            p.accesses.append(("write", pc, p.steps, data + 32 + lane, 1, 0xA5, lane))
+    if mmx:
+        p.emit("0F 77")
+    return p
+
+
+def indexed_program(start, data):
+    p = Program(start, data)
+    p.immediate("B9", 33)
+    p.emit("0F AB 0B", 0, 2, address=data + 4)  # BTS [BX], bit33
+    p.immediate("B9", 0xffffffff)
+    p.emit("0F AB 4B 08", 2, 0x80000002, address=data + 4)  # Negative bit index
+    p.immediate("B9", 64)
+    p.emit("0F BB 0B", 0, 1, address=data + 8)  # BTC bit64
+    p.immediate("B8" if IS_X86 else "48 B8", 0xDEAD0003, 4 if IS_X86 else 8)
+    p.emit("D7", before=0, size=1, address=data + 3)  # XLAT uses AL only
+    return p
+
+
+def wide_vector_program(start, data):
+    if not ctypes.windll.kernel32.IsProcessorFeaturePresent(39):
+        pytest.skip("AVX execution requires enabled CPU/OS state")
+    p = Program(start, data)
+    p.initial = bytes(range(64))
+    pc = p.emit("C5 FE 6F 03")  # VMOVDQU YMM0,[BX]
+    for offset in (0, 16):
+        p.accesses.append(("read", pc, p.steps, data + offset, 16,
+                           int.from_bytes(p.initial[offset:offset + 16], "little"), None))
+    pc = p.emit("C5 FE 7F 43 20")  # VMOVDQU [BX+32],YMM0
+    for offset in (0, 16):
+        p.accesses.append(("write", pc, p.steps, data + 32 + offset, 16,
+                           int.from_bytes(p.initial[32+offset:48+offset], "little"),
+                           int.from_bytes(p.initial[offset:offset+16], "little")))
+    p.emit("C5 F8 77")
+    return p
+
+
+def avx_mask_program(start, data, client):
+    if not ctypes.windll.kernel32.IsProcessorFeaturePresent(40):
+        pytest.skip("AVX2 execution requires enabled CPU/OS state")
+    p = Program(start, data)
+    p.initial = bytes(range(32)) + b"".join((0x80000000 if i % 2 == 0 else 0x7fffffff).to_bytes(4, "little")
+                                           for i in range(8)) + bytes([0xA5] * 32)
+    bx = "ebx" if IS_X86 else "rbx"
+    def instruction(code):
+        assembled = check(client.tool("veh_assemble", {"code": code, "address": hex(p.start + len(p.code))}))
+        return p.emit(assembled["bytes"])
+    pc = instruction(f"vmovdqu ymm1, [{bx}+32]")
+    for offset in (32, 48):
+        p.accesses.append(("read", pc, p.steps, data + offset, 16,
+                           int.from_bytes(p.initial[offset:offset+16], "little"), None))
+    pc = instruction(f"vpmaskmovd ymm0, ymm1, [{bx}]")
+    for lane in range(0, 8, 2):
+        p.accesses.append(("read", pc, p.steps, data + lane * 4, 4,
+                           int.from_bytes(p.initial[lane*4:lane*4+4], "little"), None))
+    pc = instruction(f"vpmaskmovd [{bx}+64], ymm1, ymm0")
+    for lane in range(0, 8, 2):
+        p.accesses.append(("write", pc, p.steps, data + 64 + lane * 4, 4, 0xA5A5A5A5,
+                           int.from_bytes(p.initial[lane*4:lane*4+4], "little")))
+    p.emit("C5 F8 77")
+    return p
+
+
+def gather_program(start, data, client):
+    if not ctypes.windll.kernel32.IsProcessorFeaturePresent(40):
+        pytest.skip("AVX2 execution requires enabled CPU/OS state")
+    p = Program(start, data)
+    indices = [0, 0x40000000, 2, 0x40000000, 4, 0x40000000, 6, 0x40000000]
+    masks = [0x80000000 if i % 2 == 0 else 0 for i in range(8)]
+    p.initial = bytes(range(32)) + b"".join(v.to_bytes(4, "little") for v in indices + masks)
+    bx = "ebx" if IS_X86 else "rbx"
+    for reg, offset in [("ymm1", 32), ("ymm2", 64)]:
+        pc = p.emit(check(client.tool("veh_assemble", {"code": f"vmovdqu {reg}, [{bx}+{offset}]"}))["bytes"])
+        for at in (offset, offset + 16):
+            p.accesses.append(("read", pc, p.steps, data + at, 16,
+                               int.from_bytes(p.initial[at:at+16], "little"), None))
+    pc = p.emit(check(client.tool("veh_assemble", {"code": f"vpgatherdd ymm0, [{bx}+ymm1*4], ymm2"}))["bytes"])
+    for lane in range(0, 8, 2):
+        offset = indices[lane] * 4
+        p.accesses.append(("read", pc, p.steps, data + offset, 4,
+                           int.from_bytes(p.initial[offset:offset+4], "little"), None))
+    p.emit("C5 F8 77")
     return p
 
 
@@ -291,17 +389,21 @@ def capture(client, tid, program, output, caller, mode):
 
 @pytest.mark.parametrize("caller", ["direct", "batch", "action"])
 @pytest.mark.parametrize("mode", ["inline", "file"])
-@pytest.mark.parametrize("kind", ["rmw", "conditional", "masked", "string"])
+@pytest.mark.parametrize("kind", ["rmw", "conditional", "masked", "string", "sparse_mask", "mmx_mask", "indexed", "wide_vector", "avx_mask", "gather"])
 def test_memory_accesses(session, tmp_path, caller, mode, kind):
     client, tid, page = session
-    builder = {"rmw": rmw_program, "conditional": conditional_program, "masked": masked_program, "string": string_program}[kind]
+    builder = {"rmw": rmw_program, "conditional": conditional_program, "masked": masked_program, "string": string_program,
+               "sparse_mask": sparse_mask_program, "mmx_mask": lambda s, d: sparse_mask_program(s, d, True),
+               "indexed": indexed_program, "wide_vector": wide_vector_program,
+               "avx_mask": lambda s, d: avx_mask_program(s, d, client),
+               "gather": lambda s, d: gather_program(s, d, client)}[kind]
     program = builder(page, page + 2048)
     result, memory, registers = capture(client, tid, program, str(tmp_path / "trace.json"), caller, mode)
     actual = [(e["kind"], int(e["instruction"], 0), e["sequence"], int(e["address"], 0), e["size"])
               for e in memory]
     assert actual == [e[:5] for e in program.accesses], (actual, program.accesses)
     final_bytes = bytes.fromhex(check(client.tool("veh_read_memory", {
-        "address": hex(program.data), "size": 64}))["hex"])
+        "address": hex(program.data), "size": len(program.initial)}))["hex"])
     final = bytearray(program.initial)
     for expected in program.accesses:
         if expected[0] == "write":
@@ -335,9 +437,113 @@ def test_memory_accesses(session, tmp_path, caller, mode, kind):
         assert all(source in w.get("dependencies", []) for w in result["memory_writes"]), result["memory_writes"]
 
 
-def test_unsupported_inline_completeness(session):
+@pytest.mark.parametrize("caller", ["direct", "batch", "action"])
+@pytest.mark.parametrize("mode", ["inline", "file"])
+def test_segment_first_access(session, tmp_path, caller, mode):
     client, tid, page = session
-    # MASKMOVDQU with no active lanes is intentionally unsupported by the collector.
+    offset, segment = (0x18, "fs") if IS_X86 else (0x30, "gs")
+    expected = check(client.tool("veh_evaluate", {"expression": f"{segment}:[{hex(offset)}]",
+                                                  "threadId": tid}))
+    teb = int(expected["tebAddress"], 0)
+    p = Program(page, page + 2048)
+    p.emit("64 A1 18 00 00 00" if IS_X86 else "65 48 8B 04 25 30 00 00 00",
+           before=teb, size=4 if IS_X86 else 8, address=teb + offset)
+    result, memory, _ = capture(client, tid, p, str(tmp_path / "segment.json"), caller, mode)
+    assert len(memory) == 1 and int(memory[0]["address"], 0) == teb + offset, memory
+    assert int.from_bytes(bytes.fromhex(memory[0]["value"]), "little") == teb, memory
+    assert result["unsupported_memory_reads"] == 0, result
+
+
+@pytest.mark.parametrize("mode", ["inline", "file"])
+def test_fxsave_large_operand(session, tmp_path, mode):
+    client, tid, page = session
+    p = Program(page, page + 2048)
+    p.initial = bytes(512)
+    p.emit(("48 " if not IS_X86 else "") + "0F AE 03")
+    p.emit(("48 " if not IS_X86 else "") + "0F AE 0B")
+    result, memory, _ = capture(client, tid, p, str(tmp_path / "fxsave.json"), "direct", mode)
+    writes = [e for e in memory if e["kind"] == "write"]
+    reads = [e for e in memory if e["kind"] == "read"]
+    assert len(writes) == len(reads) == 32, (len(writes), len(reads))
+    assert [int(e["address"], 0) for e in writes] == list(range(p.data, p.data + 512, 16))
+    assert [e["after"] for e in writes] == [e["value"] for e in reads]
+    assert all(e["before"] == bytes(16).hex(" ") for e in writes), writes
+    actual = check(client.tool("veh_read_memory", {"address": hex(p.data), "size": 512}))["hex"]
+    assert bytes.fromhex(actual) == b"".join(bytes.fromhex(e["after"]) for e in writes), result
+
+
+@pytest.mark.parametrize("mode", ["inline", "file"])
+def test_xsave_dynamic_operand(session, tmp_path, mode):
+    if not ctypes.windll.kernel32.IsProcessorFeaturePresent(39):
+        pytest.skip("XSAVE execution requires enabled CPU/OS state")
+    client, tid, page = session
+    p = Program(page, page + 2048)
+    p.initial = bytes(576)
+    p.immediate("B8", 3)
+    p.immediate("BA", 0)
+    p.emit("0F AE 23")  # XSAVE [BX], requested x87/SSE only
+    p.emit("0F AE 2B")  # XRSTOR from the captured architectural area
+    result, memory, _ = capture(client, tid, p, str(tmp_path / "xsave.json"), "direct", mode)
+    writes = [e for e in memory if e["kind"] == "write"]
+    reads = [e for e in memory if e["kind"] == "read"]
+    assert len(writes) == 36 and len(reads) == 37, (len(writes), len(reads))
+    assert int(reads[0]["address"], 0) == p.data + 512 and reads[0]["size"] == 8
+    assert [int(e["address"], 0) for e in writes] == list(range(p.data, p.data + 576, 16))
+    assert [e["after"] for e in writes] == [e["value"] for e in reads[1:]], result
+
+
+@pytest.mark.parametrize("caller", ["direct", "batch", "action"])
+@pytest.mark.parametrize("mode", ["inline", "file"])
+def test_vector_mask_first_access(session, tmp_path, caller, mode):
+    if not ctypes.windll.kernel32.IsProcessorFeaturePresent(40):
+        pytest.skip("AVX2 execution requires enabled CPU/OS state")
+    client, tid, page = session
+    bx = "ebx" if IS_X86 else "rbx"
+    initial = bytes(range(32)) + b"".join(
+        (0x80000000 if i % 2 == 0 else 0).to_bytes(4, "little") for i in range(8))
+    setup = Program(page, page + 2048)
+    setup.initial = initial
+    setup.emit(check(client.tool("veh_assemble", {"code": f"vmovdqu ymm1, [{bx}+32]"}))["bytes"])
+    capture(client, tid, setup, str(tmp_path / "setup.json"), "direct", "inline")
+    p = Program(page, page + 2048)
+    p.initial = initial
+    p.emit(check(client.tool("veh_assemble", {"code": f"vpmaskmovd ymm0, ymm1, [{bx}]"}))["bytes"])
+    p.emit("C5 F8 77")
+    _, memory, _ = capture(client, tid, p, str(tmp_path / "first-mask.json"), caller, mode)
+    assert [int(e["address"], 0) for e in memory] == [p.data + lane * 4 for lane in range(0, 8, 2)], memory
+    assert [bytes.fromhex(e["value"]) for e in memory] == [initial[lane*4:lane*4+4] for lane in range(0, 8, 2)]
+
+
+@pytest.mark.parametrize("level", [0, 1, 3])
+def test_enter_frame_chain(session, tmp_path, level):
+    client, tid, page = session
+    regs = check(client.tool("veh_registers", {"threadId": tid}))["registers"]
+    sp = int(regs["esp" if IS_X86 else "rsp"], 0)
+    width = 4 if IS_X86 else 8
+    p = Program(page, page + 2048)
+    p.initial = bytes(range(128))
+    p.immediate("BD" if IS_X86 else "48 BD", p.data + 64, width)
+    enter = p.emit("C8 10 00 " + f"{level:02x}")
+    leave = p.emit("C9")
+    result, memory, _ = capture(client, tid, p, str(tmp_path / "enter.json"), "direct", "file")
+    frame_reads = [e for e in memory if int(e["instruction"], 0) == enter and e["kind"] == "read"]
+    assert [int(e["address"], 0) for e in frame_reads] == [p.data + 64 - i * width for i in range(1, level)]
+    frame_writes = [e for e in memory if int(e["instruction"], 0) == enter and e["kind"] == "write"]
+    captured = b"".join(bytes.fromhex(e["after"]) for e in frame_writes)
+    expected = (p.data + 64).to_bytes(width, "little")
+    if level:
+        expected = (sp - width).to_bytes(width, "little") + b"".join(
+            p.initial[64-i*width:64-(i-1)*width] for i in range(level - 1, 0, -1)) + expected
+    assert captured == expected, (captured.hex(), expected.hex(), result)
+    restored = next(e for e in memory if int(e["instruction"], 0) == leave)
+    assert int(restored["address"], 0) == sp - width and bytes.fromhex(restored["value"]) == expected[-width:]
+    after = check(client.tool("veh_registers", {"threadId": tid}))["registers"]
+    assert int(after["esp" if IS_X86 else "rsp"], 0) == sp, after
+
+
+def test_zero_mask_inline_completeness(session):
+    client, tid, page = session
+    # Legacy MASKMOV may still fault on an invalid destination; keep it mapped.
     code = "66 0F EF C0 66 0F EF C9 66 0F F7 C1"
     check(client.tool("veh_write_memory", {"address": hex(page), "data": code}))
     for name, value in [("eip" if IS_X86 else "rip", page),
@@ -349,5 +555,5 @@ def test_unsupported_inline_completeness(session):
         "collect_memory_events": True, "output_mode": "inline", "events_output": "inline",
     }))
     assert result["steps_executed"] == 3, result
-    assert result["unsupported_memory_writes"] == 1, result
-    assert result["capture_complete"] is False and result["truncated"] is False, result
+    assert result["unsupported_memory_writes"] == 0, result
+    assert result["capture_complete"] is True and result["truncated"] is False, result

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cctype>
 #include "veh_handler.h"
+#include "trace_memory_context.h"
 #include "breakpoint.h"
 #include "hw_breakpoint.h"
 #include "page_breakpoint.h"
@@ -389,6 +390,13 @@ VehHandler::WaitResult VehHandler::NotifyAndWait(
 		if (ctxIt != stoppedContexts_.end()) {
 			*info->ContextRecord = ctxIt->second;
 			stoppedContexts_.erase(ctxIt);
+			auto& trace = traceBasicBlocks_;
+			if (trace.active.load(std::memory_order_acquire) && trace.threadId == tid &&
+				trace.initialMemoryPending) {
+				trace.initialMemoryPending = false;
+				PrepareBasicTraceMemoryWrites(EnsureBasicTraceInstruction(trace.initialAddress), info->ContextRecord);
+				PrepareBasicTraceRegisterEvent(trace.initialAddress, info->ContextRecord);
+			}
 			return WaitResult::Resumed;
 		}
 	}
@@ -727,109 +735,197 @@ bool VehHandler::BasicTraceCollectionGate(const CONTEXT* ctx) const {
 }
 
 void VehHandler::PrepareBasicTraceMemoryWrites(
-		const TraceBasicBlocksState::Instruction* instruction, const CONTEXT* ctx) {
-	auto& tb = traceBasicBlocks_;
-	tb.pendingWriteCount = 0;
-	tb.pendingReadCount = 0;
-	tb.pendingRegisterWriteMask = 0;
-	tb.pendingDependencyMask = 0;
-	tb.pendingWritesFlags = 0;
-	if (!instruction || !ctx) return;
-	if (!tb.collectMemoryWrites && !tb.collectMemoryReads && !tb.collectMemoryEvents &&
-		!tb.dependencySourceCount) return;
-	if (instruction->repeatCountBits) {
-		uint64_t count = BasicTraceContextRegister(ctx, 2); // CX/ECX/RCX
-		if (instruction->repeatCountBits == 16) count = static_cast<uint16_t>(count);
-		else if (instruction->repeatCountBits == 32) count = static_cast<uint32_t>(count);
-		// A zero-count REP retires without touching memory or its destinations.
-		if (!count) return;
-	}
-	if (tb.dependencySourceCount && (instruction->unsupportedReads || instruction->unsupportedWrites))
-		tb.dependencyIncomplete = true;
-	if (tb.collectMemoryWrites || tb.collectMemoryEvents)
-		tb.unsupportedMemoryWrites += instruction->unsupportedWrites;
-	if (tb.collectMemoryReads || tb.collectMemoryEvents)
-		tb.unsupportedMemoryReads += instruction->unsupportedReads;
-	uint32_t dependency = instruction->readsFlags ? tb.flagsDependencies : 0;
-	for (uint8_t reg = 0; reg < 16; ++reg)
-		if (instruction->readRegisterMask & (1u << reg)) dependency |= tb.registerDependencies[reg];
-	auto effectiveAddress = [&](const TraceBasicBlocksState::WriteOperand& operand) {
-		uint64_t address = 0;
-		if (operand.ripRelative) address = instruction->next + static_cast<uint64_t>(operand.displacement);
-		else {
-			uint64_t base = operand.base == 0xFF ? 0 : BasicTraceContextRegister(ctx, operand.base);
-			uint64_t index = operand.index == 0xFF ? 0 : BasicTraceContextRegister(ctx, operand.index);
-			address = base + index * operand.scale + static_cast<uint64_t>(operand.displacement);
-			if (operand.preDecrementStack) address -= operand.size;
-			if (operand.postIncrementStack) address += operand.size;
-			if (instruction->repeatCountBits == 16) address = static_cast<uint16_t>(address);
-			else if (instruction->repeatCountBits == 32) address = static_cast<uint32_t>(address);
-#ifndef _WIN64
-			address = static_cast<uint32_t>(address);
+        const TraceBasicBlocksState::Instruction* instruction, const CONTEXT* ctx) {
+    auto& tb = traceBasicBlocks_;
+    tb.pendingWriteCount = tb.pendingReadCount = 0;
+    tb.pendingRegisterWriteMask = tb.pendingDependencyMask = 0;
+    tb.pendingWritesFlags = 0;
+    if (!instruction || !ctx) return;
+    if (!tb.collectMemoryWrites && !tb.collectMemoryReads && !tb.collectMemoryEvents &&
+        !tb.dependencySourceCount) return;
+    auto narrow = [](uint64_t value, uint8_t bits) {
+        return bits && bits < 64 ? value & ((uint64_t(1) << bits) - 1) : value;
+    };
+    if (instruction->repeatCountBits &&
+        !narrow(BasicTraceContextRegister(ctx, 2), instruction->repeatCountBits)) return;
+    if (tb.dependencySourceCount && (instruction->unsupportedReads || instruction->unsupportedWrites))
+        tb.dependencyIncomplete = true;
+    if (tb.collectMemoryWrites || tb.collectMemoryEvents) tb.unsupportedMemoryWrites += instruction->unsupportedWrites;
+    if (tb.collectMemoryReads || tb.collectMemoryEvents) tb.unsupportedMemoryReads += instruction->unsupportedReads;
+    uint32_t dependency = instruction->readsFlags ? tb.flagsDependencies : 0;
+    for (uint8_t reg = 0; reg < 16; ++reg)
+        if (instruction->readRegisterMask & (1u << reg)) dependency |= tb.registerDependencies[reg];
+
+    auto failed = [&](bool write) {
+        if (write) ++tb.unsupportedMemoryWrites; else ++tb.unsupportedMemoryReads;
+        if (tb.dependencySourceCount) tb.dependencyIncomplete = true;
+    };
+    auto spans = [&](const TraceBasicBlocksState::WriteOperand& op, bool write, auto emit) {
+        uint64_t segment = 0;
+        if (!TraceSegmentBase(ctx, op.segment, segment)) { failed(write); return; }
+        uint64_t offset = op.ripRelative ? instruction->next :
+            narrow(op.base == 0xFF ? 0 : BasicTraceContextRegister(ctx, op.base), op.baseBits);
+        offset += static_cast<uint64_t>(op.displacement);
+        if (op.vectorIndex == 0xFF)
+            offset += narrow(op.index == 0xFF ? 0 : BasicTraceContextRegister(ctx, op.index), op.indexBits) * op.scale;
+        if (op.preDecrementStack) offset -= op.size;
+        if (op.postIncrementStack) offset += op.size;
+        if (op.bitIndexRegister != 0xFF) {
+            uint64_t raw = BasicTraceContextRegister(ctx, op.bitIndexRegister);
+            int64_t bit = op.size == 2 ? static_cast<int16_t>(raw) :
+                          op.size == 4 ? static_cast<int32_t>(raw) : static_cast<int64_t>(raw);
+            const int shift = op.size == 2 ? 4 : op.size == 4 ? 5 : 6;
+            offset += static_cast<uint64_t>((bit >> shift) * static_cast<int64_t>(op.size));
+        }
+        auto linear = [&](uint64_t value) { return segment + narrow(value, op.addressBits); };
+        auto chunks = [&](uint64_t address, uint32_t size) {
+            for (uint32_t at = 0; at < size; at += kTraceMemoryMaxValueBytes)
+                emit(address + at, static_cast<uint8_t>(std::min<uint32_t>(size - at, kTraceMemoryMaxValueBytes)));
+        };
+        if (op.dynamicSize >= 1 && op.dynamicSize <= 3) {
+            int cpu[4]{}; __cpuid(cpu, 1);
+            if (!(cpu[2] & (1 << 27))) { failed(write); return; }
+            const uint64_t enabled = _xgetbv(0);
+            const uint64_t requested = ((BasicTraceContextRegister(ctx, 3) & 0xffffffffull) << 32) |
+                                       (BasicTraceContextRegister(ctx, 0) & 0xffffffffull);
+            const uint64_t selected = enabled & requested;
+            if (!write && op.dynamicSize != 3) {
+                // XSAVE merges the previous XSTATE_BV; the saved payload is not a source operand.
+                chunks(linear(offset) + 512, 8);
+                return;
+            }
+            uint64_t layout = selected;
+            bool compact = op.dynamicSize == 2;
+            if (op.dynamicSize == 3) {
+                uint64_t header = 0;
+                if (!SafeCopyTraceValue(linear(offset) + 520, reinterpret_cast<uint8_t*>(&header), 8)) {
+                    failed(write); return;
+                }
+                compact = (header >> 63) != 0;
+                if (compact) layout = header & ~(uint64_t(1) << 63);
+            }
+            // Architectural save-area ranges, split into the existing value records.
+            if (selected & 3) chunks(linear(offset), 512);
+            chunks(linear(offset) + 512, 64);
+            uint32_t compactOffset = 576;
+            for (uint32_t feature = 2; feature < 63; ++feature) {
+                if (!(layout & (uint64_t(1) << feature))) continue;
+                __cpuidex(cpu, 0xD, feature);
+                const uint32_t bytes = static_cast<uint32_t>(cpu[0]);
+                uint32_t componentOffset = static_cast<uint32_t>(cpu[1]);
+                if (compact) {
+                    if (cpu[2] & 2) compactOffset = (compactOffset + 63) & ~63u;
+                    componentOffset = compactOffset;
+                    if (bytes > 131072 - std::min<uint32_t>(compactOffset, 131072)) { failed(write); return; }
+                    compactOffset += bytes;
+                }
+                if (!(selected & (uint64_t(1) << feature))) continue;
+                if (!bytes || componentOffset > 131072 || bytes > 131072 - componentOffset) { failed(write); return; }
+                chunks(linear(offset) + componentOffset, bytes);
+            }
+            return;
+        }
+        if (op.dynamicSize == 6) {
+            const uint32_t level = op.maskRegister;
+            if (write) {
+                const uint32_t bytes = op.size * (level ? level + 1 : 1);
+                chunks(linear(offset - bytes), bytes);
+            } else {
+                for (uint32_t frame = 1; frame < level; ++frame)
+                    chunks(linear(offset - frame * op.size), op.size);
+            }
+            return;
+        }
+        if (!op.maskKind && op.vectorIndex == 0xFF) { chunks(linear(offset), op.size); return; }
+        if (!op.elementSize || !op.size || op.size / op.elementSize > 64) { failed(write); return; }
+        const uint32_t lanes = op.dynamicSize == 5 ? op.vectorBytes / op.elementSize : op.size / op.elementSize;
+        uint64_t mask = ~uint64_t(0);
+        uint8_t vector[64]{};
+        if (op.maskKind == 2) {
+            if (!TraceMaskBits(ctx, op.maskRegister, mask)) { failed(write); return; }
+        } else if (op.maskKind == 1 || op.maskKind == 3) {
+            if (op.maskKind == 3) {
+                if (op.maskRegister >= 8) { failed(write); return; }
+#ifdef _WIN64
+                memcpy(vector, &ctx->FltSave.FloatRegisters[op.maskRegister], 8);
+#else
+                memcpy(vector, ctx->ExtendedRegisters + 32 + op.maskRegister * 16, 8);
 #endif
-		}
-		return address;
-	};
-	for (uint8_t i = 0; i < instruction->readOperandCount; ++i) {
-		const auto& operand = instruction->readOperands[i];
-		uint64_t address = effectiveAddress(operand);
-		uint32_t readDependency = 0;
-		uint64_t readEnd = address + operand.size;
-		for (uint8_t source = 0; source < tb.dependencySourceCount; ++source) {
-			const auto& configured = tb.dependencySources[source];
-			if (configured.kind != TraceDependencySourceKind::Memory) continue;
-			uint64_t sourceEnd = configured.address + configured.size;
-			if (address < sourceEnd && configured.address < readEnd) readDependency |= 1u << source;
-		}
-		if (!tb.memoryTaintTable.empty()) {
-			size_t mask = tb.memoryTaintTable.size() - 1;
-			size_t index = static_cast<size_t>(BasicTraceHash(address) ^ operand.size) & mask;
-			for (size_t probe = 0; probe < tb.memoryTaintTable.size(); ++probe) {
-				const auto& slot = tb.memoryTaintTable[index];
-				if (!slot.occupied) break;
-				if (slot.address == address && slot.size == operand.size) { readDependency |= slot.dependencyMask; break; }
-				index = (index + 1) & mask;
-			}
-		}
-		dependency |= readDependency;
-		if (tb.collectMemoryReads || tb.collectMemoryEvents) {
-			auto& pending = tb.pendingReads[tb.pendingReadCount];
-			pending = {};
-			pending.instruction = instruction->address;
-			pending.address = address;
-			pending.size = operand.size;
-			pending.dependencyMask = readDependency;
-			pending.accessIndex = i;
-			if (!SafeCopyTraceValue(address, pending.value, operand.size)) {
-				tb.unsupportedMemoryReads++;
-				if (tb.dependencySourceCount) tb.dependencyIncomplete = true;
-			}
-			else tb.pendingReadCount++;
-		}
-	}
-	if (instruction->clearsDependencies) dependency = 0;
-	tb.pendingDependencyMask = dependency;
-	tb.pendingRegisterWriteMask = instruction->writeRegisterMask;
-	tb.pendingWritesFlags = instruction->writesFlags;
-	const_cast<TraceBasicBlocksState::Instruction*>(instruction)->lastDependencyMask = dependency;
-	if (!tb.collectMemoryWrites && !tb.collectMemoryEvents && !tb.dependencySourceCount) return;
-	for (uint8_t i = 0; i < instruction->writeOperandCount; ++i) {
-		const auto& operand = instruction->writeOperands[i];
-		uint64_t address = effectiveAddress(operand);
-		auto& pending = tb.pendingWrites[tb.pendingWriteCount];
-		pending = {};
-		pending.instruction = instruction->address;
-		pending.address = address;
-		pending.size = operand.size;
-		pending.dependencyMask = dependency;
-		pending.accessIndex = static_cast<uint8_t>(instruction->readOperandCount + i);
-		if (!SafeCopyTraceValue(address, pending.before, operand.size)) {
-			tb.unsupportedMemoryWrites++;
-			if (tb.dependencySourceCount) tb.dependencyIncomplete = true;
-			continue;
-		}
-		tb.pendingWriteCount++;
-	}
+            } else if (!TraceVectorBytes(ctx, op.maskRegister, op.maskBytes, vector)) { failed(write); return; }
+            mask = 0;
+            for (uint32_t lane = 0; lane < lanes; ++lane) {
+                const uint32_t byte = lane * op.elementSize + op.elementSize - 1;
+                if (byte >= op.maskBytes) { failed(write); return; }
+                if (vector[byte] & 0x80) mask |= uint64_t(1) << lane;
+            }
+        }
+        if (lanes < 64) mask &= (uint64_t(1) << lanes) - 1;
+        if (!mask) return; // No access, including unmapped disabled lanes.
+        if (op.dynamicSize == 5) { chunks(linear(offset), op.size); return; }
+        if (op.vectorIndex != 0xFF &&
+            !TraceVectorBytes(ctx, op.vectorIndex, op.vectorBytes, vector)) { failed(write); return; }
+        uint32_t packedLane = 0;
+        for (uint32_t lane = 0; lane < lanes; ++lane) {
+            if (!(mask & (uint64_t(1) << lane))) continue;
+            uint64_t address = offset + (op.dynamicSize == 4 ? packedLane++ : lane) * op.elementSize;
+            if (op.vectorIndex != 0xFF) {
+                int64_t index = 0;
+                if (op.vectorIndexSize == 4) {
+                    int32_t value = 0; memcpy(&value, vector + lane * 4, 4); index = value;
+                } else memcpy(&index, vector + lane * 8, 8);
+                address = offset + static_cast<uint64_t>(index) * op.scale;
+            }
+            chunks(linear(address), op.elementSize);
+        }
+    };
+    for (uint8_t i = 0; i < instruction->readOperandCount; ++i) {
+        spans(instruction->readOperands[i], false, [&](uint64_t address, uint8_t size) {
+            uint32_t readDependency = 0;
+            for (uint8_t source = 0; source < tb.dependencySourceCount; ++source) {
+                const auto& configured = tb.dependencySources[source];
+                if (configured.kind == TraceDependencySourceKind::Memory &&
+                    address < configured.address + configured.size && configured.address < address + size)
+                    readDependency |= 1u << source;
+            }
+            if (!tb.memoryTaintTable.empty()) {
+                const size_t mask = tb.memoryTaintTable.size() - 1;
+                size_t slotIndex = static_cast<size_t>(BasicTraceHash(address) ^ size) & mask;
+                for (size_t probe = 0; probe < tb.memoryTaintTable.size(); ++probe) {
+                    const auto& slot = tb.memoryTaintTable[slotIndex];
+                    if (!slot.occupied) break;
+                    if (slot.address == address && slot.size == size) { readDependency |= slot.dependencyMask; break; }
+                    slotIndex = (slotIndex + 1) & mask;
+                }
+            }
+            dependency |= readDependency;
+            if (!tb.collectMemoryReads && !tb.collectMemoryEvents) return;
+            if (tb.pendingReadCount >= TraceBasicBlocksState::kMaxPendingMemory) { failed(false); return; }
+            auto& pending = tb.pendingReads[tb.pendingReadCount];
+            pending = {};
+            pending.instruction = instruction->address; pending.address = address; pending.size = size;
+            pending.dependencyMask = readDependency; pending.accessIndex = i;
+            if (!SafeCopyTraceValue(address, pending.value, size)) failed(false);
+            else ++tb.pendingReadCount;
+        });
+    }
+    if (instruction->clearsDependencies) dependency = 0;
+    tb.pendingDependencyMask = dependency;
+    tb.pendingRegisterWriteMask = instruction->writeRegisterMask;
+    tb.pendingWritesFlags = instruction->writesFlags;
+    const_cast<TraceBasicBlocksState::Instruction*>(instruction)->lastDependencyMask = dependency;
+    if (!tb.collectMemoryWrites && !tb.collectMemoryEvents && !tb.dependencySourceCount) return;
+    for (uint8_t i = 0; i < instruction->writeOperandCount; ++i) {
+        spans(instruction->writeOperands[i], true, [&](uint64_t address, uint8_t size) {
+            if (tb.pendingWriteCount >= TraceBasicBlocksState::kMaxPendingMemory) { failed(true); return; }
+            auto& pending = tb.pendingWrites[tb.pendingWriteCount];
+            pending = {};
+            pending.instruction = instruction->address; pending.address = address; pending.size = size;
+            pending.dependencyMask = dependency;
+            pending.accessIndex = static_cast<uint8_t>(instruction->readOperandCount + i);
+            if (!SafeCopyTraceValue(address, pending.before, size)) failed(true);
+            else ++tb.pendingWriteCount;
+        });
+    }
 }
 
 bool VehHandler::RecordBasicTraceMemoryWrite(
@@ -1494,13 +1590,13 @@ void VehHandler::FinalizeTraceBasicBlocksStreams() {
 void VehHandler::CompleteBasicTraceMemoryWrites() {
 	auto& tb = traceBasicBlocks_;
 	const uint64_t sequence = tb.stepsExecuted + 1;
-	for (uint8_t i = 0; i < tb.pendingReadCount; ++i) {
+	for (uint16_t i = 0; i < tb.pendingReadCount; ++i) {
 		RecordBasicTraceMemoryEvent(tb.pendingReads[i], sequence);
 		if (tb.collectMemoryReads && !RecordBasicTraceMemoryRead(tb.pendingReads[i]))
 			tb.memoryReadsTruncated = true;
 	}
 	tb.pendingReadCount = 0;
-	for (uint8_t i = 0; i < tb.pendingWriteCount; ++i) {
+	for (uint16_t i = 0; i < tb.pendingWriteCount; ++i) {
 		uint8_t after[kTraceMemoryMaxValueBytes]{};
 		const auto& pending = tb.pendingWrites[i];
 		if (!SafeCopyTraceValue(pending.address, after, pending.size)) {
@@ -2023,10 +2119,9 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 		tb.entryBreakpointNeedsRearm = false;
 		StopBasicTraceCodeStream(true); StopBasicTraceEventStream(true); return false;
 	}
-	if (tb.collectWindowActive) {
-		PrepareBasicTraceMemoryWrites(EnsureBasicTraceInstruction(ip), &ctx);
-		PrepareBasicTraceRegisterEvent(ip, &ctx);
-	}
+	// The live exception frame owns XState and the traced thread's segment bases.
+	// Prepare the first access on that thread before it returns to user code.
+	tb.initialMemoryPending = tb.collectWindowActive;
 	tb.active.store(true, std::memory_order_release);
 	ResumeStoppedThread(threadId, false);
 	return true;

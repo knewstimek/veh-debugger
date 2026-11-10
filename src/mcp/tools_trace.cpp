@@ -388,8 +388,10 @@ json McpServer::ToolTraceBasicBlocks(const json& args) {
     if (operation == "read_events" || operation == "analyze_events") return ReadTraceHardwareArtifact(args);
 	if (!args.contains("threadId")) return {{"error", "threadId is required for process trace"}};
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
-	return ExecuteTraceBasicBlocksTool(session_, args,
+	auto result = ExecuteTraceBasicBlocksTool(session_, args,
 		[this](const std::string& text, uint64_t& value) { return ParseAddress(text, value); });
+	if (inBreakpointAction_ && result.value("fatal", false)) actionStepInterrupted_ = true;
+	return result;
 }
 
 json McpServer::ToolTargetedCapture(const json& args) {

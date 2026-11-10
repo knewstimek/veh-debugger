@@ -102,12 +102,26 @@ public:
 	struct TraceBasicBlocksState {
 		static constexpr uint8_t kMaxWriteOperands = 2;
 		static constexpr uint8_t kMaxReadOperands = 4;
+		static constexpr uint16_t kMaxPendingMemory = 8192; // 128 KiB per direction, in existing 16-byte records
 		struct WriteOperand {
 			int64_t displacement = 0;
 			uint8_t base = 0xFF;
 			uint8_t index = 0xFF;
 			uint8_t scale = 0;
-			uint8_t size = 0;
+			uint32_t size = 0;
+			uint8_t addressBits = 0;
+			uint8_t baseBits = 0;
+			uint8_t indexBits = 0;
+			uint8_t segment = 0; // 1=FS, 2=GS
+			uint8_t maskKind = 0; // 1=vector sign bits, 2=opmask, 3=MMX sign bits
+			uint8_t maskRegister = 0;
+			uint8_t maskBytes = 0;
+			uint8_t elementSize = 0;
+			uint8_t vectorIndex = 0xFF;
+			uint8_t vectorIndexSize = 0;
+			uint8_t vectorBytes = 0;
+			uint8_t bitIndexRegister = 0xFF;
+			uint8_t dynamicSize = 0; // 1/2=XSAVE standard/compact, 3=XRSTOR, 4=packed lanes, 5=broadcast, 6=ENTER
 			uint8_t ripRelative = 0;
 			uint8_t preDecrementStack = 0;
 			uint8_t postIncrementStack = 0;
@@ -373,10 +387,11 @@ public:
 		uint32_t pendingRegisterWriteMask = 0;
 		uint32_t pendingDependencyMask = 0;
 		uint8_t pendingWritesFlags = 0;
-		uint8_t pendingReadCount = 0;
-		PendingRead pendingReads[kMaxReadOperands]{};
-		uint8_t pendingWriteCount = 0;
-		PendingWrite pendingWrites[kMaxWriteOperands]{};
+		bool initialMemoryPending = false;
+		uint16_t pendingReadCount = 0;
+		PendingRead pendingReads[kMaxPendingMemory]{};
+		uint16_t pendingWriteCount = 0;
+		PendingWrite pendingWrites[kMaxPendingMemory]{};
 		uint64_t stepsExecuted = 0;
 		uint64_t initialAddress = 0;
 		uint64_t currentBlock = 0;

@@ -134,9 +134,10 @@ static uint8_t DecodeTraceInstruction(const ZydisDecoder& decoder, ZydisMachineM
 
 		bool repeated = (decoded.attributes & (ZYDIS_ATTRIB_HAS_REP |
 			ZYDIS_ATTRIB_HAS_REPE | ZYDIS_ATTRIB_HAS_REPNE)) != 0;
-		// Only architectural string operations can use per-iteration TF capture.
-		// Other REP-prefixed operations retain their unsupported classification.
-		const bool repeatedString = repeated && decoded.meta.category == ZYDIS_CATEGORY_STRINGOP;
+		// String operations expose one memory-access iteration per TF stop.
+		// Their address-size-selected count can suppress the access entirely.
+		const bool repeatedString = repeated && (decoded.meta.category == ZYDIS_CATEGORY_STRINGOP ||
+			decoded.meta.category == ZYDIS_CATEGORY_IOSTRINGOP);
 		if (repeatedString) meta.repeatCountBits = decoded.address_width;
 		if (decoded.cpu_flags) {
 			meta.readsFlags = decoded.cpu_flags->tested != 0;
@@ -178,23 +179,43 @@ static uint8_t DecodeTraceInstruction(const ZydisDecoder& decoder, ZydisMachineM
 			// instruction length, but they neither calculate an effective address
 			// nor access memory. Treating NOP [reg] as a read creates a false
 			// unsupported access when the decorative register value is unmapped.
-			if (decoded.mnemonic == ZYDIS_MNEMONIC_NOP) continue;
+			if (decoded.mnemonic == ZYDIS_MNEMONIC_NOP ||
+				operand.mem.type == ZYDIS_MEMOP_TYPE_AGEN || operand.mem.type == ZYDIS_MEMOP_TYPE_MIB) continue;
 			bool readable = (operand.actions & ZYDIS_OPERAND_ACTION_MASK_READ) != 0;
 			bool writable = (operand.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) != 0;
 			// CMPXCHG writes the destination on both outcomes: the source on
 			// success, or the original destination on failure. Zydis describes
 			// this as CONDWRITE, so WRITE alone silently loses its writeback.
+			const bool signMask = decoded.mnemonic == ZYDIS_MNEMONIC_MASKMOVQ ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_MASKMOVDQU ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_VMASKMOVDQU ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_VMASKMOVPS ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_VMASKMOVPD ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_VPMASKMOVD ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_VPMASKMOVQ;
+			const bool opmask = decoded.avx.mask.reg != ZYDIS_REGISTER_NONE &&
+				decoded.avx.mask.reg != ZYDIS_REGISTER_K0;
+			const bool vectorIndex = operand.mem.type == ZYDIS_MEMOP_TYPE_VSIB;
+			const bool xsaveArea = decoded.mnemonic == ZYDIS_MNEMONIC_XSAVE ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_XSAVE64 ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_XSAVEOPT ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_XSAVEOPT64 ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_XSAVEC ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_XSAVEC64 ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_XRSTOR ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_XRSTOR64;
+			const bool conditionalMemory = signMask || opmask || vectorIndex || xsaveArea;
 			const bool compareExchange = decoded.mnemonic == ZYDIS_MNEMONIC_CMPXCHG ||
 				decoded.mnemonic == ZYDIS_MNEMONIC_CMPXCHG8B ||
 				decoded.mnemonic == ZYDIS_MNEMONIC_CMPXCHG16B;
-			if ((operand.actions & ZYDIS_OPERAND_ACTION_CONDWRITE) && !compareExchange && !repeatedString) {
+			if ((operand.actions & ZYDIS_OPERAND_ACTION_CONDWRITE) && !compareExchange && !repeatedString && !conditionalMemory) {
 				// Masked/conditional stores need per-lane execution metadata; do
 				// not invent a full-operand write when the instruction may skip it.
 				meta.unsupportedWrites++;
 				writable = false;
 			}
 			if ((operand.actions & ZYDIS_OPERAND_ACTION_CONDREAD) &&
-				decoded.meta.category != ZYDIS_CATEGORY_CMOV && !repeatedString) {
+				decoded.meta.category != ZYDIS_CATEGORY_CMOV && !repeatedString && !conditionalMemory) {
 				meta.unsupportedReads++;
 				readable = false;
 			}
@@ -202,17 +223,7 @@ static uint8_t DecodeTraceInstruction(const ZydisDecoder& decoder, ZydisMachineM
 			// conditionally assigns the register. Other conditional reads need
 			// execution metadata before they can be reported as observations.
 			if (!readable && !writable) continue;
-			const bool maskedMemory = decoded.mnemonic == ZYDIS_MNEMONIC_MASKMOVQ ||
-				decoded.mnemonic == ZYDIS_MNEMONIC_MASKMOVDQU ||
-				decoded.mnemonic == ZYDIS_MNEMONIC_VMASKMOVDQU ||
-				decoded.mnemonic == ZYDIS_MNEMONIC_VMASKMOVPS ||
-				decoded.mnemonic == ZYDIS_MNEMONIC_VMASKMOVPD ||
-				decoded.mnemonic == ZYDIS_MNEMONIC_VPMASKMOVD ||
-				decoded.mnemonic == ZYDIS_MNEMONIC_VPMASKMOVQ ||
-				(decoded.avx.mask.reg != ZYDIS_REGISTER_NONE && decoded.avx.mask.reg != ZYDIS_REGISTER_K0);
-			bool unsupported = (repeated && !repeatedString) || maskedMemory || operand.size == 0 ||
-				operand.size > veh::kTraceMemoryMaxValueBytes * 8 ||
-				operand.mem.segment == ZYDIS_REGISTER_FS || operand.mem.segment == ZYDIS_REGISTER_GS ||
+			bool unsupported = (!operand.size && !xsaveArea) ||
 				(writable && meta.writeOperandCount >= veh::VehHandler::TraceBasicBlocksState::kMaxWriteOperands) ||
 				(readable && meta.readOperandCount >= veh::VehHandler::TraceBasicBlocksState::kMaxReadOperands);
 			if (unsupported) {
@@ -221,12 +232,75 @@ static uint8_t DecodeTraceInstruction(const ZydisDecoder& decoder, ZydisMachineM
 				continue;
 			}
 			veh::VehHandler::TraceBasicBlocksState::WriteOperand parsed{};
-			parsed.size = static_cast<uint8_t>((operand.size + 7) / 8);
+			parsed.size = (operand.size + 7) / 8;
+			if (xsaveArea) {
+				parsed.size = 576;
+				parsed.dynamicSize = decoded.mnemonic == ZYDIS_MNEMONIC_XRSTOR ||
+					decoded.mnemonic == ZYDIS_MNEMONIC_XRSTOR64 ? 3 :
+					decoded.mnemonic == ZYDIS_MNEMONIC_XSAVEC ||
+					decoded.mnemonic == ZYDIS_MNEMONIC_XSAVEC64 ? 2 : 1;
+			}
+			parsed.addressBits = decoded.address_width;
+			parsed.baseBits = static_cast<uint8_t>(ZydisRegisterGetWidth(machineMode, operand.mem.base));
+			parsed.indexBits = static_cast<uint8_t>(ZydisRegisterGetWidth(machineMode, operand.mem.index));
+			parsed.segment = operand.mem.segment == ZYDIS_REGISTER_FS ? 1 :
+				operand.mem.segment == ZYDIS_REGISTER_GS ? 2 : 0;
+			parsed.elementSize = static_cast<uint8_t>(operand.element_size / 8);
+			parsed.vectorBytes = static_cast<uint8_t>(decoded.avx.vector_length / 8);
+			if (signMask || (vectorIndex && !opmask)) {
+				const auto mask = operands[signMask ? 1 : 2].reg.value;
+				parsed.maskKind = decoded.mnemonic == ZYDIS_MNEMONIC_MASKMOVQ ? 3 : 1;
+				parsed.maskRegister = static_cast<uint8_t>(ZydisRegisterGetId(mask));
+				parsed.maskBytes = static_cast<uint8_t>(ZydisRegisterGetWidth(machineMode, mask) / 8);
+				if (decoded.mnemonic == ZYDIS_MNEMONIC_MASKMOVQ ||
+					decoded.mnemonic == ZYDIS_MNEMONIC_MASKMOVDQU ||
+					decoded.mnemonic == ZYDIS_MNEMONIC_VMASKMOVDQU) parsed.elementSize = 1;
+			} else if (opmask) {
+				parsed.maskKind = 2;
+				parsed.maskRegister = static_cast<uint8_t>(ZydisRegisterGetId(decoded.avx.mask.reg));
+			}
+			if (opmask && decoded.avx.broadcast.mode != ZYDIS_BROADCAST_MODE_INVALID)
+				parsed.dynamicSize = 5;
+			switch (decoded.mnemonic) {
+			case ZYDIS_MNEMONIC_VCOMPRESSPD: case ZYDIS_MNEMONIC_VCOMPRESSPS:
+			case ZYDIS_MNEMONIC_VPCOMPRESSB: case ZYDIS_MNEMONIC_VPCOMPRESSW:
+			case ZYDIS_MNEMONIC_VPCOMPRESSD: case ZYDIS_MNEMONIC_VPCOMPRESSQ:
+			case ZYDIS_MNEMONIC_VEXPANDPD: case ZYDIS_MNEMONIC_VEXPANDPS:
+			case ZYDIS_MNEMONIC_VPEXPANDB: case ZYDIS_MNEMONIC_VPEXPANDW:
+			case ZYDIS_MNEMONIC_VPEXPANDD: case ZYDIS_MNEMONIC_VPEXPANDQ:
+				parsed.dynamicSize = 4; break;
+			default: break;
+			}
+			if (vectorIndex) {
+				parsed.vectorIndex = static_cast<uint8_t>(ZydisRegisterGetId(operand.mem.index));
+				parsed.indexBits = 0;
+				parsed.vectorIndexSize = 4;
+				switch (decoded.mnemonic) {
+				case ZYDIS_MNEMONIC_VGATHERQPS: case ZYDIS_MNEMONIC_VGATHERQPD:
+				case ZYDIS_MNEMONIC_VPGATHERQD: case ZYDIS_MNEMONIC_VPGATHERQQ:
+				case ZYDIS_MNEMONIC_VSCATTERQPS: case ZYDIS_MNEMONIC_VSCATTERQPD:
+				case ZYDIS_MNEMONIC_VPSCATTERQD: case ZYDIS_MNEMONIC_VPSCATTERQQ:
+					parsed.vectorIndexSize = 8; break;
+				default: break;
+				}
+				const auto indexBytes = ZydisRegisterGetWidth(machineMode, operand.mem.index) / 8;
+				const auto lanes = std::min<uint32_t>(indexBytes / parsed.vectorIndexSize,
+					parsed.vectorBytes / std::max<uint8_t>(1, parsed.elementSize));
+				parsed.size = lanes * parsed.elementSize;
+			}
+			if (decoded.mnemonic == ZYDIS_MNEMONIC_BT || decoded.mnemonic == ZYDIS_MNEMONIC_BTC ||
+				decoded.mnemonic == ZYDIS_MNEMONIC_BTR || decoded.mnemonic == ZYDIS_MNEMONIC_BTS) {
+				if (operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER)
+					parsed.bitIndexRegister = BasicTraceRegisterIndex(machineMode, operands[1].reg.value);
+			}
 			parsed.scale = operand.mem.scale;
 			parsed.displacement = operand.mem.disp.has_displacement ? operand.mem.disp.value : 0;
-			parsed.ripRelative = operand.mem.base == ZYDIS_REGISTER_RIP ? 1 : 0;
+			parsed.ripRelative = operand.mem.base == ZYDIS_REGISTER_RIP || operand.mem.base == ZYDIS_REGISTER_EIP ? 1 : 0;
 			parsed.base = parsed.ripRelative ? 0xFF : BasicTraceRegisterIndex(machineMode, operand.mem.base);
-			parsed.index = BasicTraceRegisterIndex(machineMode, operand.mem.index);
+			parsed.index = vectorIndex ? 0xFF : BasicTraceRegisterIndex(machineMode, operand.mem.index);
+			if (decoded.mnemonic == ZYDIS_MNEMONIC_XLAT) {
+				parsed.index = 0; parsed.indexBits = 8; parsed.scale = 1;
+			}
 			// PUSH and CALL decrement SP before storing; Zydis reports the stack
 			// operand relative to the pre-instruction SP.
 			parsed.preDecrementStack = writable && (decoded.meta.category == ZYDIS_CATEGORY_PUSH ||
@@ -236,13 +310,25 @@ static uint8_t DecodeTraceInstruction(const ZydisDecoder& decoder, ZydisMachineM
 			parsed.postIncrementStack = writable && decoded.meta.category == ZYDIS_CATEGORY_POP &&
 				parsed.base == 7 ? 1 : 0;
 			if ((!parsed.ripRelative && operand.mem.base != ZYDIS_REGISTER_NONE && parsed.base == 0xFF) ||
-				(operand.mem.index != ZYDIS_REGISTER_NONE && parsed.index == 0xFF)) {
+				(!vectorIndex && operand.mem.index != ZYDIS_REGISTER_NONE && parsed.index == 0xFF)) {
 				if (writable) meta.unsupportedWrites++;
 				if (readable) meta.unsupportedReads++;
 				continue;
 			}
 			if (writable) meta.writeOperands[meta.writeOperandCount++] = parsed;
 			if (readable) meta.readOperands[meta.readOperandCount++] = parsed;
+		}
+		if (decoded.mnemonic == ZYDIS_MNEMONIC_ENTER) {
+			// ENTER's frame-chain accesses depend on its nesting immediate.
+			meta.readOperandCount = meta.writeOperandCount = 1;
+			meta.unsupportedReads = meta.unsupportedWrites = 0;
+			veh::VehHandler::TraceBasicBlocksState::WriteOperand frame{};
+			frame.base = 6; frame.addressBits = decoded.stack_width;
+			frame.size = decoded.operand_width / 8; frame.dynamicSize = 6;
+			frame.maskRegister = static_cast<uint8_t>(operands[1].imm.value.u & 31);
+			meta.readOperands[0] = frame;
+			frame.base = 7;
+			meta.writeOperands[0] = frame;
 		}
 	}
 

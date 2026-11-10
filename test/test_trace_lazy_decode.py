@@ -131,6 +131,8 @@ def main():
         assert wide["unsupported_memory_writes"] == 4294967298, wide
         assert wide["unsupported_memory_reads"] == 4294967299, wide
         assert wide["resource_limits"]["max_steps"] == "10000000000", wide
+        assert wide["code"] == "memory_capture_incomplete" and "error" in wide, wide
+        assert wide["capture_complete"] is False, wide
     print("PASS: lazy decode large range, 64-bit steps, cache budget, direct/batch/action and file errors")
 
 

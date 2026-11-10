@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fill collector memory-capture gaps for wide operands, FS/GS-relative addresses, MMX/SSE/AVX masked accesses, VSIB indices, bit-string and XLAT indexing, nested ENTER frames and variable XSAVE areas. Prepare the first access on the traced thread using its live vector context. Preserve the existing event format by splitting large values into 16-byte records.
+- Return `memory_capture_incomplete` errors for uncollected accesses across direct, batch and breakpoint actions, preserving partial artifacts and exact counters so error-stopping chains reject incomplete memory.
 - Capture implicit MOVS/STOS/LODS/CMPS/SCAS memory accesses for every REP iteration, including reverse direction, early comparison termination and zero-count/address-size cases. Preserve the existing event format and direct/batch/breakpoint-action behavior.
 - Trace completeness now accounts for unsupported memory accesses and incomplete dependencies in inline results and compact artifact receipts; successful file storage no longer hides these gaps. Failed runtime value snapshots also mark requested dependency tracking incomplete.
 

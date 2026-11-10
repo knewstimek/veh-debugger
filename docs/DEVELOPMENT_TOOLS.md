@@ -21,9 +21,31 @@ unchanged. Existing captures cannot recover bytes that were never recorded.
 requested dependencies are incomplete, as well as when retained data is truncated.
 Compact JSON receipts expose the unsupported read/write counts and dependency
 status alongside storage and capture completion. File integrity alone does not
-qualify a capture for replay. Masked/vector-lane accesses, values over 16 bytes,
-FS/GS-relative memory and unsupported address registers remain explicitly counted
-limitations; a zero unsupported count does not qualify every instruction family.
+qualify a capture for replay. A nonzero unsupported read/write count now returns
+`code=memory_capture_incomplete` and an error through direct calls, batch and
+breakpoint actions. The diagnostic is fatal to the current batch/action chain, including when
+`stop_on_error=false`; breakpoint actions also suppress automatic continuation.
+Any written artifact
+retains the diagnostic and captured data. `test/test_trace_memory_gap.py` checks
+this with exact 64-bit counts and inline/artifact replies.
+
+The target collector resolves FS/GS bases on the traced thread and uses the live
+exception frame for SSE/AVX/opmask state, including the first traced instruction.
+Wide operands are split into existing records of at most 16 bytes; `access_index`
+continues to identify the logical operand, so its chunks can share that index.
+MASKMOV, AVX mask moves and VSIB gather/scatter select active lanes, with signed
+vector indices. EVEX broadcast and compress/expand use their memory layout rather
+than an unmasked vector range. Address-size wrapping, XLAT's AL index, signed
+BT/BTS/BTR/BTC register indices and ENTER nesting are resolved before capture.
+FXSAVE/FXRSTOR and XSAVE/XRSTOR areas use multiple records; XSAVE layouts follow
+the requested enabled components and CPU-reported standard/compact offsets.
+Save-area records describe architectural operand ranges and can include unchanged
+reserved bytes; they are not a bus-access trace.
+
+Native regressions cover both widths, legacy/SSE/AVX masks, disabled unmapped
+gather lanes, wide values, segment-relative first accesses, bit/byte indices,
+ENTER/LEAVE and state save/restore. CPU-dependent execution tests require the
+corresponding enabled OS feature; a hardware skip is not an execution pass.
 
 ## Release boundaries
 

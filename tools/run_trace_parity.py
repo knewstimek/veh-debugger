@@ -15,12 +15,12 @@ def run(build_dir, timeout):
     env["VEH_TEST_BUILD_DIR"] = os.path.abspath(build_dir)
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     process = subprocess.Popen([sys.executable, TEST_RUNNER, "test_trace_basic_blocks.py",
-                                "test_trace_memory_access.py", "--jobs", "1",
+                                "test_trace_memory_access.py", "test_trace_memory_gap.py", "--jobs", "1",
                                 "--timeout", str(timeout)], cwd=ROOT, env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, creationflags=creationflags)
     try:
-        stdout, stderr = process.communicate(timeout=2 * timeout + 30)
+        stdout, stderr = process.communicate(timeout=3 * timeout + 30)
     except subprocess.TimeoutExpired:
         if os.name == "nt":
             subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
