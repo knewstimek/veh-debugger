@@ -780,7 +780,7 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
         auto linear = [&](uint64_t value) { return segment + narrow(value, op.addressBits); };
         auto chunks = [&](uint64_t address, uint32_t size) {
             for (uint32_t at = 0; at < size; at += kTraceMemoryMaxValueBytes)
-                emit(address + at, static_cast<uint8_t>(std::min<uint32_t>(size - at, kTraceMemoryMaxValueBytes)));
+                emit(address + at, static_cast<uint8_t>(std::min<uint32_t>(size - at, kTraceMemoryMaxValueBytes)), nullptr, UINT16_MAX);
         };
         if (op.dynamicSize >= 1 && op.dynamicSize <= 3) {
             int cpu[4]{}; __cpuid(cpu, 1);
@@ -795,18 +795,37 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
                 return;
             }
             uint64_t layout = selected;
+            uint64_t payload = selected;
             bool compact = op.dynamicSize == 2;
             if (op.dynamicSize == 3) {
-                uint64_t header = 0;
-                if (!SafeCopyTraceValue(linear(offset) + 520, reinterpret_cast<uint8_t*>(&header), 8)) {
+                uint64_t header = 0, present = 0;
+                if (!SafeCopyTraceValue(linear(offset) + 512, reinterpret_cast<uint8_t*>(&present), 8) ||
+                    !SafeCopyTraceValue(linear(offset) + 520, reinterpret_cast<uint8_t*>(&header), 8)) {
                     failed(write); return;
                 }
+                payload &= present; // INIT components have no source payload.
                 compact = (header >> 63) != 0;
                 if (compact) layout = header & ~(uint64_t(1) << 63);
             }
             // Architectural save-area ranges, split into the existing value records.
-            if (selected & 3) chunks(linear(offset), 512);
-            chunks(linear(offset) + 512, 64);
+            if (op.dynamicSize == 3) {
+                chunks(linear(offset) + 512, 64);
+                if (payload & 1) { chunks(linear(offset), 24); chunks(linear(offset) + 32, 128); }
+                if (payload & 2) {
+#ifdef _WIN64
+                    chunks(linear(offset) + 160, 256);
+#else
+                    chunks(linear(offset) + 160, 128);
+#endif
+                }
+                // Standard XRSTOR loads MXCSR for SSE or AVX even in INIT;
+                // compacted XRSTOR loads it only with present, requested SSE.
+                if ((!compact && (selected & 6)) || (compact && (payload & 2)))
+                    chunks(linear(offset) + 24, 4);
+            } else {
+                if (selected & 3) chunks(linear(offset), 512);
+                chunks(linear(offset) + 512, 64);
+            }
             uint32_t compactOffset = 576;
             for (uint32_t feature = 2; feature < 63; ++feature) {
                 if (!(layout & (uint64_t(1) << feature))) continue;
@@ -819,7 +838,7 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
                     if (bytes > 131072 - std::min<uint32_t>(compactOffset, 131072)) { failed(write); return; }
                     compactOffset += bytes;
                 }
-                if (!(selected & (uint64_t(1) << feature))) continue;
+                if (!(payload & (uint64_t(1) << feature))) continue;
                 if (!bytes || componentOffset > 131072 || bytes > 131072 - componentOffset) { failed(write); return; }
                 chunks(linear(offset) + componentOffset, bytes);
             }
@@ -827,12 +846,42 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
         }
         if (op.dynamicSize == 6) {
             const uint32_t level = op.maskRegister;
+            if (!op.size || op.size > 8 || level > 31) { failed(write); return; }
+            const auto width = static_cast<uint8_t>(op.size);
             if (write) {
-                const uint32_t bytes = op.size * (level ? level + 1 : 1);
-                chunks(linear(offset - bytes), bytes);
+                const uint32_t slots = level ? level + 1 : 1;
+                for (uint32_t slot = 0; slot < slots; ++slot) {
+                    const uint16_t order = static_cast<uint16_t>(slot == 0 ? 0 :
+                        slot == level ? 2 * level - 1 : 2 * slot);
+                    emit(linear(offset - (slot + 1) * width), width, nullptr, order);
+                }
             } else {
-                for (uint32_t frame = 1; frame < level; ++frame)
-                    chunks(linear(offset - frame * op.size), op.size);
+                // Earlier ENTER pushes can alias later frame-chain sources.
+                // Overlay those known writes in architectural order before reading
+                // any still-uncovered source bytes.
+                uint8_t pushed[32][8]{};
+                uint64_t bp = BasicTraceContextRegister(ctx, 6);
+                memcpy(pushed[0], &bp, width);
+                const uint64_t sp = BasicTraceContextRegister(ctx, 7);
+                for (uint32_t frame = 1; frame < level; ++frame) {
+                    const uint64_t source = linear(offset - frame * width);
+                    uint8_t value[8]{};
+                    for (uint32_t byte = 0; byte < width; ++byte) {
+                        bool overlaid = false;
+                        for (uint32_t prior = frame; prior-- > 0;) {
+                            const uint64_t destination = linear(sp - (prior + 1) * width);
+                            if (source + byte >= destination && source + byte - destination < width) {
+                                value[byte] = pushed[prior][source + byte - destination];
+                                overlaid = true; break;
+                            }
+                        }
+                        if (!overlaid && !SafeCopyTraceValue(source + byte, &value[byte], 1)) {
+                            failed(write); return;
+                        }
+                    }
+                    memcpy(pushed[frame], value, width);
+                    emit(source, width, value, static_cast<uint16_t>(2 * frame - 1));
+                }
             }
             return;
         }
@@ -879,7 +928,7 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
         }
     };
     for (uint8_t i = 0; i < instruction->readOperandCount; ++i) {
-        spans(instruction->readOperands[i], false, [&](uint64_t address, uint8_t size) {
+        spans(instruction->readOperands[i], false, [&](uint64_t address, uint8_t size, const uint8_t* observed, uint16_t order) {
             uint32_t readDependency = 0;
             for (uint8_t source = 0; source < tb.dependencySourceCount; ++source) {
                 const auto& configured = tb.dependencySources[source];
@@ -904,7 +953,9 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
             pending = {};
             pending.instruction = instruction->address; pending.address = address; pending.size = size;
             pending.dependencyMask = readDependency; pending.accessIndex = i;
-            if (!SafeCopyTraceValue(address, pending.value, size)) failed(false);
+            pending.order = order == UINT16_MAX ? tb.pendingReadCount : order;
+            if (observed) { memcpy(pending.value, observed, size); ++tb.pendingReadCount; }
+            else if (!SafeCopyTraceValue(address, pending.value, size)) failed(false);
             else ++tb.pendingReadCount;
         });
     }
@@ -915,13 +966,14 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
     const_cast<TraceBasicBlocksState::Instruction*>(instruction)->lastDependencyMask = dependency;
     if (!tb.collectMemoryWrites && !tb.collectMemoryEvents && !tb.dependencySourceCount) return;
     for (uint8_t i = 0; i < instruction->writeOperandCount; ++i) {
-        spans(instruction->writeOperands[i], true, [&](uint64_t address, uint8_t size) {
+        spans(instruction->writeOperands[i], true, [&](uint64_t address, uint8_t size, const uint8_t*, uint16_t order) {
             if (tb.pendingWriteCount >= TraceBasicBlocksState::kMaxPendingMemory) { failed(true); return; }
             auto& pending = tb.pendingWrites[tb.pendingWriteCount];
             pending = {};
             pending.instruction = instruction->address; pending.address = address; pending.size = size;
             pending.dependencyMask = dependency;
             pending.accessIndex = static_cast<uint8_t>(instruction->readOperandCount + i);
+            pending.order = order == UINT16_MAX ? static_cast<uint16_t>(tb.pendingReadCount + tb.pendingWriteCount) : order;
             if (!SafeCopyTraceValue(address, pending.before, size)) failed(true);
             else ++tb.pendingWriteCount;
         });
@@ -1590,19 +1642,18 @@ void VehHandler::FinalizeTraceBasicBlocksStreams() {
 void VehHandler::CompleteBasicTraceMemoryWrites() {
 	auto& tb = traceBasicBlocks_;
 	const uint64_t sequence = tb.stepsExecuted + 1;
-	for (uint16_t i = 0; i < tb.pendingReadCount; ++i) {
+	auto read = [&](uint16_t i) {
 		RecordBasicTraceMemoryEvent(tb.pendingReads[i], sequence);
 		if (tb.collectMemoryReads && !RecordBasicTraceMemoryRead(tb.pendingReads[i]))
 			tb.memoryReadsTruncated = true;
-	}
-	tb.pendingReadCount = 0;
-	for (uint16_t i = 0; i < tb.pendingWriteCount; ++i) {
+	};
+	auto write = [&](uint16_t i) {
 		uint8_t after[kTraceMemoryMaxValueBytes]{};
 		const auto& pending = tb.pendingWrites[i];
 		if (!SafeCopyTraceValue(pending.address, after, pending.size)) {
 			tb.unsupportedMemoryWrites++;
 			if (tb.dependencySourceCount) tb.dependencyIncomplete = true;
-			continue;
+			return;
 		}
 		RecordBasicTraceMemoryEvent(pending, after, sequence);
 		if (tb.collectMemoryWrites && !RecordBasicTraceMemoryWrite(pending, after)) tb.memoryWritesTruncated = true;
@@ -1618,8 +1669,14 @@ void VehHandler::CompleteBasicTraceMemoryWrites() {
 				index = (index + 1) & mask;
 			}
 		}
+	};
+	uint16_t r = 0, w = 0;
+	while (r < tb.pendingReadCount || w < tb.pendingWriteCount) {
+		if (w == tb.pendingWriteCount || (r < tb.pendingReadCount &&
+			tb.pendingReads[r].order < tb.pendingWrites[w].order)) read(r++);
+		else write(w++);
 	}
-	tb.pendingWriteCount = 0;
+	tb.pendingReadCount = tb.pendingWriteCount = 0;
 	for (uint8_t reg = 0; reg < 16; ++reg)
 		if (tb.pendingRegisterWriteMask & (1u << reg)) tb.registerDependencies[reg] = tb.pendingDependencyMask;
 	if (tb.pendingWritesFlags) tb.flagsDependencies = tb.pendingDependencyMask;

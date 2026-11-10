@@ -115,6 +115,7 @@ bool hardwareCapture(HANDLE pipe, uint32_t command, const std::vector<unsigned c
     base.stopReason = mode == L"hardware-maxsteps" ? veh::TraceBasicBlockStopReason::MaxSteps :
         veh::TraceBasicBlockStopReason::LeftRange;
     base.eventCollectionEnabled = 1; base.eventSchemaVersion = 1; base.returnSnapshot = UINT32_MAX;
+    if (mode == L"hardware-memory-gap") base.unsupportedMemoryReads = 1;
     ht::ResponseV1 response;
     response.status = 0; response.baseResponseBytes = sizeof(base); response.appliedKinds = envelope.kinds;
     response.retainedRecords = count; response.unknownValueFields = unknown;

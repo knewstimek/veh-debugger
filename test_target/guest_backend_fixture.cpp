@@ -261,6 +261,10 @@ int wmain(int argc, wchar_t** argv) {
                 if(mode!=L"deferred-unsupported")veh::SetCommandSupported(caps.commands,veh::IpcCommand::SetModuleLoadStop);
             }
             if(mode.rfind(L"shellcode-",0)==0)veh::SetCommandSupported(caps.commands,veh::IpcCommand::ExecuteShellcode);
+            if(mode==L"path-wide-limits") {
+                veh::SetCommandSupported(caps.commands,veh::IpcCommand::GetRegisters);
+                veh::SetCommandSupported(caps.commands,veh::IpcCommand::IsThreadStopped);
+            }
             if(localsMode) {
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::EnumLocals);
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::GetStackTrace);
@@ -505,6 +509,8 @@ int wmain(int argc, wchar_t** argv) {
                 response.filteredSteps64 = UINT64_C(0x100000001);
                 response.unsupportedMemoryWrites64 = UINT64_C(0x100000002);
                 response.unsupportedMemoryReads64 = UINT64_C(0x100000003);
+                response.memoryEventCollectionEnabled = request.collectMemoryEvents;
+                response.memoryEventSchemaVersion = 1;
                 response.filteredSteps = response.unsupportedMemoryWrites = response.unsupportedMemoryReads = UINT32_MAX;
                 response.finalAddress = request.rangeStart;
             }
@@ -780,6 +786,8 @@ int wmain(int argc, wchar_t** argv) {
             if (mode == L"inst-reply-short") result.resize(4);
             if (mode == L"inst-reply-long") result.push_back(0);
             if (!send(pipe, header.command, result.data(), static_cast<uint32_t>(result.size()))) break;
+        } else if (mode==L"path-wide-limits" && command==veh::IpcCommand::IsThreadStopped) {
+            if (!reply(pipe, header.command, veh::IsThreadStoppedResponse{veh::IpcStatus::Ok, 1})) break;
         } else if (command == veh::IpcCommand::GetTargetInfo) {
             veh::GetTargetInfoResponse info{veh::IpcStatus::Ok, veh::IpcTargetScope::Guest, pid, (hardwareMode || mode==L"launch-64" || (callerCapture.enabled()&&mode!=L"cc-x86")) ? 64u : 32u};
             if(mode==L"launch-wrong-pid")++info.pid;
@@ -1254,7 +1262,7 @@ int wmain(int argc, wchar_t** argv) {
                 const size_t size=mode==L"locals-empty"?sizeof(response.head):sizeof(response);
                 if(!send(pipe,header.command,&response,static_cast<uint32_t>(size)))break;
             }
-        } else if ((localsMode || mode.rfind(L"stack-",0)==0 || mode.rfind(L"control-",0)==0) &&
+        } else if ((localsMode || mode==L"path-wide-limits" || mode.rfind(L"stack-",0)==0 || mode.rfind(L"control-",0)==0) &&
                    command==veh::IpcCommand::GetRegisters) {
             veh::GetRegistersResponse response{};
             response.status=veh::IpcStatus::Ok;response.regs.rip=0x1234;response.regs.is32bit=1;
@@ -1365,7 +1373,7 @@ int wmain(int argc, wchar_t** argv) {
             threads.header.status = veh::IpcStatus::Ok;
             threads.header.count = mode==L"machine-thread-short"?2:1;
             threads.thread.id = 77;
-            if(mode==L"path-file-output")sprintf_s(threads.thread.name,"trace-calls:%u",pathRequests);
+            if(mode==L"path-file-output"||mode==L"path-wide-limits")sprintf_s(threads.thread.name,"trace-calls:%u",pathRequests);
             if(hardwareMode)sprintf_s(threads.thread.name,"hardware:%u:%u",hardwareQueries,pathRequests);
             if(mode==L"local-drop-live"&&++localThreadQueries==2){
                 CloseHandle(pipe);

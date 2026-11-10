@@ -486,10 +486,40 @@ def test_xsave_dynamic_operand(session, tmp_path, mode):
     result, memory, _ = capture(client, tid, p, str(tmp_path / "xsave.json"), "direct", mode)
     writes = [e for e in memory if e["kind"] == "write"]
     reads = [e for e in memory if e["kind"] == "read"]
-    assert len(writes) == 36 and len(reads) == 37, (len(writes), len(reads))
+    assert len(writes) == 36 and reads, (len(writes), len(reads))
     assert int(reads[0]["address"], 0) == p.data + 512 and reads[0]["size"] == 8
     assert [int(e["address"], 0) for e in writes] == list(range(p.data, p.data + 576, 16))
-    assert [e["after"] for e in writes] == [e["value"] for e in reads[1:]], result
+    saved = b"".join(bytes.fromhex(e["after"]) for e in writes)
+    present = int.from_bytes(saved[512:520], "little")
+    expected = set(range(512, 576)) | set(range(24, 28))
+    if present & 1:
+        expected |= set(range(24)) | set(range(32, 160))
+    if present & 2:
+        expected |= set(range(160, 288 if IS_X86 else 416))
+    observed = set()
+    for event in reads[1:]:
+        at = int(event["address"], 0) - p.data
+        assert bytes.fromhex(event["value"]) == saved[at:at+event["size"]], event
+        observed.update(range(at, at + event["size"]))
+    assert observed == expected, (sorted(observed ^ expected), result)
+
+
+@pytest.mark.parametrize("mode", ["inline", "file"])
+def test_xrstor_init_does_not_read_component_payload(session, tmp_path, mode):
+    if not ctypes.windll.kernel32.IsProcessorFeaturePresent(39):
+        pytest.skip("AVX state is not enabled")
+    client, tid, page = session
+    p = Program(page, page + 2048)
+    data = bytearray(1024)
+    data[24:28] = (0x1f80).to_bytes(4, "little")
+    p.initial = bytes(data)  # XSTATE_BV=0: initialize AVX, do not load its payload.
+    p.immediate("B8", 4)
+    p.immediate("BA", 0)
+    p.emit("0F AE 2B")
+    _, memory, _ = capture(client, tid, p, str(tmp_path / "xrstor-init.json"), "direct", mode)
+    assert all(int(e["address"], 0) < p.data + 576 for e in memory), [
+        (e["address"], e["size"]) for e in memory]
+    assert any(int(e["address"], 0) == p.data + 24 and e["size"] == 4 for e in memory), memory
 
 
 @pytest.mark.parametrize("caller", ["direct", "batch", "action"])
@@ -529,7 +559,7 @@ def test_enter_frame_chain(session, tmp_path, level):
     frame_reads = [e for e in memory if int(e["instruction"], 0) == enter and e["kind"] == "read"]
     assert [int(e["address"], 0) for e in frame_reads] == [p.data + 64 - i * width for i in range(1, level)]
     frame_writes = [e for e in memory if int(e["instruction"], 0) == enter and e["kind"] == "write"]
-    captured = b"".join(bytes.fromhex(e["after"]) for e in frame_writes)
+    captured = b"".join(bytes.fromhex(e["after"]) for e in sorted(frame_writes, key=lambda e: int(e["address"], 0)))
     expected = (p.data + 64).to_bytes(width, "little")
     if level:
         expected = (sp - width).to_bytes(width, "little") + b"".join(
@@ -539,6 +569,48 @@ def test_enter_frame_chain(session, tmp_path, level):
     assert int(restored["address"], 0) == sp - width and bytes.fromhex(restored["value"]) == expected[-width:]
     after = check(client.tool("veh_registers", {"threadId": tid}))["registers"]
     assert int(after["esp" if IS_X86 else "rsp"], 0) == sp, after
+
+
+def test_enter_overlapping_frame_reads(session, tmp_path):
+    client, tid, page = session
+    regs = check(client.tool("veh_registers", {"threadId": tid}))["registers"]
+    sp = int(regs["esp" if IS_X86 else "rsp"], 0)
+    width = 4 if IS_X86 else 8
+    p = Program(page, page + 2048)
+    p.immediate("BD" if IS_X86 else "48 BD", sp, width)
+    enter = p.emit("C8 10 00 03")
+    p.emit("C9")
+    _, memory, _ = capture(client, tid, p, str(tmp_path / "enter-overlap.json"), "direct", "file")
+    reads = [e for e in memory if int(e["instruction"], 0) == enter and e["kind"] == "read"]
+    assert [int.from_bytes(bytes.fromhex(e["value"]), "little") for e in reads] == [sp, sp], reads
+    assert [e["kind"] for e in memory if int(e["instruction"], 0) == enter] == [
+        "write", "read", "write", "read", "write", "write"], memory
+
+
+def test_targeted_memory_budget_is_not_complete(session, tmp_path):
+    client, tid, page = session
+    prefix = "e" if IS_X86 else "r"
+    data = page + 2048
+    check(client.tool("veh_write_memory", {"address": hex(page), "data": "8B 03 89 43 04 01 43 08 90"}))
+    check(client.tool("veh_write_memory", {"address": hex(data), "data": bytes(64).hex(" ")}))
+    args = {
+        "inputs": [1], "steps": [
+            {"tool": "veh_set_register", "args": {"threadId": tid, "name": prefix + "ip", "value": hex(page)}},
+            {"tool": "veh_set_register", "args": {"threadId": tid, "name": prefix + "bx", "value": hex(data)}},
+        ],
+        "trace": {"threadId": tid, "start": hex(page), "end": hex(page + 9),
+                  "max_steps": 1000, "max_memory_events": 1, "stack_bytes": 0},
+        "trigger": {"address": hex(page)}, "window": {"before_steps": 0, "after_steps": 3},
+        "environment": {"capture_teb": False}, "output_directory": str(tmp_path / "targeted"),
+    }
+    result = client.tool("veh_targeted_capture", args)
+    item = result["inputs"][0]
+    assert item["target_window"]["matched"] and item["stop_reason"] == "target_window", item
+    assert item["capture_complete"] is False and item["artifact"]["complete"] is False, item
+    assert result["failed"] == 1 and result["success"] is False, result
+    batch = client.tool("veh_batch", {"stop_on_error": True, "steps": [
+        {"tool": "veh_targeted_capture", "args": args}]})
+    assert batch["failed"] == 1, batch
 
 
 def test_zero_mask_inline_completeness(session):

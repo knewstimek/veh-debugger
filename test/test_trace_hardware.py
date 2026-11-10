@@ -74,6 +74,15 @@ def main():
             assert "error" in trace({"collect_hardware_events": False})
             assert counters() == "hardware:0:0", counters()
             checks += 1
+            attach("hardware-memory-gap")
+            incomplete = trace()
+            assert incomplete.get("fatal") and incomplete.get("code") == "memory_capture_incomplete", incomplete
+            assert not incomplete["capture_complete"] and not incomplete["complete"], incomplete
+            assert not incomplete["event_file"]["complete"], incomplete
+            assert not incomplete["hardware_collection"]["complete"], incomplete
+            assert not incomplete["output_file"]["capture_complete"], incomplete
+            checks += 1
+            attach("hardware-ok")
             direct = trace({"timeout_ms": 120000})
             raw, rows = verify(direct)
             assert rows[0]["subject"] == "0x3" and rows[0]["value"] != rows[0]["after"], rows

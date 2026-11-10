@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Require complete captured data for targeted-input success; preserve budget-truncation failure through batch results instead of marking partial artifacts complete.
+- Preserve ENTER read-after-write values and access order for overlapping frame chains; skip XRSTOR payload reads for INIT components while retaining required MXCSR reads. Propagate fatal trace failures through nested batches and targeted inputs, and keep memory/hardware completion flags consistent with capture gaps.
 - Fill collector memory-capture gaps for wide operands, FS/GS-relative addresses, MMX/SSE/AVX masked accesses, VSIB indices, bit-string and XLAT indexing, nested ENTER frames and variable XSAVE areas. Prepare the first access on the traced thread using its live vector context. Preserve the existing event format by splitting large values into 16-byte records.
 - Return `memory_capture_incomplete` errors for uncollected accesses across direct, batch and breakpoint actions, preserving partial artifacts and exact counters so error-stopping chains reject incomplete memory.
 - Capture implicit MOVS/STOS/LODS/CMPS/SCAS memory accesses for every REP iteration, including reverse direction, early comparison termination and zero-count/address-size cases. Preserve the existing event format and direct/batch/breakpoint-action behavior.

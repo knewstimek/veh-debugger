@@ -175,6 +175,7 @@ public:
 			uint8_t before[kTraceMemoryMaxValueBytes]{};
 			uint32_t dependencyMask = 0;
 			uint8_t accessIndex = 0;
+			uint16_t order = 0;
 		};
 		struct MemoryReadSlot {
 			uint64_t instruction = 0;
@@ -192,6 +193,7 @@ public:
 			uint8_t size = 0;
 			uint8_t value[kTraceMemoryMaxValueBytes]{};
 			uint8_t accessIndex = 0;
+			uint16_t order = 0;
 		};
 		struct MemoryTaintSlot {
 			uint64_t address = 0;

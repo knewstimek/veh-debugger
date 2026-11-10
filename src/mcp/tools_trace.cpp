@@ -459,6 +459,7 @@ json McpServer::ToolTargetedCapture(const json& args) {
 	json reports = json::array();
 	uint32_t succeeded = 0, failed = 0;
 	int64_t firstFailedInput = -1;
+	json fatalFailure;
 
 	for (size_t index = 0; index < args["inputs"].size(); ++index) {
 		const auto& input = args["inputs"][index];
@@ -467,6 +468,10 @@ json McpServer::ToolTargetedCapture(const json& args) {
 		executor.SetVariable(inputVariable, input);
 		json setup = setupSteps.empty() ? json{{"results", json::array()}, {"failed", 0}, {"succeeded", 0}}
 			: executor.Execute(setupSteps);
+		if (setup.value("fatal", false)) {
+			fatalFailure = setup;
+			if (inBreakpointAction_) actionStepInterrupted_ = true;
+		}
 		json setupSummary = {{"succeeded", setup.value("succeeded", 0)},
 			{"failed", setup.value("failed", 0)},
 			{"first_failed_step", setup.value("first_failed_step", json(nullptr))}};
@@ -477,7 +482,7 @@ json McpServer::ToolTargetedCapture(const json& args) {
 			report["error"] = "input setup failed";
 			reports.push_back(std::move(report));
 			++failed; if (firstFailedInput < 0) firstFailedInput = static_cast<int64_t>(index);
-			if (stopOnError) break;
+			if (stopOnError || !fatalFailure.is_null()) break;
 			continue;
 		}
 
@@ -513,7 +518,7 @@ json McpServer::ToolTargetedCapture(const json& args) {
 			report["error"] = environment["error"];
 			reports.push_back(std::move(report));
 			++failed; if (firstFailedInput < 0) firstFailedInput = static_cast<int64_t>(index);
-			if (stopOnError) break;
+			if (stopOnError || !fatalFailure.is_null()) break;
 			continue;
 		}
 		const json checkpointId = environment["id"];
@@ -545,6 +550,12 @@ json McpServer::ToolTargetedCapture(const json& args) {
 		}
 		ToolCheckpointDelete({{"id", checkpointId}});
 		const bool hasTraceError = traceResult.contains("error");
+		if (traceResult.value("fatal", false)) {
+			fatalFailure = traceResult;
+			if (inBreakpointAction_) actionStepInterrupted_ = true;
+			for (const char* key : {"code", "fatal", "unsupported_memory_reads", "unsupported_memory_writes"})
+				if (traceResult.contains(key)) report[key] = traceResult[key];
+		}
 		const bool targetMatched = !hasTraceError &&
 			traceResult.value("target_window", json::object()).value("matched", false);
 		const uint64_t stepsExecuted = !hasTraceError ?
@@ -554,7 +565,8 @@ json McpServer::ToolTargetedCapture(const json& args) {
 		// A match at the initial IP has sequence zero.  It is only a trigger
 		// observation, not a completed capture: the requested post window must run
 		// and terminate through the dedicated target-window stop path.
-		const bool captureSucceeded = !hasTraceError && targetMatched &&
+		const bool dataComplete = !hasTraceError && traceResult.value("capture_complete", false);
+		const bool captureSucceeded = !hasTraceError && dataComplete && targetMatched &&
 			stepsExecuted != 0 && stopReason == "target_window";
 		if (traceResult.contains("output_file")) report["artifact"] = traceResult["output_file"];
 		if (traceResult.contains("counts")) report["counts"] = traceResult["counts"];
@@ -573,6 +585,7 @@ json McpServer::ToolTargetedCapture(const json& args) {
 			else if (stepsExecuted == 0) report["error"] = "trace executed zero instructions";
 			else if (stopReason == "exception")
 				report["error"] = "trace stopped by exception before target window completed";
+			else if (!dataComplete) report["error"] = "captured data is incomplete";
 			else report["error"] = "target window did not complete (stop_reason: " + stopReason + ")";
 			++failed; if (firstFailedInput < 0) firstFailedInput = static_cast<int64_t>(index);
 		} else {
@@ -580,13 +593,18 @@ json McpServer::ToolTargetedCapture(const json& args) {
 			++succeeded;
 		}
 		reports.push_back(std::move(report));
-		if (stopOnError && failed != 0) break;
+		if (!fatalFailure.is_null() || (stopOnError && failed != 0)) break;
 	}
-	return {{"mode", "targeted_inputs"}, {"input_variable", inputVariable},
+	json result = {{"success", failed == 0}, {"mode", "targeted_inputs"}, {"input_variable", inputVariable},
 		{"inputs", std::move(reports)}, {"succeeded", succeeded}, {"failed", failed},
 		{"first_failed_input", firstFailedInput < 0 ? json(nullptr) : json(firstFailedInput)},
 		{"stopped_on_error", stopOnError && failed != 0},
 		{"artifact_directory", directory.string()}};
+	if (!fatalFailure.is_null()) {
+		result["error"] = fatalFailure["error"]; result["fatal"] = true;
+		if (fatalFailure.contains("code")) result["code"] = fatalFailure["code"];
+	}
+	return result;
 }
 
 } // namespace veh

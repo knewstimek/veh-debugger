@@ -27,7 +27,9 @@ breakpoint actions. The diagnostic is fatal to the current batch/action chain, i
 `stop_on_error=false`; breakpoint actions also suppress automatic continuation.
 Any written artifact
 retains the diagnostic and captured data. `test/test_trace_memory_gap.py` checks
-this with exact 64-bit counts and inline/artifact replies.
+this with exact 64-bit counts and inline/artifact replies, nested if/loop/for_each
+chains, result projections and targeted-input propagation. Nested batch metadata
+is collected from leaf results once, excluding cached summaries and artifact lists.
 
 The target collector resolves FS/GS bases on the traced thread and uses the live
 exception frame for SSE/AVX/opmask state, including the first traced instruction.
@@ -40,7 +42,13 @@ BT/BTS/BTR/BTC register indices and ENTER nesting are resolved before capture.
 FXSAVE/FXRSTOR and XSAVE/XRSTOR areas use multiple records; XSAVE layouts follow
 the requested enabled components and CPU-reported standard/compact offsets.
 Save-area records describe architectural operand ranges and can include unchanged
-reserved bytes; they are not a bus-access trace.
+reserved bytes; they are not a bus-access trace. XRSTOR reads only present,
+requested component payloads, retaining the standard/compact MXCSR rules for INIT
+state. ENTER preserves push/read order and overlays earlier pushes when a frame
+source overlaps the destination stack. Targeted input success requires both a
+completed target window and complete captured data; reaching the target does not
+override a truncated artifact. Hardware and memory completion flags also include
+memory capture failures.
 
 Native regressions cover both widths, legacy/SSE/AVX masks, disabled unmapped
 gather lanes, wide values, segment-relative first accesses, bit/byte indices,

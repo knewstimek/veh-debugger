@@ -46,6 +46,18 @@ static bool BatchResultFailed(const json& value) {
 	return false;
 }
 
+// A fatal result remains fatal through control-flow wrappers and projections.
+static const json* BatchFatalResult(const json& value) {
+	if (value.is_object()) {
+		if (value.contains("error") && value.value("fatal", false)) return &value;
+		for (const char* key : {"result", "results"})
+			if (value.contains(key)) if (const auto* fatal = BatchFatalResult(value[key])) return fatal;
+	} else if (value.is_array()) {
+		for (const auto& child : value) if (const auto* fatal = BatchFatalResult(child)) return fatal;
+	}
+	return nullptr;
+}
+
 static void CollectBatchTraceMetadata(const json& value, json& summaries, json& artifacts) {
 	if (value.is_object()) {
 		if (value.contains("stop_reason") && value.contains("steps_executed")) {
@@ -61,7 +73,8 @@ static void CollectBatchTraceMetadata(const json& value, json& summaries, json& 
 		if (value.contains("event_file") && value["event_file"].is_object() &&
 			value["event_file"].contains("path")) artifacts.push_back(value["event_file"]);
 		for (const auto& [key, child] : value.items())
-			if (key != "output_file" && key != "code_artifact" && key != "event_file")
+			if (key != "output_file" && key != "code_artifact" && key != "event_file" &&
+				key != "trace_summary" && key != "artifacts")
 				CollectBatchTraceMetadata(child, summaries, artifacts);
 	} else if (value.is_array()) {
 		for (const auto& child : value) CollectBatchTraceMetadata(child, summaries, artifacts);
@@ -149,6 +162,10 @@ static json ProjectBatchResult(const json& step, const json& result) {
 		{"partial", true}, {"reason", "missing_result_fields"}, {"missing", std::move(missing)}};
 	if (result.is_object() && result.contains("error") && !projected.contains("error"))
 		projected["error"] = result["error"];
+	if (const auto* fatal = BatchFatalResult(result)) {
+		projected["fatal"] = true; projected["error"] = (*fatal)["error"];
+		if (fatal->contains("code")) projected["code"] = (*fatal)["code"];
+	}
 	return projected;
 }
 
@@ -168,6 +185,7 @@ json BatchExecutor::Execute(const json& steps) {
 	json allResults = json::array();
 	uint32_t succeeded = 0, failed = 0;
 	int64_t firstFailedStep = -1;
+	json fatalFailure;
 
 	for (size_t i = 0; i < steps.size(); i++) {
 		try {
@@ -180,8 +198,9 @@ json BatchExecutor::Execute(const json& steps) {
 			else ++succeeded;
 
 			// Check for fatal error
-			if (result.contains("error") && result.contains("fatal") && result["fatal"].get<bool>()) {
-				allResults.push_back({{"step", i}, {"aborted", true}, {"reason", result["error"]}});
+			if (const auto* fatal = BatchFatalResult(result)) {
+				fatalFailure = *fatal;
+				allResults.push_back({{"step", i}, {"aborted", true}, {"reason", (*fatal)["error"]}});
 				break;
 			}
 			if (stepFailed && stopOnError_) break;
@@ -201,6 +220,10 @@ json BatchExecutor::Execute(const json& steps) {
 		{"first_failed_step", firstFailedStep < 0 ? json(nullptr) : json(firstFailedStep)},
 		{"stopped_on_error", stopOnError_ && failed != 0},
 		{"trace_summary", std::move(traceSummaries)}, {"artifacts", std::move(artifacts)}};
+	if (!fatalFailure.is_null()) {
+		report["fatal"] = true; report["error"] = fatalFailure["error"];
+		if (fatalFailure.contains("code")) report["code"] = fatalFailure["code"];
+	}
 	return report;
 }
 
@@ -276,7 +299,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 			namedVars_ = sub.namedVars_;
 			loopResults.push_back(r);
 			iterations++;
-			if (stopOnError_ && BatchResultFailed(r)) break;
+			if (BatchFatalResult(r) || (stopOnError_ && BatchResultFailed(r))) break;
 
 			if (!untilCond.empty()) {
 				std::string resolved = ResolveString(untilCond);
@@ -320,7 +343,7 @@ json BatchExecutor::ExecuteStep(const json& step) {
 			results_ = sub.results_;
 			namedVars_ = sub.namedVars_;
 			foreachResults.push_back(r);
-			if (stopOnError_ && BatchResultFailed(r)) break;
+			if (BatchFatalResult(r) || (stopOnError_ && BatchResultFailed(r))) break;
 		}
 		return {{"type", "for_each"}, {"count", foreachResults.size()}, {"results", foreachResults}};
 	}

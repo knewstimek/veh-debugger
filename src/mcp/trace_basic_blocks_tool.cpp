@@ -1084,7 +1084,8 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 	json memoryOrdering = {{"available", result.memoryEventCollectionEnabled},
 		{"granularity", "instruction_memory_accesses"},
 		{"event_schema_version", result.memoryEventSchemaVersion},
-		{"complete", result.memoryEventCollectionEnabled && !memoryEventsTruncated},
+		{"complete", result.memoryEventCollectionEnabled && !memoryEventsTruncated &&
+			!result.unsupportedMemoryReads && !result.unsupportedMemoryWrites},
 		{"events_captured", capturedMemoryEvents},
 		{"events_dropped", result.memoryEventsDropped}};
 	if (fileEventOutput) memoryOrdering["storage"] = "file";
@@ -1219,7 +1220,8 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
         const auto& h = result.hardware;
         const auto& a = result.eventArtifact;
         const bool lower = (h.resultFlags & hardwaretrace::kCountLowerBound) != 0;
-        hardwareCaptureComplete = !result.truncated && !a.captureTruncated && !eventsTruncated &&
+        hardwareCaptureComplete = !result.unsupportedMemoryReads && !result.unsupportedMemoryWrites &&
+            !result.dependencyIncomplete && !result.truncated && !a.captureTruncated && !eventsTruncated &&
             !memoryEventsTruncated && !registerEventsTruncated && !codeTruncated &&
             !result.memoryWritesTruncated && !result.memoryReadsTruncated && !result.decodeIncomplete &&
             !(h.resultFlags & (hardwaretrace::kCountLowerBound | hardwaretrace::kUnsupportedAtPc |
