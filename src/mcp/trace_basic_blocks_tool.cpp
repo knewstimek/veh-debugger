@@ -1275,7 +1275,6 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
         else if (h.resultFlags & hardwaretrace::kScopeExit) fullResult["stop_reason"] = "left_scope";
     }
 	if (!artifactMetadata.empty()) fullResult["capture_environment"] = artifactMetadata;
-	if (outputMode == "inline" && !TraceReplyNeedsArtifact(fullResult)) return fullResult;
 
 	json truncation = {{"trace", fullResult["truncated"]},
 		{"events", fullResult["events_truncated"]},
@@ -1285,8 +1284,12 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		{"memory_writes", fullResult["memory_writes_truncated"]},
 		{"memory_reads", fullResult["memory_reads_truncated"]}};
 	if (collectionFlags || result.appliedMaxDecodedInstructions) truncation["decode"] = result.decodeIncomplete;
-	bool complete = true;
+	// Storage success does not prove that every requested memory access was captured.
+	bool complete = !result.unsupportedMemoryReads && !result.unsupportedMemoryWrites &&
+		!result.dependencyIncomplete;
 	for (const auto& value : truncation.items()) if (value.value().get<bool>()) complete = false;
+	fullResult["capture_complete"] = hardware ? hardwareCaptureComplete : complete;
+	if (outputMode == "inline" && !TraceReplyNeedsArtifact(fullResult)) return fullResult;
 
 	auto exported = outputFile.empty() ?
 		WriteJsonArtifactInDirectory("", "trace", fullResult, outputFormat) :
@@ -1324,6 +1327,10 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 			{"memory_events", fullResult["memory_events_dropped"]},
 			{"register_events", fullResult["register_events_dropped"]}}},
 		{"truncation", std::move(truncation)}, {"occurrence_window", fullResult["occurrence_window"]},
+		{"capture_complete", fullResult["capture_complete"]},
+		{"unsupported_memory_reads", result.unsupportedMemoryReads},
+		{"unsupported_memory_writes", result.unsupportedMemoryWrites},
+		{"dependency_incomplete", result.dependencyIncomplete},
 		{"output_file", {{"path", exported.path}, {"format", exported.format},
 			{"size", exported.size}, {"sha256", exported.sha256},
                 {"storage_complete", true}, {"capture_complete", complete}, {"complete", complete}}}};

@@ -133,6 +133,8 @@ public:
 			uint8_t readsFlags = 0;
 			uint8_t writesFlags = 0;
 			uint8_t clearsDependencies = 0;
+			// REP strings trap after each iteration; address width selects CX/ECX/RCX.
+			uint8_t repeatCountBits = 0;
 			uint32_t lastDependencyMask = 0;
 			TraceBasicBlockEdgeKind kind = TraceBasicBlockEdgeKind::Fallthrough;
 		};

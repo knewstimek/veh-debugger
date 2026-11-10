@@ -10,7 +10,7 @@ from ctypes import wintypes
 import pytest
 
 from build_paths import RELEASE, IS_X86, ROOT
-from mcp_test_client import McpClient
+from owned_mcp_client import OwnedMcpClient
 
 
 def check(result):
@@ -20,7 +20,7 @@ def check(result):
 
 @pytest.fixture(scope="module")
 def session():
-    client = McpClient(args=["--profile=full"])
+    client = OwnedMcpClient(args=["--profile=full"])
     target = None
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
@@ -146,6 +146,74 @@ def masked_program(start, data):
     return p
 
 
+def string_program(start, data):
+    p = Program(start, data)
+    p.initial = bytes(range(64))
+    ptr = 4 if IS_X86 else 8
+    def setup(count, source=0, dest=32):
+        p.immediate("BE" if IS_X86 else "48 BE", data + source, ptr)
+        p.immediate("BF" if IS_X86 else "48 BF", data + dest, ptr)
+        p.immediate("B9", count)
+    def string(code, reads, writes=()):
+        pc = p.start + len(p.code)
+        p.code.extend(bytes.fromhex(code))
+        # TF yields once for every REP iteration (and once for a zero count).
+        for read, write in zip(reads, writes or [None] * len(reads)):
+            p.steps += 1
+            for offset, size, value in read:
+                p.accesses.append(("read", pc, p.steps, data + offset, size, value, None))
+            if write:
+                offset, size, before, after = write
+                p.accesses.append(("write", pc, p.steps, data + offset, size, before, after))
+        if not reads:
+            p.steps += 1
+    p.emit("FC")
+    setup(3)
+    string("F3 A4", [[(i, 1, i)] for i in range(3)],
+           [(32 + i, 1, 32 + i, i) for i in range(3)])
+    # Zero count must not read invalid pointers or publish a write/dependency.
+    p.immediate("BE" if IS_X86 else "48 BE", 0, ptr)
+    p.immediate("BF" if IS_X86 else "48 BF", 0, ptr)
+    p.immediate("B9", 0)
+    string("F3 A4", [])
+    p.immediate("B9" if IS_X86 else "48 B9", 1 << (16 if IS_X86 else 32), ptr)
+    string("67 F3 A4", [])  # CX/ECX zero despite nonzero enclosing register
+    # DF=1, word-sized stores and loads.
+    p.emit("FD")
+    setup(2, 6, 38)
+    p.immediate("B8", 0xBEEF)
+    string("F3 66 AB", [[], []], [(38, 2, 0x2726, 0xBEEF), (36, 2, 0x2524, 0xBEEF)])
+    string("66 AD", [[(6, 2, 0x0706)]])
+    p.immediate("B9", 2)
+    string("F3 66 AD", [[(4, 2, 0x0504)], [(2, 2, 0x0302)]])
+    p.emit("FC")
+    # REPE CMPS continues over equal bytes, then stops on a mismatch.
+    setup(4, 0, 0)
+    string("A6", [[(0, 1, 0), (0, 1, 0)]])
+    setup(5, 0, 32)
+    string("F3 A6", [[(i, 1, i), (32 + i, 1, i if i < 3 else 35)] for i in range(4)])
+    # REPNE SCAS stops at the matching byte; the remaining count is nonzero.
+    setup(4, 0, 0)
+    p.immediate("B8", 1)
+    string("F2 AE", [[(0, 1, 0)], [(1, 1, 1)]])
+    # Unprefixed MOVS/STOS/SCAS and a repeated dword copy.
+    setup(1, 8, 40)
+    string("A4", [[(8, 1, 8)]], [(40, 1, 40, 8)])
+    string("AA", [[]], [(41, 1, 41, 1)])
+    string("AE", [[(42, 1, 42)]])
+    setup(2, 8, 48)
+    string("F3 A5", [[(8 + i * 4, 4, int.from_bytes(p.initial[8+i*4:12+i*4], "little"))]
+                     for i in range(2)],
+           [(48+i*4, 4, int.from_bytes(p.initial[48+i*4:52+i*4], "little"),
+             int.from_bytes(p.initial[8+i*4:12+i*4], "little")) for i in range(2)])
+    if not IS_X86:
+        setup(1, 16, 56)
+        string("F3 48 A5", [[(16, 8, int.from_bytes(p.initial[16:24], "little"))]],
+               [(56, 8, int.from_bytes(p.initial[56:64], "little"),
+                 int.from_bytes(p.initial[16:24], "little"))])
+    return p
+
+
 def capture(client, tid, program, output, caller, mode):
     prefix = "e" if IS_X86 else "r"
     steps = [
@@ -173,11 +241,16 @@ def capture(client, tid, program, output, caller, mode):
     if mode == "file":
         args.update(events_output="file", events_output_path=output + ".vte")
     if caller == "direct":
-        check(client.tool("veh_trace_basic_blocks", inline_trace_args(args), timeout=15))
+        receipt = check(client.tool("veh_trace_basic_blocks", inline_trace_args(args), timeout=15))
+        assert receipt["capture_complete"] == (not bool(program.unsupported_writes)), receipt
+        assert receipt["unsupported_memory_writes"] == program.unsupported_writes, receipt
+        assert receipt["output_file"]["capture_complete"] == receipt["capture_complete"], receipt
     elif caller == "batch":
         result = check(client.tool("veh_batch", {"steps": [
             {"tool": "veh_trace_basic_blocks", "args": inline_trace_args(args)}]}))
-        check(result["results"][0]["result"])
+        receipt = check(result["results"][0]["result"])
+        assert receipt["capture_complete"] == (not bool(program.unsupported_writes)), receipt
+        assert receipt["output_file"]["capture_complete"] == receipt["capture_complete"], receipt
     else:
         bp = check(client.tool("veh_set_breakpoint", {
             "address": hex(program.start), "action": [
@@ -201,6 +274,7 @@ def capture(client, tid, program, output, caller, mode):
     assert result["unsupported_memory_reads"] == 0, result
     assert result["unsupported_memory_writes"] == program.unsupported_writes, result
     assert result["dependency_incomplete"] == bool(program.unsupported_writes), result
+    assert result["capture_complete"] == (not bool(program.unsupported_writes)), result
     if mode == "inline":
         return result, result["memory_events"], result["register_events"]
     converted = output + ".jsonl"
@@ -217,10 +291,10 @@ def capture(client, tid, program, output, caller, mode):
 
 @pytest.mark.parametrize("caller", ["direct", "batch", "action"])
 @pytest.mark.parametrize("mode", ["inline", "file"])
-@pytest.mark.parametrize("kind", ["rmw", "conditional", "masked"])
+@pytest.mark.parametrize("kind", ["rmw", "conditional", "masked", "string"])
 def test_memory_accesses(session, tmp_path, caller, mode, kind):
     client, tid, page = session
-    builder = {"rmw": rmw_program, "conditional": conditional_program, "masked": masked_program}[kind]
+    builder = {"rmw": rmw_program, "conditional": conditional_program, "masked": masked_program, "string": string_program}[kind]
     program = builder(page, page + 2048)
     result, memory, registers = capture(client, tid, program, str(tmp_path / "trace.json"), caller, mode)
     actual = [(e["kind"], int(e["instruction"], 0), e["sequence"], int(e["address"], 0), e["size"])
@@ -243,7 +317,8 @@ def test_memory_accesses(session, tmp_path, caller, mode, kind):
                 assert event["before"] == before.to_bytes(event["size"], "little").hex(" "), event
             assert event["after"] == after.to_bytes(event["size"], "little").hex(" "), event
             aggregate = next(w for w in result["memory_writes"]
-                             if int(w["instruction"], 0) == int(event["instruction"], 0))
+                             if int(w["instruction"], 0) == int(event["instruction"], 0)
+                             and w["address"] == event["address"])
             assert (aggregate["address"], aggregate["before"], aggregate["after"]) == (
                 event["address"], event["before"], event["after"]), aggregate
     expected_flags = dict(program.flags)
@@ -258,3 +333,21 @@ def test_memory_accesses(session, tmp_path, caller, mode, kind):
         accumulator = "eax" if IS_X86 else "rax"
         assert source in result["final_dependencies"][accumulator], result["final_dependencies"]
         assert all(source in w.get("dependencies", []) for w in result["memory_writes"]), result["memory_writes"]
+
+
+def test_unsupported_inline_completeness(session):
+    client, tid, page = session
+    # MASKMOVDQU with no active lanes is intentionally unsupported by the collector.
+    code = "66 0F EF C0 66 0F EF C9 66 0F F7 C1"
+    check(client.tool("veh_write_memory", {"address": hex(page), "data": code}))
+    for name, value in [("eip" if IS_X86 else "rip", page),
+                        ("edi" if IS_X86 else "rdi", page + 2048), ("eflags", 0x202)]:
+        check(client.tool("veh_set_register", {"threadId": tid, "name": name, "value": hex(value)}))
+    result = check(client.tool("veh_trace_basic_blocks", {
+        "threadId": tid, "start": hex(page), "end": hex(page + 12),
+        "max_steps": 8, "timeout_ms": 1000, "stack_bytes": 0,
+        "collect_memory_events": True, "output_mode": "inline", "events_output": "inline",
+    }))
+    assert result["steps_executed"] == 3, result
+    assert result["unsupported_memory_writes"] == 1, result
+    assert result["capture_complete"] is False and result["truncated"] is False, result

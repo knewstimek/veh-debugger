@@ -134,6 +134,10 @@ static uint8_t DecodeTraceInstruction(const ZydisDecoder& decoder, ZydisMachineM
 
 		bool repeated = (decoded.attributes & (ZYDIS_ATTRIB_HAS_REP |
 			ZYDIS_ATTRIB_HAS_REPE | ZYDIS_ATTRIB_HAS_REPNE)) != 0;
+		// Only architectural string operations can use per-iteration TF capture.
+		// Other REP-prefixed operations retain their unsupported classification.
+		const bool repeatedString = repeated && decoded.meta.category == ZYDIS_CATEGORY_STRINGOP;
+		if (repeatedString) meta.repeatCountBits = decoded.address_width;
 		if (decoded.cpu_flags) {
 			meta.readsFlags = decoded.cpu_flags->tested != 0;
 			meta.writesFlags = (decoded.cpu_flags->modified | decoded.cpu_flags->set_0 |
@@ -183,14 +187,14 @@ static uint8_t DecodeTraceInstruction(const ZydisDecoder& decoder, ZydisMachineM
 			const bool compareExchange = decoded.mnemonic == ZYDIS_MNEMONIC_CMPXCHG ||
 				decoded.mnemonic == ZYDIS_MNEMONIC_CMPXCHG8B ||
 				decoded.mnemonic == ZYDIS_MNEMONIC_CMPXCHG16B;
-			if ((operand.actions & ZYDIS_OPERAND_ACTION_CONDWRITE) && !compareExchange) {
+			if ((operand.actions & ZYDIS_OPERAND_ACTION_CONDWRITE) && !compareExchange && !repeatedString) {
 				// Masked/conditional stores need per-lane execution metadata; do
 				// not invent a full-operand write when the instruction may skip it.
 				meta.unsupportedWrites++;
 				writable = false;
 			}
 			if ((operand.actions & ZYDIS_OPERAND_ACTION_CONDREAD) &&
-				decoded.meta.category != ZYDIS_CATEGORY_CMOV) {
+				decoded.meta.category != ZYDIS_CATEGORY_CMOV && !repeatedString) {
 				meta.unsupportedReads++;
 				readable = false;
 			}
@@ -206,7 +210,7 @@ static uint8_t DecodeTraceInstruction(const ZydisDecoder& decoder, ZydisMachineM
 				decoded.mnemonic == ZYDIS_MNEMONIC_VPMASKMOVD ||
 				decoded.mnemonic == ZYDIS_MNEMONIC_VPMASKMOVQ ||
 				(decoded.avx.mask.reg != ZYDIS_REGISTER_NONE && decoded.avx.mask.reg != ZYDIS_REGISTER_K0);
-			bool unsupported = repeated || maskedMemory || operand.size == 0 ||
+			bool unsupported = (repeated && !repeatedString) || maskedMemory || operand.size == 0 ||
 				operand.size > veh::kTraceMemoryMaxValueBytes * 8 ||
 				operand.mem.segment == ZYDIS_REGISTER_FS || operand.mem.segment == ZYDIS_REGISTER_GS ||
 				(writable && meta.writeOperandCount >= veh::VehHandler::TraceBasicBlocksState::kMaxWriteOperands) ||

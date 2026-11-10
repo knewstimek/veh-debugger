@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+
+- Capture implicit MOVS/STOS/LODS/CMPS/SCAS memory accesses for every REP iteration, including reverse direction, early comparison termination and zero-count/address-size cases. Preserve the existing event format and direct/batch/breakpoint-action behavior.
+- Trace completeness now accounts for unsupported memory accesses and incomplete dependencies in inline results and compact artifact receipts; successful file storage no longer hides these gaps. Failed runtime value snapshots also mark requested dependency tracking incomplete.
+
 ## 1.2.5 - 2026-11-08
 
 ### Changed

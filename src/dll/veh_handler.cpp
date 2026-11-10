@@ -737,6 +737,13 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
 	if (!instruction || !ctx) return;
 	if (!tb.collectMemoryWrites && !tb.collectMemoryReads && !tb.collectMemoryEvents &&
 		!tb.dependencySourceCount) return;
+	if (instruction->repeatCountBits) {
+		uint64_t count = BasicTraceContextRegister(ctx, 2); // CX/ECX/RCX
+		if (instruction->repeatCountBits == 16) count = static_cast<uint16_t>(count);
+		else if (instruction->repeatCountBits == 32) count = static_cast<uint32_t>(count);
+		// A zero-count REP retires without touching memory or its destinations.
+		if (!count) return;
+	}
 	if (tb.dependencySourceCount && (instruction->unsupportedReads || instruction->unsupportedWrites))
 		tb.dependencyIncomplete = true;
 	if (tb.collectMemoryWrites || tb.collectMemoryEvents)
@@ -755,6 +762,8 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
 			address = base + index * operand.scale + static_cast<uint64_t>(operand.displacement);
 			if (operand.preDecrementStack) address -= operand.size;
 			if (operand.postIncrementStack) address += operand.size;
+			if (instruction->repeatCountBits == 16) address = static_cast<uint16_t>(address);
+			else if (instruction->repeatCountBits == 32) address = static_cast<uint32_t>(address);
 #ifndef _WIN64
 			address = static_cast<uint32_t>(address);
 #endif
@@ -791,7 +800,10 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
 			pending.size = operand.size;
 			pending.dependencyMask = readDependency;
 			pending.accessIndex = i;
-			if (!SafeCopyTraceValue(address, pending.value, operand.size)) tb.unsupportedMemoryReads++;
+			if (!SafeCopyTraceValue(address, pending.value, operand.size)) {
+				tb.unsupportedMemoryReads++;
+				if (tb.dependencySourceCount) tb.dependencyIncomplete = true;
+			}
 			else tb.pendingReadCount++;
 		}
 	}
@@ -813,6 +825,7 @@ void VehHandler::PrepareBasicTraceMemoryWrites(
 		pending.accessIndex = static_cast<uint8_t>(instruction->readOperandCount + i);
 		if (!SafeCopyTraceValue(address, pending.before, operand.size)) {
 			tb.unsupportedMemoryWrites++;
+			if (tb.dependencySourceCount) tb.dependencyIncomplete = true;
 			continue;
 		}
 		tb.pendingWriteCount++;
@@ -1492,6 +1505,7 @@ void VehHandler::CompleteBasicTraceMemoryWrites() {
 		const auto& pending = tb.pendingWrites[i];
 		if (!SafeCopyTraceValue(pending.address, after, pending.size)) {
 			tb.unsupportedMemoryWrites++;
+			if (tb.dependencySourceCount) tb.dependencyIncomplete = true;
 			continue;
 		}
 		RecordBasicTraceMemoryEvent(pending, after, sequence);

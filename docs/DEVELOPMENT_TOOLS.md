@@ -8,6 +8,23 @@ These bounded command-line helpers are the preferred way to reproduce and valida
 
 Captured aggregate/vector bytes and incomplete scalars use the same raw-byte formatter in MCP and DAP, in backend byte order. MCP adds uppercase contiguous `valueBytes`, captured `valueSize` and, when the declared size is known, `valueTruncated`. Partial values show `(captured/declared bytes)`; unknown-size values explicitly say `size unknown`. No captured bytes remains unreadable; complete 1/2/4/8-byte scalars retain their typed format. Run `py -3 test/test_backend_results.py --locals-only` after building `veh-mcp-server`, `veh-debug-adapter` and `guest_backend_fixture` to check complete/partial/unknown/missing bytes, partial scalars and 32-bit pointers through direct, batch, breakpoint actions and DAP. These checks qualify presentation, not backend memory capture or unwind.
 
+## String memory capture and completeness
+
+`test/test_trace_memory_access.py` includes native MOVS/STOS/LODS/CMPS/SCAS probes,
+REP iteration bytes and addresses, zero counts (including address-size-selected
+CX/ECX), DF=1, element widths and comparison early termination. It checks direct,
+batch and breakpoint actions with both inline events and `.vte` files on x64/x86.
+The collector uses the target's per-iteration TF stops; the event wire format is
+unchanged. Existing captures cannot recover bytes that were never recorded.
+
+`capture_complete` is false when requested memory accesses are unsupported or
+requested dependencies are incomplete, as well as when retained data is truncated.
+Compact JSON receipts expose the unsupported read/write counts and dependency
+status alongside storage and capture completion. File integrity alone does not
+qualify a capture for replay. Masked/vector-lane accesses, values over 16 bytes,
+FS/GS-relative memory and unsupported address registers remain explicitly counted
+limitations; a zero unsupported count does not qualify every instruction family.
+
 ## Release boundaries
 
 `test/test_release_metadata.py` runs metadata-only preparation in isolated LF and CRLF Git fixtures. It verifies synchronized versions, unchanged dependency versions, preserved line endings and idempotent headings/notes. Run it with `py -3 tools/run_tests.py test_release_metadata.py --jobs 1 --timeout 90`; it is also included in the release test set.
