@@ -433,6 +433,18 @@ struct GetRegistersResponse {
 	RegisterSet regs;
 };
 
+// kCapRegisterValidityV1 connections append a validity mask to GetRegisters. Bit i is
+// RegisterSet field i in SetRegisterRequest.regIndex order; XMM0..15 are bits 30..45.
+// A complete context sets every bit. Unreadable fields are zero, and writes that
+// would need them (SetRegisters, SetRegister of such a field) return InvalidState.
+constexpr uint64_t kRegisterValidRip = 1ull << 16;
+constexpr uint64_t kRegisterValidAll = (1ull << 46) - 1;
+struct GetRegistersResponseV1 {
+	GetRegistersResponse base;
+	uint64_t validMask;
+};
+static_assert(sizeof(GetRegistersResponseV1) == sizeof(GetRegistersResponse) + 8);
+
 struct SetRegisterRequest {
 	uint32_t threadId;
 	uint32_t regIndex;   // RegisterSet 내 오프셋 (0=rax, 1=rbx, ..., 16=rip, 17=rflags)
@@ -2135,6 +2147,7 @@ enum class IpcBackend : uint32_t { VehDll = 0, Hypervisor = 1 };
 // process image bitness remains separate target metadata. Wire layouts unchanged.
 constexpr uint32_t kCapPageBreakpointV1 = 1u << 11; //VEH-only guard/TF watches
 constexpr uint32_t kCapRegisterContextV1 = 1u << 10;
+constexpr uint32_t kCapRegisterValidityV1 = 1u << 12; // opt-in partial contexts; see GetRegistersResponseV1
 constexpr uint32_t kCapStopIdentityV1 = 1u << 9; // opt-in hold identity and atomic ContinueIfStopped
 constexpr uint32_t kCapBasicTraceLazy = 1u << 8; // wire12 lazy decode, cache budget and 64-bit steps
 constexpr uint32_t kCapValueScanV2 = 1u << 7; // transactional disk/undo and event-driven async value scans
@@ -2165,12 +2178,14 @@ static_assert(sizeof(GetTargetInfoResponse) == 16);
 struct GetCapabilitiesRequestV1 { uint32_t version,flags; };
 static_assert(sizeof(GetCapabilitiesRequestV1)==8);
 // Parse selection before changing connection state. Empty discovery retains the
-// current selection; malformed/unknown requests leave it unchanged.
-inline bool SelectRegisterContext(const void* payload,uint32_t size,uint32_t current,uint32_t* selected) {
+// current selection; malformed/unknown requests leave it unchanged. supported:
+// the opt-in flags this backend advertises and implements.
+inline bool SelectRegisterContext(const void* payload,uint32_t size,uint32_t current,uint32_t* selected,
+    uint32_t supported=kCapRegisterContextV1) {
     if(!size){*selected=current;return true;}
     if(!payload||size!=sizeof(GetCapabilitiesRequestV1))return false;
     GetCapabilitiesRequestV1 request{};std::memcpy(&request,payload,sizeof(request));
-    if(request.version!=1||(request.flags&~kCapRegisterContextV1))return false;
+    if(request.version!=1||(request.flags&~supported))return false;
     *selected=request.flags;return true;
 }
 struct GetCapabilitiesResponse {

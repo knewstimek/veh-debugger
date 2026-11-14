@@ -7,6 +7,7 @@
 - `veh_processes` accepts `backend` when no session is attached: it queries a VM-scope backend once and leaves no session, so finding a guest PID no longer needs a VM attach/detach round trip.
 - Remote runner profiles accept an optional per-backend `stderr_file` that appends agent stderr to a local log on the analysis host; it is never sent to clients.
 - Startup diagnostic detail `backend_busy` (`backend_unavailable`) for an agent that serves one session at a time. The attach error tells the user to detach first.
+- Register validity v1 (`kCapRegisterValidityV1 = 1 << 12`, opt-in): a backend can return a partial context, for example only RIP/RSP/RFLAGS/selectors for a thread held in the kernel by a whole-VM pause. `veh_registers` shows unreadable fields as `null` with `partial: true`. Evaluation and checkpoints refuse partial contexts, and writes to unreadable registers fail with `InvalidState`. `veh_set_register` now reports the backend status.
 - VM state `Fatal` (wire value 4): `veh_virtual_machine status` reports `fatal` for a VM halted by an unrecoverable error. Backends refuse commands that need it to run with `InvalidState`.
 
 ### Fixed

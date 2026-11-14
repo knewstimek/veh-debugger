@@ -46,19 +46,22 @@ public:
 		std::vector<uint8_t>& response, int timeoutMs = 3000,
 		PipeExchangeDiagnostics* diagnostics = nullptr) = 0;
 	virtual bool WaitForReady(int timeoutMs = 3000) = 0;
-    bool QueryContextCapabilities(std::vector<uint8_t>& response,int timeoutMs=1500) {
+    // wanted: opt-in flags this client implements; only advertised ones are selected.
+    bool QueryContextCapabilities(std::vector<uint8_t>& response,int timeoutMs=1500,
+        uint32_t wanted=kCapRegisterContextV1) {
         // Discover with the unchanged request first. Never send an extension
         // payload to a legacy peer which has not advertised support.
         if(!SendAndReceive(IpcCommand::GetCapabilities,nullptr,0,response,timeoutMs))return false;
         GetCapabilitiesResponse caps{};
         if(response.size()<sizeof(caps))return true;
         std::memcpy(&caps,response.data(),sizeof(caps));
-        if(caps.status!=IpcStatus::Ok||!(caps.flags&kCapRegisterContextV1))return true;
-        const GetCapabilitiesRequestV1 request={1,kCapRegisterContextV1};
+        const uint32_t requested=caps.flags&wanted;
+        if(caps.status!=IpcStatus::Ok||!requested)return true;
+        const GetCapabilitiesRequestV1 request={1,requested};
         if(!SendAndReceive(IpcCommand::GetCapabilities,&request,sizeof(request),response,timeoutMs)||
            response.size()<sizeof(caps))return false;
         std::memcpy(&caps,response.data(),sizeof(caps));
-        return caps.status==IpcStatus::Ok&&(caps.flags&kCapRegisterContextV1);
+        return caps.status==IpcStatus::Ok&&(caps.flags&requested)==requested;
     }
 	virtual void StartEventListener(EventCallback cb) = 0;
 	virtual void StopEventListener() = 0;

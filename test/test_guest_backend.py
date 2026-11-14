@@ -48,6 +48,22 @@ def run():
         host.wait(timeout=5)
         assert client.tool('veh_threads')['count'] == 1
         assert client.tool('veh_detach').get('success')
+        # A kernel-held thread under a whole-VM pause exposes only RIP/RSP/RFLAGS/selectors.
+        partial = client.tool('veh_attach', {**args, 'agent_args': ['--metadata', 'partial-registers']})
+        assert partial.get('success'), partial
+        regs = client.tool('veh_registers', {'threadId': 77})['registers']
+        assert regs['partial'] is True and regs['rip'] == '0x7FFF22339000' and regs['rsp'] == '0x5BFF000', regs
+        assert regs['rax'] is None and regs['r15'] is None and regs['dr7'] is None and regs['cs'] == '0x33', regs
+        assert client.tool('veh_registers', {'threadId': 77, 'fields': ['rax']})['registers'] == \
+            {'is32bit': False, 'partial': True, 'rax': None}
+        evaluated = client.tool('veh_evaluate', {'expression': 'rax', 'threadId': 77})
+        assert 'error' in evaluated, ('unreadable register evaluated as a value', evaluated)
+        refused = client.tool('veh_set_register', {'threadId': 77, 'name': 'rax', 'value': '1'})
+        assert refused.get('error') == 'SetRegister: operation refused in the current target state', refused
+        assert client.tool('veh_set_register', {'threadId': 77, 'name': 'rip', 'value': '0x1000'}).get('success')
+        code = client.tool('veh_disassemble', {'address': '0x7FFF22339000', 'count': 1, 'threadId': 77})
+        assert code.get('addressBits') == 64, ('partial context lost its code width', code)
+        assert client.tool('veh_detach').get('success')
         # Hypervisor tracing stays non-stopping even when Continue/Pause exist.
         traced = client.tool('veh_attach', {**args, 'agent_args': ['--metadata', 'trace']})
         assert traced.get('success'), traced

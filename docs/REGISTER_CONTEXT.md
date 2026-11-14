@@ -52,6 +52,23 @@ Standard DAP disassembly at the stopped PC also uses the negotiated context,
 including offsets around that PC; other addresses retain the process default.
 A memory address alone does not prove an instruction's execution mode.
 
+## Register validity, version 1
+
+`kCapRegisterValidityV1 = 1u << 12` is selected the same way, alone or together
+with context v1. Backends that support it pass both flags to
+`SelectRegisterContext`'s `supported` argument. On a selecting connection every
+GetRegisters reply is `GetRegistersResponseV1`, the unchanged response followed by
+`uint64 validMask`. Bit i is RegisterSet field i in `SetRegisterRequest.regIndex`
+order (0-15 GPRs, 16 RIP, 17 RFLAGS, 18-23 CS/SS/DS/ES/FS/GS, 24-29 DR0-3/DR6/DR7),
+and XMM0-15 are bits 30-45. A complete context sets all 46 bits; unreadable fields
+are zero. SetRegister of an unreadable field and SetRegisters on a partial context
+return `InvalidState`. Without the selection, a backend refuses a context it
+cannot read completely.
+
+MCP `veh_registers` shows unreadable fields as `null` and adds `partial: true`.
+Disassembly width needs only RIP. Evaluation, checkpoints, stepping and every
+other consumer require a complete context. DAP does not select this flag yet.
+
 Use synthetic mixed-mode stops with nonzero high GPRs and addresses above 4 GiB
 to verify read/write round trips and resumed effects. Also verify a32-bit edit
 preserves hidden native state. Low addresses or matching CS alone are not proof.

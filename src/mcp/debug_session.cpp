@@ -181,7 +181,7 @@ bool DebugSession::ConnectExternalAgent(uint32_t pid, const ExternalAgent& agent
 void DebugSession::QueryBackendInfo() {
 	backendInfo_ = {};
 	std::vector<uint8_t> resp;
-	if (!ipcTransport_->QueryContextCapabilities(resp,1500)) return;
+	if (!ipcTransport_->QueryContextCapabilities(resp, 1500, kCapRegisterContextV1 | kCapRegisterValidityV1)) return;
 	if (resp.size() < sizeof(GetCapabilitiesResponse)) return;   // older DLL: bare InvalidArgs
 	GetCapabilitiesResponse caps;
 	memcpy(&caps, resp.data(), sizeof(caps));
@@ -1311,7 +1311,7 @@ std::vector<StackFrame> DebugSession::GetStackTrace(uint32_t threadId, uint32_t 
 	return result;
 }
 
-std::optional<RegisterSet> DebugSession::GetRegisters(uint32_t threadId) {
+std::optional<RegisterSet> DebugSession::GetRegisterView(uint32_t threadId, uint64_t& validMask) {
 	GetRegistersRequest req{};
 	req.threadId = threadId;
 
@@ -1320,26 +1320,34 @@ std::optional<RegisterSet> DebugSession::GetRegisters(uint32_t threadId) {
 		return std::nullopt;
 
 	if (respData.size() < sizeof(GetRegistersResponse)) return std::nullopt;
-	auto* resp = reinterpret_cast<const GetRegistersResponse*>(respData.data());
-	if (resp->status != IpcStatus::Ok) return std::nullopt;
-
-	return resp->regs;
+	GetRegistersResponse resp{};
+	memcpy(&resp, respData.data(), sizeof(resp));
+	if (resp.status != IpcStatus::Ok) return std::nullopt;
+	validMask = kRegisterValidAll;
+	if (backendInfo_.reported && (backendInfo_.flags & kCapRegisterValidityV1)) {
+		if (respData.size() != sizeof(GetRegistersResponseV1)) return std::nullopt;
+		memcpy(&validMask, respData.data() + sizeof(GetRegistersResponse), sizeof(validMask));
+		if (validMask & ~kRegisterValidAll) return std::nullopt;
+	}
+	return resp.regs;
 }
 
-bool DebugSession::SetRegister(uint32_t threadId, uint32_t regIndex, uint64_t value) {
+// Callers use every field, so a partial context is not a register set for them.
+std::optional<RegisterSet> DebugSession::GetRegisters(uint32_t threadId) {
+	uint64_t validMask = 0;
+	auto regs = GetRegisterView(threadId, validMask);
+	if (regs && validMask != kRegisterValidAll) return std::nullopt;
+	return regs;
+}
+
+bool DebugSession::SetRegister(uint32_t threadId, uint32_t regIndex, uint64_t value, std::string& error) {
 	SetRegisterRequest req{};
 	req.threadId = threadId;
 	req.regIndex = regIndex;
 	req.value = value;
 
 	std::vector<uint8_t> respData;
-	if (!ipcTransport_->SendAndReceive(IpcCommand::SetRegister, &req, sizeof(req), respData))
-		return false;
-	if (respData.size() >= sizeof(SetRegisterResponse)) {
-		auto* resp = reinterpret_cast<const SetRegisterResponse*>(respData.data());
-		return resp->status == IpcStatus::Ok;
-	}
-	return false;
+	return ReceiveBackendReply(IpcCommand::SetRegister, &req, sizeof(req), respData, "SetRegister", error);
 }
 
 bool DebugSession::SetRegisters(uint32_t threadId, const RegisterSet& regs) {
@@ -1877,7 +1885,9 @@ uint32_t DebugSession::DisassemblyAddressBits(uint64_t address, uint32_t threadI
         if (lastStop_.sessionGeneration == sessionGeneration_.load()) threadId = lastStop_.threadId;
     }
     if (threadId) {
-        const auto regs = GetRegisters(threadId);
+        uint64_t valid = 0;
+        auto regs = GetRegisterView(threadId, valid);
+        if (!(valid & kRegisterValidRip)) regs.reset();
         if (regs && (explicitThread || regs->rip == address)) return regs->is32bit ? 32u : 64u;
         if (explicitThread) return 0;
     }

@@ -83,6 +83,9 @@ int wmain(int argc, wchar_t** argv) {
     uint32_t pendingStandardTrace = 0;
     const bool concurrentTraceMode = mode == L"concurrent-trace" || mode == L"ops-action-concurrent";
     const bool contextMode = mode == L"control-context";
+    // A thread held in the kernel by a whole-VM pause: only RIP/RSP/RFLAGS/selectors.
+    const bool partialMode = mode == L"partial-registers";
+    constexpr uint64_t partialValid = (1ull << 7) | (3ull << 16) | (0x3Full << 18);
     uint32_t contextSelection = 0;
     bool contextNative = false;
     uint32_t pathRequests = 0, hardwareQueries = 0;
@@ -194,6 +197,17 @@ int wmain(int argc, wchar_t** argv) {
                     continue;
                 }
                 caps.flags |= veh::kCapRegisterContextV1;
+            }
+            if (partialMode) {
+                constexpr uint32_t supported = veh::kCapRegisterContextV1 | veh::kCapRegisterValidityV1;
+                if (!veh::SelectRegisterContext(bytes.data(), static_cast<uint32_t>(bytes.size()), contextSelection,
+                        &contextSelection, supported)) {
+                    if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break;
+                    continue;
+                }
+                caps.flags |= supported;
+                for (auto op : {veh::IpcCommand::GetRegisters, veh::IpcCommand::SetRegister, veh::IpcCommand::SetRegisters})
+                    veh::SetCommandSupported(caps.commands, op);
             }
             caps.flags |= veh::kCapNoTargetFootprint | (mode == L"host-cap" || mode == L"host-trace" || mode == L"hardware-host" || mode == L"host-late-reply" ? 0 : machineMode ? veh::kCapVirtualMachineTarget : veh::kCapGuestTarget);
             if(importMode)veh::SetCommandSupported(caps.commands,veh::IpcCommand::ResolveImport);
@@ -1536,6 +1550,22 @@ int wmain(int argc, wchar_t** argv) {
         } else if (mode == L"trace" && (command == veh::IpcCommand::Continue || command == veh::IpcCommand::Pause)) {
             if (command == veh::IpcCommand::Continue) ++continueRequests; else ++pauseRequests;
             if (!reply(pipe, header.command, veh::IpcStatus::Ok)) break;
+        } else if (partialMode && command == veh::IpcCommand::GetRegisters) {
+            veh::GetRegistersResponseV1 response{};
+            auto& r = response.base.regs;
+            r.rip = 0x7FFF22339000ULL; r.rsp = 0x5BFF000ULL; r.rflags = 0x246;
+            r.cs = 0x33; r.ss = 0x2B; r.ds = r.es = r.gs = 0x2B; r.fs = 0x53;
+            response.validMask = partialValid;
+            // Without the selected contract a partial context is refused, never zero-filled.
+            if (!(contextSelection & veh::kCapRegisterValidityV1)) {
+                if (!reply(pipe, header.command, veh::GetRegistersResponse{veh::IpcStatus::InvalidState, {}})) break;
+            } else if (!reply(pipe, header.command, response)) break;
+        } else if (partialMode && (command == veh::IpcCommand::SetRegister || command == veh::IpcCommand::SetRegisters)) {
+            veh::SetRegisterRequest request{};
+            if (command == veh::IpcCommand::SetRegister && bytes.size() == sizeof(request)) std::memcpy(&request, bytes.data(), sizeof(request));
+            const bool writable = command == veh::IpcCommand::SetRegister && request.regIndex < 46 &&
+                (partialValid & (1ull << request.regIndex));
+            if (!reply(pipe, header.command, writable ? veh::IpcStatus::Ok : veh::IpcStatus::InvalidState)) break;
         } else if (mode == L"host-late-reply" && command == veh::IpcCommand::Pause) {
             // Only the first reply outlives the frontend's 3-second exchange timeout.
             if (!pauseRequests++) Sleep(4000);

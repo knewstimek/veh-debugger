@@ -434,9 +434,7 @@ json McpServer::ToolSetRegister(const json& args) {
 		return {{"error", "Invalid value: " + valueStr}};
 	}
 
-	if (!session_.SetRegister(threadId, regIndex, newVal)) {
-		return {{"error", "Failed to set register"}};
-	}
+	if (std::string error; !session_.SetRegister(threadId, regIndex, newVal, error)) return {{"error", error}};
 
 	char buf[32];
 	snprintf(buf, sizeof(buf), "0x%llX", newVal);

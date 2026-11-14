@@ -325,7 +325,8 @@ json McpServer::ToolRegisters(const json& args) {
 	uint32_t threadId = JsonUint32(args, "threadId");
 	if (threadId == 0) return {{"error", "threadId is required"}};
 
-	auto regsOpt = session_.GetRegisters(threadId);
+	uint64_t valid = 0;
+	auto regsOpt = session_.GetRegisterView(threadId, valid);
 	if (!regsOpt) {
 		return {{"error", "Failed to get registers (thread may not exist or is not suspended)"}};
 	}
@@ -333,7 +334,11 @@ json McpServer::ToolRegisters(const json& args) {
 	const auto& r = *regsOpt;
 	char buf[20];
 	json regs = json::object();
-	auto hex = [&](uint64_t v) -> std::string {
+	// Fields of a partial context the backend cannot read are null, never zero.
+	auto hex = [&](const uint64_t& v) -> json {
+		const auto index = static_cast<size_t>(reinterpret_cast<const char*>(&v) -
+			reinterpret_cast<const char*>(&r)) / sizeof(uint64_t); // regIndex order
+		if (!(valid & (1ull << index))) return nullptr;
 		snprintf(buf, sizeof(buf), "0x%llX", v);
 		return buf;
 	};
@@ -361,9 +366,11 @@ json McpServer::ToolRegisters(const json& args) {
 	regs["dr2"] = hex(r.dr2); regs["dr3"] = hex(r.dr3);
 	regs["dr6"] = hex(r.dr6); regs["dr7"] = hex(r.dr7);
 	regs["is32bit"] = (bool)r.is32bit;
+	if (valid != kRegisterValidAll) regs["partial"] = true;
 
 	if (args.contains("fields") && args["fields"].is_array() && !args["fields"].empty()) {
 		json selected = {{"is32bit", regs["is32bit"]}};
+		if (regs.contains("partial")) selected["partial"] = true;
 		for (const auto& field : args["fields"]) {
 			if (field.is_string() && regs.contains(field.get<std::string>()))
 				selected[field.get<std::string>()] = regs[field.get<std::string>()];

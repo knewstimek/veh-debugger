@@ -275,8 +275,10 @@ public:
 	bool FreezeThread(FreezeOp op, uint32_t threadId, std::vector<uint32_t>& frozen, std::string* error=nullptr);
     bool TerminateThread(uint32_t threadId, std::string& error);
 	std::vector<StackFrame> GetStackTrace(uint32_t threadId, uint32_t maxFrames = 20, std::string* error = nullptr);
-	std::optional<RegisterSet> GetRegisters(uint32_t threadId);
-	bool SetRegister(uint32_t threadId, uint32_t regIndex, uint64_t value);
+	std::optional<RegisterSet> GetRegisters(uint32_t threadId); // complete contexts only
+	// May be partial (kCapRegisterValidityV1); validMask marks readable fields.
+	std::optional<RegisterSet> GetRegisterView(uint32_t threadId, uint64_t& validMask);
+	bool SetRegister(uint32_t threadId, uint32_t regIndex, uint64_t value, std::string& error);
 	bool SetRegisters(uint32_t threadId, const RegisterSet& regs);
 	bool IsThreadStopped(uint32_t threadId);
 	// A failed or unsupported query is unknown, not a confirmed running state.

@@ -34,6 +34,13 @@ std::optional<RegisterSet> ReadRegisters(IIpcTransport& transport, uint32_t thre
 	auto* registers = reinterpret_cast<const GetRegistersResponse*>(response.data());
 	if (frontend == ExprEvalFrontend::Mcp && registers->status != IpcStatus::Ok)
 		return std::nullopt;
+	// Only a kCapRegisterValidityV1 connection appends the mask. Expressions may name
+	// any register, so a partial context cannot be evaluated against.
+	if (response.size() == sizeof(GetRegistersResponseV1)) {
+		uint64_t validMask = 0;
+		memcpy(&validMask, response.data() + sizeof(GetRegistersResponse), sizeof(validMask));
+		if (validMask != kRegisterValidAll) return std::nullopt;
+	}
 	return registers->regs;
 }
 
