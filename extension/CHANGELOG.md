@@ -7,11 +7,12 @@
 - `veh_processes` accepts `backend` when no session is attached: it queries a VM-scope backend once and leaves no session, so finding a guest PID no longer needs a VM attach/detach round trip.
 - Remote runner profiles accept an optional per-backend `stderr_file` that appends agent stderr to a local log on the analysis host; it is never sent to clients.
 - Startup diagnostic detail `backend_busy` (`backend_unavailable`) for an agent that serves one session at a time. The attach error tells the user to detach first.
+- VM state `Fatal` (wire value 4): `veh_virtual_machine status` reports `fatal` for a VM halted by an unrecoverable error. Backends refuse commands that need it to run with `InvalidState`.
 
 ### Fixed
 
 - A timed-out backend request no longer disables the whole session. Only that request fails, its late reply is discarded, and the same command is refused until that reply arrives, while other requests and heartbeat liveness continue. A failed pipe write still invalidates the stream.
-- `veh_pause` reports the backend status (for example `Pause: request unsupported by backend`) instead of a generic IPC exchange failure.
+- `veh_pause` and `veh_continue` report the backend status or the transport failure (for example `Continue: operation refused in the current target state`) instead of a generic IPC exchange failure.
 - Remote detach can now confirm backend cleanup. The resident relays the agent's Detach status before closing the work, and an agent exiting right after its acknowledgement no longer drops that relay. A missing, late or failed acknowledgement still reports `backendCleanupConfirmed: false`.
 
 - Preserve fatal memory-gap diagnostics and known execution facts when artifact export also fails; retain both capture and export errors, stop batch/action continuation and preserve existing destination files.

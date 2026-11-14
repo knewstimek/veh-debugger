@@ -128,10 +128,11 @@ json McpServer::ToolVirtualMachine(const json& args) {
         if(bytes.size()!=sizeof(response))return {{"error","Invalid VM control response"}};
         std::memcpy(&response,bytes.data(),sizeof(response));
         if(response.status!=IpcStatus::Ok)return {{"error",StatusText(response.status)},{"scope","virtualMachine"}};
-        if(static_cast<uint32_t>(response.state)>3)return {{"error","Invalid VM state"}};
+        if(static_cast<uint32_t>(response.state)>4)return {{"error","Invalid VM state"}};
         const char* state=response.state==VirtualMachineState::Running?"running":
             response.state==VirtualMachineState::Paused?"paused":
-            response.state==VirtualMachineState::PoweredOff?"poweredOff":"other";
+            response.state==VirtualMachineState::PoweredOff?"poweredOff":
+            response.state==VirtualMachineState::Fatal?"fatal":"other";
         return {{"success",true},{"scope","virtualMachine"},{"state",state}};
     }
     if(op!="trace")return {{"error","operation must be status, pause, resume or trace"}};

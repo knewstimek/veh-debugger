@@ -2090,7 +2090,9 @@ struct ResolveAddressSpaceResponse {
 // Trace executes just the selected vCPU while every other vCPU stays paused.
 // They do not implement selective OS-thread stops or hardware trace throughput.
 enum class VirtualMachineAction : uint32_t { Query = 0, Pause = 1, Resume = 2 };
-enum class VirtualMachineState : uint32_t { Other = 0, Running = 1, Paused = 2, PoweredOff = 3 };
+// Fatal: halted by an unrecoverable VM error; it cannot run again until reset. While
+// Fatal, commands that need the VM to run are refused with IpcStatus::InvalidState.
+enum class VirtualMachineState : uint32_t { Other = 0, Running = 1, Paused = 2, PoweredOff = 3, Fatal = 4 };
 struct ControlVirtualMachineRequest { VirtualMachineAction action; uint32_t reserved; };
 struct ControlVirtualMachineResponse { IpcStatus status; VirtualMachineState state; };
 struct TraceVirtualCpuRequest {

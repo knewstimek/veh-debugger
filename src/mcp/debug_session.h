@@ -52,6 +52,7 @@ struct StopEvent {
 
 struct ContinueResult {
 	bool ok = false;
+	std::string error; // !ok: exchange failure or backend status
 	std::vector<uint32_t> resumedThreadIds;
 	std::vector<uint32_t> stillStoppedThreadIds;
 };

@@ -1500,6 +1500,10 @@ int wmain(int argc, wchar_t** argv) {
             else if(request.action==veh::VirtualMachineAction::Pause)vmState=2;
             else if(request.action==veh::VirtualMachineAction::Resume)vmState=1;
             response.state=static_cast<veh::VirtualMachineState>(vmState);
+            if(mode==L"machine-fatal"){ // halted VM: queries report it, control is refused
+                response.state=veh::VirtualMachineState::Fatal;
+                if(request.action!=veh::VirtualMachineAction::Query)response.status=veh::IpcStatus::InvalidState;
+            }
             if(!reply(pipe,header.command,response))break;
         } else if(vmMode&&command==veh::IpcCommand::TraceVirtualCpu&&bytes.size()==sizeof(veh::TraceVirtualCpuRequest)) {
             veh::TraceVirtualCpuRequest request{};memcpy(&request,bytes.data(),sizeof(request));

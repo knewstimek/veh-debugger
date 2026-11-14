@@ -33,6 +33,8 @@ def run():
         assert 'edx' in json.dumps(assembly).lower() and 'inc' in json.dumps(assembly).lower(), assembly
         paused = client.tool('veh_pause')
         assert paused.get('error') == 'Pause: request unsupported by backend', ('backend status lost', paused)
+        resumed = client.tool('veh_continue', {'threadId': 77})
+        assert resumed.get('error') == 'Continue: request unsupported by backend', ('backend status lost', resumed)
         assert 'error' in client.tool('veh_terminate'), 'Unsupported terminate reported success'
         assert client.tool('veh_threads')['count'] == 1, 'Unsupported terminate detached guest'
         # A refused step must return now, not wait five seconds for an event.

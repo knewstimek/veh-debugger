@@ -511,9 +511,7 @@ json McpServer::ToolContinue(const json& args) {
     }
 
     auto continueResult = session_.ContinueWithDetails(threadId, passException);
-	if (!continueResult.ok) {
-		return {{"error", IpcErrorMessage()}};
-	}
+	if (!continueResult.ok) return {{"error", continueResult.error}};
 	auto addResumeDetails = [&](json& ret) {
 		ret["resumeScope"] = threadId == 0 ? "all" : "single";
 		ret["requestedThreadId"] = threadId;

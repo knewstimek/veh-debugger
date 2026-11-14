@@ -901,13 +901,7 @@ ContinueResult DebugSession::ContinueWithDetails(uint32_t threadId, bool passExc
 	req.passException = passException ? 1 : 0;
 	req.wantDetails = 1;
 	std::vector<uint8_t> response;
-	if (!ipcTransport_->SendAndReceive(IpcCommand::Continue, &req, sizeof(req), response)) {
-		return result;
-	}
-	if (response.size() < sizeof(IpcStatus)) return result;
-	IpcStatus status{};
-	memcpy(&status, response.data(), sizeof(status));
-	result.ok = status == IpcStatus::Ok;
+	result.ok = ReceiveBackendReply(IpcCommand::Continue, &req, sizeof(req), response, "Continue", result.error);
 	if (!result.ok) return result;
 
 	if (response.size() >= sizeof(ContinueResponse)) {

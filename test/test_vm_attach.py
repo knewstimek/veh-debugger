@@ -36,6 +36,10 @@ def run():
             assert client.tool('veh_attach',{**vm,'agent_args':['--metadata',mode]}).get('success')
             result=client.tool('veh_toolbox',{'operation':'call','tool':'veh_processes','arguments':{}})['result']
             assert 'error' in result,(mode,result)
+        assert client.tool('veh_attach',{**vm,'agent_args':['--metadata','machine-fatal']}).get('success')
+        assert client.tool('veh_virtual_machine',{'operation':'status'})['state']=='fatal'
+        refused=client.tool('veh_virtual_machine',{'operation':'resume'})
+        assert refused.get('error')=='operation refused in the current target state',refused
         for mode in ('machine-thread-error','machine-thread-short','machine-thread-name'):
             assert client.tool('veh_attach',{**vm,'agent_args':['--metadata',mode]}).get('success')
             result=client.tool('veh_toolbox',{'operation':'call','tool':'veh_threads','arguments':{}})['result']
