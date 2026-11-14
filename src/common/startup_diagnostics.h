@@ -14,6 +14,7 @@ enum class StartupError : uint32_t {
 enum class StartupDetail : uint32_t {
     DriverOpenFailed = 1, HypervisorNotRunning = 2, AbiMismatch = 3,
     TargetOpenFailed = 4, PipeCreateFailed = 5, InvalidArguments = 6,
+    BackendBusy = 7, // the backend serves one session at a time and another holds it
 };
 inline constexpr wchar_t kStartupDiagnosticHandle[] = L"VEH_STARTUP_DIAGNOSTIC_HANDLE";
 struct StartupDiagnostic {
@@ -44,6 +45,7 @@ inline const char* StartupDetailName(StartupDetail detail) {
     case StartupDetail::TargetOpenFailed: return "target_open_failed";
     case StartupDetail::PipeCreateFailed: return "pipe_create_failed";
     case StartupDetail::InvalidArguments: return "invalid_arguments";
+    case StartupDetail::BackendBusy: return "backend_busy";
     default: return nullptr;
     }
 }
@@ -52,7 +54,8 @@ inline bool ValidStartupDiagnostic(const StartupDiagnostic& record) {
         record.size != sizeof(record) || record.reserved) return false;
     switch (record.detail) {
     case StartupDetail::DriverOpenFailed:
-    case StartupDetail::HypervisorNotRunning: return record.error == StartupError::BackendUnavailable;
+    case StartupDetail::HypervisorNotRunning:
+    case StartupDetail::BackendBusy: return record.error == StartupError::BackendUnavailable;
     case StartupDetail::AbiMismatch: return record.error == StartupError::VersionMismatch;
     case StartupDetail::TargetOpenFailed: return record.error == StartupError::TargetUnavailable;
     case StartupDetail::PipeCreateFailed: return record.error == StartupError::IpcSetupFailed;

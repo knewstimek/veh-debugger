@@ -49,6 +49,9 @@ void AppendStartupDiagnostics(std::string& error, const nlohmann::json& reply) {
         }
     }
     error += "]";
+    // A remote attach opens the new work before releasing the current one.
+    if (diagnostic.detail == StartupDetail::BackendBusy && ValidStartupDiagnostic(diagnostic))
+        error += "; the backend serves one session at a time: detach the current session first";
 }
 }
 TcpIpcTransport::TcpIpcTransport(RemoteEndpoint endpoint, std::string openRequest)
@@ -137,7 +140,8 @@ bool TcpIpcTransport::MatchesWork(const RemoteEndpoint& endpoint, const std::str
         endpoint_.certificateSha256 == endpoint.certificateSha256 && endpoint_.backend == endpoint.backend &&
         endpoint_.tokenFile == endpoint.tokenFile && work_.scope == scope && work_.pid == pid;
 }
-bool TcpIpcTransport::WaitForWorkClose(int timeoutMs) {
+bool TcpIpcTransport::WaitForWorkClose(int timeoutMs, IpcCommand finalCommand, IpcStatus* acknowledgement) {
+    if (acknowledgement) *acknowledgement = IpcStatus::Error;
     if (timeoutMs <= 0) return false;
     const auto deadline = GetTickCount64() + static_cast<ULONGLONG>(timeoutMs);
     auto remaining = [&]() -> int {
@@ -152,6 +156,15 @@ bool TcpIpcTransport::WaitForWorkClose(int timeoutMs) {
         // the resident to retire work and close, not for that local stop signal.
         if (!channel_.Read(&header, sizeof(header), budget)) return GetLastError() == ERROR_BROKEN_PIPE;
         if (header.payloadSize > 64 * 1024 * 1024) return false;
+        // The resident relays the backend's Detach/Shutdown status before closing
+        // (older residents close without it, which stays unconfirmed).
+        if (header.command == static_cast<uint32_t>(finalCommand) && header.payloadSize == sizeof(IpcStatus)) {
+            IpcStatus status{};
+            const int statusBudget = remaining();
+            if (!statusBudget || !channel_.Read(&status, sizeof(status), statusBudget)) return false;
+            if (acknowledgement) *acknowledgement = status;
+            continue;
+        }
         uint8_t buffer[4096];
         auto left = header.payloadSize;
         while (left) {

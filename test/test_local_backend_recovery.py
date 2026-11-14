@@ -75,6 +75,25 @@ def run():
                 finally:
                     probe.close(terminate_target=False)
 
+            # One timed-out request fails alone: the session keeps serving other
+            # requests and its late reply never answers the next same-command request.
+            profile.write_text(json.dumps({"hv": {"path": str(FIXTURE.resolve()),
+                "args": ["--metadata", "host-late-reply"]}}), encoding="utf-8")
+            probe = OwnedMcpClient(env=dict(os.environ, VEH_BACKENDS=str(profile)))
+            try:
+                probe.initialize()
+                assert probe.tool("veh_attach", {"pid": 424242, "backend": "hv"}, timeout=10).get("success")
+                late = probe.tool("veh_pause", {"threadId": 77}, timeout=10)
+                assert "timed out" in late.get("error", ""), late
+                threads = probe.tool("veh_threads", timeout=10)
+                assert threads.get("count") == 1, ("timeout ended the session", threads)
+                again = probe.tool("veh_pause", {"threadId": 77}, timeout=10)
+                assert again.get("success"), ("late reply blocked or answered the next pause", again)
+                detached = probe.tool("veh_detach")
+                assert detached.get("success") and "backendCleanupConfirmed" not in detached, detached
+            finally:
+                probe.close(terminate_target=False)
+
             def attach(mode="local-recovery", pid=424240):
                 result = client.tool("veh_attach", {
                     "pid": pid, "agent": str(FIXTURE), "target_scope": "guest",
@@ -136,7 +155,7 @@ def run():
                 "target_scope": "guest", "agent_args": ["--metadata", "local-recovery",
                 "--pipe", "\\\\.\\pipe\\veh-unconnected-" + suffix]}, timeout=10)
             assert "error" in failed, failed
-            print("PASS local death/reconnect, pipe loss, stale cache isolation and failed-startup cleanup")
+            print("PASS local death/reconnect, request timeout recovery, pipe loss, stale cache isolation and failed-startup cleanup")
         finally:
             client.close(terminate_target=False)
             for handle in handles:

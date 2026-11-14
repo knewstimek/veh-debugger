@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <map>
 #include <memory>
+#include <set>
 #include "ipc_transport.h"
 
 namespace veh {
@@ -55,6 +56,7 @@ public:
 protected:
 	void ReaderThread();
 	void HeartbeatThread();
+	bool AwaitingReply();
 
 	// Overlapped I/O helpers
 	virtual bool AsyncReadExact(void* buf, DWORD size, DWORD timeoutMs = 3000);
@@ -108,9 +110,13 @@ protected:
 	// At most one waiter for each command; separate lanes have disjoint command IDs.
 	std::map<uint32_t, std::shared_ptr<PendingReply>> pendingReplies_;
 	void AbortPendingRepliesLocked(PipeExchangeFailure failure, DWORD systemError, uint32_t advertisedPayloadSize = 0);
-	// A timed-out request or failed write may still be answered: the next reply could be
-	// its late response, so the connection refuses requests until reconnect.
+	// A failed write or partial direct read leaves the stream position unknown, so the
+	// connection refuses requests until reconnect.
 	bool desynced_ = false;
+	// A timed-out request still owes exactly one reply. Replies are matched by command,
+	// so that reply is discarded and the same command is refused until it arrives;
+	// other commands keep working.
+	std::set<uint32_t> orphanedReplies_;
 	PipeExchangeFailure responseFailure_ = PipeExchangeFailure::None;
 	DWORD responseSystemError_ = ERROR_SUCCESS;
 	uint32_t responseAdvertisedPayloadSize_ = 0;

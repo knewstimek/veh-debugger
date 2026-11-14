@@ -616,11 +616,14 @@ bool DebugSession::Detach() {
 		StopProcessMonitor();
 		ipcTransport_->StopHeartbeat();
 		ipcTransport_->StopEventListener();
+		IpcStatus acknowledgement = IpcStatus::Error;
 		try {
 			const bool sent = ipcTransport_->SendCommand(IpcCommand::Detach);
-			detachConfirmed = !wasConnected || (sent && remote->WaitForWorkClose(5000));
+			detachConfirmed = !wasConnected ||
+				(sent && remote->WaitForWorkClose(5000, IpcCommand::Detach, &acknowledgement));
 		} catch (...) { detachConfirmed = false; }
-        // Resident work closure is not an acknowledgement of backend cleanup.
+		// Work closure alone is not backend cleanup; the relayed Detach status is.
+		lastDetachBackendConfirmed_ = wasConnected && detachConfirmed && acknowledgement == IpcStatus::Ok;
 	} else {
         auto currentAgent = externalAgents_.find(targetPid_);
         if (currentAgent != externalAgents_.end() && currentAgent->second.pipe != transportPipe_)
@@ -979,15 +982,11 @@ IpcStatus DebugSession::StepOut(uint32_t threadId) {
 	return respData.size() == sizeof(IpcStatus) ? *reinterpret_cast<const IpcStatus*>(respData.data()) : IpcStatus::Error;
 }
 
-bool DebugSession::Pause(uint32_t threadId) {
+bool DebugSession::Pause(uint32_t threadId, std::string& error) {
 	PauseRequest req{};
 	req.threadId = threadId;
 	std::vector<uint8_t> respData;
-	if (!ipcTransport_->SendAndReceive(IpcCommand::Pause, &req, sizeof(req), respData) ||
-        respData.size() < sizeof(IpcStatus)) return false;
-    IpcStatus status{};
-    memcpy(&status, respData.data(), sizeof(status));
-    return status == IpcStatus::Ok;
+	return ReceiveBackendReply(IpcCommand::Pause, &req, sizeof(req), respData, "Pause", error);
 }
 
 uint32_t DebugSession::ResumeMainThread(uint32_t requestedThreadId) {
@@ -1202,7 +1201,10 @@ std::string DebugSession::DescribeIpcFailure(const PipeExchangeDiagnostics* diag
 			: "Backend IPC connection closed; target state is unknown";
 	if (diagnostics) {
 		switch (diagnostics->failure) {
-			case PipeExchangeFailure::WaitTimeout: return "Backend response timed out";
+			case PipeExchangeFailure::WaitTimeout:
+				return "Backend response timed out; the backend may still complete it, and other requests remain usable";
+			case PipeExchangeFailure::EarlierReplyPending:
+				return "An earlier request of this kind timed out and its reply has not arrived; retry later";
 			case PipeExchangeFailure::SendFailed: return "Could not send request to backend";
 			case PipeExchangeFailure::HeaderReadFailed: return "Could not read backend response header";
 			case PipeExchangeFailure::PayloadReadFailed: return "Could not read complete backend response";

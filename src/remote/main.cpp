@@ -74,6 +74,8 @@ Configuration Load(const std::filesystem::path& path) {
         const auto args = it.value().value("args", Json::array());
         if (!args.is_array() || args.size() > 128) throw std::invalid_argument("args");
         for (const auto& arg : args) profile.args.push_back(Wide(arg.get<std::string>()));
+        if (it.value().contains("stderr_file"))
+            profile.stderrFile = resolve(it.value().at("stderr_file").get<std::string>());
         config.backends.emplace(it.key(), std::move(profile));
     }
     return config;

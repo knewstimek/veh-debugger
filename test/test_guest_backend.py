@@ -31,7 +31,8 @@ def run():
         assert module_batch['failed'] == 1 and 'error' in module_batch['results'][0]['result'], module_batch
         assembly = client.tool('veh_disassemble', {'address': '0x1000', 'count': 2})
         assert 'edx' in json.dumps(assembly).lower() and 'inc' in json.dumps(assembly).lower(), assembly
-        assert 'error' in client.tool('veh_pause'), 'Unsupported pause reported success'
+        paused = client.tool('veh_pause')
+        assert paused.get('error') == 'Pause: request unsupported by backend', ('backend status lost', paused)
         assert 'error' in client.tool('veh_terminate'), 'Unsupported terminate reported success'
         assert client.tool('veh_threads')['count'] == 1, 'Unsupported terminate detached guest'
         # A refused step must return now, not wait five seconds for an event.

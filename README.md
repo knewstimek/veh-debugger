@@ -426,10 +426,10 @@ VM 자체에 연결할 때는 외부 백엔드를 VM 범위로 등록한 뒤
 `--pipe`와 설정 인자를 받고, 프로세스 agent에만 `--pid`도 전달됩니다.
 `veh_virtual_machine`으로 VM 전체 제어와 제한된 가상 CPU 기록을 요청합니다.
 물리 메모리 읽기·쓰기는 capability에 따라 제공하며 VM 범위 검색·덤프는 미지원입니다.
-지원 백엔드에 VM 범위로 연결한 뒤 `veh_processes`로 게스트 PID를 찾고,
-`veh_attach(target_scope="guest", pid=...)`로 해당 프로세스에 연결합니다.
+게스트 PID는 세션 없이 `veh_processes(backend="<VM 범위 백엔드>")`로 한 번 조회하거나
+VM 세션 안에서 `veh_processes`로 찾고, `veh_attach(target_scope="guest", pid=...)`로 연결합니다.
 짧은 이미지명에 포함된 비 ASCII 바이트는 `\\xNN`으로 표시합니다.
-게스트 프로세스에 연결하는 기존 `target_scope="guest"`는 검증된 비영 PID를 사용합니다.
+한 번에 세션 하나만 받는 원격 백엔드는 다른 범위로 바로 attach하면 `backend_busy`로 거절하므로 먼저 `veh_detach`합니다.
 
 **MCP 도구 목록**
 
@@ -439,7 +439,7 @@ VM 자체에 연결할 때는 외부 백엔드를 VM 범위로 등록한 뒤
 |------|------|------|
 | `veh_toolbox` | `operation, tool?, arguments?, profile?, query?, schema_handle?` | 현재 프로필에 eager 노출되지 않은 도구를 검색·설명·호출하는 lazy gateway. `describe`가 반환한 `schema_handle`을 재사용하면 변경 없음만 짧게 확인한다. |
 | `veh_virtual_machine` | `operation, cpu?, max_instructions?, duration_ms?, cpl_mask?, cr3_roots?, rip_begin?, rip_end?` | 명시적 VM 전체 제어·정지 상태 vCPU 트레이스. 수동 호출 전용 |
-| `veh_processes` | - | 지원하는 게스트/VM 백엔드에서 OS 프로세스 목록(PID, 주소 폭, 짧은 이미지명)을 한 스냅샷으로 조회. 기본 프로필에선 `veh_toolbox`로 호출 |
+| `veh_processes` | `backend?` | 게스트/VM 백엔드에서 OS 프로세스 목록(PID, 주소 폭, 짧은 이미지명)을 한 스냅샷으로 조회. `backend`는 세션이 없을 때만 VM 범위 백엔드에 일회성 연결. 기본 프로필에선 `veh_toolbox`로 호출 |
 | `veh_attach` | `pid?, backend?/agent?, agent_args?, target_scope?` | VEH 주입 또는 외부 백엔드 연결. VM PID는 `target_scope="guest"`와 백엔드 검증 필요. VM 자체 연결은 pid를 생략합니다. |
 | `veh_launch` | `program, args?, stopOnEntry?, cwd?, env?, backend?/agent?, target_scope?` | 호스트 프로세스 생성·연결 및 등록된 로컬 guest_launch 백엔드의 게스트 진입점 생성·검증. DAP/원격 게스트는 attach 전용 |
 | `veh_detach` | - | 디버거 분리 (타겟은 계속 실행). 백엔드 정리 실패 시 오류를 반환하고 세션을 유지해 재시도 가능 |

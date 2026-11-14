@@ -34,7 +34,9 @@ public:
     const std::string& Error() const { return error_; }
     RemoteOpenOutcome OpenOutcome() const { return openOutcome_; }
     bool MatchesWork(const RemoteEndpoint&, const std::string& scope, uint32_t pid) const;
-    bool WaitForWorkClose(int timeoutMs); // Reader stopped; bounded drain of pending frames.
+    // Reader stopped; bounded drain of pending frames until the resident closes the work.
+    // acknowledgement: the relayed status of finalCommand, Error when none arrived.
+    bool WaitForWorkClose(int timeoutMs, IpcCommand finalCommand, IpcStatus* acknowledgement);
 protected:
     bool AsyncReadExact(void* data, DWORD size, DWORD timeoutMs) override;
     bool AsyncWriteExact(const void* data, DWORD size, DWORD timeoutMs) override;

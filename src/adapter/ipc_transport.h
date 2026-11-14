@@ -18,6 +18,7 @@ enum class PipeExchangeFailure : uint8_t {
 	PayloadReadFailed,
 	WaitTimeout,
 	ReaderAborted,
+	EarlierReplyPending, // the same command timed out earlier and its reply has not arrived
 };
 
 struct PipeExchangeDiagnostics {

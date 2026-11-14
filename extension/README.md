@@ -253,10 +253,12 @@ target, OS thread identity or single process address width. VM agents receive
 `--pipe` and configured arguments; process agents also receive `--pid`.
 Use `veh_virtual_machine` for explicit whole-VM control and bounded vCPU records.
 Physical memory read/write is available when advertised; search/dump needs a
-server operation and is unavailable in VM scope. A capable backend exposes
-`veh_processes` for one guest OS process snapshot; use a returned PID with
+server operation and is unavailable in VM scope. `veh_processes` returns one guest
+OS process snapshot, from the VM session or, before any session, with
+`backend` naming a VM-scope backend; attach a returned PID with
 `veh_attach(target_scope="guest")`. Short image names escape non-ASCII bytes as
-`\\xNN`. Guest process attachment still uses a validated nonzero guest PID.
+`\\xNN`. A remote backend that serves one session at a time refuses a
+different-scope attach with `backend_busy`; detach first.
 
 ## Requirements
 

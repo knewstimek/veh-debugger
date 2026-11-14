@@ -202,6 +202,7 @@ private:
 	json ToolHiddenHook(const json& args);
 	json ToolBranchTrace(const json& args);
 	bool SystemExchange(IpcCommand cmd, const void* payload, uint32_t size, std::vector<uint8_t>& response, json& error, int timeoutMs = 10000);
+	bool OneShotVmExchange(const std::string& backend, IpcCommand cmd, std::vector<uint8_t>& response, json& error);
 	std::vector<SystemModuleEntry> SystemModules(json& error);
 	static json KernelLocation(uint64_t address, const std::vector<SystemModuleEntry>& modules);
 	// Halting kernel debugging over the GDB remote protocol (tools_kernel_debug.cpp)

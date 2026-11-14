@@ -53,6 +53,8 @@ Supply the bridge's existing VM-selection and Windows context arguments in its
 registered `args`. Use a separate entry per VM/scope. Backend executable and
 startup arguments are chosen by the resident profile; callers cannot override
 them over the network. Do not put credentials in backend arguments.
+Optional `stderr_file` appends agent stderr to a local log, never sent to clients;
+an unopenable log fails `stage=agent_start`. Without it, agent stderr is discarded.
 
 Start the runner under its configured Windows account:
 
@@ -145,7 +147,7 @@ each real backend must call the helper to provide them.
 
 | Common error (wire ID) | Detail (wire ID) |
 | --- | --- |
-| `backend_unavailable` (1) | `driver_open_failed` (1), `hypervisor_not_running` (2) |
+| `backend_unavailable` (1) | `driver_open_failed` (1), `hypervisor_not_running` (2), `backend_busy` (7) |
 | `version_mismatch` (2) | `abi_mismatch` (3) |
 | `target_unavailable` (3) | `target_open_failed` (4) |
 | `ipc_setup_failed` (4) | `pipe_create_failed` (5) |
@@ -209,8 +211,13 @@ or a bounded three-second drain deadline, including clients that do not read it.
 Explicit detach ends the resident work and releases an owned host target, including
 its initial suspended thread. The frontend stops its reader, sends Detach, and
 waits up to five seconds for resident connection closure before reporting success.
+The resident relays the agent's Detach/Shutdown status before closing the work;
+only a relayed `Ok` confirms backend cleanup (a missing or late agent reply relays
+`Error`; older residents relay nothing).
 A repeated attach to the same registered endpoint/backend/scope/PID performs that
-confirmed detach first; other target selections retain staged connection behavior.
+confirmed detach first; other selections open the new work before releasing the
+current session, so a single-session agent must report `backend_busy` and the user
+detaches first.
 If closure cannot be confirmed, detach reports an error rather than racing a new
 connection against the old owner. Lease expiry or runner shutdown tears down owned
 agents and targets. An attached pre-existing host target is never put in the

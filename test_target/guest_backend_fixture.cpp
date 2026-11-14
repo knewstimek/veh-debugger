@@ -38,6 +38,10 @@ int wmain(int argc, wchar_t** argv) {
         else if (option == L"--guest-launch-request") launchRequest=argv[i+1];
         else if (option == L"--ready-event") readyEvent = argv[i + 1];
     }
+    if (mode == L"diagnostic-busy") {
+        veh::ReportStartupFailure(veh::StartupError::BackendUnavailable, veh::StartupDetail::BackendBusy);
+        return 10;
+    }
     if (mode == L"diagnostic-driver" || mode == L"diagnostic-abi") {
         const bool driver = mode == L"diagnostic-driver";
         veh::ReportStartupFailure(driver ? veh::StartupError::BackendUnavailable : veh::StartupError::VersionMismatch,
@@ -191,7 +195,7 @@ int wmain(int argc, wchar_t** argv) {
                 }
                 caps.flags |= veh::kCapRegisterContextV1;
             }
-            caps.flags |= veh::kCapNoTargetFootprint | (mode == L"host-cap" || mode == L"host-trace" || mode == L"hardware-host" ? 0 : machineMode ? veh::kCapVirtualMachineTarget : veh::kCapGuestTarget);
+            caps.flags |= veh::kCapNoTargetFootprint | (mode == L"host-cap" || mode == L"host-trace" || mode == L"hardware-host" || mode == L"host-late-reply" ? 0 : machineMode ? veh::kCapVirtualMachineTarget : veh::kCapGuestTarget);
             if(importMode)veh::SetCommandSupported(caps.commands,veh::IpcCommand::ResolveImport);
             if(scanMode){veh::SetCommandSupported(caps.commands,veh::IpcCommand::ValueScan);if(mode!=L"scan-legacy")caps.flags|=veh::kCapValueScanV2;}
             if(mode==L"machine-guest-cap")caps.flags=veh::kCapNoTargetFootprint|veh::kCapGuestTarget;
@@ -1527,6 +1531,10 @@ int wmain(int argc, wchar_t** argv) {
             if (!reply(pipe, header.command, response)) break;
         } else if (mode == L"trace" && (command == veh::IpcCommand::Continue || command == veh::IpcCommand::Pause)) {
             if (command == veh::IpcCommand::Continue) ++continueRequests; else ++pauseRequests;
+            if (!reply(pipe, header.command, veh::IpcStatus::Ok)) break;
+        } else if (mode == L"host-late-reply" && command == veh::IpcCommand::Pause) {
+            // Only the first reply outlives the frontend's 3-second exchange timeout.
+            if (!pauseRequests++) Sleep(4000);
             if (!reply(pipe, header.command, veh::IpcStatus::Ok)) break;
         } else if (command == veh::IpcCommand::Heartbeat) {
             if (!send(pipe, static_cast<uint32_t>(veh::IpcEvent::HeartbeatAck), nullptr, 0)) break;

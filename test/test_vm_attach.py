@@ -47,10 +47,20 @@ def run():
         assert 'error' in client.tool('veh_attach',{'target_scope':'vm'})
         with tempfile.TemporaryDirectory(prefix='veh-vm-backend-') as temp:
             table=Path(temp)/'backends.json'
-            table.write_text(json.dumps({'machine':{'path':str(FIXTURE),'args':['--metadata','machine'],'target_scope':'vm'}}),encoding='utf-8')
+            table.write_text(json.dumps({'machine':{'path':str(FIXTURE),'args':['--metadata','machine'],'target_scope':'vm'},
+                'guest':{'path':str(FIXTURE),'target_scope':'guest'}}),encoding='utf-8')
             with McpClient(env=dict(os.environ,VEH_BACKENDS=str(table))) as registered:
                 registered.initialize()
+                def processes(arguments):
+                    return registered.tool('veh_toolbox',{'operation':'call','tool':'veh_processes','arguments':arguments})['result']
+                # Discovery before any session, so a guest PID needs no VM attach/detach round trip.
+                assert processes({'backend':'machine'})==listed
+                assert 'error' in registered.tool('veh_threads'),'one-shot process query left a session'
+                assert 'target_scope=vm' in processes({'backend':'guest'}).get('error',''),'non-VM backend accepted'
+                assert 'error' in processes({'backend':'missing'})
                 assert registered.tool('veh_attach',{'backend':'machine'}).get('success')
+                assert 'omit it' in processes({'backend':'machine'}).get('error',''),'one-shot query beside a session'
+                assert processes({})==listed
                 assert registered.tool('veh_detach').get('success')
         with McpClient(env=dict(os.environ,VEH_MCP_PROFILE='full')) as full:
             full.initialize()
@@ -58,7 +68,7 @@ def run():
             assert full.tool('veh_processes')==listed
             assert 'error' in full.tool('veh_processes',{'unexpected':1})
             assert full.tool('veh_detach').get('success')
-        print('PASS VM no-PID routing, process list direct/toolbox/batch/errors, metadata rejection and VM control/trace')
+        print('PASS VM no-PID routing, process list direct/toolbox/batch/errors/sessionless, metadata rejection and VM control/trace')
     finally:client.close(terminate_target=False)
 
 if __name__=='__main__':run()

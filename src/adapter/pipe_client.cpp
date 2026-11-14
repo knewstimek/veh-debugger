@@ -112,6 +112,7 @@ bool PipeClient::ConnectToPeer(uint32_t targetPid, int timeoutMs, HANDLE peerPro
 	stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 	{ std::lock_guard<std::mutex> lock(responseMutex_);
 		desynced_ = false;
+		orphanedReplies_.clear();
 		responseFailure_ = PipeExchangeFailure::None;
 		responseSystemError_ = ERROR_SUCCESS;
 		responseAdvertisedPayloadSize_ = 0;
@@ -300,6 +301,11 @@ bool PipeClient::SendAndReceive(IpcCommand cmd,
 		if (!running_ || !connected_) {
 			report(PipeExchangeFailure::ReaderAborted, ERROR_BROKEN_PIPE); return false;
 		}
+		// Its late reply would satisfy this request. Detach/Shutdown stay usable: the
+		// reader drops the late reply first, then completes this one.
+		if (orphanedReplies_.count(command) && cmd != IpcCommand::Detach && cmd != IpcCommand::Shutdown) {
+			report(PipeExchangeFailure::EarlierReplyPending, ERROR_BUSY); return false;
+		}
 		if (!pendingReplies_.emplace(command, pending).second) {
 			report(PipeExchangeFailure::SendFailed, ERROR_BUSY); return false;
 		}
@@ -319,9 +325,8 @@ bool PipeClient::SendAndReceive(IpcCommand cmd,
 		[&] { return pending->completed; });
 	pendingReplies_.erase(command);
 	if (!ok) {
-		desynced_ = true;
-		AbortPendingRepliesLocked(PipeExchangeFailure::WaitTimeout, WAIT_TIMEOUT);
-		LOG_ERROR("SendAndReceive timeout for cmd 0x%04X (%dms)", command, timeoutMs);
+		orphanedReplies_.insert(command);
+		LOG_ERROR("SendAndReceive timeout for cmd 0x%04X (%dms); its late reply will be discarded", command, timeoutMs);
 		report(PipeExchangeFailure::WaitTimeout, WAIT_TIMEOUT);
 		return false;
 	}
@@ -459,7 +464,9 @@ void PipeClient::ReaderThread() {
 		} else {
 			std::lock_guard<std::mutex> lock(responseMutex_);
 			const auto found = pendingReplies_.find(hdr.command);
-			if (found != pendingReplies_.end() && !found->second->completed) {
+			if (orphanedReplies_.erase(hdr.command)) {
+				LOG_WARN("Discarded late reply for timed-out cmd 0x%04X", hdr.command);
+			} else if (found != pendingReplies_.end() && !found->second->completed) {
 				auto& pending = *found->second;
 				pending.data = std::move(payload);
 				pending.completed = true;
@@ -496,6 +503,17 @@ void PipeClient::StopHeartbeat() {
 	}
 }
 
+// A synchronous command, or a timed-out one whose reply is still owed, keeps the
+// backend busy with its own work. Lack of heartbeat traffic meanwhile is expected.
+bool PipeClient::AwaitingReply() {
+	{
+		std::lock_guard<std::mutex> lock(requestStateMutex_);
+		if (requestsInFlight_) return true;
+	}
+	std::lock_guard<std::mutex> lock(responseMutex_);
+	return !orphanedReplies_.empty();
+}
+
 void PipeClient::HeartbeatThread() {
 	LOG_DEBUG("Heartbeat thread started (interval=10s, timeout=30s)");
 
@@ -503,12 +521,7 @@ void PipeClient::HeartbeatThread() {
 		// 10초 대기 (StopHeartbeat/Disconnect가 stopEvent_로 즉시 깨운다)
 		if (!stopEvent_ || WaitForSingleObject(stopEvent_, 10000) != WAIT_TIMEOUT) break;
 		if (!heartbeatRunning_ || !connected_) break;
-		{
-			std::lock_guard<std::mutex> lock(requestStateMutex_);
-			// A synchronous command owns the response channel and its own bounded
-			// timeout. Lack of unrelated heartbeat traffic while it runs is expected.
-			if (requestsInFlight_) continue;
-		}
+		if (AwaitingReply()) continue;
 
 		// Heartbeat 전송
 		if (!SendCommand(IpcCommand::Heartbeat)) {
@@ -519,8 +532,7 @@ void PipeClient::HeartbeatThread() {
 		// 30초 무응답 체크
 		uint64_t elapsed = GetTickCount64() - lastRecvTime_;
 		if (elapsed > 30000) {
-			std::lock_guard<std::mutex> lock(requestStateMutex_);
-			if (requestsInFlight_) continue;
+			if (AwaitingReply()) continue;
 			LOG_ERROR("Heartbeat timeout: no response for %llu ms", elapsed);
 			connected_ = false;
 			if (stopEvent_) SetEvent(stopEvent_);

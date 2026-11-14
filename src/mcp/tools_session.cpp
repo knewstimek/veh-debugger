@@ -372,6 +372,32 @@ json McpServer::ToolDetach(const json& args) {
 	return {{"success", true}, {"message", "Detached"}};
 }
 
+// One request on a short-lived VM-scope connection, for discovery before any session
+// exists (a guest attach needs the PID this finds). The current session is untouched.
+bool McpServer::OneShotVmExchange(const std::string& backend, IpcCommand cmd, std::vector<uint8_t>& response, json& error) {
+    std::optional<DebugSession::ExternalAgent> agent;
+    if (std::string why; !ResolveBackend(json{{"backend", backend}}, agent, why)) { error = {{"error", why}}; return false; }
+    if (!agent || !agent->vmTarget) {
+        error = {{"error", "backend '" + backend + "' must be registered with target_scope=vm"}}; return false;
+    }
+    DebugSession probe;
+    if (!probe.Attach(0, &*agent)) {
+        const auto why = probe.LastAttachError();
+        error = {{"error", why.empty() ? "VM backend connection failed" : why}}; return false;
+    }
+    probe.SetEventCallback({});
+    probe.GetPipeClient().WaitForReady(3000);
+    probe.QueryBackendInfo();
+    bool ok = probe.CompleteBackendAttach();
+    if (!ok) error = {{"error", probe.LastAttachError().empty() ? "Backend target scope validation failed" : probe.LastAttachError()}};
+    else if (!probe.GetBackendInfo().Supports(cmd)) { ok = false; error = {{"error", "request unsupported by backend"}}; }
+    else if (!probe.GetPipeClient().SendAndReceive(cmd, nullptr, 0, response, 10000) || response.size() < sizeof(IpcStatus)) {
+        ok = false; error = {{"error", "no response from the backend"}};
+    }
+    probe.Detach();
+    return ok;
+}
+
 json McpServer::ToolTerminate(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
@@ -659,9 +685,7 @@ json McpServer::ToolPause(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
 	uint32_t threadId = JsonUint32(args, "threadId");
-	if (!session_.Pause(threadId)) {
-		return {{"error", IpcErrorMessage()}};
-	}
+	if (std::string error; !session_.Pause(threadId, error)) return {{"error", error}};
 	return {{"success", true}, {"threadId", threadId}};
 }
 

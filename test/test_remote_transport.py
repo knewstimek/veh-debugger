@@ -265,7 +265,8 @@ def lifecycle_checks(client, runner, directory, target_handles, port, pin, token
     for alias, pid in (("silent", 424250), ("late", 424251)):
         attach(alias, pid)
         for _ in range(2):
-            assert client.tool("veh_detach").get("success")
+            detached = client.tool("veh_detach")
+            assert detached.get("success") and detached.get("backendCleanupConfirmed") is False, detached
             threading.Event().wait(0.5)
             attach(alias, pid)
         assert client.tool("veh_detach").get("success")
@@ -484,7 +485,7 @@ try{$pin=([BitConverter]::ToString($hash.ComputeHash($cert.RawData))).Replace('-
                        for alias, mode in (("early", "early-exit"), ("ready-exit", "ready-exit"),
                                            ("cap-exit", "cap-exit"), ("scope-mismatch", "host-cap"), ("state-refusal", "shellcode-state"),
                                            ("diagnostic-driver", "diagnostic-driver"), ("diagnostic-abi", "diagnostic-abi"),
-                                           ("diagnostic-invalid", "diagnostic-invalid"))},
+                                           ("diagnostic-invalid", "diagnostic-invalid"), ("diagnostic-busy", "diagnostic-busy"))},
                     "missing-agent": {"path": str(directory / "missing-agent.exe"), "target_scope": "guest"},
                 }}
             runner_profile = directory / "runner.json"
@@ -561,6 +562,7 @@ try{$pin=([BitConverter]::ToString($hash.ComputeHash($cert.RawData))).Replace('-
             for alias, scope in (("guest", "guest"), ("machine", "vm"), ("host", "host"),
                                  ("early", "guest"), ("ready-exit", "guest"), ("cap-exit", "guest"),
                                  ("diagnostic-driver", "guest"), ("diagnostic-abi", "guest"), ("diagnostic-invalid", "guest"),
+                                 ("diagnostic-busy", "guest"),
                                  ("scope-mismatch", "guest"), ("missing-agent", "guest"), ("state-refusal", "guest"),
                                  ("trace-output", "guest")):
                 mappings[alias] = {"target_scope": scope, "remote": {
@@ -619,6 +621,7 @@ try{$pin=([BitConverter]::ToString($hash.ComputeHash($cert.RawData))).Replace('-
             for alias, kind, detail in (
                 ("diagnostic-driver", "backend_unavailable", "driver_open_failed"),
                 ("diagnostic-abi", "version_mismatch", "abi_mismatch"),
+                ("diagnostic-busy", "backend_unavailable", "backend_busy"),
                 ("diagnostic-invalid", None, None),
             ):
                 failure = client.tool("veh_attach", {"backend": alias, "pid": 424244}, timeout=25)
@@ -628,6 +631,8 @@ try{$pin=([BitConverter]::ToString($hash.ComputeHash($cert.RawData))).Replace('-
                     assert f"error={kind}" in error and f"detail={detail}" in error, failure
                     if alias == "diagnostic-driver":
                         assert "backend_win32_error=5" in error, failure
+                    # A busy single-session backend tells the user how to proceed.
+                    assert ("detach the current session first" in error) == (alias == "diagnostic-busy"), failure
                 else:
                     assert "detail=" not in error and "error=backend_unavailable" not in error, failure
                 assert token.hex() not in error and str(directory) not in error, failure
@@ -688,8 +693,9 @@ try{$pin=([BitConverter]::ToString($hash.ComputeHash($cert.RawData))).Replace('-
             assert "error" in rejected, "guest process launch accepted"
             assert client.tool("veh_threads")["count"] == 1, "launch rejection lost prior guest session"
             detached = client.tool("veh_detach")
-            assert detached.get("success") and detached.get("backendCleanupConfirmed") is False, detached
-            passed("MCP guest metadata/threads and unsupported launch preserves session")
+            # The resident relays the agent's Detach acknowledgement before closing.
+            assert detached.get("success") and "backendCleanupConfirmed" not in detached, detached
+            passed("MCP guest metadata/threads, unsupported launch preserves session, relayed detach acknowledgement")
 
             batch_marker = directory / "batch-launch.txt"
             batch_release = directory / "batch-launch-release.txt"

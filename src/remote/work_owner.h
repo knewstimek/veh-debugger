@@ -17,6 +17,7 @@ struct BackendProfile {
     std::vector<std::wstring> args;
     std::string scope;
     bool allowLaunch = false;
+    std::wstring stderrFile; // optional local log for agent stderr (appended)
 };
 class WorkOwner : public std::enable_shared_from_this<WorkOwner> {
 public:
@@ -50,6 +51,7 @@ private:
     bool FlushEvents();
     void Worker();
     std::vector<uint8_t> Execute(const Request&, bool& response);
+    bool FinalRequestPending() const; // mutex_ held: Detach/Shutdown queued or running, reply owed
     bool ResumeLaunchThread(uint32_t requestedThread);
     mutable std::mutex mutex_;
     std::mutex sendMutex_, launchMutex_;

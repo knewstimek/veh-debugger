@@ -114,18 +114,47 @@ void routedReplies() {
         pipe.respond(trace, 0x44);
         check(second.get().second == std::vector<uint8_t>{0x44}, "Queued trace got old reply");
     }
-    for (bool disconnect : {false, true}) {
+    {
+        // A timeout is one request's failure: the session survives it.
         RoutedPeer pipe;
-        auto trace = request(pipe, C::TraceCallers, disconnect ? 2000 : 100);
+        auto trace = request(pipe, C::TraceCallers, 100);
+        check(pipe.waitSent(C::TraceCallers), "Timeout test trace missing");
+        auto inspection = request(pipe, C::GetThreads);
+        check(pipe.waitSent(C::GetThreads), "Timeout test inspection blocked");
+        check(!trace.get().first, "Timed-out request reported success");
+        pipe.respond(C::GetThreads, 0x22);
+        check(inspection.get().second == std::vector<uint8_t>{0x22}, "Timeout aborted an unrelated request");
+        std::vector<uint8_t> bytes;
+        veh::PipeExchangeDiagnostics diagnostics{};
+        check(!pipe.SendAndReceive(C::TraceCallers, nullptr, 0, bytes, 2000, &diagnostics) &&
+            diagnostics.failure == veh::PipeExchangeFailure::EarlierReplyPending,
+            "Same command was sent while its late reply could answer it");
+        check(!pipe.waitSent(C::TraceCallers, 2, 40), "Refused request reached the peer");
+        pipe.respond(C::TraceCallers, 0x11); // the late reply
+        // The reader handles frames in order: once this later reply is delivered,
+        // the late trace reply has been consumed.
+        auto fence = request(pipe, C::GetThreads);
+        check(pipe.waitSent(C::GetThreads, 2), "Fence request missing");
+        pipe.respond(C::GetThreads, 0x55);
+        check(fence.get().second == std::vector<uint8_t>{0x55}, "Late reply was delivered to another command");
+        auto retry = request(pipe, C::TraceCallers);
+        check(pipe.waitSent(C::TraceCallers, 2), "Command stayed refused after its late reply");
+        pipe.respond(C::TraceCallers, 0x44);
+        check(retry.get().second == std::vector<uint8_t>{0x44}, "Late reply answered the next request");
+    }
+    {
+        RoutedPeer pipe;
+        auto trace = request(pipe, C::TraceCallers);
         check(pipe.waitSent(C::TraceCallers), "Failure test trace missing");
         auto inspection = request(pipe, C::GetThreads);
         check(pipe.waitSent(C::GetThreads), "Failure test inspection blocked");
-        if (disconnect) pipe.breakPeer();
-        check(!trace.get().first && !inspection.get().first, "Pending requests survived loss/timeout");
+        pipe.breakPeer();
+        check(!trace.get().first && !inspection.get().first, "Pending requests survived loss");
         std::vector<uint8_t> bytes;
         check(!pipe.SendAndReceive(C::GetThreads, nullptr, 0, bytes, 10), "Failed channel reused");
     }
-    std::puts("PASS standard trace routing, concurrent inspection, same-command serialization and failure wakeup");
+    std::puts("PASS standard trace routing, concurrent inspection, same-command serialization, "
+        "timeout recovery and failure wakeup");
 }
 
 }

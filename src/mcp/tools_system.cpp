@@ -471,10 +471,16 @@ std::vector<SystemModuleEntry> McpServer::SystemModules(json& error) {
 }
 
 json McpServer::ToolProcesses(const json& args) {
-	if (!args.is_object() || !args.empty()) return {{"error", "veh_processes takes no arguments"}};
+	if (!args.is_object() || args.size() > 1 || (args.size() == 1 && !args.contains("backend")))
+		return {{"error", "veh_processes accepts only an optional backend"}};
 	json error;
 	std::vector<uint8_t> bytes;
-	if (!SystemExchange(IpcCommand::GetProcesses, nullptr, 0, bytes, error)) return error;
+	if (args.contains("backend")) {
+		if (!args["backend"].is_string()) return {{"error", "backend must be a registered backend name"}};
+		if (session_.IsAttached())
+			return {{"error", "backend is for discovery without a session; omit it to use the current session"}};
+		if (!OneShotVmExchange(args["backend"].get<std::string>(), IpcCommand::GetProcesses, bytes, error)) return error;
+	} else if (!SystemExchange(IpcCommand::GetProcesses, nullptr, 0, bytes, error)) return error;
 	if (bytes.size() == sizeof(IpcStatus)) {
 		IpcStatus status{};
 		std::memcpy(&status, bytes.data(), sizeof(status));

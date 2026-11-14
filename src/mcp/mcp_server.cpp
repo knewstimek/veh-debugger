@@ -1202,7 +1202,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
         }}};
 	std::vector<ToolDef> tools = {
 		Tool(&McpServer::ToolAttach, "session", kLite | kInteractive, false,
-			{{"name", "veh_attach"}, {"description", "Attach to a host/guest process or a VM. Host/guest requires pid; target_scope=vm omits pid and requires external VM metadata. Replaces the session after argument validation. Default VEH requires a running host process."},
+			{{"name", "veh_attach"}, {"description", "Attach to a host/guest process or a VM. Host/guest requires pid; target_scope=vm omits pid and requires external VM metadata. Replaces the session after argument validation; a remote attach opens the new work first, so a single-session backend refuses it (backend_busy) until veh_detach. Default VEH requires a running host process."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"pid", {{"type", "integer"}, {"description", "Required for host/guest process scope; omit for vm scope"}}},
 			{"backend", {{"type", "string"}, {"description", "veh (default): inject the VEH DLL. Any other name: an out-of-process agent registered in veh-backends.json next to the server (or VEH_BACKENDS); nothing is injected. The response's backend.unsupported lists tool families the backend cannot serve."}}},
@@ -1345,7 +1345,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}, {"required", json::array({"threadId"})}}}}),
 
 		Tool(&McpServer::ToolPause, "session", 0, true,
-			{{"name", "veh_pause"}, {"description", "Pause execution. threadId=0 pauses all threads."},
+			{{"name", "veh_pause"}, {"description", "Pause execution. threadId=0 pauses all threads; a backend that pauses only selected threads reports it unsupported."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "Thread ID (0 = all)"}}}
 		 }}}}}),
@@ -1719,8 +1719,10 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			 }}}}}),
 
 		Tool(&McpServer::ToolProcesses, "system", 0, true,
-			{{"name", "veh_processes"}, {"description", "List guest OS processes from one backend snapshot (PID, address width, escaped short image name). Needs a guest or VM hypervisor backend."},
-			 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
+			{{"name", "veh_processes"}, {"description", "List guest OS processes from one backend snapshot (PID, address width, escaped short image name). Needs a guest or VM hypervisor backend. Without a session, backend names a target_scope=vm backend to query once."},
+			 {"inputSchema", {{"type", "object"}, {"properties", {
+				{"backend", {{"type", "string"}, {"description", "Registered VM-scope backend; only without an attached session"}}}
+			 }}}}}),
 		Tool(&McpServer::ToolKernelModules, "system", 0, true,
 			{{"name", "veh_kernel_modules"}, {"description", "Loaded kernel modules (base, size, path). Needs a hypervisor backend."},
 			 {"inputSchema", {{"type", "object"}, {"properties", {

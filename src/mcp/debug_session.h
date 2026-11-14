@@ -252,7 +252,7 @@ public:
 	IpcStatus StepIn(uint32_t threadId); // Ok accepts the request; a stop may interrupt completion
 	IpcStatus StepOver(uint32_t threadId);
 	IpcStatus StepOut(uint32_t threadId);
-	bool Pause(uint32_t threadId = 0);
+	bool Pause(uint32_t threadId, std::string& error); // error: exchange failure or backend status
 	uint32_t ResumeMainThread(uint32_t requestedThreadId = 0);
 
 	// Wait for stop event (blocks)

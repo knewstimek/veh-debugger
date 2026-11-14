@@ -167,7 +167,7 @@ bool WorkOwner::Initialize(const BackendProfile& profile, const Json& request, s
     if (command.size() > 32766) { code = "invalid"; return false; }
     startupStage_ = "agent_start";
     PROCESS_INFORMATION pi{};
-    if (!startupDiagnostics_.CreateAgent(profile.executable, command.data(), pi))
+    if (!startupDiagnostics_.CreateAgent(profile.executable, command.data(), profile.stderrFile, pi))
         return StartupError(GetLastError());
     agentProcess_ = pi.hProcess;
     // Guest/VM bridge children silently break away: the bridge belongs to this
@@ -243,10 +243,14 @@ void CALLBACK WorkOwner::AgentExited(void* context, BOOLEAN) {
     auto* owner = static_cast<WorkOwner*>(context);
     std::lock_guard<std::mutex> lock(owner->mutex_);
     if (owner->stopped_) return;
-    owner->closing_ = true; owner->releaseTarget_ = owner->releaseTarget_ || owner->published_;
+    owner->releaseTarget_ = owner->releaseTarget_ || owner->published_;
     // Do not leave our initial OS suspension waiting behind unrelated agent
     // teardown. Serialize with Continue/Stop before releasing this exact handle.
     if (owner->published_ && !owner->ResumeLaunchThread(0)) owner->outcomeUnknown_ = true;
+    // An agent normally exits right after acknowledging Detach. The worker still
+    // owes that acknowledgement to the frontend and closes the work after it.
+    if (owner->FinalRequestPending()) { owner->cv_.notify_all(); return; }
+    owner->closing_ = true;
     owner->outcomeUnknown_ = owner->outcomeUnknown_ || owner->inFlight_ || !owner->requests_.empty();
     if (owner->peer_) owner->peer_->Cancel();
     owner->cv_.notify_all();
@@ -258,7 +262,10 @@ bool WorkOwner::Closing() const {
 }
 bool WorkOwner::CleanupReady() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return closing_ || BackendUnavailable();
+    return closing_ || (BackendUnavailable() && !FinalRequestPending());
+}
+bool WorkOwner::FinalRequestPending() const {
+    return ending_ && !closing_ && (inFlight_ || !requests_.empty());
 }
 bool WorkOwner::HasPendingWork(const std::shared_ptr<Channel>& peer) const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -378,19 +385,18 @@ std::vector<uint8_t> WorkOwner::Execute(const Request& request, bool& response) 
     if (command == IpcCommand::Detach || command == IpcCommand::Shutdown) {
         const bool resumed = ResumeLaunchThread(0);
         std::vector<uint8_t> detached;
-        response = false;
         const bool received = backend_->SendAndReceive(command, request.payload.data(),
             static_cast<uint32_t>(request.payload.size()), detached, 3000);
         IpcStatus status = IpcStatus::Error;
         if (received && detached.size() >= sizeof(status)) memcpy(&status, detached.data(), sizeof(status));
+        if (!resumed && status == IpcStatus::Ok) status = IpcStatus::Error;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            outcomeUnknown_ = outcomeUnknown_ || !resumed || !received || status != IpcStatus::Ok;
-            releaseTarget_ = true; closing_ = true;
-            if (peer_) peer_->Cancel();
-            if (notify_) notify_();
+            outcomeUnknown_ = outcomeUnknown_ || status != IpcStatus::Ok;
+            releaseTarget_ = true;
         }
-        return {};
+        // Relayed as the frontend's acknowledgement; Worker closes the work after it.
+        return Bytes(status);
     }
     std::vector<uint8_t> result;
     if (!backend_->SendAndReceive(command, request.payload.data(), static_cast<uint32_t>(request.payload.size()), result, 600000)) {
@@ -446,10 +452,13 @@ void WorkOwner::Worker() {
         if (response && peer) {
             delivered = FlushEvents() && Send(peer, request.command, result.data(), static_cast<uint32_t>(result.size()));
         }
+        const bool final = request.command == static_cast<uint32_t>(IpcCommand::Detach) ||
+            request.command == static_cast<uint32_t>(IpcCommand::Shutdown);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (response && !delivered) outcomeUnknown_ = true;
             inFlight_ = false;
+            if (final) { closing_ = true; if (peer_) peer_->Cancel(); }
         }
         if (notify_) notify_();
     }

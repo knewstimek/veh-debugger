@@ -794,9 +794,11 @@ are rejected because exception IPC does not identify first/second chance.
 `veh_address_space` allows 180 seconds for the complete resolve request, including
 scan, page fault-ins, validation and application. MCP clients and test drivers
 must allow a longer tool-call deadline when waiting for this operation. A wait
-timeout does not cancel the backend or roll back an applied root. After an
-ambiguous timeout, reconnect and query the active root before issuing another
-state-changing request. Failed pipe writes likewise have ambiguous delivery:
+timeout does not cancel the backend or roll back an applied root. After a
+timeout, query the active root before issuing another state-changing request.
+A timed-out reply wait fails only that request: its late reply is discarded and
+the same command is refused until that reply arrives, while other commands and
+heartbeat liveness continue. Failed pipe writes leave the stream position unknown:
 ordinary requests are rejected until reconnect; detach/shutdown remain allowed.
 
 ## Backend error event semantics
@@ -890,9 +892,8 @@ permits MCP to clear its stale session/cache and reconnect. The agent's original
 process handle and matching pipe identify the current peer; PID reuse or a stale
 external-agent record cannot stand in for a native DLL. Clearing local state does
 not prove target cleanup: explicit `veh_detach` returns
-`backendCleanupConfirmed: false` in that case. TCP work closure also cannot
-confirm a backend acknowledgement, so TCP detach carries the same marker while
-retaining its existing resident-work closure wait. A connected live backend's rejected,
+`backendCleanupConfirmed: false` in that case. TCP detach is confirmed only by
+the agent status the resident relays before closing the work. A connected live backend's rejected,
 malformed or unavailable reply still retains the session. DAP cleanup is unchanged.
 
 `IpcStatus::InvalidState = 6` means an advertised operation was refused **before

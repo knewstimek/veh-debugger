@@ -6,8 +6,9 @@
 #include <vector>
 
 namespace veh::remote {
-// Only the diagnostic writer is inherited. Never make runner sockets, token files,
-// work handles or unrelated process handles inheritable for an agent.
+// Only the diagnostic writer, and an optional operator-configured stderr log, are
+// inherited. Never make runner sockets, token files, work handles or unrelated
+// process handles inheritable for an agent.
 class StartupDiagnosticChannel {
 public:
     ~StartupDiagnosticChannel() { Close(); }
@@ -15,19 +16,31 @@ public:
     StartupDiagnosticChannel(const StartupDiagnosticChannel&) = delete;
     StartupDiagnosticChannel& operator=(const StartupDiagnosticChannel&) = delete;
     void Close() { if (reader_) CloseHandle(reader_); reader_ = nullptr; }
-    bool CreateAgent(const std::wstring& executable, wchar_t* command, PROCESS_INFORMATION& process) {
+    // stderrFile: empty, or a local log the agent's stderr is appended to. The runner
+    // never reads it, so a chatty agent cannot block on an undrained pipe.
+    bool CreateAgent(const std::wstring& executable, wchar_t* command, const std::wstring& stderrFile,
+        PROCESS_INFORMATION& process) {
         SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
         struct Resources {
-            HANDLE writer = nullptr;
+            HANDLE handles[2]{};
+            HANDLE& writer = handles[0];
+            HANDLE& log = handles[1];
             LPPROC_THREAD_ATTRIBUTE_LIST attributes = nullptr;
             std::vector<unsigned char> storage;
             ~Resources() {
                 const DWORD error = GetLastError();
                 if (attributes) DeleteProcThreadAttributeList(attributes);
                 if (writer) CloseHandle(writer);
+                if (log) CloseHandle(log);
                 SetLastError(error);
             }
         } resources;
+        if (!stderrFile.empty()) {
+            const HANDLE log = CreateFileW(stderrFile.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE |
+                FILE_SHARE_DELETE, &security, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (log == INVALID_HANDLE_VALUE) return false;
+            resources.log = log;
+        }
         if (!CreatePipe(&reader_, &resources.writer, &security, sizeof(StartupDiagnostic))) return false;
         DWORD failure = 0;
         SIZE_T bytes = 0;
@@ -39,8 +52,9 @@ public:
             if (!SetHandleInformation(reader_, HANDLE_FLAG_INHERIT, 0)) { failure = GetLastError(); break; }
             if (!InitializeProcThreadAttributeList(attributes, 1, 0, &bytes)) { failure = GetLastError(); break; }
             resources.attributes = attributes;
+            const SIZE_T handleCount = resources.log ? 2 : 1;
             if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-                    &resources.writer, sizeof(resources.writer), nullptr, nullptr)) { failure = GetLastError(); break; }
+                    resources.handles, handleCount * sizeof(HANDLE), nullptr, nullptr)) { failure = GetLastError(); break; }
             // Build a private child environment; do not mutate the resident's environment.
             auto releaseEnvironment = [](wchar_t* block) { FreeEnvironmentStringsW(block); };
             std::unique_ptr<wchar_t, decltype(releaseEnvironment)> inherited(GetEnvironmentStringsW(), releaseEnvironment);
@@ -66,6 +80,10 @@ public:
             STARTUPINFOEXW startup{};
             startup.StartupInfo.cb = sizeof(startup);
             startup.lpAttributeList = attributes;
+            if (resources.log) {
+                startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+                startup.StartupInfo.hStdError = resources.log;
+            }
             created = CreateProcessW(executable.c_str(), command, nullptr, nullptr, TRUE,
                 CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
                 environment.data(), nullptr, &startup.StartupInfo, &process) != FALSE;
