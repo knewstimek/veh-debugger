@@ -9,6 +9,7 @@
 - Remote runner profiles accept an optional per-backend `stderr_file` that appends agent stderr to a local log on the analysis host; it is never sent to clients.
 - Startup diagnostic detail `backend_busy` (`backend_unavailable`) for an agent that serves one session at a time. The attach error tells the user to detach first.
 - Register validity v1 (`kCapRegisterValidityV1 = 1 << 12`, opt-in): a backend can return a partial context, for example only RIP/RSP/RFLAGS/selectors for a thread held in the kernel by a whole-VM pause. `veh_registers` shows unreadable fields as `null` with `partial: true`. Evaluation and checkpoints refuse partial contexts, and writes to unreadable registers fail with `InvalidState`. `veh_set_register` now reports the backend status.
+- `veh_stack_trace` frames include `offset`, the position inside `function`. It comes from one `Symbolize` batch per stack and is shown only when both name the same function. Backends keep sending bare function names.
 - VM state `Fatal` (wire value 4): `veh_virtual_machine status` reports `fatal` for a VM halted by an unrecoverable error. Backends refuse commands that need it to run with `InvalidState`.
 
 ### Fixed
@@ -16,6 +17,8 @@
 - A timed-out backend request no longer disables the whole session. Only that request fails, its late reply is discarded, and the same command is refused until that reply arrives, while other requests and heartbeat liveness continue. A failed pipe write still invalidates the stream.
 - `veh_pause` and `veh_continue` report the backend status or the transport failure (for example `Continue: operation refused in the current target state`) instead of a generic IPC exchange failure.
 - Remote detach can now confirm backend cleanup. The resident relays the agent's Detach status before closing the work, and an agent exiting right after its acknowledgement no longer drops that relay. A missing, late or failed acknowledgement still reports `backendCleanupConfirmed: false`.
+- The DAP call stack showed the module RVA after the function name (`ntdll!SleepEx+0x9E5C0`). It now shows the offset inside the function, or the bare name when it cannot be confirmed.
+- Stack traces wait up to 30 seconds for the backend, like symbol lookups, instead of 3. A deep stack or a first PDB load no longer times out.
 - A whole-target pause (thread 0) now ends with `veh_continue` on all threads. Before, a backend that listed only real thread ids as resumed left the old pause stop cached, and the next `veh_continue wait` returned it.
 - Preserve fatal memory-gap diagnostics and known execution facts when artifact export also fails; retain both capture and export errors, stop batch/action continuation and preserve existing destination files.
 - Require complete captured data for targeted-input success; preserve budget-truncation failure through batch results instead of marking partial artifacts complete.

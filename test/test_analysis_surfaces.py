@@ -19,6 +19,10 @@ def test_stop_stack_breakpoint_labels_and_opt_out(tmp_path):
         assert stop["annotation"]["comment"] == "request processing entry" and not stop["annotation"]["stale"], stop
         stack = client.tool("veh_stack_trace", {"threadId": stop["threadId"]})
         assert stack["frames"], stack
+        # Named frames report the offset inside the function; callers sit past a call.
+        named = [row for row in stack["frames"] if row["function"]]
+        assert named and all("offset" in row for row in named), stack
+        assert any(int(row["offset"], 16) for row in named[1:]), stack
         exact = [row for row in stack["frames"] if int(row["address"], 16) == int(address, 16)]
         assert exact and exact[0]["annotation"]["label"] == "work_entry", stack
         for frame in stack["frames"]:

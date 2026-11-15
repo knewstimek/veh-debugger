@@ -141,9 +141,9 @@ void DapServer::SetTransport(Transport* transport) {
 }
 
 bool DapServer::ReceiveBackendReply(IpcCommand command, const void* payload, uint32_t size,
-    std::vector<uint8_t>& response, std::string& error) {
+    std::vector<uint8_t>& response, std::string& error, int timeoutMs) {
     PipeExchangeDiagnostics diagnostics{};
-    if (!ipcTransport_->SendAndReceive(command, payload, size, response, 3000, &diagnostics)) {
+    if (!ipcTransport_->SendAndReceive(command, payload, size, response, timeoutMs, &diagnostics)) {
         error = diagnostics.failure == PipeExchangeFailure::WaitTimeout ?
             "Backend request timed out; outcome not confirmed" : "Backend IPC exchange failed";
         if (diagnostics.systemError)
@@ -1978,7 +1978,8 @@ void DapServer::OnStackTrace(const Request& req) {
         levels == 0 ? 200u : static_cast<uint32_t>(std::min(levels, 200))};
     std::vector<uint8_t> respData;
     GetStackTraceResponse header{};
-    if (!ReceiveBackendReply(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), respData, resp.message) ||
+    // Walking a deep stack can load PDBs, like Symbolize.
+    if (!ReceiveBackendReply(IpcCommand::GetStackTrace, &stReq, sizeof(stReq), respData, resp.message, 30000) ||
         !ValidateStackTraceReply(respData, stReq.maxFrames, header, resp.message)) {
         resp.success = false;
         SendResponse(resp);
@@ -1988,6 +1989,31 @@ void DapServer::OnStackTrace(const Request& req) {
     json framesJson = json::array();
     const auto* frames = reinterpret_cast<const StackFrameInfo*>(respData.data() + sizeof(header));
     const uint32_t count = header.count;
+    // Frames carry the bare function name; the offset inside it comes from one
+    // Symbolize batch and is shown only when both name the same function.
+    std::vector<std::string> functionOffsets(count);
+    if (count && (!guestTarget_ || GuestSupports(IpcCommand::Symbolize))) {
+        std::vector<uint8_t> request(sizeof(SymbolizeRequest) + count * sizeof(uint64_t));
+        const SymbolizeRequest head{count};
+        memcpy(request.data(), &head, sizeof(head));
+        for (uint32_t i = 0; i < count; i++)
+            memcpy(request.data() + sizeof(head) + i * sizeof(uint64_t), &frames[i].address, sizeof(uint64_t));
+        std::vector<uint8_t> symbols;
+        std::string ignored;
+        if (ReceiveBackendReply(IpcCommand::Symbolize, request.data(), static_cast<uint32_t>(request.size()), symbols, ignored, 30000) &&
+                symbols.size() == sizeof(SymbolizeResponse) + count * sizeof(SymbolizeEntry) &&
+                reinterpret_cast<const SymbolizeResponse*>(symbols.data())->count == count) {
+            const auto* entries = reinterpret_cast<const SymbolizeEntry*>(symbols.data() + sizeof(SymbolizeResponse));
+            for (uint32_t i = 0; i < count; i++) {
+                const auto& e = entries[i];
+                if (e.address != frames[i].address || !frames[i].functionName[0] ||
+                        strncmp(e.functionName, frames[i].functionName, sizeof(frames[i].functionName)) != 0) continue;
+                char text[32];
+                snprintf(text, sizeof(text), "+0x%llX", static_cast<unsigned long long>(e.displacement));
+                functionOffsets[i] = e.displacement ? text : "";
+            }
+        }
+    }
 	for (uint32_t i = 0; i < count; i++) {
 		// 순차 ID 발급 + 맵에 (threadId, frameIndex) 저장
 		// Windows 스레드 ID가 16비트 초과 가능(예: 169644)하므로 비트 패킹 불가
@@ -2003,7 +2029,7 @@ void DapServer::OnStackTrace(const Request& req) {
 		f.id = fid;
 		f.instructionPointerReference = FormatAddress(frames[i].address);
 
-		// 프레임 이름: module!func+0xOFFSET (0xADDR) — 오프셋 + 쌩 주소 둘 다 표시
+		// Frame name: module!func+0xFUNCOFFSET (0xADDR), or module+0xRVA without a function
 		{
 			std::string mod = frames[i].moduleName[0] ? frames[i].moduleName : "";
 			std::string func = frames[i].functionName[0] ? frames[i].functionName : "";
@@ -2013,10 +2039,8 @@ void DapServer::OnStackTrace(const Request& req) {
 			char offsetStr[32];
 			snprintf(offsetStr, sizeof(offsetStr), "+0x%llX", modOffset);
 
-			if (!func.empty() && !mod.empty()) {
-				f.name = mod + "!" + func + offsetStr + " (" + addr + ")";
-			} else if (!func.empty()) {
-				f.name = func + " (" + addr + ")";
+			if (!func.empty()) {
+				f.name = (mod.empty() ? "" : mod + "!") + func + functionOffsets[i] + " (" + addr + ")";
 			} else if (!mod.empty()) {
 				f.name = mod + offsetStr + " (" + addr + ")";
 			} else {

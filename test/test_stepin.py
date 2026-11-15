@@ -1,5 +1,6 @@
 """DAP stepIn integration test with bounded I/O and cleanup."""
 import os
+import re
 from build_paths import RELEASE
 
 from dap_test_client import DapClient
@@ -44,6 +45,11 @@ def main():
             if frames and "WorkFunction" in frames[0].get("name", ""):
                 break
         assert frames and "WorkFunction" in frames[0].get("name", ""), frames
+        # Frame names show the offset inside the function (just past WorkFunction's
+        # entry here), not the module RVA.
+        offset = re.search(r"!WorkFunction(?:\+0x([0-9A-F]+))? \(", frames[0]["name"])
+        assert offset and int(offset.group(1) or "0", 16) < 0x40, frames
+        assert len(frames) > 1 and re.search(r"![^!+ ]+\+0x[0-9A-F]+ \(", frames[1]["name"]), frames
         print(f"PASS: DAP stepIn entered {frames[0]['name']}")
     finally:
         client.close()

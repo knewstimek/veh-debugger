@@ -1289,7 +1289,8 @@ std::vector<StackFrame> DebugSession::GetStackTrace(uint32_t threadId, uint32_t 
 	std::string detail;
 	if (error) error->clear();
 	GetStackTraceResponse header{};
-	if (!ReceiveBackendReply(IpcCommand::GetStackTrace, &req, sizeof(req), respData, "GetStackTrace", detail) ||
+	// Walking a deep stack can load PDBs, like Symbolize.
+	if (!ReceiveBackendReply(IpcCommand::GetStackTrace, &req, sizeof(req), respData, "GetStackTrace", detail, 30000) ||
 		!ValidateStackTraceReply(respData, maxFrames, header, detail)) {
 		if (error) *error = detail;
 		return result;

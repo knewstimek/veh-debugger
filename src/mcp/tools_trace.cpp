@@ -81,8 +81,17 @@ json McpServer::ToolStackTrace(const json& args) {
 	const auto annotationEpoch = JsonBool(args, "include_annotations", true) ? AnnotationEpoch(true) : std::string{};
 	auto frames = session_.GetStackTrace(threadId, maxFrames, &error);
 	if (!error.empty()) return {{"error", error}};
+	// Frames carry the bare function name; the offset inside it comes from one
+	// Symbolize batch and is reported only when both name the same function.
+	std::vector<SymbolizeEntry> symbols;
+	if (!frames.empty() && session_.GetBackendInfo().Supports(IpcCommand::Symbolize)) {
+		std::vector<uint64_t> addresses;
+		for (const auto& f : frames) addresses.push_back(f.address);
+		symbols = session_.Symbolize(addresses);
+	}
 	json arr = json::array();
-	for (auto& f : frames) {
+	for (size_t i = 0; i < frames.size(); i++) {
+		const auto& f = frames[i];
 		char addrBuf[20];
 		snprintf(addrBuf, sizeof(addrBuf), "0x%llX", f.address);
 
@@ -93,6 +102,9 @@ json McpServer::ToolStackTrace(const json& args) {
 			{"module", f.moduleName},
 			{"function", f.functionName}
 		};
+		if (symbols.size() == frames.size() && symbols[i].address == f.address && !f.functionName.empty() &&
+				strncmp(symbols[i].functionName, f.functionName.c_str(), sizeof(symbols[i].functionName)) == 0)
+			frame["offset"] = HexAddr(symbols[i].displacement);
 		if (!f.sourceFile.empty()) {
 			frame["source"] = f.sourceFile;
 			frame["line"] = f.line;

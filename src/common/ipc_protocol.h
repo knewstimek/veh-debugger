@@ -389,7 +389,7 @@ struct StackFrameInfo {
 	uint64_t frameBase;
 	uint64_t moduleBase;     // 모듈 베이스 주소 (ntdll.dll+0xOFFSET 표시용)
 	char     moduleName[128];
-	char     functionName[128];
+	char     functionName[128]; // bare name; clients add the offset from Symbolize
 	char     sourceFile[256];
 	uint32_t line;
 };

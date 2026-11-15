@@ -90,7 +90,7 @@ private:
 	bool AttachGuestAgent(const Request& req, std::string& error);
 	bool GuestSupports(IpcCommand command) const;
 	bool ReceiveBackendReply(IpcCommand command, const void* payload, uint32_t size,
-		std::vector<uint8_t>& response, std::string& error);
+		std::vector<uint8_t>& response, std::string& error, int timeoutMs = 3000);
 	bool SendStatusCommand(IpcCommand command, const void* payload, uint32_t size, std::string& error);
 	bool ContinueBackend(uint32_t threadId, bool& allContinued, std::string& error,
 		uint64_t resumeCutoff = UINT64_MAX);

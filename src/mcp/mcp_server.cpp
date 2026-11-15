@@ -1359,7 +1359,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 
 
 		Tool(&McpServer::ToolStackTrace, "trace", 0, true,
-			{{"name", "veh_stack_trace"}, {"description", "Get stack frames with address, frameBase and returnAddress (0x0 if unavailable). To inspect caller locals, pass that frame's address and frameBase to veh_enum_locals. Backend failures return errors; an empty stack is successful."},
+			{{"name", "veh_stack_trace"}, {"description", "Get stack frames with address, frameBase, returnAddress (0x0 if unavailable), function and its offset (when symbolized). To inspect caller locals, pass that frame's address and frameBase to veh_enum_locals. Backend failures return errors; an empty stack is successful."},
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"threadId", {{"type", "integer"}, {"description", "OS thread ID (from veh_threads)"}}},
 			{"maxFrames", {{"type", "integer"}, {"description", "Max frames to return (default: 20)"}}}
