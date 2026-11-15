@@ -370,7 +370,7 @@ enabled = true
 
 설정 후 에이전트/IDE를 재시작하면 활성화됩니다.
 
-기본 `lite` 프로필은 `veh_toolbox`, launch/attach/continue/batch/terminate/registers만 먼저 노출하여 매 요청의 도구 스키마 비용을 줄입니다. 나머지는 `veh_toolbox`로 검색 → schema 확인 → 호출하며, 이름을 아는 자동화는 숨겨진 도구도 기존처럼 직접 호출할 수 있습니다. BP/inspection 중심은 `--profile=interactive`, trace/checkpoint 중심은 `--profile=capture`를 사용하세요. 고급 분석은 `--profile=analysis`(41개), 게스트 프로세스 탐색·VM 전체 제어까지 포함하려면 `--profile=vmguest`(43개), 전체 목록은 `--profile=full`을 사용하세요. 새 프로필의 공통 목록·제한은 [프로필 안내](docs/DEVELOPMENT_TOOLS.md#mcp-exposure-profiles-and-lazy-toolbox)를 참고하세요. 노출 여부와 실제 백엔드 지원 여부는 별개입니다.
+기본 `lite` 프로필은 `veh_toolbox`, launch/attach/continue/batch/terminate/registers만 먼저 노출하여 매 요청의 도구 스키마 비용을 줄입니다. 나머지는 `veh_toolbox`로 검색 → schema 확인 → 호출하며, 이름을 아는 자동화는 숨겨진 도구도 기존처럼 직접 호출할 수 있습니다. BP/inspection 중심은 `--profile=interactive`, trace/checkpoint 중심은 `--profile=capture`를 사용하세요. 고급 분석은 `--profile=analysis`(41개), 게스트 프로세스 탐색·VM 제어·커널/물리 메모리·이벤트/후킹·주소 공간 분석까지 포함하려면 `--profile=vmguest`(51개), 전체 목록은 `--profile=full`을 사용하세요. 새 프로필의 공통 목록·제한은 [프로필 안내](docs/DEVELOPMENT_TOOLS.md#mcp-exposure-profiles-and-lazy-toolbox)를 참고하세요. 노출 여부와 실제 백엔드 지원 여부는 별개입니다.
 
 ### 외부 백엔드와 VM 안의 프로세스 연결 (MCP)
 

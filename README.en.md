@@ -328,7 +328,7 @@ enabled = true
 
 Restart the agent/IDE after configuring to activate.
 
-The default `lite` profile eagerly exposes only `veh_toolbox` plus launch/attach/continue/batch/terminate/registers, reducing the tool-schema cost on each request. Use `veh_toolbox` to search, describe, then call other tools; automation that already knows a hidden tool name can still call it directly. Select `--profile=interactive` for breakpoint/inspection work or `--profile=capture` for trace/checkpoint work. Use `--profile=analysis` for 41 advanced analysis tools, `--profile=vmguest` for the same tools plus guest process discovery and whole-VM control (43), or `--profile=full` for the complete inventory. See [profile contents and limits](docs/DEVELOPMENT_TOOLS.md#mcp-exposure-profiles-and-lazy-toolbox). Exposure does not imply backend support.
+The default `lite` profile eagerly exposes only `veh_toolbox` plus launch/attach/continue/batch/terminate/registers, reducing the tool-schema cost on each request. Use `veh_toolbox` to search, describe, then call other tools; automation that already knows a hidden tool name can still call it directly. Select `--profile=interactive` for breakpoint/inspection work or `--profile=capture` for trace/checkpoint work. Use `--profile=analysis` for 41 advanced analysis tools, `--profile=vmguest` for the same tools plus guest process discovery, VM control, kernel/physical memory, events/hooks and address-space analysis (51), or `--profile=full` for the complete inventory. See [profile contents and limits](docs/DEVELOPMENT_TOOLS.md#mcp-exposure-profiles-and-lazy-toolbox). Exposure does not imply backend support.
 
 ### External backends and VM guest attachment (MCP)
 

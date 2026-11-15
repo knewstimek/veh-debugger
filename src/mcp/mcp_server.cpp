@@ -1217,7 +1217,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 {"inputSchema", {{"type", "object"}, {"properties", {
 			{"program", {{"type", "string"}, {"description", "Path to executable"}}},
 			{"args", {{"type", "array"}, {"items", {{"type", "string"}}}, {"description", "Command line arguments"}}},
-			{"cwd", {{"type", "string"}, {"description", "Working directory for the target process. Omit to inherit the debugger's current directory. Use this when the program loads config/resources/DLLs by relative path from its own folder."}}},
+			{"cwd", {{"type", "string"}, {"description", "Target working directory (default: debugger directory). Set for relative config/resources/DLL paths."}}},
 			{"env", {{"type", "object"}, {"description", "Environment variables for the target, applied on top of the inherited parent environment (e.g. {\"ORACLE_M4_HOME\":\"C:/oracle\"}). Enables debugging headless processes configured via env vars. Also accepts an array of \"KEY=VALUE\" strings."}}},
 			{"stopOnEntry", {{"type", "boolean"}, {"description", "Stop at entry point (default: true)"}}},
 			{"runAsInvoker", {{"type", "boolean"}, {"description", "Bypass UAC elevation prompt by setting __COMPAT_LAYER=RunAsInvoker (default: false)"}}},
@@ -2071,10 +2071,22 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
         "veh_dump_memory",
         "veh_resolve_imports"
     };
+    static const char* vmGuestTools[] = {
+        "veh_processes",
+        "veh_virtual_machine",
+        "veh_system_memory",
+        "veh_hidden_hook",
+        "veh_event",
+        "veh_event_records",
+        "veh_transparency",
+        "veh_address_space",
+        "veh_translate",
+        "veh_kernel_modules"
+    };
     for (auto& tool : tools) {
         if (std::find(std::begin(analysisTools), std::end(analysisTools), tool.name) != std::end(analysisTools))
             tool.profiles |= kAnalysis;
-        if (tool.name == "veh_processes" || tool.name == "veh_virtual_machine")
+        if (std::find(std::begin(vmGuestTools), std::end(vmGuestTools), tool.name) != std::end(vmGuestTools))
             tool.profiles |= kVmGuest;
         if (tool.name == "veh_list_breakpoints" || tool.name == "veh_stack_trace" || tool.name == "veh_continue" ||
                 tool.name == "veh_step_in" || tool.name == "veh_step_over" || tool.name == "veh_step_out")

@@ -150,7 +150,11 @@ def test_analysis_and_vmguest_share_exact_inventory_and_gateway_schemas():
         veh_set_register veh_batch veh_evaluate veh_set_function_breakpoint veh_set_module_breakpoint
         veh_assemble veh_dump_memory veh_resolve_imports
     """.split())
-    expected_vm_only = {"veh_processes", "veh_virtual_machine"}
+    expected_vm_only = {
+        "veh_processes", "veh_virtual_machine", "veh_system_memory", "veh_hidden_hook",
+        "veh_event", "veh_event_records", "veh_transparency", "veh_address_space",
+        "veh_translate", "veh_kernel_modules",
+    }
     _, full = _inventory("full")
     full_definitions = {tool["name"]: tool for tool in full}
     for profile, expected in (
@@ -178,7 +182,7 @@ def test_analysis_and_vmguest_share_exact_inventory_and_gateway_schemas():
             profiles = client.tool("veh_toolbox", {"operation": "profiles"})
             counts = {item["name"]: item["eager_tools"] for item in profiles["profiles"]}
             assert profiles["active"] == profile
-            assert counts["analysis"] == 41 and counts["vmguest"] == 43
+            assert counts["analysis"] == 41 and counts["vmguest"] == 51
             # Visibility never grants backend support; hidden names remain callable.
             direct = client.tool("veh_virtual_machine", {"operation": "status"})
             gateway = client.tool("veh_toolbox", {
