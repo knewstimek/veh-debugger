@@ -2148,6 +2148,7 @@ enum class IpcBackend : uint32_t { VehDll = 0, Hypervisor = 1 };
 constexpr uint32_t kCapPageBreakpointV1 = 1u << 11; //VEH-only guard/TF watches
 constexpr uint32_t kCapRegisterContextV1 = 1u << 10;
 constexpr uint32_t kCapRegisterValidityV1 = 1u << 12; // opt-in partial contexts; see GetRegistersResponseV1
+constexpr uint32_t kCapFailureReasonV1 = 1u << 13; // opt-in suffix on failed Memory/Execute replies
 constexpr uint32_t kCapStopIdentityV1 = 1u << 9; // opt-in hold identity and atomic ContinueIfStopped
 constexpr uint32_t kCapBasicTraceLazy = 1u << 8; // wire12 lazy decode, cache budget and 64-bit steps
 constexpr uint32_t kCapValueScanV2 = 1u << 7; // transactional disk/undo and event-driven async value scans
@@ -2195,6 +2196,15 @@ struct GetCapabilitiesResponse {
 	uint8_t    commands[32];   // bit n set = IpcCommand value n is implemented
 	char       name[32];       // human-readable backend name
 };
+
+// Only after selecting kCapFailureReasonV1: a failed WriteMemory, AllocateMemory,
+// FreeMemory, ProtectMemory or ExecuteShellcode response keeps its legacy prefix
+// and appends this header followed by size printable ASCII bytes (no NUL).
+// size may be zero when the backend has no concrete reason. Successful replies
+// and connections that did not select the flag keep their exact legacy shape.
+constexpr uint32_t kFailureReasonMax = 1024;
+struct FailureReasonV1 { uint32_t version, size; };
+static_assert(sizeof(FailureReasonV1)==8);
 
 inline void SetCommandSupported(uint8_t (&bits)[32], IpcCommand cmd) {
 	const uint32_t n = static_cast<uint32_t>(cmd);

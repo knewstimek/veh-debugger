@@ -71,6 +71,20 @@ def run():
     finally:
         client.close(terminate_debuggee=False)
 
+    # A guest Terminate answered with Error is not an exit: no success, no terminated event.
+    client, response = attach("fail-reason")
+    try:
+        assert response["success"], response
+        failed = client.request("terminate")
+        assert not failed["success"] and "not confirmed" in failed["message"], failed
+        threads = client.request("threads")
+        assert threads["success"] and len(threads["body"]["threads"]) == 1, threads
+        assert client.request("disconnect", {"terminateDebuggee": False})["success"]
+        exit_code = client.proc.wait(timeout=3)
+        assert exit_code == 0, (exit_code, client.stderr_tail())
+    finally:
+        client.close(terminate_debuggee=False)
+
     for mode in ("wrong-pid", "bad-width", "wrong-scope", "truncated", "host-cap"):
         client, response = attach(mode)
         try:

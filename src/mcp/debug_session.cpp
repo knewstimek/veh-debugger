@@ -181,7 +181,8 @@ bool DebugSession::ConnectExternalAgent(uint32_t pid, const ExternalAgent& agent
 void DebugSession::QueryBackendInfo() {
 	backendInfo_ = {};
 	std::vector<uint8_t> resp;
-	if (!ipcTransport_->QueryContextCapabilities(resp, 1500, kCapRegisterContextV1 | kCapRegisterValidityV1)) return;
+	if (!ipcTransport_->QueryContextCapabilities(resp, 1500,
+		kCapRegisterContextV1 | kCapRegisterValidityV1 | kCapFailureReasonV1)) return;
 	if (resp.size() < sizeof(GetCapabilitiesResponse)) return;   // older DLL: bare InvalidArgs
 	GetCapabilitiesResponse caps;
 	memcpy(&caps, resp.data(), sizeof(caps));
@@ -684,18 +685,40 @@ bool DebugSession::Detach() {
 	return detachConfirmed;
 }
 
-bool DebugSession::Terminate(uint32_t exitCode) {
-	if (!attached_ || (!launchedByUs_ && !backendInfo_.Supports(IpcCommand::Terminate))) return false;
+bool DebugSession::Terminate(uint32_t exitCode, std::string* error) {
+	if (error) error->clear();
+	if (!attached_ || (!launchedByUs_ && !backendInfo_.Supports(IpcCommand::Terminate))) {
+		if (error) *error = "Target termination is unsupported or the session is unavailable";
+		return false;
+	}
 
 	// 1) 인-프로세스 종료 요청. 타겟 DLL 이 TerminateProcess(GetCurrentProcess()) 를 호출하므로
 	//    외부 OpenProcess(TERMINATE) 를 막는 자기보호 타겟도 확실히 죽는다.
-	//    프로세스가 곧 사라지므로 응답을 기다리지 않는 fire-and-forget.
+	//    VEH DLL 은 타겟과 함께 사라져 응답이 없다(fire-and-forget). 타겟 밖의 백엔드는
+	//    종료를 확인한 뒤에만 Ok 를 보내므로 그 응답을 기다린다.
 	TerminateRequest req{ exitCode };
-	try { ipcTransport_->SendCommand(IpcCommand::Terminate, &req, sizeof(req)); } catch (...) {}
+	bool confirmed = true;
+	std::string detail;
+	if (backendInfo_.backend == IpcBackend::VehDll) {
+		try { ipcTransport_->SendCommand(IpcCommand::Terminate, &req, sizeof(req)); } catch (...) {}
+	} else {
+		std::vector<uint8_t> reply;
+		confirmed = ReceiveBackendReply(IpcCommand::Terminate, &req, sizeof(req), reply, "Terminate", detail, 60000);
+		if (confirmed && reply.size() != sizeof(IpcStatus)) {
+			confirmed = false;
+			detail = "Terminate: malformed backend response";
+		}
+	}
 
 	// 2) 우리가 띄운 프로세스면 TERMINATE 핸들을 이미 쥐고 있으니 백업으로 직접 종료(1 실패 대비).
 	if (launchedByUs_ && targetProcess_) {
 		TerminateProcess(targetProcess_, exitCode);
+		if (!confirmed) confirmed = WaitForSingleObject(targetProcess_, 5000) == WAIT_OBJECT_0;
+	}
+	if (!confirmed) {
+		if (error) *error = detail + "; exit not confirmed, session kept attached "
+			"(the backend may already have released stops and breakpoints)";
+		return false;
 	}
 
 	// 3) 세션 정리. Detach 명령은 보내지 않는다 -- 타겟이 사라지는 중이라 파이프도 곧 끊긴다.
@@ -1699,7 +1722,28 @@ DebugSession::ValueScanResultV2 DebugSession::ValueScanV2(const ValueScanRequest
     return result;
 }
 
-bool DebugSession::WriteMemory(uint64_t address, const uint8_t* data, uint32_t size) {
+std::string DebugSession::FailureReason(const std::vector<uint8_t>& reply, size_t prefix) const {
+	if (!backendInfo_.reported || !(backendInfo_.flags & kCapFailureReasonV1)) return {};
+	FailureReasonV1 header{};
+	if (reply.size() < prefix + sizeof(header)) return {};
+	memcpy(&header, reply.data() + prefix, sizeof(header));
+	if (header.version != 1 || header.size > kFailureReasonMax ||
+		reply.size() != prefix + sizeof(header) + header.size) return {};
+	std::string text(reinterpret_cast<const char*>(reply.data() + prefix + sizeof(header)), header.size);
+	for (char& c : text) if (c < 0x20 || c > 0x7e) c = '?';
+	return text;
+}
+
+bool DebugSession::StatusReply(const std::vector<uint8_t>& reply, std::string* reason) const {
+	if (reply.size() < sizeof(IpcStatus)) return false;
+	IpcStatus status{};
+	memcpy(&status, reply.data(), sizeof(status));
+	if (status == IpcStatus::Ok) return reply.size() == sizeof(IpcStatus);
+	if (reason) *reason = FailureReason(reply, sizeof(IpcStatus));
+	return false;
+}
+
+bool DebugSession::WriteMemory(uint64_t address, const uint8_t* data, uint32_t size, std::string* reason) {
 	std::vector<uint8_t> payload(sizeof(WriteMemoryRequest) + size);
 	auto* req = reinterpret_cast<WriteMemoryRequest*>(payload.data());
 	req->address = address;
@@ -1710,12 +1754,7 @@ bool DebugSession::WriteMemory(uint64_t address, const uint8_t* data, uint32_t s
 	if (!ipcTransport_->SendAndReceive(IpcCommand::WriteMemory, payload.data(),
 	                                 static_cast<uint32_t>(payload.size()), respData))
 		return false;
-
-	if (respData.size() == sizeof(IpcStatus)) {
-		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
-		return status == IpcStatus::Ok;
-	}
-	return false;
+	return StatusReply(respData, reason);
 }
 
 DebugSession::CodePatchResult DebugSession::PatchCode(uint64_t address, const std::vector<uint8_t>& code,
@@ -1778,7 +1817,7 @@ DebugSession::CodePatchResult DebugSession::PatchCode(uint64_t address, const st
     return result;
 }
 
-uint64_t DebugSession::AllocateMemory(uint32_t size, uint32_t protection) {
+uint64_t DebugSession::AllocateMemory(uint32_t size, uint32_t protection, std::string* reason) {
 	AllocateMemoryRequest req{};
 	req.size = size;
 	req.protection = protection;
@@ -1789,11 +1828,14 @@ uint64_t DebugSession::AllocateMemory(uint32_t size, uint32_t protection) {
 	if (respData.size() < sizeof(AllocateMemoryResponse)) return 0;
 
 	auto* resp = reinterpret_cast<const AllocateMemoryResponse*>(respData.data());
-	if (resp->status != IpcStatus::Ok) return 0;
+	if (resp->status != IpcStatus::Ok) {
+		if (reason) *reason = FailureReason(respData, sizeof(AllocateMemoryResponse));
+		return 0;
+	}
 	return resp->address;
 }
 
-bool DebugSession::FreeMemory(uint64_t address) {
+bool DebugSession::FreeMemory(uint64_t address, std::string* reason) {
 	FreeMemoryRequest req{};
 	req.address = address;
 	req.size = 0;
@@ -1801,11 +1843,7 @@ bool DebugSession::FreeMemory(uint64_t address) {
 	std::vector<uint8_t> respData;
 	if (!ipcTransport_->SendAndReceive(IpcCommand::FreeMemory, &req, sizeof(req), respData))
 		return false;
-	if (respData.size() == sizeof(IpcStatus)) {
-		auto status = *reinterpret_cast<const IpcStatus*>(respData.data());
-		return status == IpcStatus::Ok;
-	}
-	return false;
+	return StatusReply(respData, reason);
 }
 
 DebugSession::ProtectMemoryResult DebugSession::ProtectMemory(uint64_t address, uint64_t size,
@@ -1828,6 +1866,7 @@ DebugSession::ProtectMemoryResult DebugSession::ProtectMemory(uint64_t address, 
 	result.errorCode = resp->errorCode;
 	result.method = resp->method;
 	result.ok = resp->status == IpcStatus::Ok;
+	if (!result.ok) result.reason = FailureReason(respData, sizeof(ProtectMemoryResponse));
 	return result;
 }
 
@@ -1857,6 +1896,8 @@ ShellcodeResult DebugSession::ExecuteShellcode(const uint8_t* code, uint32_t siz
 		result.backendStatus = status;
 		if (status != IpcStatus::Ok) {
 			result.error = "ExecuteShellcode: " + BackendStatusText(status);
+			if (const auto reason = FailureReason(respData, sizeof(ExecuteShellcodeResponse)); !reason.empty())
+				result.error += ": " + reason;
 			return result;
 		}
 	}

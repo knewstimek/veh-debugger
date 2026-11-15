@@ -10,6 +10,7 @@
 - Startup diagnostic detail `backend_busy` (`backend_unavailable`) for an agent that serves one session at a time. The attach error tells the user to detach first.
 - Register validity v1 (`kCapRegisterValidityV1 = 1 << 12`, opt-in): a backend can return a partial context, for example only RIP/RSP/RFLAGS/selectors for a thread held in the kernel by a whole-VM pause. `veh_registers` shows unreadable fields as `null` with `partial: true`. Evaluation and checkpoints refuse partial contexts, and writes to unreadable registers fail with `InvalidState`. `veh_set_register` now reports the backend status.
 - `veh_stack_trace` frames include `offset`, the position inside `function`. It comes from one `Symbolize` batch per stack and is shown only when both name the same function. Backends keep sending bare function names.
+- Failure reason v1 (`kCapFailureReasonV1 = 1 << 13`, opt-in): a backend can append its own reason to a failed `WriteMemory`, `AllocateMemory`, `FreeMemory`, `ProtectMemory` or `ExecuteShellcode` reply. The reason appears after the error message, for example `VirtualAlloc failed in target process: The process is stopped as a whole; continue thread 0 first`. Malformed suffixes are ignored, and other replies keep their legacy shape.
 - VM state `Fatal` (wire value 4): `veh_virtual_machine status` reports `fatal` for a VM halted by an unrecoverable error. Backends refuse commands that need it to run with `InvalidState`.
 
 ### Fixed
@@ -19,6 +20,7 @@
 - Remote detach can now confirm backend cleanup. The resident relays the agent's Detach status before closing the work, and an agent exiting right after its acknowledgement no longer drops that relay. A missing, late or failed acknowledgement still reports `backendCleanupConfirmed: false`.
 - The DAP call stack showed the module RVA after the function name (`ntdll!SleepEx+0x9E5C0`). It now shows the offset inside the function, or the bare name when it cannot be confirmed.
 - Stack traces wait up to 30 seconds for the backend, like symbol lookups, instead of 3. A deep stack or a first PDB load no longer times out.
+- `veh_terminate` and DAP terminate on an out-of-process backend now wait up to 60 seconds for its reply and succeed only on `Ok`. On `Error`, a malformed reply or a timeout, the session stays attached and the error says the exit was not confirmed. Before, MCP reported success and detached without reading the reply.
 - A whole-target pause (thread 0) now ends with `veh_continue` on all threads. Before, a backend that listed only real thread ids as resumed left the old pause stop cached, and the next `veh_continue wait` returned it.
 - Preserve fatal memory-gap diagnostics and known execution facts when artifact export also fails; retain both capture and export errors, stop batch/action continuation and preserve existing destination files.
 - Require complete captured data for targeted-input success; preserve budget-truncation failure through batch results instead of marking partial artifacts complete.

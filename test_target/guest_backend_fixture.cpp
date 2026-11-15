@@ -87,6 +87,10 @@ int wmain(int argc, wchar_t** argv) {
     const bool partialMode = mode == L"partial-registers";
     constexpr uint64_t partialValid = (1ull << 7) | (3ull << 16) | (0x3Full << 18);
     uint32_t contextSelection = 0;
+    // fail-reason selects FailureReasonV1; fail-legacy never offers it; fail-malformed
+    // sends a suffix whose size disagrees with the reply length.
+    const bool failMode = mode.rfind(L"fail-", 0) == 0;
+    uint32_t failureSelection = 0;
     bool contextNative = false;
     uint32_t pathRequests = 0, hardwareQueries = 0;
     const bool hardwareMode = mode.rfind(L"hardware-", 0) == 0;
@@ -210,6 +214,18 @@ int wmain(int argc, wchar_t** argv) {
                     veh::SetCommandSupported(caps.commands, op);
             }
             caps.flags |= veh::kCapNoTargetFootprint | (mode == L"host-cap" || mode == L"host-trace" || mode == L"hardware-host" || mode == L"host-late-reply" ? 0 : machineMode ? veh::kCapVirtualMachineTarget : veh::kCapGuestTarget);
+            if (failMode) {
+                const uint32_t supported = mode == L"fail-legacy" ? 0u : veh::kCapFailureReasonV1;
+                if (!veh::SelectRegisterContext(bytes.data(), static_cast<uint32_t>(bytes.size()), failureSelection,
+                        &failureSelection, supported)) {
+                    if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break;
+                    continue;
+                }
+                caps.flags |= supported;
+                for (auto op : {veh::IpcCommand::WriteMemory, veh::IpcCommand::AllocateMemory, veh::IpcCommand::FreeMemory,
+                                veh::IpcCommand::ProtectMemory, veh::IpcCommand::ExecuteShellcode, veh::IpcCommand::Terminate})
+                    veh::SetCommandSupported(caps.commands, op);
+            }
             if(importMode)veh::SetCommandSupported(caps.commands,veh::IpcCommand::ResolveImport);
             if(scanMode){veh::SetCommandSupported(caps.commands,veh::IpcCommand::ValueScan);if(mode!=L"scan-legacy")caps.flags|=veh::kCapValueScanV2;}
             if(mode==L"machine-guest-cap")caps.flags=veh::kCapNoTargetFootprint|veh::kCapGuestTarget;
@@ -1363,6 +1379,27 @@ int wmain(int argc, wchar_t** argv) {
             event.threadId = 77; event.address = 0x1000;
             event.breakpointId = fixtureBreakpointId ? fixtureBreakpointId : 7;
             if (!send(pipe, static_cast<uint32_t>(veh::IpcEvent::BreakpointHit), &event, sizeof(event))) break;
+        } else if (failMode && (command == veh::IpcCommand::WriteMemory || command == veh::IpcCommand::AllocateMemory ||
+                   command == veh::IpcCommand::FreeMemory || command == veh::IpcCommand::ProtectMemory ||
+                   command == veh::IpcCommand::ExecuteShellcode || command == veh::IpcCommand::Terminate)) {
+            // Every request fails; Terminate answers a bare Error (exit not attested).
+            std::vector<unsigned char> out(command == veh::IpcCommand::AllocateMemory ? sizeof(veh::AllocateMemoryResponse) :
+                command == veh::IpcCommand::ProtectMemory ? sizeof(veh::ProtectMemoryResponse) :
+                command == veh::IpcCommand::ExecuteShellcode ? sizeof(veh::ExecuteShellcodeResponse) : sizeof(veh::IpcStatus), 0);
+            const auto status = veh::IpcStatus::Error;
+            std::memcpy(out.data(), &status, sizeof(status));
+            if (command == veh::IpcCommand::ProtectMemory) {
+                veh::ProtectMemoryResponse response{}; response.status = status; response.errorCode = 0xC0000022;
+                std::memcpy(out.data(), &response, sizeof(response));
+            }
+            if (command != veh::IpcCommand::Terminate && (failureSelection & veh::kCapFailureReasonV1)) {
+                static constexpr char text[] = "process stopped as a whole\x01";
+                const veh::FailureReasonV1 suffix{1, mode == L"fail-malformed" ? 99u : static_cast<uint32_t>(sizeof(text) - 1)};
+                const auto* raw = reinterpret_cast<const unsigned char*>(&suffix);
+                out.insert(out.end(), raw, raw + sizeof(suffix));
+                out.insert(out.end(), text, text + sizeof(text) - 1);
+            }
+            if (!send(pipe, header.command, out.data(), static_cast<uint32_t>(out.size()))) break;
         } else if (mode == L"reply-errors" &&
                    (command == veh::IpcCommand::GetThreads || command == veh::IpcCommand::GetModules)) {
             if (!reply(pipe, header.command, veh::IpcStatus::Unsupported)) break;

@@ -17,6 +17,13 @@
 
 namespace veh {
 
+namespace {
+// The backend's own failure text (kCapFailureReasonV1) after the generic message.
+std::string WithReason(const std::string& message, const std::string& reason) {
+	return reason.empty() ? message : message + ": " + reason;
+}
+}
+
 json McpServer::ToolReadMemory(const json& args) {
 	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
 
@@ -184,11 +191,12 @@ json McpServer::ToolWriteMemory(const json& args) {
 				errors.push_back({{"address", pAddr}, {"error", "invalid hex data"}});
 				continue;
 			}
-			if (session_.WriteMemory(addr, bytes.data(), static_cast<uint32_t>(bytes.size()))) {
+			std::string reason;
+			if (session_.WriteMemory(addr, bytes.data(), static_cast<uint32_t>(bytes.size()), &reason)) {
 				succeeded++;
 			} else {
 				failed++;
-				errors.push_back({{"address", pAddr}, {"error", "write failed"}});
+				errors.push_back({{"address", pAddr}, {"error", WithReason("write failed", reason)}});
 			}
 		}
 		json ret = {{"success", failed == 0}, {"succeeded", succeeded}, {"failed", failed}};
@@ -213,8 +221,10 @@ json McpServer::ToolWriteMemory(const json& args) {
 		return {{"error", "data too large (max 1MB)"}};
 	}
 
-	if (!session_.WriteMemory(addr, bytes.data(), static_cast<uint32_t>(bytes.size()))) {
-		return {{"error", "Memory write failed; memory or page protection may have changed"}};
+	std::string reason;
+	if (!session_.WriteMemory(addr, bytes.data(), static_cast<uint32_t>(bytes.size()), &reason)) {
+		return {{"error", reason.empty() ? "Memory write failed; memory or page protection may have changed" :
+			WithReason("Memory write failed", reason)}};
 	}
 
 	return {{"success", true}, {"bytesWritten", bytes.size()}};
@@ -379,9 +389,10 @@ json McpServer::ToolAllocateMemory(const json& args) {
 	uint32_t protection = 0;
 	if (!ParseProtectText(protStr, protection)) return {{"error", "invalid protection"}};
 
-	uint64_t addr = session_.AllocateMemory(static_cast<uint32_t>(size), protection);
+	std::string reason;
+	uint64_t addr = session_.AllocateMemory(static_cast<uint32_t>(size), protection, &reason);
 	if (addr == 0) {
-		return {{"error", "VirtualAlloc failed in target process"}};
+		return {{"error", WithReason("VirtualAlloc failed in target process", reason)}};
 	}
 
 	char buf[20];
@@ -435,7 +446,7 @@ json McpServer::ToolProtectMemory(const json& args) {
 		char code[16];
 		snprintf(code, sizeof(code), "0x%08X", result.errorCode);
 		const std::string kind = result.method == ProtectMemoryMethod::Api ? "Win32" : "NTSTATUS";
-		return {{"error", std::string("memory protection failed (") + kind + " " + code + ")"},
+		return {{"error", WithReason(std::string("memory protection failed (") + kind + " " + code + ")", result.reason)},
 			{"code", code}, {"method", methodName(result.method)}};
 	}
 
@@ -1001,8 +1012,9 @@ json McpServer::ToolFreeMemory(const json& args) {
 	uint64_t addr;
 	if (!ParseAddress(addrStr, addr)) return {{"error", "invalid address format"}};
 
-	if (!session_.FreeMemory(addr)) {
-		return {{"error", "VirtualFree failed"}};
+	std::string reason;
+	if (!session_.FreeMemory(addr, &reason)) {
+		return {{"error", WithReason("VirtualFree failed", reason)}};
 	}
 	return {{"success", true}};
 }

@@ -218,8 +218,9 @@ public:
     void RetainGuestLaunch();
 	bool Detach();
 	// Terminate the target from inside (via DLL). Works even on self-protected targets that
-	// deny external OpenProcess(PROCESS_TERMINATE). Tears down the session afterward.
-	bool Terminate(uint32_t exitCode = 0);
+	// deny external OpenProcess(PROCESS_TERMINATE). Tears down the session only once the
+	// exit is confirmed; otherwise the session stays attached and error says why.
+	bool Terminate(uint32_t exitCode = 0, std::string* error = nullptr);
 	bool IsAttached() const { return attached_; }
 	uint32_t GetTargetPid() const { return targetPid_; }
 	bool IsTargetAlive();
@@ -295,7 +296,8 @@ public:
 
 	// --- Memory ---
 	std::vector<uint8_t> ReadMemory(uint64_t address, uint32_t size);
-	bool WriteMemory(uint64_t address, const uint8_t* data, uint32_t size);
+	// reason: the backend's failure text (kCapFailureReasonV1), empty when none.
+	bool WriteMemory(uint64_t address, const uint8_t* data, uint32_t size, std::string* reason = nullptr);
     struct CodePatchResult {
         bool ok = false;
         std::string error;
@@ -305,13 +307,14 @@ public:
     };
     CodePatchResult PatchCode(uint64_t address, const std::vector<uint8_t>& code,
         uint32_t overwriteSize, bool nopFill, uint32_t addressBits);
-	uint64_t AllocateMemory(uint32_t size, uint32_t protection);
-	bool FreeMemory(uint64_t address);
+	uint64_t AllocateMemory(uint32_t size, uint32_t protection, std::string* reason = nullptr);
+	bool FreeMemory(uint64_t address, std::string* reason = nullptr);
 	struct ProtectMemoryResult {
 		bool ok = false;
 		uint32_t oldProtection = 0;
 		uint32_t errorCode = 0;
 		ProtectMemoryMethod method = ProtectMemoryMethod::Api;
+		std::string reason;
 	};
 	ProtectMemoryResult ProtectMemory(uint64_t address, uint64_t size, uint32_t protection,
 		ProtectMemoryMethod method);
@@ -584,6 +587,10 @@ public:
 private:
 	bool ReceiveBackendReply(IpcCommand command, const void* payload, uint32_t size,
 		std::vector<uint8_t>& response, const char* operation, std::string& error, int timeoutMs = 3000);
+	// The FailureReasonV1 text after a failed reply's legacy prefix; empty when absent or malformed.
+	std::string FailureReason(const std::vector<uint8_t>& reply, size_t prefix) const;
+	// A bare-status reply (WriteMemory, FreeMemory): true only for an exact Ok.
+	bool StatusReply(const std::vector<uint8_t>& reply, std::string* reason) const;
 	std::string GetExeDir();
 	std::string ResolveDll(const std::string& dir, bool use32);
 	std::string GetDllPath(uint32_t pid);

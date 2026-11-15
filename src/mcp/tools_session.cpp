@@ -404,12 +404,16 @@ json McpServer::ToolTerminate(const json& args) {
     StopValueFreezes("scope-ended");
 	uint32_t pid = session_.GetTargetPid();
 	int exitCode = JsonInt(args, "exitCode", 0);
-	if (!session_.Terminate(static_cast<uint32_t>(exitCode)))
-		return {{"error", "Target termination is unsupported or the session is unavailable"}};
+	std::string error;
+	if (!session_.Terminate(static_cast<uint32_t>(exitCode), &error)) {
+		json result = {{"error", error}};
+		// The backend answered or timed out without attesting the exit: the session stays.
+		if (session_.IsAttached()) result["attached"] = true;
+		return result;
+	}
     ClearRunUntil("terminated", false);
     operationPid_ = 0;
-	return {{"success", true}, {"pid", pid},
-	        {"message", "Terminated target from inside (in-process kill; works on self-protected targets) and detached"}};
+	return {{"success", true}, {"pid", pid}, {"message", "Terminated target and detached"}};
 }
 
 json McpServer::ToolSetRegister(const json& args) {

@@ -901,9 +901,13 @@ void DapServer::OnTerminate(const Request& req) {
 		// itself (Ok only after it attested the exit).
 		TerminateRequest term{0};
 		std::vector<uint8_t> reply;
-		resp.success = ipcTransport_->SendAndReceive(IpcCommand::Terminate, &term, sizeof(term), reply) &&
-			reply.size() >= sizeof(IpcStatus) && *reinterpret_cast<const IpcStatus*>(reply.data()) == IpcStatus::Ok;
-		if (!resp.success) resp.message = "guest target termination failed";
+		std::string error;
+		resp.success = ReceiveBackendReply(IpcCommand::Terminate, &term, sizeof(term), reply, error, 60000);
+		if (resp.success && reply.size() != sizeof(IpcStatus)) {
+			resp.success = false;
+			error = "Malformed backend status response";
+		}
+		if (!resp.success) resp.message = "Guest target exit not confirmed; session kept attached: " + error;
 		SendResponse(resp);
 		if (resp.success && !terminated_.exchange(true)) SendEvent("terminated");
 		return;
