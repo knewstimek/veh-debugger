@@ -5,7 +5,8 @@ test_* functions, otherwise as a script) with a per-file timeout, --jobs files a
 a time, longest first. Every process a file starts (debug targets, adapters, MCP
 servers) is tracked through its parent chain while the file runs and terminated
 afterwards; processes of other files and processes that existed before the run
-are never touched. Files marked `# requires: x64` are skipped against an x86
+are never touched. Each file gets its own TEMP/TMP, deleted afterwards, so default
+trace artifacts and temporary files do not pile up in the user's temp folder. Files marked `# requires: x64` are skipped against an x86
 build, and files marked `# slow` are skipped with --quick. Prints a duration
 table and exits non-zero when any file failed or timed out.
 """
@@ -15,8 +16,10 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -68,6 +71,8 @@ def run_file(name, env, timeout, x86, quick):
     kernel32 = ctypes.windll.kernel32
     kernel32.CreateJobObjectW.restype = wintypes.HANDLE
     job = kernel32.CreateJobObjectW(None, None)
+    temp = tempfile.mkdtemp(prefix="veh-test-")
+    env = dict(env, TEMP=temp, TMP=temp)
     proc = subprocess.Popen(cmd, cwd=TEST_DIR, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     assigned = bool(job) and bool(kernel32.AssignProcessToJobObject(job, int(proc._handle)))
     try:
@@ -92,6 +97,7 @@ def run_file(name, env, timeout, x86, quick):
         leaked = 0
     if job:
         kernel32.CloseHandle(job)
+    shutil.rmtree(temp, ignore_errors=True)  # the job's processes are gone, so nothing holds it
     return status, elapsed, text, leaked
 
 
