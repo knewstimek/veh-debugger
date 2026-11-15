@@ -168,6 +168,15 @@ def run():
             new = attach("normal")
             assert new["state"] == "stopped" and new["sessionGeneration"] != old["sessionGeneration"], new
 
+        # A whole-target pause (thread 0) ends with Continue(0) even though the
+        # backend lists only real thread ids as resumed.
+        attach("pause-all")
+        assert tool("veh_pause").get("success")
+        resumed = tool("veh_continue", {"threadId": 0, "wait": False})
+        assert resumed.get("success") and resumed["resumedThreadIds"] == [77], resumed
+        result = tool("veh_continue", {"threadId": 0, "wait": True, "timeout": 1})
+        assert result.get("timeout"), ("stale pause stop returned", result)
+
         attach("frozen")
         result = run_to()
         assert "error" in result and "frozen" in result["error"], result

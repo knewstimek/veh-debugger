@@ -948,7 +948,7 @@ int wmain(int argc, wchar_t** argv) {
                 veh::ContinueRequest request{};
                 if (bytes.size() != sizeof(request)) { if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break; continue; }
                 std::memcpy(&request, bytes.data(), sizeof(request));
-                if (request.threadId != 77) {
+                if (request.threadId != 77 && !(mode == L"ops-pause-all" && request.threadId == 0)) {
                     if (!reply(pipe, header.command, veh::IpcStatus::InvalidArgs)) break;
                     continue;
                 }
@@ -996,7 +996,8 @@ int wmain(int argc, wchar_t** argv) {
             } else if (command == veh::IpcCommand::Pause) {
                 operationsStopped = true;
                 if (!reply(pipe, header.command, veh::IpcStatus::Ok)) break;
-                const uint32_t thread = 77;
+                // A whole-target pause reports thread 0; Continue(0) lists the real threads.
+                const uint32_t thread = mode == L"ops-pause-all" ? 0u : 77u;
                 if (!reply(pipe, static_cast<uint32_t>(veh::IpcEvent::Paused), thread)) break;
             } else if (command == veh::IpcCommand::ReadMemory) {
                 veh::ReadMemoryRequest request{};

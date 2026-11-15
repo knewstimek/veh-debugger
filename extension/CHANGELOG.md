@@ -15,7 +15,7 @@
 - A timed-out backend request no longer disables the whole session. Only that request fails, its late reply is discarded, and the same command is refused until that reply arrives, while other requests and heartbeat liveness continue. A failed pipe write still invalidates the stream.
 - `veh_pause` and `veh_continue` report the backend status or the transport failure (for example `Continue: operation refused in the current target state`) instead of a generic IPC exchange failure.
 - Remote detach can now confirm backend cleanup. The resident relays the agent's Detach status before closing the work, and an agent exiting right after its acknowledgement no longer drops that relay. A missing, late or failed acknowledgement still reports `backendCleanupConfirmed: false`.
-
+- A whole-target pause (thread 0) now ends with `veh_continue` on all threads. Before, a backend that listed only real thread ids as resumed left the old pause stop cached, and the next `veh_continue wait` returned it.
 - Preserve fatal memory-gap diagnostics and known execution facts when artifact export also fails; retain both capture and export errors, stop batch/action continuation and preserve existing destination files.
 - Require complete captured data for targeted-input success; preserve budget-truncation failure through batch results instead of marking partial artifacts complete.
 - Preserve ENTER read-after-write values and access order for overlapping frame chains; skip XRSTOR payload reads for INIT components while retaining required MXCSR reads. Propagate fatal trace failures through nested batches and targeted inputs, and keep memory/hardware completion flags consistent with capture gaps.

@@ -928,8 +928,10 @@ ContinueResult DebugSession::ContinueWithDetails(uint32_t threadId, bool passExc
 	{
 		std::lock_guard<std::mutex> lock(stopMutex_);
 		const bool listed = !result.resumedThreadIds.empty() || !result.stillStoppedThreadIds.empty();
-		const bool resumed = listed
-			? std::find(result.resumedThreadIds.begin(), result.resumedThreadIds.end(), lastStop_.threadId) !=
+		// A thread-0 stop is a whole-target pause: only a resume-all ends it, and
+		// backends list the real threads they resumed, never thread 0.
+		const bool resumed = lastStop_.threadId == 0 ? threadId == 0
+			: listed ? std::find(result.resumedThreadIds.begin(), result.resumedThreadIds.end(), lastStop_.threadId) !=
 				result.resumedThreadIds.end()
 			: threadId == 0 || lastStop_.threadId == threadId; // a peer without details
 		if (stopOccurred_ && stopSeq_ <= seqBefore && resumed)
