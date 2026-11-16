@@ -332,7 +332,7 @@ The default `lite` profile eagerly exposes only `veh_toolbox` plus launch/attach
 
 ### Agent skill
 
-The optional [VEH debugging skill](skills/veh-debugging/SKILL.md) captures recurring agent mistakes in exception handling, execution control, evidence interpretation and cleanup. Copy the entire `skills/veh-debugging` folder into your agent's supported skills directory. It uses public MCP contracts, requires no proprietary backend source, and can evolve through verified session feedback.
+Choose the optional skill for the current connection: [veh](skills/veh/SKILL.md) for the built-in user-mode VEH DLL, or [veh-backend](skills/veh-backend/SKILL.md) for an external backend and its supported process, kernel or VM scopes. Each is self-contained; copy only the chosen folder into your agent's supported skills directory. You may keep both installed when using both connection types; select the matching skill for each operation. Both use public MCP contracts, require no proprietary backend source, and evolve through verified session feedback.
 
 ### External backends and VM guest attachment (MCP)
 

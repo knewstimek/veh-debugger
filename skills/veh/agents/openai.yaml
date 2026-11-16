@@ -1,0 +1,3 @@
+interface:
+  display_name: "VEH"
+  short_description: "User-mode debugging with the built-in VEH DLL"

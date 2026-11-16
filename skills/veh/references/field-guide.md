@@ -1,4 +1,4 @@
-# VEH debugging field guide
+# VEH user-mode field guide
 
 Read the relevant section for the current operation. Examples use synthetic IDs and addresses. Replace them with current observations and validate the connected tool schema; they are not commands to replay blindly.
 
@@ -8,19 +8,18 @@ Read the relevant section for the current operation. Examples use synthetic IDs 
 |---|---|---|
 | Tool bindings differ from saved configuration | Compare live profile, actual exposed bindings, client filters and loaded project configuration. Check cwd/trust requirements in the client's documented configuration contract. | Project-local scope is applied without changing unrelated global defaults; otherwise report saved versus active separately. |
 | A needed tool is absent from current bindings | Use `veh_toolbox({"operation":"describe","tool":"veh_execution"})`. For several missing schemas use one `manifest` with exact `tools`. | Schema or an explicit discovery failure; do not dump the whole registry. |
-| Backend name is unknown | Verify the server actually loaded the local backend registration; keep credentials and machine paths in an ignored local profile. | Registration is confirmed before attach; do not diagnose the guest from lookup failure. |
 | A session is already attached | Establish ownership before replacing/detaching it. Qualify conditional breakpoints and other optional features from this attach, not a prior session. | Current target/capability evidence. No forced agent/server termination to refresh configuration. |
-| High-cardinality inspection | Estimate scope; use backend search, filters and supported batch/trace paths with bounded result fields/output. | Small counts, selected matches and artifact receipts. Do not serialize shell object metadata as plain text. |
+| High-cardinality inspection | Estimate scope; use native search, filters and supported batch/trace paths with bounded result fields/output. | Small counts, selected matches and artifact receipts. Do not serialize shell object metadata as plain text. |
 
 ## Selected-thread execution
 
-For an existing exception stop on synthetic OS thread 77, where the intended next action is delivery to the application handler:
+Call `veh_continue` for an existing exception stop on synthetic OS thread 77 only when the intended next action is delivery to the application handler:
 
 ```json
 {"threadId":77,"pass_exception":true,"wait":true,"timeout":10}
 ```
 
-Require a current exception event and supported forwarding; use its actual nonzero thread ID. Expect a confirmed next stop, timeout or error, not necessarily application success. If refused, check arguments, current state and backend status before labeling the feature unsupported. On a successful resume, correlate the next event/state before issuing another resume.
+Require a current exception event and supported forwarding; use its actual nonzero thread ID. Expect a confirmed next stop, timeout or error, not necessarily application success. If refused, check arguments, current state and the original operation status before labeling the feature unsupported. On a successful resume, correlate the next event/state before issuing another resume.
 
 For supported state inspection, including after a timeout:
 
@@ -28,16 +27,14 @@ For supported state inspection, including after a timeout:
 {"operation":"state","threadId":77}
 ```
 
-Call this as `veh_execution`. Expect `stopped`, `running` or `unknown` with available identity fields. Preserve `unknown`; compare current registers and hits when available. Notifications are opt-in and bounded; queue loss and frontend sequence are not backend capture completeness or guest capture time.
+Call this as `veh_execution`. Expect `stopped`, `running` or `unknown` with available identity fields. Preserve `unknown`; compare current registers and hits when available. Notifications are opt-in and bounded; queue loss is not proof of complete observation, and frontend sequence is not capture time.
 
 | Situation | Correct decision |
 |---|---|
 | Observation is intended to be record-only | Check exception-stop and auto-forward policies first. Recording intent does not guarantee execution cannot stop. |
 | First-chance exception | Identify its code, origin and intended handler before selecting forwarding/consumption. Do not assign one policy to all exception codes. |
 | Application INT3 versus debugger breakpoint | Identify ownership and reason before forwarding; blindly forwarding all INT3 can create an unhandled exception. |
-| Error after whole-target pause | Separate read prerequisites from native mutation/execution prerequisites. Use the original refusal and required execution state; hook presence alone is not causal evidence. |
-| Generic recovery text | Compare explicit recovery state and original error. Generic failure wording does not establish recovery-required state. |
-| Run-to or breakpoint actions | Verify advertised support, automatic continuation and temporary ownership. Observe batch/action lifecycle exclusions; do not nest session replacement or VM-wide control. |
+| Run-to or breakpoint actions | Verify advertised support, automatic continuation and temporary ownership. Observe batch/action lifecycle exclusions; do not nest session replacement. |
 | Cancel or detach | Cancellation is not execution rollback. Preserve borrowed breakpoints; unconfirmed removal/cleanup remains unconfirmed even if the frontend session disappears or job count becomes zero. |
 
 ## Memory, frames and code evidence
@@ -50,7 +47,6 @@ Call this as `veh_execution`. Expect `stopped`, `running` or `unknown` with avai
 | Unwound frame output differs from expression context | Validate selected context and nonvolatile restoration; read a small range using explicit verified frame addresses. |
 | Dump stack has wrong symbols | Use system/module images matching the captured target; repeat unwind before attributing a cause. |
 | One range read fails | Retry only the necessary page-bounded slices; preserve partial success and identity/counter observations around the read. |
-| Non-present manual page walk | Prefer native target memory view; document the walker's supported page states before inferring absence. |
 | String read/decode fails | Respect page boundaries, terminators, maximum length and UTF-16 surrogate boundaries; do not blame the target string from decoder failure alone. |
 | Same vtable slot offset | Verify owning object/table, actual function and return ABI; inspect the original configuration path before patching. |
 | Memory/trace export file exists | Inspect capture completeness, fatal gaps and exact execution counters. Static decoded bytes, executed trace, recovered semantics and native equivalence are distinct claims. |
@@ -85,6 +81,10 @@ Record branch/patch evidence as a compact table: binary identity, RVA, original 
 | CLI/helper update during active login | Preserve the live GUI/session and coordinate deployment with a natural restart. Do not attribute account/security actions to a cause without service evidence. |
 | Compiler/shell output | Reuse verified compiler arguments, cwd and encoding. Keep noisy logs in OS temp, return bounded diagnostics, and remove the logs once no longer needed. |
 | Harness cleanup | Use real nonblocking timeouts and finally-cleanup for every started process, including helpers outside a job. Verify path/parent identity before terminating leftovers. |
+
+## Mutation method
+
+Honor the requested mutation mechanism and original-code constraints. Software INT3 changes instruction bytes; a register edit or a different patch is not an equivalent replacement. If the required method is unavailable, report it instead of selecting another method implicitly.
 
 ## Feedback and defect triage
 

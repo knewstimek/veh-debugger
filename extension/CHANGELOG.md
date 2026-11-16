@@ -4,7 +4,7 @@
 
 ### Added
 
-- Add the shareable `skills/veh-debugging` agent skill for capability-aware VEH MCP debugging, exception disposition, execution evidence, cleanup and verified session feedback. It requires no proprietary backend source.
+- Add independent `skills/veh` (built-in user-mode VEH DLL) and `skills/veh-backend` (external backend) agent skills. Load only the matching skill; each includes exception handling, execution evidence, cleanup and verified feedback without proprietary backend source. The backend skill distinguishes EPT execution hooks from direct code writes and forbids silently substituting the requested method.
 
 - Expand `--profile=vmguest` from 43 to 51 eager tools with `veh_system_memory`, `veh_hidden_hook`, `veh_event`, `veh_event_records`, `veh_transparency`, `veh_address_space`, `veh_translate` and `veh_kernel_modules`. The shared `analysis` inventory remains unchanged; operations still require backend support.
 - `veh_processes` accepts `backend` when no session is attached: it queries a VM-scope backend once and leaves no session, so finding a guest PID no longer needs a VM attach/detach round trip.

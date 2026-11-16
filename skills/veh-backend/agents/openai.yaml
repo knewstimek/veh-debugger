@@ -1,0 +1,3 @@
+interface:
+  display_name: "VEH Backend"
+  short_description: "External backend, guest and VM debugging"
