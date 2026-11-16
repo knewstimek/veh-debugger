@@ -372,6 +372,10 @@ enabled = true
 
 기본 `lite` 프로필은 `veh_toolbox`, launch/attach/continue/batch/terminate/registers만 먼저 노출하여 매 요청의 도구 스키마 비용을 줄입니다. 나머지는 `veh_toolbox`로 검색 → schema 확인 → 호출하며, 이름을 아는 자동화는 숨겨진 도구도 기존처럼 직접 호출할 수 있습니다. BP/inspection 중심은 `--profile=interactive`, trace/checkpoint 중심은 `--profile=capture`를 사용하세요. 고급 분석은 `--profile=analysis`(41개), 게스트 프로세스 탐색·VM 제어·커널/물리 메모리·이벤트/후킹·주소 공간 분석까지 포함하려면 `--profile=vmguest`(51개), 전체 목록은 `--profile=full`을 사용하세요. 새 프로필의 공통 목록·제한은 [프로필 안내](docs/DEVELOPMENT_TOOLS.md#mcp-exposure-profiles-and-lazy-toolbox)를 참고하세요. 노출 여부와 실제 백엔드 지원 여부는 별개입니다.
 
+### 에이전트 스킬
+
+[VEH 디버깅 스킬](skills/veh-debugging/SKILL.md)은 예외 처리, 실행 제어, 관측 근거 해석과 정리에서 반복된 에이전트 실수를 압축한 선택형 스킬입니다. `skills/veh-debugging` 폴더 전체를 사용하는 에이전트의 스킬 디렉터리에 복사하면 됩니다. 공개 MCP 계약을 사용하며 비공개 백엔드 소스가 필요하지 않고, 검증된 실사용 피드백으로 계속 개선할 수 있습니다.
+
 ### 외부 백엔드와 VM 안의 프로세스 연결 (MCP)
 
 등록 백엔드의 `remote` 설정으로 인증된 TCP 연결도 사용할 수 있습니다. `veh-remote-runner`가 분석 VM에서 에이전트 시작·호스트 프로세스 생성·재연결을 맡습니다. VirtualBox/WHPX에서는 분석 호스트 VM에만 실행기를 두며 내부 게스트에는 설치하지 않습니다. 게스트 launch는 미지원입니다. 설정과 제한은 [원격 전송 문서](docs/REMOTE_TRANSPORT.md)를 참고하세요. 기존 프로필·게이트웨이 도구 수와 명령별 입력은 늘어나지 않습니다.

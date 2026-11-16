@@ -4,6 +4,8 @@
 
 ### Added
 
+- Add the shareable `skills/veh-debugging` agent skill for capability-aware VEH MCP debugging, exception disposition, execution evidence, cleanup and verified session feedback. It requires no proprietary backend source.
+
 - Expand `--profile=vmguest` from 43 to 51 eager tools with `veh_system_memory`, `veh_hidden_hook`, `veh_event`, `veh_event_records`, `veh_transparency`, `veh_address_space`, `veh_translate` and `veh_kernel_modules`. The shared `analysis` inventory remains unchanged; operations still require backend support.
 - `veh_processes` accepts `backend` when no session is attached: it queries a VM-scope backend once and leaves no session, so finding a guest PID no longer needs a VM attach/detach round trip.
 - Remote runner profiles accept an optional per-backend `stderr_file` that appends agent stderr to a local log on the analysis host; it is never sent to clients.
