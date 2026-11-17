@@ -217,6 +217,8 @@ public:
     LaunchResult LaunchGuest(const LaunchOptions& opts);
     void RetainGuestLaunch();
 	bool Detach();
+    // Explicit local-only retirement after a failed detach; sends no backend command.
+    bool AbandonExternalSession(std::string& error);
 	// Terminate the target from inside (via DLL). Works even on self-protected targets that
 	// deny external OpenProcess(PROCESS_TERMINATE). Tears down the session only once the
 	// exit is confirmed; otherwise the session stays attached and error says why.
@@ -626,6 +628,7 @@ private:
 	uint32_t targetAddressBits_ = 0;
 	std::string lastAttachError_;   // categorized reason for the last Attach() failure
 	bool lastDetachBackendConfirmed_ = false;
+    bool lastDetachFailed_ = false;
 	EventCallback eventCallback_; // replaced only after the previous monitor/listener is stopped
 	std::atomic<bool> attached_{false};
 	std::atomic<bool> launchedByUs_{false};

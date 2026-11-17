@@ -125,6 +125,12 @@ json McpServer::ToolVirtualMachine(const json& args) {
         ControlVirtualMachineRequest request{action,0};
         if(!SystemExchange(IpcCommand::ControlVirtualMachine,&request,sizeof(request),bytes,error))return error;
         ControlVirtualMachineResponse response{};
+        if (bytes.size() == sizeof(IpcStatus)) {
+            IpcStatus status{};
+            std::memcpy(&status, bytes.data(), sizeof(status));
+            if (status != IpcStatus::Ok)
+                return {{"error", StatusText(status)}, {"backendStatus", static_cast<uint32_t>(status)}, {"scope", "virtualMachine"}};
+        }
         if(bytes.size()!=sizeof(response))return {{"error","Invalid VM control response"}};
         std::memcpy(&response,bytes.data(),sizeof(response));
         if(response.status!=IpcStatus::Ok)return {{"error",StatusText(response.status)},{"scope","virtualMachine"}};

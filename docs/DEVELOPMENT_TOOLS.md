@@ -84,7 +84,7 @@ Process lazy-decode budgets and the additive wire12 contract are documented in [
 | `tools/run_tests.py` | Runs every `test/test_*.py` file in parallel (`--jobs`, longest first from `test/.test_durations.json`) with a per-file timeout, prints durations, flags exit-0 runs that report FAIL, skips `# requires: x64` files on an x86 build and `# slow` files with `--quick`, and cleans up exactly the processes each file started (parent chain + creation time, so reused pids are never adopted). |
 | `test/test_remote_transport.py` | Exercises resident TCP/TLS authentication, IPC routing, late/missing detach replies, dead-agent recovery, startup exit/Win32 and structured common error diagnostics (including invalid-record fallback), launch width/initial-thread metadata and retry recovery, and real DLL lifecycle reply draining; removes its owned certificate, secret and processes. See [remote transport](REMOTE_TRANSPORT.md). |
 | `test/test_dap_deferred_loader_stop.py` | Uses the guest fixture without dwell sleeps: binding requires a hold and the DLL disappears on explicit continuation. Covers reload, failed-install retry, shared BP IDs, query failures, historical versus new holds delivered inside a Continue exchange, known stop reasons and termination/exit with TID reuse. |
-| `test/test_local_backend_recovery.py` | Kills only exact test-owned agent handles and checks same-MCP reattachment, death during detach, live pipe loss without agent termination, and stale-agent isolation from native DLL cleanup. |
+| `test/test_local_backend_recovery.py` | Checks same-MCP recovery after agent death/pipe loss, ordinary live detach refusal, guarded explicit frontend abandonment through direct/toolbox, exact IPC request audit and stale-agent isolation from native DLL cleanup; kills only exact test-owned handles. |
 | `test/test_session_operations.py`, `test/test_operation_lifetime.py` | VM-free run-until ownership, fast/stale/other-thread events, exit/reconnect, CALL step-over, bounded value-write leases, receipt loss, action parity, and input/output control-loss checks. Uses the existing guest fixture and owned MCP process job. |
 | `test/test_session_receipts.py`, `test/test_system_receipts.py` | Target pointer width, exact breakpoint-removal/stopped-state and system event/hook receipts; direct/batch parity with synthetic malformed/refused responses. |
 | `test/test_code_patch.py` | Exercises real DLL instruction-aware patches in x64/x86: automatic spans, default/disabled NOP fill, explicit oversized/split spans, breakpoint overlap, page-edge failures, raw opt-in and direct/batch/native-action parity. Guest tests verify reported bitness and unsupported direct/batch/action parity. |
@@ -897,6 +897,36 @@ not prove target cleanup: explicit `veh_detach` returns
 `backendCleanupConfirmed: false` in that case. TCP detach is confirmed only by
 the agent status the resident relays before closing the work. A connected live backend's rejected,
 malformed or unavailable reply still retains the session. DAP cleanup is unchanged.
+
+If the old target has gone but its local runner still refuses Detach, MCP has an
+explicit frontend-only recovery path. First verify that the connected
+`veh_detach` schema advertises `abandon` (older frontends ignore unknown fields),
+then query `veh_execution(operation="state")` and retain the existing ledger.
+After an ordinary detach has failed for that session, call:
+
+```json
+{"abandon":true,"expected_session_generation":"1","expected_pid":424240}
+```
+
+Pass these arguments to `veh_detach`, replacing both identity values with the
+current snapshot. Missing, stale or incorrectly typed identity values refuse the
+operation. Only locally connected external **attach** sessions are eligible;
+native DLL, remote and launched targets are excluded. The frontend stops its
+local workers and closes the exact old IPC/cache without sending Detach,
+Continue, VM control or Terminate, and without killing the runner. A backend may
+react to IPC closure; this does not prove its cleanup or restore any target state.
+The receipt includes `previousSession`, `abandoned:true` and
+`backendCleanupConfirmed:false`. Reconnect explicitly, confirm the new target
+and owner, and only then decide whether to resume. No ledger files are modified.
+This lifecycle escape remains excluded from batch and breakpoint actions; direct
+and toolbox calls share the same guarded implementation.
+`test/test_local_backend_recovery.py` audits the fixture's IPC requests, live peer
+survival, identity rejection, ordinary refusal retention and same-MCP reattach.
+
+VM control now preserves a received status-only non-Ok response as a backend
+error with `backendStatus`, rather than hiding it behind a response-size error.
+An incomplete Ok response still fails validation. This parses an existing error
+receipt; it adds no IPC command, wire layout or inferred target state.
 
 `IpcStatus::InvalidState = 6` means an advertised operation was refused **before
 starting** because of the current target state. Values 0-5 and existing response

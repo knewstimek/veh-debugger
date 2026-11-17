@@ -17,6 +17,9 @@
 
 ### Fixed
 
+- Recover an unusable local external attach session after failed detach with explicit, session-generation/PID-guarded `veh_detach(abandon=true)`. Retire only frontend state without sending backend control commands or killing the runner; report backend cleanup as unconfirmed. Ordinary detach refusal still retains the session.
+- Preserve backend status-only VM-control errors instead of replacing them with `Invalid VM control response`; incomplete successful replies remain invalid.
+
 - A timed-out backend request no longer disables the whole session. Only that request fails, its late reply is discarded, and the same command is refused until that reply arrives, while other requests and heartbeat liveness continue. A failed pipe write still invalidates the stream.
 - `veh_pause` and `veh_continue` report the backend status or the transport failure (for example `Continue: operation refused in the current target state`) instead of a generic IPC exchange failure.
 - Remote detach can now confirm backend cleanup. The resident relays the agent's Detach status before closing the work, and an agent exiting right after its acknowledgement no longer drops that relay. A missing, late or failed acknowledgement still reports `backendCleanupConfirmed: false`.

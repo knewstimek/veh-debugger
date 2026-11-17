@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <fstream>
 #include "ipc_protocol.h"
 #include "startup_diagnostics.h"
 #include "guest_launch_startup.h"
@@ -28,7 +29,7 @@ template<class T> bool reply(HANDLE pipe, uint32_t command, const T& value) { re
 #include "caller_capture_fixture.h"
 
 int wmain(int argc, wchar_t** argv) {
-    std::wstring name, mode, readyEvent, launchRequest;
+    std::wstring name, mode, readyEvent, launchRequest, requestLog;
     uint32_t pid = 0;bool pidProvided=false;
     for (int i = 1; i + 1 < argc; i += 2) {
         const std::wstring option = argv[i];
@@ -37,6 +38,7 @@ int wmain(int argc, wchar_t** argv) {
         else if (option == L"--metadata") mode = argv[i + 1];
         else if (option == L"--guest-launch-request") launchRequest=argv[i+1];
         else if (option == L"--ready-event") readyEvent = argv[i + 1];
+        else if (option == L"--request-log") requestLog = argv[i + 1];
     }
     if (mode == L"diagnostic-busy") {
         veh::ReportStartupFailure(veh::StartupError::BackendUnavailable, veh::StartupDetail::BackendBusy);
@@ -186,6 +188,10 @@ int wmain(int argc, wchar_t** argv) {
         std::vector<unsigned char> bytes(header.payloadSize);
         if (!bytes.empty() && !transfer(pipe, false, bytes.data(), header.payloadSize)) break;
         const auto command = static_cast<veh::IpcCommand>(header.command);
+        if (!requestLog.empty()) {
+            std::ofstream log(requestLog, std::ios::app);
+            log << header.command << '\n';
+        }
         if (command == veh::IpcCommand::GetCapabilities) {
             if (mode == L"symbols-unreported") {
                 if (!reply(pipe, header.command, veh::IpcStatus::Unsupported)) break;
@@ -234,6 +240,8 @@ int wmain(int argc, wchar_t** argv) {
                 veh::SetCommandSupported(caps.commands, op);
             if(mode.rfind(L"modules-",0)==0||mode.rfind(L"reply-",0)==0) // modes that serve GetModules advertise it
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::GetModules);
+            if (mode == L"local-refuse-detach" || mode == L"local-control-ok")
+                veh::SetCommandSupported(caps.commands,veh::IpcCommand::ControlVirtualMachine);
             if(vmMode) {
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::GetProcesses);
                 veh::SetCommandSupported(caps.commands,veh::IpcCommand::ControlVirtualMachine);
@@ -1545,6 +1553,8 @@ int wmain(int argc, wchar_t** argv) {
                 if(!reply(pipe,static_cast<uint32_t>(veh::IpcEvent::ThreadExited),exited)||!emitDeferredLoad(true))break;
             }
             if(deferredMode&&request.address==0x2000&&!emitDeferredLoad(true))break;
+        } else if((mode==L"local-refuse-detach"||mode==L"local-control-ok")&&command==veh::IpcCommand::ControlVirtualMachine) {
+            if (!reply(pipe, header.command, mode==L"local-control-ok" ? veh::IpcStatus::Ok : veh::IpcStatus::Error)) break;
         } else if(vmMode&&command==veh::IpcCommand::ControlVirtualMachine&&bytes.size()==sizeof(veh::ControlVirtualMachineRequest)) {
             veh::ControlVirtualMachineRequest request{};memcpy(&request,bytes.data(),sizeof(request));
             veh::ControlVirtualMachineResponse response{veh::IpcStatus::Ok,veh::VirtualMachineState::Paused};
@@ -1614,6 +1624,10 @@ int wmain(int argc, wchar_t** argv) {
             Sleep(5000); break;
         } else if (command == veh::IpcCommand::Detach) {
             if(mode==L"local-die-detach")break;
+            if (mode == L"local-refuse-detach") {
+                if (!reply(pipe, header.command, veh::IpcStatus::Error)) break;
+                continue;
+            }
             if (mode == L"silent-detach") continue;
             if (mode == L"late-detach") Sleep(4500);
             if(mode==L"detach-three-errors"&&detachFailures++<3) {
@@ -1624,5 +1638,6 @@ int wmain(int argc, wchar_t** argv) {
         } else if (!reply(pipe, header.command, veh::IpcStatus::Unsupported)) break;
     }
     CloseHandle(pipe);
+    if (mode == L"local-refuse-detach") Sleep(30000); // retained test-owned peer; never killed by abandon
     return 0;
 }

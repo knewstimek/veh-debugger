@@ -355,7 +355,26 @@ json McpServer::ToolLaunch(const json& args) {
 }
 
 json McpServer::ToolDetach(const json& args) {
-	if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+    if (args.contains("abandon") && !args["abandon"].is_boolean())
+        return {{"error", "abandon must be a boolean"}};
+    if (!session_.IsAttached()) return {{"error", NotAttachedMessage()}};
+    if (args.contains("abandon") && args["abandon"].get<bool>()) {
+        const auto generation = std::to_string(session_.GetSessionGeneration());
+        if (!args.contains("expected_session_generation") || !args["expected_session_generation"].is_string() ||
+            args["expected_session_generation"].get<std::string>() != generation ||
+            !args.contains("expected_pid") || !args["expected_pid"].is_number_integer() ||
+            args["expected_pid"] != json(session_.GetTargetPid()))
+            return {{"error", "Abandon requires matching expected_session_generation (exact string) and expected_pid; query veh_execution state first"}};
+        const auto previous = ExecutionSnapshot(0);
+        std::string error;
+        if (!session_.AbandonExternalSession(error)) return {{"error", error}};
+        StopValueFreezes("abandoned");
+        ClearRunUntil("abandoned", false);
+        operationPid_ = 0;
+        return {{"success", true}, {"abandoned", true}, {"backendCleanupConfirmed", false},
+            {"previousSession", previous},
+            {"message", "Frontend session abandoned without a backend control command; backend cleanup and target execution state are unconfirmed"}};
+    }
     StopValueFreezes("scope-ended");
 
 	// Deferred BP 워커는 영속(McpServer 생애). 워커는 session_.IsAttached()를 확인하므로

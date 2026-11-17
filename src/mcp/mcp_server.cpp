@@ -1230,8 +1230,12 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 		 }}, {"required", json::array({"program"})}}}}),
 
 		Tool(&McpServer::ToolDetach, "session", 0, false,
-			{{"name", "veh_detach"}, {"description", "Detach debugger from the target process. A failed backend cleanup returns an error and retains the session for retry."},
-		 {"inputSchema", {{"type", "object"}, {"properties", json::object()}}}}),
+			{{"name", "veh_detach"}, {"description", "Detach; failure retains the session. Explicit abandon retires only a local external attach after failed detach, guarded by exact session generation and PID; sends no backend control command and never confirms backend cleanup."},
+         {"inputSchema", {{"type", "object"}, {"properties", {
+             {"abandon", {{"type", "boolean"}, {"default", false}}},
+             {"expected_session_generation", {{"type", "string"}, {"description", "Abandon only: exact sessionGeneration from veh_execution state"}}},
+             {"expected_pid", {{"type", "integer"}, {"minimum", 0}, {"maximum", 4294967295ULL}, {"description", "Abandon only: current pid from veh_execution state (0 for VM scope)"}}}
+         }}}}}),
 
 		Tool(&McpServer::ToolTerminate, "session", kLite | kInteractive | kCapture, false,
 			{{"name", "veh_terminate"}, {"description", "Terminate the target through its backend; detach on success. VEH can terminate from inside the target when external access is denied."},

@@ -94,15 +94,76 @@ def run():
             finally:
                 probe.close(terminate_target=False)
 
-            def attach(mode="local-recovery", pid=424240):
+            def attach(mode="local-recovery", pid=424240, request_log=None):
+                arguments = ["--metadata", mode]
+                if request_log is not None:
+                    arguments += ["--request-log", str(request_log)]
                 result = client.tool("veh_attach", {
                     "pid": pid, "agent": str(FIXTURE), "target_scope": "guest",
-                    "agent_args": ["--metadata", mode]})
+                    "agent_args": arguments})
                 assert result.get("success"), result
                 agent = int(client.tool("veh_threads")["threads"][0]["name"].split(":")[1])
                 handle = owned_handle(agent, FIXTURE, client.proc.pid, directory)
                 handles.append(handle)
                 return agent, handle
+
+            # A still-connected runner can outlive its old VM. Ordinary cleanup
+            # must retain refusal; only an identity-guarded explicit abandon may retire it.
+            for gateway in (False, True):
+                audit = Path(directory) / ("abandon-gateway.log" if gateway else "abandon-direct.log")
+                old, handle = attach("local-refuse-detach", request_log=audit)
+                state = client.tool("veh_execution", {"operation": "state"})
+                abandon = {"abandon": True, "expected_session_generation": state["sessionGeneration"],
+                           "expected_pid": state["pid"]}
+                premature = client.tool("veh_detach", abandon)
+                assert "previous failed detach" in premature.get("error", ""), premature
+                vm_error = client.tool("veh_virtual_machine", {"operation": "resume"})
+                assert vm_error.get("backendStatus") == 1 and "error" in vm_error, vm_error
+                vm_batch = client.tool("veh_batch", {"steps": [{"tool": "veh_virtual_machine", "args": {"operation": "resume"}}]})
+                assert vm_batch.get("failed", 0) or "error" in vm_batch, vm_batch
+                refused = client.tool("veh_detach")
+                assert "status 1" in refused.get("error", ""), refused
+                blocked = client.tool("veh_attach", {"pid": 424241, "agent": str(FIXTURE),
+                    "target_scope": "guest", "agent_args": ["--metadata", "local-recovery"]})
+                assert "session retained" in blocked.get("error", ""), blocked
+                for invalid in ({}, {"expected_session_generation": "9007199254740993"},
+                                {"expected_pid": 424241}, {"expected_session_generation": 1},
+                                {"expected_pid": -1}, {"abandon": "true"}):
+                    args = dict(abandon, **invalid)
+                    if not invalid:
+                        args.pop("expected_pid")
+                    rejected = client.tool("veh_detach", args)
+                    assert "error" in rejected, (args, rejected)
+                    assert client.tool("veh_execution", {"operation": "state"})["attached"]
+                rejected = client.tool("veh_batch", {"steps": [{"tool": "veh_detach", "args": abandon}]})
+                assert rejected.get("failed", 0) or "error" in rejected, rejected
+                # No request at all (including Detach/Resume/Terminate) may be added
+                # by abandoning. Heartbeats already in flight are the only exception.
+                before = audit.read_text().splitlines() if audit.exists() else []
+                if gateway:
+                    abandoned = client.tool("veh_toolbox", {"operation": "call",
+                        "tool": "veh_detach", "arguments": abandon})["result"]
+                else:
+                    abandoned = client.tool("veh_detach", abandon)
+                assert abandoned.get("abandoned") and abandoned["backendCleanupConfirmed"] is False, abandoned
+                assert abandoned["previousSession"]["sessionGeneration"] == state["sessionGeneration"]
+                assert not client.tool("veh_execution", {"operation": "state"})["attached"]
+                after = audit.read_text().splitlines()
+                # Heartbeat command is 0x00FE.
+                assert [x for x in after if x != "254"] == [x for x in before if x != "254"], (before, after)
+                assert KERNEL.WaitForSingleObject(handle, 0) == 258, "abandon terminated the live peer"
+                new, _ = attach()
+                assert new != old
+                stale = client.tool("veh_detach", abandon)
+                assert "error" in stale and client.tool("veh_execution", {"operation": "state"})["attached"], stale
+                assert client.tool("veh_detach").get("success")
+                assert KERNEL.TerminateProcess(handle, 0) and KERNEL.WaitForSingleObject(handle, 5000) == 0
+
+            # A short Ok is not a successful VM control receipt.
+            attach("local-control-ok")
+            short_ok = client.tool("veh_virtual_machine", {"operation": "resume"})
+            assert short_ok.get("error") == "Invalid VM control response" and "state" not in short_ok, short_ok
+            assert client.tool("veh_detach").get("success")
 
             old, handle = attach()
             assert KERNEL.TerminateProcess(handle, 23)
@@ -148,6 +209,11 @@ def run():
             assert KERNEL.WaitForSingleObject(handle, 5000) == 0
             attached = client.tool("veh_attach", {"pid": target.pid})
             assert attached.get("success"), attached
+            native_state = client.tool("veh_execution", {"operation": "state"})
+            native_abandon = client.tool("veh_detach", {"abandon": True,
+                "expected_session_generation": native_state["sessionGeneration"], "expected_pid": native_state["pid"]})
+            assert "local external attach" in native_abandon.get("error", ""), native_abandon
+            assert client.tool("veh_execution", {"operation": "state"})["attached"]
             detached = client.tool("veh_detach")
             assert detached.get("success") and "backendCleanupConfirmed" not in detached, detached
             # Never-connect startup must also be captured before an agent PID is exposed.
@@ -155,7 +221,7 @@ def run():
                 "target_scope": "guest", "agent_args": ["--metadata", "local-recovery",
                 "--pipe", "\\\\.\\pipe\\veh-unconnected-" + suffix]}, timeout=10)
             assert "error" in failed, failed
-            print("PASS local death/reconnect, request timeout recovery, pipe loss, stale cache isolation and failed-startup cleanup")
+            print("PASS guarded direct/toolbox abandon with no control IPC or peer termination, VM error status, local death/reconnect, pipe loss and native isolation")
         finally:
             client.close(terminate_target=False)
             for handle in handles:

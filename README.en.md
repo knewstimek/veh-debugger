@@ -407,7 +407,7 @@ The table below documents the complete public tool surface. Treat the running se
 | `veh_virtual_machine` | `operation, cpu?, max_instructions?, duration_ms?, cpl_mask?, cr3_roots?, rip_begin?, rip_end?` | Explicit whole-VM control and paused-vCPU trace; manual calls only |
 | `veh_attach` | `pid?, backend?/agent?, agent_args?, target_scope?` | VEH injection or external backend attach; guest PIDs require guest scope and backend validation. VM attachment omits pid. |
 | `veh_launch` | `program, args?, stopOnEntry?, cwd?, env?, backend?/agent?, target_scope?` | Create/attach a host process with optional cwd/env; registered local guest_launch backends support verified guest entry launch; remote guest/DAP remain attach-only |
-| `veh_detach` | - | Detach debugger (target keeps running) |
+| `veh_detach` | `abandon?, expected_session_generation?, expected_pid?` | Normal detach retains the session on cleanup failure. After failed detach, explicit identity-guarded abandonment retires only a local external attach session, without backend control commands; cleanup and target state remain unconfirmed. See [recovery contract](docs/DEVELOPMENT_TOOLS.md). |
 | `veh_terminate` | `exitCode?` | Kill the target from **inside** (the injected DLL calls `TerminateProcess` on its own process). Works even on self-protected targets that deny external `taskkill`/`OpenProcess` (deny-DACL or higher integrity), since a process's own handle always has terminate rights. Auto-detaches afterward. Replaces the `WM_CLOSE->detach->taskkill` dance. |
 | `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?, action?` | Software BP. `action` auto-executes on hit (veh_batch format) |
 | `veh_remove_breakpoint` | `id` | Remove software BP |

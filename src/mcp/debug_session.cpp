@@ -279,6 +279,7 @@ bool DebugSession::Attach(uint32_t pid, const ExternalAgent* agent) {
 }
 
 void DebugSession::FinishAttach(uint32_t pid) {
+    lastDetachFailed_ = false;
 	targetPid_ = pid;
 	attached_ = true;
 	// External attach is provisional until the authenticated backend reports scope.
@@ -604,6 +605,7 @@ DebugSession::LaunchResult DebugSession::Launch(const LaunchOptions& opts) {
 }
 
 bool DebugSession::Detach() {
+    lastDetachFailed_ = false;
 	lastDetachBackendConfirmed_ = false;
 	if (!attached_) return false;
 
@@ -647,6 +649,7 @@ bool DebugSession::Detach() {
             // A live connected peer's rejection/lost reply must retain the
             // session. Death/disconnection during the exchange permits recovery.
             if (!acknowledged && !backendGone()) {
+                lastDetachFailed_ = true;
                 lastAttachError_ = received && reply.size() == sizeof(status) ?
                     "Backend refused detach (status " + std::to_string(static_cast<uint32_t>(status)) + "); session retained" :
                     "Backend detach failed or its reply is unavailable; session retained";
@@ -683,6 +686,40 @@ bool DebugSession::Detach() {
 	targetAddressBits_ = 0;
 	if (!detachConfirmed) lastAttachError_ = "Remote detach completion was not confirmed; reconnect after the resident closes the old work";
 	return detachConfirmed;
+}
+
+bool DebugSession::AbandonExternalSession(std::string& error) {
+    const auto agent = externalAgents_.find(targetPid_);
+    if (!attached_ || ipcTransport_->IsRemote() || agent == externalAgents_.end() ||
+        agent->second.pipe != transportPipe_ || launchedByUs_ || launchedMainThreadId_) {
+        error = "Abandon requires a local external attach session, not a native, remote or launched target";
+        return false;
+    }
+    if (!lastDetachFailed_) {
+        error = "Abandon requires a previous failed detach for this session";
+        return false;
+    }
+    // Do not Detach, ResumeMainThread, resume a VM, or terminate an agent here.
+    // Closing IPC may trigger backend-specific cleanup; none is acknowledged.
+    attached_ = false;
+    StopProcessMonitor();
+    ipcTransport_->Disconnect();
+    externalAgents_.erase(agent); // close only our handle; never terminate the peer
+    {
+        std::lock_guard<std::mutex> lock(bpMutex_);
+        swBreakpoints_.clear();
+        hwBreakpoints_.clear();
+    }
+    if (targetProcess_) { CloseHandle(targetProcess_); targetProcess_ = nullptr; }
+    targetPid_ = 0;
+    guestTarget_ = false;
+    vmTarget_ = false;
+    externalAttachPending_ = false;
+    targetAddressBits_ = 0;
+    lastDetachBackendConfirmed_ = false;
+    lastDetachFailed_ = false;
+    lastAttachError_.clear();
+    return true;
 }
 
 bool DebugSession::Terminate(uint32_t exitCode, std::string* error) {
