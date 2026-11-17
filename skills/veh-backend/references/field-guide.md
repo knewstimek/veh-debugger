@@ -43,7 +43,7 @@ Call this as `veh_execution`. Expect `stopped`, `running` or `unknown` with avai
 
 | Situation | Correct decision |
 |---|---|
-| Observation is intended to be record-only | Check exception-stop and auto-forward policies first. Recording intent does not guarantee execution cannot stop. |
+| Observation is intended to be record-only | Check exception-stop and auto-forward policies first. `veh_continue.ignore_exceptions` forwards matching received events; it does not establish that observation is disabled. If no exception observation is required, this filter alone does not demonstrate that requirement: verify a separately documented supported policy or report the capability unconfirmed. Preserve unrelated defaults; do not forward all exceptions just to keep running. Recording intent does not guarantee execution cannot stop. |
 | First-chance exception | Identify its code, origin and intended handler before selecting forwarding/consumption. Do not assign one policy to all exception codes. |
 | Application INT3 versus debugger breakpoint | Identify ownership and reason before forwarding; blindly forwarding all INT3 can create an unhandled exception. |
 | Error after whole-target pause | Separate read prerequisites from native mutation/execution prerequisites. Use the original refusal and required execution state; hook presence alone is not causal evidence. |
