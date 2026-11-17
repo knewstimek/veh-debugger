@@ -5,6 +5,7 @@ test_target's TraceExternalExitTarget runs a buffer whose thunk returns into an 
 TraceExternalTailTarget runs a buffer that ends in a tail jump to the API, which
 returns on the function's behalf.
 """
+import json
 import os
 
 import pytest
@@ -108,3 +109,46 @@ def test_tail_jump_returns_on_behalf_of_the_function(session):
     edges = [e for e in trace["events"] if e["type"] == "edge"]
     assert [(int(e["source_instruction"], 16), e["kind"]) for e in edges] == \
         [(code + TAIL_JMP, "range_exit")], trace["events"]
+
+
+@pytest.mark.parametrize("path", ["direct", "batch", "action"])
+def test_tail_jump_stops_before_external_execution_at_step_budget(session, path, tmp_path):
+    client, base, size = session
+    tid, code = enter_buffer(client, base, size, "TraceExternalTailTarget")
+    args = inline_trace_args({
+        "threadId": tid, "start": hex(code), "end": hex(code + TAIL_END),
+        "stop_on_return": True, "max_steps": 2, "timeout_ms": 5000,
+        "collect_events": True, "collect_code": True,
+    })
+    if path == "batch":
+        batch = client.tool("veh_batch", {"steps": [{"tool": "veh_trace_basic_blocks", "args": args}]})
+        trace = batch["results"][0]["result"]
+    elif path == "action":
+        # Reach the action breakpoint from a separate instruction. Installing it
+        # at the current stopped IP would exercise breakpoint retry/skip instead.
+        hop = code + 128
+        jump = b"\xe9" + (-133).to_bytes(4, "little", signed=True)
+        assert client.tool("veh_write_memory", {"address": hex(hop), "data": jump.hex(" ")}).get("success")
+        assert client.tool("veh_set_register", {"threadId": tid, "name": "eip" if IS_X86 else "rip",
+            "value": hex(hop)}).get("success")
+        output = tmp_path / "external-budget.json"
+        bp = client.tool("veh_set_breakpoint", {"address": hex(code), "action": [
+            {"tool": "veh_trace_basic_blocks", "args": dict(args, output_file=str(output), output_mode="file")},
+            {"tool": "veh_set_breakpoint", "args": {"address": "$0.function_scope.return_address"}},
+        ]})
+        assert bp.get("success"), bp
+        stopped = None
+        try:
+            stopped = client.tool("veh_continue", {"wait": True, "timeout": 10}, timeout=20)
+            assert stopped.get("reason") == "breakpoint", (stopped, output.exists(), client.stderr_tail()[-1500:])
+            with output.open(encoding="utf-8") as source:
+                trace = json.load(source)
+        finally:
+            if stopped and stopped.get("breakpointId") and stopped["breakpointId"] != bp["id"]:
+                client.tool("veh_remove_breakpoint", {"id": stopped["breakpointId"]})
+            client.tool("veh_remove_breakpoint", {"id": bp["id"]})
+    else:
+        trace = client.tool("veh_trace_basic_blocks", args)
+    assert trace.get("stop_reason") == "max_steps", trace
+    assert trace["steps_executed"] == 2, trace
+    assert trace["function_scope"]["external_steps"] == 0, trace

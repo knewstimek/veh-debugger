@@ -2412,6 +2412,10 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 		if (!inRange) {
 			if (external) {
 				FlushBasicTracePath();
+				if (tb.stepsExecuted >= tb.maxSteps) {
+					FinishBasicTrace(TraceBasicBlockStopReason::MaxSteps, addr, true);
+					return BasicTraceStepResult::Stop;
+				}
 				tb.externalCallActive = true;
 				tb.externalStackPointer = stackPointer;
 				tb.pendingWriteCount = 0;
