@@ -1213,6 +1213,8 @@ enum class TraceBasicBlockEventType : uint8_t {
 
 // Version 1 ordered-event record. Sequence is the trace step number and every
 // record is scoped to threadId. BlockEntry uses target for the entered block;
+// an entry that follows execution outside the range sets source to 1 + the
+// index of the snapshot taken there (0: none), the state that execution left.
 // Edge supplies source/sourceInstruction/target and edgeKind.
 struct TraceBasicBlockEventEntry {
 	uint64_t sequence;

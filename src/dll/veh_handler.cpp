@@ -2118,7 +2118,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.externalCallActive = false;
 	tb.entryStackPointer = entryStackPointer;
 	tb.returnAddress = returnAddress;
-	tb.externalReturnAddress = 0;
+	tb.externalStackPointer = 0;
 	tb.externalSteps = 0;
 	tb.returnSnapshot = UINT32_MAX;
 	tb.stepsExecuted = 0;
@@ -2140,6 +2140,19 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	tb.targetMatched = false;
 	tb.entryBreakpointAddress = 0;
 	tb.entryBreakpointNeedsRearm = false;
+	// A restored checkpoint can point back at a software-breakpoint address after
+	// the breakpoint has already been rearmed by an earlier trace.  Execute the
+	// original entry instruction, then restore INT3 after its first single-step;
+	// otherwise identical captures alternate between success and a zero-step BP.
+	// Before the entry block is decoded and its code captured: both read live memory.
+	if (auto entryBreakpoint = BreakpointManager::Instance().FindByAddress(ip);
+		entryBreakpoint && entryBreakpoint->enabled) {
+		if (!BreakpointManager::Instance().Disable(entryBreakpoint->id)) {
+			StopBasicTraceCodeStream(true); StopBasicTraceEventStream(true); return false;
+		}
+		tb.entryBreakpointAddress = ip;
+		tb.entryBreakpointNeedsRearm = true;
+	}
 	EnsureBasicTraceInstruction(ip);  // the entry may itself sit off the linear sweep
 	AdvanceBasicTraceOccurrence(ip);
 	AdvanceBasicTraceTarget(ip, 0);
@@ -2148,24 +2161,14 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	if (tb.collectWindowActive) {
 		uint32_t initialSnapshot = CaptureBasicTraceSnapshot(&ctx);
 		if (!RecordBasicTraceBlock(ip, &ctx, initialSnapshot)) {
+			if (tb.entryBreakpointNeedsRearm)
+				BreakpointManager::Instance().RearmBreakpoint(tb.entryBreakpointAddress);
+			tb.entryBreakpointNeedsRearm = false;
 			StopBasicTraceCodeStream(true); StopBasicTraceEventStream(true); return false;
 		}
 		uint32_t version = CaptureBasicTraceCodeVersion(ip, 0);
 		RecordBasicTraceEvent(TraceBasicBlockEventType::BlockEntry, 0, 0, 0, ip,
 			TraceBasicBlockEdgeKind::Fallthrough, 0, false, version);
-	}
-
-	// A restored checkpoint can point back at a software-breakpoint address after
-	// the breakpoint has already been rearmed by an earlier trace.  Execute the
-	// original entry instruction, then restore INT3 after its first single-step;
-	// otherwise identical captures alternate between success and a zero-step BP.
-	if (auto entryBreakpoint = BreakpointManager::Instance().FindByAddress(ip);
-		entryBreakpoint && entryBreakpoint->enabled) {
-		if (!BreakpointManager::Instance().Disable(entryBreakpoint->id)) {
-			StopBasicTraceCodeStream(true); StopBasicTraceEventStream(true); return false;
-		}
-		tb.entryBreakpointAddress = ip;
-		tb.entryBreakpointNeedsRearm = true;
 	}
 	// Avoid leaving a generic step flag behind: write TF into the stopped context
 	// directly, then resume it as a normal continue.
@@ -2220,35 +2223,32 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 	}
 	if (inRange) AdvanceBasicTraceTarget(addr, tb.stepsExecuted + 1);
 	auto* previousInstruction = FindBasicTraceInstruction(tb.previousInstruction);
-	if (tb.stopOnReturn && previousInstruction &&
-		previousInstruction->kind == TraceBasicBlockEdgeKind::Return &&
-		addr == tb.returnAddress) {
 #ifdef _WIN64
-		const uint64_t stackPointer = info->ContextRecord->Rsp;
-		const uint64_t returnStackPointer = tb.entryStackPointer + sizeof(uint64_t);
+	const uint64_t stackPointer = info->ContextRecord->Rsp;
 #else
-		const uint64_t stackPointer = info->ContextRecord->Esp;
-		const uint64_t returnStackPointer = tb.entryStackPointer + sizeof(uint32_t);
+	const uint64_t stackPointer = info->ContextRecord->Esp;
 #endif
-		if (stackPointer >= returnStackPointer) {
-			++tb.stepsExecuted;
-			++previousInstruction->hitCount;
-			previousInstruction->lastHitStep = tb.stepsExecuted;
-			uint32_t snapshot = UINT32_MAX;
-			if (!RecordBasicTraceEdge(tb.currentBlock, tb.previousInstruction, addr,
-					TraceBasicBlockEdgeKind::Return, 0, previousInstruction->indirect != 0,
-					info->ContextRecord, &snapshot)) {
-				FinishBasicTrace(TraceBasicBlockStopReason::MaxEdges, addr, true);
-				return BasicTraceStepResult::Stop;
-			}
-			RecordBasicTraceEvent(TraceBasicBlockEventType::Edge, tb.stepsExecuted,
-				tb.currentBlock, tb.previousInstruction, addr, TraceBasicBlockEdgeKind::Return,
-				0, previousInstruction->indirect != 0, UINT32_MAX);
-			tb.functionReturned = true;
-			tb.returnSnapshot = snapshot;
-			FinishBasicTrace(TraceBasicBlockStopReason::FunctionReturn, addr);
+	const bool returned = tb.stopOnReturn && addr == tb.returnAddress &&
+		stackPointer >= tb.entryStackPointer + sizeof(void*);
+	if (returned && !tb.externalCallActive && previousInstruction &&
+		previousInstruction->kind == TraceBasicBlockEdgeKind::Return) {
+		++tb.stepsExecuted;
+		++previousInstruction->hitCount;
+		previousInstruction->lastHitStep = tb.stepsExecuted;
+		uint32_t snapshot = UINT32_MAX;
+		if (!RecordBasicTraceEdge(tb.currentBlock, tb.previousInstruction, addr,
+				TraceBasicBlockEdgeKind::Return, 0, previousInstruction->indirect != 0,
+				info->ContextRecord, &snapshot)) {
+			FinishBasicTrace(TraceBasicBlockStopReason::MaxEdges, addr, true);
 			return BasicTraceStepResult::Stop;
 		}
+		RecordBasicTraceEvent(TraceBasicBlockEventType::Edge, tb.stepsExecuted,
+			tb.currentBlock, tb.previousInstruction, addr, TraceBasicBlockEdgeKind::Return,
+			0, previousInstruction->indirect != 0, UINT32_MAX);
+		tb.functionReturned = true;
+		tb.returnSnapshot = snapshot;
+		FinishBasicTrace(TraceBasicBlockStopReason::FunctionReturn, addr);
+		return BasicTraceStepResult::Stop;
 	}
 
 	if (tb.externalCallActive) {
@@ -2256,10 +2256,19 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 		++tb.filteredSteps;
 		++tb.externalSteps;
 		tb.finalAddress = addr;
-		if (inRange && addr == tb.externalReturnAddress) {
+		if (returned) {
+			// The code outside the range returned on behalf of the function (a tail jump).
+			tb.functionReturned = true;
+			tb.returnSnapshot = CaptureBasicTraceSnapshot(info->ContextRecord);
+			FinishBasicTrace(TraceBasicBlockStopReason::FunctionReturn, addr);
+			return BasicTraceStepResult::Stop;
+		}
+		// Back in the range above the stack the outside code ran on: a callback into the
+		// range runs below it and stays filtered.
+		if (inRange && stackPointer >= tb.externalStackPointer) {
 			FlushBasicTracePath();
 			tb.externalCallActive = false;
-			tb.externalReturnAddress = 0;
+			tb.externalStackPointer = 0;
 			tb.currentBlock = tb.previousInstruction = addr;
 			if (tb.collectWindowActive) {
 				uint32_t snapshot = CaptureBasicTraceSnapshot(info->ContextRecord);
@@ -2269,7 +2278,8 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 				}
 				uint32_t version = CaptureBasicTraceCodeVersion(addr, tb.stepsExecuted);
 				RecordBasicTraceEvent(TraceBasicBlockEventType::BlockEntry, tb.stepsExecuted,
-					0, 0, addr, TraceBasicBlockEdgeKind::Fallthrough, 0, false, version);
+					snapshot == UINT32_MAX ? 0 : uint64_t{snapshot} + 1, 0, addr,
+					TraceBasicBlockEdgeKind::Fallthrough, 0, false, version);
 				PrepareBasicTraceMemoryWrites(current, info->ContextRecord);
 				PrepareBasicTraceRegisterEvent(addr, info->ContextRecord);
 			}
@@ -2374,10 +2384,15 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 	bool boundary = !inRange || nonSequential || staticBoundary || (previous && previous->terminal);
 	if (boundary) {
 		TraceBasicBlockEdgeKind kind = TraceBasicBlockEdgeKind::Branch;
+		bool external = false;
 		if (!inRange) {
 			kind = tb.stopOnReturn && previous &&
 				previous->kind == TraceBasicBlockEdgeKind::Call ?
 				TraceBasicBlockEdgeKind::Call : TraceBasicBlockEdgeKind::RangeExit;
+			// The function is still running while its return slot is on the stack, however
+			// the range was left (a ret into an API, a tail jump).
+			external = kind == TraceBasicBlockEdgeKind::Call ||
+				(tb.stopOnReturn && stackPointer <= tb.entryStackPointer);
 		} else if (previous && previous->terminal) kind = previous->kind;
 		else if (!nonSequential) kind = TraceBasicBlockEdgeKind::Fallthrough;
 
@@ -2395,10 +2410,10 @@ VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
 			tb.currentBlock, tb.previousInstruction, targetBlock, kind, 0,
 			previous && previous->indirect != 0, version);
 		if (!inRange) {
-			if (tb.stopOnReturn && previous && previous->kind == TraceBasicBlockEdgeKind::Call) {
+			if (external) {
 				FlushBasicTracePath();
 				tb.externalCallActive = true;
-				tb.externalReturnAddress = previous->next;
+				tb.externalStackPointer = stackPointer;
 				tb.pendingWriteCount = 0;
 				tb.pendingReadCount = 0;
 				tb.pendingRegisterEventValid = false;

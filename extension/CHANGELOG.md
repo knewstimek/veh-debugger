@@ -17,6 +17,8 @@
 
 ### Fixed
 
+- `veh_trace_basic_blocks.stop_on_return` follows execution that leaves the range by a return or a jump, not only by a call. A protected import thunk that returns into the API ended the trace with `left_range` in the middle of the function; it now runs on to `function_return`, and a tail jump whose target returns to the original caller ends with `function_return` too. Collection resumes when execution is back in the range at or above the stack pointer it left with, so a callback into the range stays filtered. The `block_entry` event of a resumption carries `snapshot`, the index of the register snapshot taken there.
+- A trace started at an armed software breakpoint captured the breakpoint's `INT3` as the code of its entry block (a one-byte `cc` block instead of the entry instructions). The breakpoint is now disabled before the entry block is decoded and its code captured.
 - Recover an unusable local external attach session after failed detach with explicit, session-generation/PID-guarded `veh_detach(abandon=true)`. Retire only frontend state without sending backend control commands or killing the runner; report backend cleanup as unconfirmed. Ordinary detach refusal still retains the session.
 - Preserve backend status-only VM-control errors instead of replacing them with `Invalid VM control response`; incomplete successful replies remain invalid.
 

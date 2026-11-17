@@ -281,7 +281,7 @@ public:
 		bool externalCallActive = false;
 		uint64_t entryStackPointer = 0;
 		uint64_t returnAddress = 0;
-		uint64_t externalReturnAddress = 0;
+		uint64_t externalStackPointer = 0;
 		uint64_t externalSteps = 0;
 		uint32_t returnSnapshot = UINT32_MAX;
 		std::vector<Instruction> instructions;

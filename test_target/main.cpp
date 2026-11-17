@@ -119,6 +119,43 @@ __declspec(noinline) int TraceMidBlockTarget() {
 	return reinterpret_cast<int (*)()>(code)();
 }
 
+// Code that leaves its range without a call. At +0x300 a thunk returns into the API (a protected
+// import call), which returns to the instruction after the thunk call. At +0x380 a tail jump
+// hands the function's return to the API.
+static void WriteTraceExternalExitCode(unsigned char* base) {
+	const auto api = reinterpret_cast<uintptr_t>(&GetCurrentThreadId);
+#ifdef _WIN64
+	// +0 sub rsp,28h | +4 call +14 | +9 add rsp,28h | +13 ret | +14 mov rax,api | +24 push rax | +25 ret
+	const unsigned char thunk[] = {0x48, 0x83, 0xEC, 0x28, 0xE8, 0x05, 0x00, 0x00, 0x00,
+		0x48, 0x83, 0xC4, 0x28, 0xC3, 0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0x50, 0xC3};
+	const unsigned thunkApi = 16;
+	// +0 mov rax,api | +10 jmp rax
+	const unsigned char tail[] = {0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xE0};
+	const unsigned tailApi = 2;
+#else
+	// +0 call +6 | +5 ret | +6 push api | +11 ret
+	const unsigned char thunk[] = {0xE8, 0x01, 0x00, 0x00, 0x00, 0xC3, 0x68, 0, 0, 0, 0, 0xC3};
+	const unsigned thunkApi = 7;
+	// +0 mov eax,api | +5 jmp eax
+	const unsigned char tail[] = {0xB8, 0, 0, 0, 0, 0xFF, 0xE0};
+	const unsigned tailApi = 1;
+#endif
+	memcpy(base + 0x300, thunk, sizeof(thunk));
+	memcpy(base + 0x300 + thunkApi, &api, sizeof(api));
+	memcpy(base + 0x380, tail, sizeof(tail));
+	memcpy(base + 0x380 + tailApi, &api, sizeof(api));
+}
+
+__declspec(noinline) DWORD TraceExternalExitTarget() {
+	auto* code = static_cast<unsigned char*>(g_trace_executable) + 0x300;
+	return reinterpret_cast<DWORD (*)()>(code)();
+}
+
+__declspec(noinline) DWORD TraceExternalTailTarget() {
+	auto* code = static_cast<unsigned char*>(g_trace_executable) + 0x380;
+	return reinterpret_cast<DWORD (*)()>(code)();
+}
+
 __declspec(noinline) void SymbolReloadMarker(int phase) {
     volatile int observed = phase;
     (void)observed;
@@ -185,6 +222,7 @@ int main(int argc, char* argv[]) {
 	*static_cast<unsigned char*>(g_trace_executable) = 0xC3;
 	memcpy(static_cast<unsigned char*>(g_trace_executable) + 0x100, kTraceOverlapCode, sizeof(kTraceOverlapCode));
 	memcpy(static_cast<unsigned char*>(g_trace_executable) + 0x200, kTraceMidBlockCode, sizeof(kTraceMidBlockCode));
+	WriteTraceExternalExitCode(static_cast<unsigned char*>(g_trace_executable));
 	(void)kTraceMidBlockTarget;
 	bool traceExceptionMode = argc > 1 && strcmp(argv[1], "--trace-exception") == 0;
 	// --interval <ms>: main loop period (default 1000); tests shorten it instead of sleeping longer
@@ -206,6 +244,7 @@ int main(int argc, char* argv[]) {
 		WorkFunction();
 		TraceOverlapTarget();
 		TraceMidBlockTarget();
+		g_counter ^= static_cast<int>(TraceExternalExitTarget() ^ TraceExternalTailTarget());
 		g_scan_value += 1 + (g_search_marker[0] >> 7);  // +1; the read keeps the marker alive
 		SleepEx(interval, TRUE);  // alertable wait — APC 인젝션 테스트 가능
 	}

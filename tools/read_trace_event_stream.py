@@ -137,6 +137,8 @@ def _decode_basic(payload):
     if values[7] == 0:
         result["type"] = "block_entry"
         result["block"] = _hex(values[3])
+        if values[1]:
+            result["snapshot"] = values[1] - 1
     elif values[7] == 2:
         result.update({"type": "repeat", "pattern_events": values[1],
                        "additional_repetitions": values[2], "sequence_stride": values[3]})

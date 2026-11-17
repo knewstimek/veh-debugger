@@ -1542,7 +1542,7 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			{"collect_snapshots", {{"type", "boolean"}, {"description", "Collect first block/edge and exception register/stack snapshots (default true). False skips capture and snapshot buffers; requires backend policy support."}}},
 			{"compress_paths", {{"type", "boolean"}, {"description", "Encode observed consecutive repeated paths losslessly (default false). Requires collect_code, no ordered memory/register events or target_window. Preserves sequence stride; reduces records, not TF exceptions."}}},
 			{"stack_bytes", {{"type", "integer"}, {"description", "Bytes to capture from SP per snapshot (default 128, max 256; 0 disables stack bytes)"}}},
-			{"stop_on_return", {{"type", "boolean"}, {"description", "Record entry SP/return address, exclude external call execution from collection, and stop with function_return plus the return register snapshot (default false)"}}},
+			{"stop_on_return", {{"type", "boolean"}, {"description", "Record entry SP/return address, follow execution outside the range (left by call, ret or jmp) without collecting it, and stop with function_return plus the return register snapshot (default false)"}}},
 			{"follow_exceptions", {{"type", "boolean"}, {"description", "Pass target exceptions to its handlers and record handled continuations as edges (default true)"}}},
 			{"collect_memory_writes", {{"type", "boolean"}, {"description", "Collect bounded memory-write before/after transitions (default false)"}}},
 			{"max_memory_writes", {{"type", "integer"}, {"description", "Maximum unique memory-write transitions (default 4096, max 16384)"}}}

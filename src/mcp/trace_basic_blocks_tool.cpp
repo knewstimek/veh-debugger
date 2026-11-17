@@ -1017,6 +1017,7 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 		} else if (event.type == TraceBasicBlockEventType::BlockEntry) {
 			value["type"] = "block_entry";
 			value["block"] = hex(event.target);
+			if (event.source) value["snapshot"] = event.source - 1;
 		} else {
 			value["type"] = "edge";
 			value["source"] = hex(event.source);
