@@ -17,6 +17,8 @@
 
 ### Fixed
 
+- A `veh_trace_basic_blocks` failure with file event output reported only `control_status_error`, so a trace the target refused to start looked like a broken stream. It now carries what the backend answered, as an inline-event failure does: `status_code`, `start_failure` (for example `start_rejected` when the target cannot start the trace's writer threads) and `backend_reported` (stop reason, steps executed, final address). Covered for direct and batch calls.
+
 - Enforce `max_steps` before following a range-exit transfer into external code, so a function-scoped trace cannot execute one extra outside instruction after reaching its step budget. Cover direct, batch and breakpoint-action paths.
 
 - `veh_trace_basic_blocks.stop_on_return` follows execution that leaves the range by a return or a jump, not only by a call. A protected import thunk that returns into the API ended the trace with `left_range` in the middle of the function; it now runs on to `function_return`, and a tail jump whose target returns to the original caller ends with `function_return` too. Collection resumes when execution is back in the range at or above the stack pointer it left with, so a callback into the range stays filtered. The `block_entry` event of a resumption carries `snapshot`, the index of the register snapshot taken there.

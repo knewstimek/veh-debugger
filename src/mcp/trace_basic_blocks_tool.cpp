@@ -656,18 +656,6 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
                 {"hardware_events", raw.success ? json(std::to_string(raw.hardwareEvents)) : json(nullptr)}};
             return withMemoryFailure(std::move(failure));
         }
-        if (fileEventOutput && (!result.eventArtifact.path.empty() ||
-            (!result.eventArtifact.error.empty() && (result.controlResponseReceived || !result.controlFailure.empty())))) {
-            auto failure = eventFailure();
-            if (!result.codeArtifact.error.empty()) failure["code_error"] = result.codeArtifact.error;
-            if (!result.controlFailure.empty()) failure["control_error"] = result.controlFailure;
-            return withMemoryFailure(std::move(failure));
-        }
-		// Preserve local artifact-validation errors when no control exchange began.
-		if (!result.controlResponseReceived && result.controlFailure.empty()) {
-			if (!result.codeArtifact.error.empty()) return {{"error", result.codeArtifact.error}};
-			if (!result.eventArtifact.error.empty()) return {{"error", result.eventArtifact.error}};
-		}
 		auto failureName = [](TraceBasicBlocksStartFailure reason) {
 			switch (reason) {
 			case TraceBasicBlocksStartFailure::InvalidArguments: return "invalid_arguments";
@@ -684,6 +672,27 @@ if (args.value("execution_context", "process") != "process" || args.value("opera
 			default: return "";
 			}
 		};
+        if (fileEventOutput && (!result.eventArtifact.path.empty() ||
+            (!result.eventArtifact.error.empty() && (result.controlResponseReceived || !result.controlFailure.empty())))) {
+            auto failure = eventFailure();
+            if (!result.codeArtifact.error.empty()) failure["code_error"] = result.codeArtifact.error;
+            if (!result.controlFailure.empty()) failure["control_error"] = result.controlFailure;
+            // what the backend answered, as the inline-event failure reports it: without it a control status
+            // error names no cause
+            if (result.controlResponseReceived) {
+                failure["status_code"] = static_cast<uint32_t>(result.status);
+                if (failureName(result.startFailure)[0]) failure["start_failure"] = failureName(result.startFailure);
+                if (result.responseHeaderSize >= kTraceBasicBlocksResponseV3Size)
+                    failure["backend_reported"] = {{"stop_reason", stopReason(result.stopReason)},
+                        {"steps_executed", result.stepsExecuted}, {"final_address", hex(result.finalAddress)}};
+            }
+            return withMemoryFailure(std::move(failure));
+        }
+		// Preserve local artifact-validation errors when no control exchange began.
+		if (!result.controlResponseReceived && result.controlFailure.empty()) {
+			if (!result.codeArtifact.error.empty()) return {{"error", result.codeArtifact.error}};
+			if (!result.eventArtifact.error.empty()) return {{"error", result.eventArtifact.error}};
+		}
 		std::string reason = failureName(result.startFailure);
 		if (reason.empty()) reason = !result.controlFailure.empty() ? result.controlFailure :
 			(!result.codeArtifact.error.empty() ? result.codeArtifact.error :

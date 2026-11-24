@@ -449,6 +449,15 @@ int wmain(int argc, wchar_t** argv) {
                 if(!WaitNamedPipeW(name.c_str(),3000))return 12;
                 HANDLE eventPipe=CreateFileW(name.c_str(),GENERIC_WRITE,0,nullptr,OPEN_EXISTING,0,nullptr);
                 if(eventPipe==INVALID_HANDLE_VALUE)return 13;
+                if (mode == L"path-stream-start-rejected") {  // the collector could not start: no record, its reason
+                    CloseHandle(eventPipe);
+                    veh::TraceBasicBlocksResponse failed{};
+                    failed.status=veh::IpcStatus::Error;failed.headerSize=sizeof(failed);
+                    failed.threadId=request.threadId;failed.returnSnapshot=UINT32_MAX;
+                    failed.startFailureReason=static_cast<uint8_t>(veh::TraceBasicBlocksStartFailure::StartRejected);
+                    if (!reply(pipe,header.command,failed)) break;
+                    continue;
+                }
                 std::vector<unsigned char> records;
                 const auto append=[&](veh::TraceEventRecordType type,const auto& row){
                     veh::TraceEventArtifactRecordHeader head{};

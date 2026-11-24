@@ -26,7 +26,7 @@ def main():
                     "agent": str(Path(RELEASE) / "guest_backend_fixture.exe"), "agent_args": ["--metadata", mode]})
                 assert result.get("success"), result
 
-            for mode in ("path-stream-prefix", "path-stream-bad-hash", "path-inline-error"):
+            for mode in ("path-stream-prefix", "path-stream-bad-hash", "path-inline-error", "path-stream-start-rejected"):
                 attach(mode)
                 common = {"threadId": 77, "start": "0x1000", "end": "0x1100", "max_steps": 1000,
                     "collect_register_events": True, "collect_memory_events": True}
@@ -61,6 +61,11 @@ def main():
                         assert len(rows) == 601 and sum(artifact["counts"].values()) == 600
                     else:
                         assert "event_file" not in result, result
+                    if mode == "path-stream-start-rejected":  # the backend's reason reaches a file-event failure
+                        assert result["start_failure"] == "start_rejected" and result["status_code"] != 0, result
+                        assert result["backend_reported"]["steps_executed"] == 0, result
+                    else:
+                        assert "start_failure" not in result, result
                     if mode == "path-inline-error":
                         assert result["failure"]["steps_executed"] is None, result
                         assert result["failure"]["backend_reported"]["steps_executed"] == 0, result
@@ -76,7 +81,7 @@ def main():
         marker = "Breakpoint action completed with an error: "
         reports = [json.loads(line.split(marker, 1)[1]) for line in logfile.read_text(encoding="utf-8").splitlines() if marker in line]
         assert len(reports) == 1 and reports[0]["results"][0]["result"] == expected, reports
-    print("PASS verified prefix salvage, partial-tail truncation, reader opt-in, checksum rejection and direct/batch/action execution uncertainty")
+    print("PASS verified prefix salvage, partial-tail truncation, reader opt-in, checksum rejection, the backend's start failure in a file-event failure and direct/batch/action execution uncertainty")
 
 
 if __name__ == "__main__":
