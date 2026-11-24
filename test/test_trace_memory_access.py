@@ -389,6 +389,25 @@ def capture(client, tid, program, output, caller, mode):
 
 @pytest.mark.parametrize("caller", ["direct", "batch", "action"])
 @pytest.mark.parametrize("mode", ["inline", "file"])
+def test_pushf_image_without_trap_flag(session, tmp_path, caller, mode):
+    """The flags a traced PUSHF stores are the untraced program's: the trace's trap flag is not in them."""
+    client, tid, page = session
+    program = Program(page, page + 2048)
+    pushf = program.emit("9C")
+    program.emit("58")  # POP EAX/RAX: the image the program reads back
+    program.emit("89 03")  # MOV [EBX/RBX], EAX: kept on the data page
+    program.emit("50")
+    program.emit("9D")  # POPF of the same image
+    result, memory, _ = capture(client, tid, program, str(tmp_path / "trace.json"), caller, mode)
+    stored = int.from_bytes(bytes.fromhex(check(client.tool("veh_read_memory", {
+        "address": hex(program.data), "size": 4}))["hex"]), "little")
+    assert stored & 0x200 and not stored & 0x100, hex(stored)
+    pushed = next(e for e in memory if e["kind"] == "write" and int(e["instruction"], 0) == pushf)
+    assert not int.from_bytes(bytes.fromhex(pushed["after"].replace(" ", "")), "little") & 0x100, pushed
+
+
+@pytest.mark.parametrize("caller", ["direct", "batch", "action"])
+@pytest.mark.parametrize("mode", ["inline", "file"])
 @pytest.mark.parametrize("kind", ["rmw", "conditional", "masked", "string", "sparse_mask", "mmx_mask", "indexed", "wide_vector", "avx_mask", "gather"])
 def test_memory_accesses(session, tmp_path, caller, mode, kind):
     client, tid, page = session

@@ -298,6 +298,26 @@ static bool SafeCopyTraceCode(uint64_t address, uint8_t* dst, size_t size) {
 	}
 }
 
+// A single-stepped PUSHF/PUSHFD/PUSHFQ stored the flags with the trap flag the trace set, where the untraced program
+// stores it clear (a VM that mixes the flags into its state takes another path). The step that follows one stops at
+// `next` right after its 0x9C, with the image on top of the stack equal to the flags in its low word: the trap flag
+// is cleared there (TF is bit 8: bit 0 of the image's second byte, at every operand size).
+static void ClearTracedPushfTrap(uint64_t next, uint64_t stackPointer, uint32_t flags) {
+	uint8_t opcode = 0, image[2]{};
+	// a breakpoint there is armed again before the step reaches the trace: its original byte is the instruction's
+	if (next && SafeCopyTraceCode(next - 1, &opcode, 1) && opcode == 0xCC)
+		if (auto armed = BreakpointManager::Instance().FindByAddress(next - 1)) opcode = armed->originalByte;
+	if (!next || !stackPointer || opcode != 0x9C ||
+		!SafeCopyTraceValue(stackPointer, image, sizeof(image)) || !(image[1] & 0x01) ||
+		((image[0] | image[1] << 8) & ~0x100) != (flags & 0xFFFF & ~0x100))
+		return;
+	__try {
+		auto* flagsHigh = reinterpret_cast<volatile uint8_t*>(static_cast<uintptr_t>(stackPointer) + 1);
+		*flagsHigh = static_cast<uint8_t>(*flagsHigh & ~0x01);
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+	}
+}
+
 std::vector<uint32_t> VehHandler::GetStoppedThreadIds() {
 	std::lock_guard<std::mutex> lock(eventMapMutex_);
 	std::vector<uint32_t> result;
@@ -2913,6 +2933,13 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 		// generic rearm/HW/step paths consume this event.
 		if (traceBasicBlocks_.active.load(std::memory_order_acquire) &&
 			tid == traceBasicBlocks_.threadId) {
+			// before a breakpoint is armed again over the instruction just run, and before the step's write is read
+			// back for its event
+#ifdef _WIN64
+			ClearTracedPushfTrap(addr, info->ContextRecord->Rsp, info->ContextRecord->EFlags);
+#else
+			ClearTracedPushfTrap(addr, info->ContextRecord->Esp, info->ContextRecord->EFlags);
+#endif
 			if (traceBasicBlocks_.entryBreakpointNeedsRearm) {
 				BreakpointManager::Instance().RearmBreakpoint(
 					traceBasicBlocks_.entryBreakpointAddress);

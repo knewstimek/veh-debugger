@@ -17,6 +17,8 @@
 
 ### Fixed
 
+- A `PUSHF`/`PUSHFD`/`PUSHFQ` that `veh_trace_basic_blocks` single-steps no longer stores the trace's trap flag: the flags image on the stack, and the memory event recording it, hold what the untraced program stores. A protector VM that mixes the flags into its state took another path under the trace than without it, so a capture of it could not be replayed. Covered on x64 and x86 for direct, batch and breakpoint-action traces, inline and file events, including a trace whose entry breakpoint is armed again over the `PUSHF` it just ran.
+
 - A `veh_trace_basic_blocks` failure with file event output reported only `control_status_error`, so a trace the target refused to start looked like a broken stream. It now carries what the backend answered, as an inline-event failure does: `status_code`, `start_failure` (for example `start_rejected` when the target cannot start the trace's writer threads) and `backend_reported` (stop reason, steps executed, final address). Covered for direct and batch calls.
 
 - Enforce `max_steps` before following a range-exit transfer into external code, so a function-scoped trace cannot execute one extra outside instruction after reaching its step budget. Cover direct, batch and breakpoint-action paths.
