@@ -7,16 +7,24 @@ Strategy:
 4. Continue -> BP hit on first loop iteration
 5. Step-over the CALL -> verify we skip over it
 """
+import ctypes
 import subprocess
 from build_paths import RELEASE
 import json
 import time
 import sys
 import os
+from ctypes import wintypes
 from bounded_pipe import bound
 
 MCP_EXE = os.path.join(RELEASE, "veh-mcp-server.exe")
 TARGET = os.path.join(RELEASE, "test_target.exe")
+KERNEL = ctypes.WinDLL("kernel32", use_last_error=True)
+KERNEL.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+KERNEL.OpenProcess.restype = wintypes.HANDLE
+KERNEL.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+KERNEL.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+KERNEL.CloseHandle.argtypes = (wintypes.HANDLE,)
 
 
 class McpClient:
@@ -121,9 +129,8 @@ def addr_int(s):
     return 0
 
 
-def test_stepover_call_skip():
+def run(client, launched):
     print("=== MCP StepOver CALL Skip Test ===\n")
-    client = McpClient()
 
     # 1. Initialize
     req_id = client.send("initialize", {
@@ -143,6 +150,8 @@ def test_stepover_call_skip():
     data = client.tool_result(resp)
     assert data and "error" not in data, f"Launch error: {data}"
     pid = data.get("pid", 0)
+    # the original process handle: cleanup cannot adopt a reused PID
+    launched.append(KERNEL.OpenProcess(0x00100001, False, pid))  # SYNCHRONIZE | PROCESS_TERMINATE
     print(f"2. Launched PID={pid}")
 
     # 3. Get modules (DLL is injected, modules are loaded even though suspended)
@@ -231,8 +240,6 @@ def test_stepover_call_skip():
         for t in threads:
             r = client.get_rip(t["id"])
             print(f"   thread {t['id']}: RIP={r}")
-        client.call_tool("veh_detach")
-        client.close()
         return False
 
     print(f"7. BP hit! thread={tid}, RIP={rip_at_bp}")
@@ -313,12 +320,6 @@ def test_stepover_call_skip():
         moved = "MOVED" if rip_before != rip_after_n else "SAME"
         print(f"    Step {i+1}: {rip_before} -> {rip_after_n} [{moved}] skippedCall={sk}")
 
-    # Cleanup
-    print("\nCleaning up...")
-    client.call_tool("veh_detach")
-    time.sleep(0.5)
-    client.close()
-
     if passed:
         print("\n=== TEST PASSED ===")
     else:
@@ -326,10 +327,27 @@ def test_stepover_call_skip():
     return passed
 
 
+def test_stepover_call_skip():
+    client, launched = McpClient(), []
+    try:
+        passed = run(client, launched)
+    finally:
+        print("\nCleaning up...")
+        try:
+            client.call_tool("veh_detach")
+        finally:
+            client.close()
+            for handle in filter(None, launched):  # the target the detach leaves running
+                KERNEL.TerminateProcess(handle, 1)
+                KERNEL.WaitForSingleObject(handle, 5000)
+                KERNEL.CloseHandle(handle)
+    assert passed
+
+
 if __name__ == "__main__":
     try:
-        success = test_stepover_call_skip()
-        sys.exit(0 if success else 1)
+        test_stepover_call_skip()
+        sys.exit(0)
     except Exception as e:
         print(f"\nFATAL: {e}")
         import traceback

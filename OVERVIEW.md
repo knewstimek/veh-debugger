@@ -161,7 +161,13 @@ The optional local VEH [page-watch manager](docs/PAGE_BREAKPOINTS.md) owns origi
 ### VEH Single-Step Flow
 1. BP hit -> save originalByte, write INT3 (0xCC)
 2. On INT3 exception: restore originalByte, set TF (Trap Flag) in EFLAGS
-3. SINGLE_STEP exception: re-install INT3, report StepCompleted
+3. SINGLE_STEP exception: re-install INT3; a step requested at the BP ends here (StepCompleted)
+
+A hypervisor that intercepts CPUID raises the trap after it one instruction late. Where the exception or continue
+handler resumes a thread with TF at a CPUID, it runs the CPUID itself (thread's leaf/subleaf) and handles the
+single-step trap at the next instruction (`StepCpuids`), so every TF user (steps, BP rearm, traces, page watches)
+sees one instruction per trap; a trap nothing of the debugger takes restores the context and leaves the CPUID to
+the processor.
 
 ### StepOver (F10) - Two Paths
 ```

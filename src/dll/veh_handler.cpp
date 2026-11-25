@@ -318,12 +318,10 @@ static void ClearTracedPushfTrap(uint64_t next, uint64_t stackPointer, uint32_t 
 	}
 }
 
-// A hypervisor that intercepts CPUID (Hyper-V under virtualization-based security) raises the single-step trap after
-// it one instruction late: the trace would lose the step of the instruction that follows and see CPUID go to the one
-// after that. A CPUID the trace is about to step is run here instead, as the processor runs it for the thread (its
-// leaf and subleaf; a 64-bit result register's upper half cleared), and the trace goes on at the next instruction.
-// One under a LOCK prefix (#UD) or an armed breakpoint is left to the processor.
-static bool RunTracedCpuid(CONTEXT& ctx) {
+// The CPUID at the context's instruction pointer, run as the processor runs it for the thread (its leaf and subleaf;
+// a 64-bit result register's upper half cleared), the context left at the next instruction. A CPUID under a LOCK
+// prefix (#UD) or an armed breakpoint, and any other instruction, is left to the processor: false.
+static bool RunCpuid(CONTEXT& ctx) {
 #ifdef _WIN64
 	const uint64_t pc = ctx.Rip;
 #else
@@ -393,12 +391,43 @@ bool VehHandler::SetStoppedContext(uint32_t threadId, const CONTEXT& ctx) {
 // 정적 콜백 → 싱글톤 인스턴스의 HandleException 호출
 LONG CALLBACK VehHandler::ExceptionHandler(PEXCEPTION_POINTERS info) {
 	auto* handler=activeHandler.load(std::memory_order_acquire);
-    return handler?handler->HandleException(info):EXCEPTION_CONTINUE_SEARCH;
+	if (!handler) return EXCEPTION_CONTINUE_SEARCH;
+	const LONG result = handler->HandleException(info);
+	if (result == EXCEPTION_CONTINUE_EXECUTION) handler->StepCpuids(info);
+	return result;
 }
 
 LONG CALLBACK VehHandler::ContinueHandler(PEXCEPTION_POINTERS info) {
 	auto* handler=activeHandler.load(std::memory_order_acquire);
-    return handler?handler->HandleContinue(info):EXCEPTION_CONTINUE_SEARCH;
+	if (!handler) return EXCEPTION_CONTINUE_SEARCH;
+	const LONG result = handler->HandleContinue(info);
+	handler->StepCpuids(info);  // a continue handler's thread resumes whatever it returns
+	return result;
+}
+
+// A hypervisor that intercepts CPUID (Hyper-V under virtualization-based security) raises the single-step trap after
+// it one instruction late, so a step over CPUID (a user's step, a breakpoint's rearm, a trace) would also run the next
+// instruction unseen. A thread about to resume with the trap flag at a CPUID has it run here (RunCpuid) and the trap
+// the processor raises after it handled at the next instruction, again while CPUIDs follow. When no part of the
+// debugger takes that trap (a trap flag of the program's own), the thread runs the CPUID itself, as it would have.
+void VehHandler::StepCpuids(PEXCEPTION_POINTERS info) {
+	while (info->ContextRecord->EFlags & 0x100) {
+		const CONTEXT before = *info->ContextRecord;
+		if (!RunCpuid(*info->ContextRecord)) return;
+		EXCEPTION_RECORD record{};
+		record.ExceptionCode = EXCEPTION_SINGLE_STEP;
+#ifdef _WIN64
+		record.ExceptionAddress = reinterpret_cast<PVOID>(info->ContextRecord->Rip);
+#else
+		record.ExceptionAddress = reinterpret_cast<PVOID>(static_cast<uintptr_t>(info->ContextRecord->Eip));
+#endif
+		info->ContextRecord->Dr6 = 0x4000;  // BS: a single-step trap, no breakpoint condition
+		EXCEPTION_POINTERS trap{&record, info->ContextRecord};
+		if (HandleException(&trap) != EXCEPTION_CONTINUE_EXECUTION) {
+			*info->ContextRecord = before;
+			return;
+		}
+	}
 }
 
 // RAII guard for TLS reentry flag (all return paths auto-clear)
@@ -455,20 +484,11 @@ VehHandler::WaitResult VehHandler::NotifyAndWait(
 			*info->ContextRecord = ctxIt->second;
 			stoppedContexts_.erase(ctxIt);
 			auto& trace = traceBasicBlocks_;
-			if (trace.active.load(std::memory_order_acquire) && trace.threadId == tid && trace.entryPending) {
-				trace.entryPending = false;
-				if (trace.initialMemoryPending) {
-					trace.initialMemoryPending = false;
-					PrepareBasicTraceMemoryWrites(EnsureBasicTraceInstruction(trace.initialAddress), info->ContextRecord);
-					PrepareBasicTraceRegisterEvent(trace.initialAddress, info->ContextRecord);
-				}
-				uint64_t address = trace.initialAddress;
-				if (StepTracedCpuids(info, tid, address) == BasicTraceStepResult::Stop) {
-					// as a single step that ends the trace (HandleException)
-					NotifyAndWait(info, tid, DebugEventType::SingleStepComplete, address, 0, EXCEPTION_SINGLE_STEP);
-					HwBreakpointManager::Instance().ClearFromContext(*info->ContextRecord);
-					HwBreakpointManager::Instance().ApplyToContext(*info->ContextRecord);
-				}
+			if (trace.active.load(std::memory_order_acquire) && trace.threadId == tid &&
+				trace.initialMemoryPending) {
+				trace.initialMemoryPending = false;
+				PrepareBasicTraceMemoryWrites(EnsureBasicTraceInstruction(trace.initialAddress), info->ContextRecord);
+				PrepareBasicTraceRegisterEvent(trace.initialAddress, info->ContextRecord);
 			}
 			return WaitResult::Resumed;
 		}
@@ -2255,7 +2275,6 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	// The live exception frame owns XState and the traced thread's segment bases.
 	// Prepare the first access on that thread before it returns to user code.
 	tb.initialMemoryPending = tb.collectWindowActive;
-	tb.entryPending = true;
 	tb.active.store(true, std::memory_order_release);
 	ResumeStoppedThread(threadId, false);
 	return true;
@@ -2266,19 +2285,6 @@ void VehHandler::CancelTraceBasicBlocks(TraceBasicBlockStopReason reason) {
 	if (!tb.active.load(std::memory_order_acquire)) return;
 	tb.pendingStopReason = reason;
 	tb.cancelRequested.store(true, std::memory_order_release);
-}
-
-VehHandler::BasicTraceStepResult VehHandler::StepTracedCpuids(PEXCEPTION_POINTERS info, uint32_t tid, uint64_t& address) {
-	auto result = BasicTraceStepResult::Continue;
-	while (result == BasicTraceStepResult::Continue && RunTracedCpuid(*info->ContextRecord)) {
-#ifdef _WIN64
-		address = info->ContextRecord->Rip;
-#else
-		address = info->ContextRecord->Eip;
-#endif
-		result = HandleBasicTraceSingleStep(info, tid, address);
-	}
-	return result;
 }
 
 VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
@@ -3017,14 +3023,11 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 				BreakpointManager::Instance().RearmBreakpoint(traceRearm.address);
 				traceRearm = {0, 0, false, false};
 			}
-			uint64_t stepAddress = addr;
-			auto traceResult = HandleBasicTraceSingleStep(info, tid, stepAddress);
-			if (traceResult == BasicTraceStepResult::Continue)
-				traceResult = StepTracedCpuids(info, tid, stepAddress);
+			auto traceResult = HandleBasicTraceSingleStep(info, tid, addr);
 			if (traceResult == BasicTraceStepResult::Continue)
 				return EXCEPTION_CONTINUE_EXECUTION;
 			if (traceResult == BasicTraceStepResult::Stop) {
-				NotifyAndWait(info, tid, DebugEventType::SingleStepComplete, stepAddress, 0, code);
+				NotifyAndWait(info, tid, DebugEventType::SingleStepComplete, addr, 0, code);
 				HwBreakpointManager::Instance().ClearFromContext(*info->ContextRecord);
 				HwBreakpointManager::Instance().ApplyToContext(*info->ContextRecord);
 				return EXCEPTION_CONTINUE_EXECUTION;
@@ -3059,11 +3062,22 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 				return EXCEPTION_CONTINUE_EXECUTION;
 			}
 
-			if (wantStep) {
-				// StepOver/StepIn 요청: rearm 후 다시 TF 설정 → 다음 SINGLE_STEP에서 StepCompleted
-				info->ContextRecord->EFlags |= 0x100;
-				LOG_DEBUG("Step requested after rearm — TF set again at 0x%llX", addr);
+			if (wantStep && (info->ContextRecord->Dr6 & 15) == 0) {
+				// The step asked for at the breakpoint is the instruction the retry just ran under it: it ends here.
+				auto result = NotifyAndWait(info, tid, DebugEventType::SingleStepComplete, addr, 0, code);
+				if (result == WaitResult::Resumed) {
+					std::lock_guard<std::mutex> lock(stepFlagMutex_);
+					auto it = stepFlags_.find(tid);
+					if (it != stepFlags_.end() && it->second) {
+						info->ContextRecord->EFlags |= 0x100;
+						stepFlags_.erase(it);
+					}
+				}
+				HwBreakpointManager::Instance().ClearFromContext(*info->ContextRecord);
+				HwBreakpointManager::Instance().ApplyToContext(*info->ContextRecord);
+				return EXCEPTION_CONTINUE_EXECUTION;
 			}
+			if (wantStep) info->ContextRecord->EFlags |= 0x100;  // the breakpoint condition reports first
 			// A single #DB may carry both our TF retry and a DR hit.
                 if((info->ContextRecord->Dr6&15)==0)return EXCEPTION_CONTINUE_EXECUTION;
 		}
