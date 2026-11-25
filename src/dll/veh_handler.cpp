@@ -318,6 +318,50 @@ static void ClearTracedPushfTrap(uint64_t next, uint64_t stackPointer, uint32_t 
 	}
 }
 
+// A hypervisor that intercepts CPUID (Hyper-V under virtualization-based security) raises the single-step trap after
+// it one instruction late: the trace would lose the step of the instruction that follows and see CPUID go to the one
+// after that. A CPUID the trace is about to step is run here instead, as the processor runs it for the thread (its
+// leaf and subleaf; a 64-bit result register's upper half cleared), and the trace goes on at the next instruction.
+// One under a LOCK prefix (#UD) or an armed breakpoint is left to the processor.
+static bool RunTracedCpuid(CONTEXT& ctx) {
+#ifdef _WIN64
+	const uint64_t pc = ctx.Rip;
+#else
+	const uint64_t pc = ctx.Eip;
+#endif
+	uint8_t byte = 0;
+	uint64_t at = pc;
+	for (; at < pc + 13; ++at) {
+		if (!SafeCopyTraceCode(at, &byte, 1)) return false;
+		const bool legacy = byte == 0x26 || byte == 0x2E || byte == 0x36 || byte == 0x3E || byte == 0x64 ||
+			byte == 0x65 || byte == 0x66 || byte == 0x67 || byte == 0xF2 || byte == 0xF3;
+#ifdef _WIN64
+		if (!legacy && (byte & 0xF0) != 0x40) break;
+#else
+		if (!legacy) break;
+#endif
+	}
+	uint8_t opcode[2]{};
+	if (!SafeCopyTraceCode(at, opcode, sizeof(opcode)) || opcode[0] != 0x0F || opcode[1] != 0xA2) return false;
+	int result[4]{};
+#ifdef _WIN64
+	__cpuidex(result, static_cast<int>(ctx.Rax), static_cast<int>(ctx.Rcx));
+	ctx.Rax = static_cast<uint32_t>(result[0]);
+	ctx.Rbx = static_cast<uint32_t>(result[1]);
+	ctx.Rcx = static_cast<uint32_t>(result[2]);
+	ctx.Rdx = static_cast<uint32_t>(result[3]);
+	ctx.Rip = at + 2;
+#else
+	__cpuidex(result, static_cast<int>(ctx.Eax), static_cast<int>(ctx.Ecx));
+	ctx.Eax = static_cast<DWORD>(result[0]);
+	ctx.Ebx = static_cast<DWORD>(result[1]);
+	ctx.Ecx = static_cast<DWORD>(result[2]);
+	ctx.Edx = static_cast<DWORD>(result[3]);
+	ctx.Eip = static_cast<DWORD>(at + 2);
+#endif
+	return true;
+}
+
 std::vector<uint32_t> VehHandler::GetStoppedThreadIds() {
 	std::lock_guard<std::mutex> lock(eventMapMutex_);
 	std::vector<uint32_t> result;
@@ -411,11 +455,20 @@ VehHandler::WaitResult VehHandler::NotifyAndWait(
 			*info->ContextRecord = ctxIt->second;
 			stoppedContexts_.erase(ctxIt);
 			auto& trace = traceBasicBlocks_;
-			if (trace.active.load(std::memory_order_acquire) && trace.threadId == tid &&
-				trace.initialMemoryPending) {
-				trace.initialMemoryPending = false;
-				PrepareBasicTraceMemoryWrites(EnsureBasicTraceInstruction(trace.initialAddress), info->ContextRecord);
-				PrepareBasicTraceRegisterEvent(trace.initialAddress, info->ContextRecord);
+			if (trace.active.load(std::memory_order_acquire) && trace.threadId == tid && trace.entryPending) {
+				trace.entryPending = false;
+				if (trace.initialMemoryPending) {
+					trace.initialMemoryPending = false;
+					PrepareBasicTraceMemoryWrites(EnsureBasicTraceInstruction(trace.initialAddress), info->ContextRecord);
+					PrepareBasicTraceRegisterEvent(trace.initialAddress, info->ContextRecord);
+				}
+				uint64_t address = trace.initialAddress;
+				if (StepTracedCpuids(info, tid, address) == BasicTraceStepResult::Stop) {
+					// as a single step that ends the trace (HandleException)
+					NotifyAndWait(info, tid, DebugEventType::SingleStepComplete, address, 0, EXCEPTION_SINGLE_STEP);
+					HwBreakpointManager::Instance().ClearFromContext(*info->ContextRecord);
+					HwBreakpointManager::Instance().ApplyToContext(*info->ContextRecord);
+				}
 			}
 			return WaitResult::Resumed;
 		}
@@ -2202,6 +2255,7 @@ bool VehHandler::StartTraceBasicBlocks(uint32_t threadId, uint64_t rangeStart, u
 	// The live exception frame owns XState and the traced thread's segment bases.
 	// Prepare the first access on that thread before it returns to user code.
 	tb.initialMemoryPending = tb.collectWindowActive;
+	tb.entryPending = true;
 	tb.active.store(true, std::memory_order_release);
 	ResumeStoppedThread(threadId, false);
 	return true;
@@ -2212,6 +2266,19 @@ void VehHandler::CancelTraceBasicBlocks(TraceBasicBlockStopReason reason) {
 	if (!tb.active.load(std::memory_order_acquire)) return;
 	tb.pendingStopReason = reason;
 	tb.cancelRequested.store(true, std::memory_order_release);
+}
+
+VehHandler::BasicTraceStepResult VehHandler::StepTracedCpuids(PEXCEPTION_POINTERS info, uint32_t tid, uint64_t& address) {
+	auto result = BasicTraceStepResult::Continue;
+	while (result == BasicTraceStepResult::Continue && RunTracedCpuid(*info->ContextRecord)) {
+#ifdef _WIN64
+		address = info->ContextRecord->Rip;
+#else
+		address = info->ContextRecord->Eip;
+#endif
+		result = HandleBasicTraceSingleStep(info, tid, address);
+	}
+	return result;
 }
 
 VehHandler::BasicTraceStepResult VehHandler::HandleBasicTraceSingleStep(
@@ -2950,11 +3017,14 @@ LONG VehHandler::HandleException(PEXCEPTION_POINTERS info) {
 				BreakpointManager::Instance().RearmBreakpoint(traceRearm.address);
 				traceRearm = {0, 0, false, false};
 			}
-			auto traceResult = HandleBasicTraceSingleStep(info, tid, addr);
+			uint64_t stepAddress = addr;
+			auto traceResult = HandleBasicTraceSingleStep(info, tid, stepAddress);
+			if (traceResult == BasicTraceStepResult::Continue)
+				traceResult = StepTracedCpuids(info, tid, stepAddress);
 			if (traceResult == BasicTraceStepResult::Continue)
 				return EXCEPTION_CONTINUE_EXECUTION;
 			if (traceResult == BasicTraceStepResult::Stop) {
-				NotifyAndWait(info, tid, DebugEventType::SingleStepComplete, addr, 0, code);
+				NotifyAndWait(info, tid, DebugEventType::SingleStepComplete, stepAddress, 0, code);
 				HwBreakpointManager::Instance().ClearFromContext(*info->ContextRecord);
 				HwBreakpointManager::Instance().ApplyToContext(*info->ContextRecord);
 				return EXCEPTION_CONTINUE_EXECUTION;

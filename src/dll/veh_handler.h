@@ -390,6 +390,7 @@ public:
 		uint32_t pendingDependencyMask = 0;
 		uint8_t pendingWritesFlags = 0;
 		bool initialMemoryPending = false;
+		bool entryPending = false;  // the traced thread has not resumed at the entry yet
 		uint16_t pendingReadCount = 0;
 		PendingRead pendingReads[kMaxPendingMemory]{};
 		uint16_t pendingWriteCount = 0;
@@ -563,6 +564,9 @@ private:
 	LONG HandleContinue(PEXCEPTION_POINTERS info);
 	enum class BasicTraceStepResult { NotActive, Continue, Stop };
 	BasicTraceStepResult HandleBasicTraceSingleStep(PEXCEPTION_POINTERS info, uint32_t tid, uint64_t addr);
+	// a CPUID the trace is about to step, run in place (RunTracedCpuid), and the step that ends after it; again while
+	// one follows. `address`: where the thread is, updated.
+	BasicTraceStepResult StepTracedCpuids(PEXCEPTION_POINTERS info, uint32_t tid, uint64_t& address);
 	bool HandleBasicTraceException(PEXCEPTION_POINTERS info, uint32_t tid, uint64_t addr, DWORD code);
 	void FinishBasicTrace(TraceBasicBlockStopReason reason, uint64_t finalAddress, bool truncated = false);
 	void FillBasicTraceSnapshot(const CONTEXT* ctx, TraceBasicBlockSnapshot& snapshot);

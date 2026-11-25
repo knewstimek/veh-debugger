@@ -408,6 +408,25 @@ def test_pushf_image_without_trap_flag(session, tmp_path, caller, mode):
 
 @pytest.mark.parametrize("caller", ["direct", "batch", "action"])
 @pytest.mark.parametrize("mode", ["inline", "file"])
+def test_cpuid_keeps_the_next_step(session, tmp_path, caller, mode):
+    """A hypervisor that intercepts CPUID raises its single-step trap one instruction late: the trace still has the
+    step of the instruction after it, and the CPUID's own register event."""
+    client, tid, page = session
+    prefix = "e" if IS_X86 else "r"
+    program = Program(page, page + 2048)
+    cpuid = program.emit("0F A2")
+    copy = program.emit("89 DE")  # MOV ESI, EBX
+    program.emit("89 D7")  # MOV EDI, EDX
+    again = program.emit("3E 0F A2")  # prefixed
+    program.emit("89 C1")  # MOV ECX, EAX
+    _, _, registers = capture(client, tid, program, str(tmp_path / "trace.json"), caller, mode)
+    by_instruction = {int(event["instruction"], 0): event["changes"] for event in registers}
+    assert {cpuid, copy, again} <= set(by_instruction), registers
+    assert by_instruction[copy][prefix + "si"]["after"] == by_instruction[cpuid][prefix + "bx"]["after"], registers
+
+
+@pytest.mark.parametrize("caller", ["direct", "batch", "action"])
+@pytest.mark.parametrize("mode", ["inline", "file"])
 @pytest.mark.parametrize("kind", ["rmw", "conditional", "masked", "string", "sparse_mask", "mmx_mask", "indexed", "wide_vector", "avx_mask", "gather"])
 def test_memory_accesses(session, tmp_path, caller, mode, kind):
     client, tid, page = session
