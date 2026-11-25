@@ -26,13 +26,14 @@ def main() -> int:
         c.initialize()
         launched = tool(c, "veh_launch", {"program": TARGET, "args": ["--interval", "20"], "stopOnEntry": False})
         assert launched.get("success"), launched
+        # async:false: each scan is done when it answers (docs/VALUE_SCAN.md); `results` pages the candidates
         tool(c, "veh_value_scan", {"operation": "first", "compare": "unknown", "value_type": "i32",
-                                   "module": "test_target.exe", "max_results": 1000}, timeout=120)
-        narrowed = {}
+                                   "module": "test_target.exe", "async": False}, timeout=120)
         for _ in range(2):
             time.sleep(0.05)  # the target's loop runs every 20 ms: g_counter has changed
-            narrowed = tool(c, "veh_value_scan", {"operation": "next", "compare": "changed", "max_results": 1000},
-                            timeout=120)
+            tool(c, "veh_value_scan", {"operation": "next", "compare": "changed", "value_type": "i32", "async": False},
+                 timeout=120)
+        narrowed = tool(c, "veh_value_scan", {"operation": "results", "offset": 0, "max_results": 1000})
         tool(c, "veh_value_scan", {"operation": "reset"})
         counter = [e.get("address") for e in narrowed.get("results", narrowed.get("entries", []))][0]
         for access in ("write", "readwrite"):

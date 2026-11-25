@@ -60,7 +60,7 @@ def main():
         stop = client.tool("veh_continue", {"wait": True, "timeout": 10}, timeout=15)
         assert stop.get("reason") == "breakpoint", stop
         start = int(bp["address"], 0)
-        trace = client.tool("veh_trace_basic_blocks", {
+        trace = client.tool("veh_trace_basic_blocks", inline_trace_args({
             "threadId": stop["threadId"],
             "start": hex(start),
             "end": hex(start + 0x100),
@@ -71,7 +71,7 @@ def main():
             "max_events": 256,
             "collect_memory_events": True,
             "max_memory_events": 256,
-        }, timeout=15)
+        }), timeout=15)
         assert "error" not in trace, trace
         if trace.get("mode") == "file":
             output = trace["output_file"]
