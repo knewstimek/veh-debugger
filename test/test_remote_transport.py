@@ -835,7 +835,7 @@ try{$pin=([BitConverter]::ToString($hash.ComputeHash($cert.RawData))).Replace('-
                 port = reservation.getsockname()[1]
             profile["listen"]["port"] = port
             profile["backends"] = {
-                alias: {"path": backend, "target_scope": "guest", "args": ["--metadata", mode]}
+                alias: {"path": backend, "target_scope": "guest", "args": ["--metadata", mode], "detach_timeout_ms": 300}
                 for alias, mode in (("silent", "silent-detach"), ("late", "late-detach"))}
             profile["backends"]["host"] = {"path": backend, "target_scope": "host", "args": ["--metadata", "host-cap"], "allow_launch": True}
             runner_profile.write_text(json.dumps(profile), encoding="utf-8")

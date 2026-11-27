@@ -164,6 +164,13 @@ json McpServer::ToolKdConnect(const json& args)
 	const std::string address = args.value("address", "");
 	if (address.empty())
 		return {{"error", "address required (pipe name, COM port, host:port or ip:port)"}};
+	uint32_t reply_timeout = KernelDebugClient::kDefaultReplyTimeoutMs;
+	if (args.contains("reply_timeout_ms")) {
+		const auto& value = args["reply_timeout_ms"];
+		if (!value.is_number_unsigned() || value.get<uint64_t>() < 1 || value.get<uint64_t>() > 600000)
+			return {{"error", "reply_timeout_ms must be an integer 1-600000"}};
+		reply_timeout = value.get<uint32_t>();
+	}
 	if (kd_) {
 		const auto detached = ToolKdDisconnect(json::object());
 		if (detached.contains("error")) return detached; // keep owned cleanup state for retry
@@ -173,7 +180,7 @@ json McpServer::ToolKdConnect(const json& args)
 	auto link = OpenKdTransport(transport, address, JsonUint32(args, "baud", 115200), &error);
 	if (!link)
 		return {{"error", error}};
-	auto client = std::make_unique<KernelDebugClient>(std::move(link));
+	auto client = std::make_unique<KernelDebugClient>(std::move(link), reply_timeout);
 	std::string stop;
 	if (!client->Handshake(&stop, &error))
 		return {{"error", error}, {"diagnostic", client->wait_diagnostic()}, {"protocol_trace", client->trace()}};
@@ -526,7 +533,7 @@ json McpServer::ToolKdBreakpoint(const json& args)
 	// Live (VirtualBox DBGC, kd_x64 run 210451): a z0 right after a breakpoint
 	// stop got no answer within 5 s while the console was still reporting the
 	// event. Z/z are idempotent: ask once more.
-	if (!kd_->Request(packet, &reply) && !kd_->Request(packet, &reply, 10000))
+	if (!kd_->Request(packet, &reply) && !kd_->Request(packet, &reply, 2 * kd_->reply_timeout_ms()))
 		return {{"error", "no answer"}, {"trace", kd_->trace()}};
 	if (reply.empty())
 		return {{"error", "breakpoints not supported by this stub"}};

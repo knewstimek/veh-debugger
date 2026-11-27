@@ -24,15 +24,19 @@ std::unique_ptr<KdTransport> OpenKdTransport(const std::string& kind, const std:
 
 class KernelDebugClient {
 public:
-	explicit KernelDebugClient(std::unique_ptr<KdTransport> transport) : transport_(std::move(transport)) {}
+	static constexpr uint32_t kDefaultReplyTimeoutMs = 5000;
+	explicit KernelDebugClient(std::unique_ptr<KdTransport> transport, uint32_t reply_timeout_ms = kDefaultReplyTimeoutMs)
+		: transport_(std::move(transport)), reply_timeout_ms_(reply_timeout_ms) {}
 
 	// qSupported, no-ack mode, initial stop reason; halts the target if it was running.
 	bool Handshake(std::string* stop, std::string* error);
 	// One request, one reply (empty reply = unsupported); false on timeout or a broken link.
-	bool Request(const std::string& packet, std::string* reply, uint32_t timeout_ms = 5000);
+	// timeout_ms 0 = the connection's reply timeout.
+	bool Request(const std::string& packet, std::string* reply, uint32_t timeout_ms = 0);
 	// qRcmd: the console output, collected from O packets until OK (or one
-	// hex reply from stubs that answer in a single packet).
-	bool Monitor(const std::string& hex_command, std::string* hex_output, uint32_t timeout_ms = 10000);
+	// hex reply from stubs that answer in a single packet). timeout_ms 0 = twice the reply timeout.
+	bool Monitor(const std::string& hex_command, std::string* hex_output, uint32_t timeout_ms = 0);
+	uint32_t reply_timeout_ms() const { return reply_timeout_ms_; }
 	// Resume (c / vCont;s:N): no reply until the target stops again.
 	bool Resume(const std::string& packet);
 	// Stop reply after Resume; false on timeout (the target keeps running).
@@ -57,6 +61,7 @@ private:
 	bool transport_usable_ = true;
 
 	std::unique_ptr<KdTransport> transport_;
+	uint32_t reply_timeout_ms_;
 	std::string buffer_;
 	std::string unacked_frame_;
 	unsigned nak_retries_ = 0;

@@ -76,6 +76,10 @@ Configuration Load(const std::filesystem::path& path) {
         for (const auto& arg : args) profile.args.push_back(Wide(arg.get<std::string>()));
         if (it.value().contains("stderr_file"))
             profile.stderrFile = resolve(it.value().at("stderr_file").get<std::string>());
+        if (it.value().contains("detach_timeout_ms")) {
+            profile.detachTimeoutMs = Unsigned(it.value().at("detach_timeout_ms"));
+            if (!profile.detachTimeoutMs || profile.detachTimeoutMs > 60000) throw std::invalid_argument("detach_timeout_ms");
+        }
         config.backends.emplace(it.key(), std::move(profile));
     }
     return config;

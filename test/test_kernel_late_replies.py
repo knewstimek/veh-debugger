@@ -42,7 +42,8 @@ def check_delay(kind, blocked_write=False):
     try:
         client = McpClient()
         client.initialize()
-        assert client.tool("veh_kd_connect", {"transport": "tcp", "address": f"127.0.0.1:{stub.port}"}).get("halted")
+        assert client.tool("veh_kd_connect", {"transport": "tcp", "address": f"127.0.0.1:{stub.port}",
+                                              "reply_timeout_ms": 300}).get("halted")
         if kind == "monitor":
             failed = client.tool("veh_kd_monitor", {"command": "delayed"}, timeout=15)
         else:

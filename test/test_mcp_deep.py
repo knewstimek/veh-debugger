@@ -27,7 +27,7 @@ class McpClient:
 
     def init_and_launch(self, stop_on_entry=False):
         self.client.initialize("mcp-deep-test")
-        return self.call("veh_launch", {"program": TARGET, "stopOnEntry": stop_on_entry})
+        return self.call("veh_launch", {"program": TARGET, "args": ["--interval", "20"], "stopOnEntry": stop_on_entry})
 
     def get_base(self):
         modules = self.call("veh_modules")
@@ -73,7 +73,6 @@ def test_function_bp_rip_accuracy():
     c = McpClient()
     try:
         c.init_and_launch(stop_on_entry=False)
-        time.sleep(1)
 
         bp = c.call("veh_set_function_breakpoint", {"name": "WorkFunction"})
         func_addr = bp.get("address", "")
@@ -108,7 +107,6 @@ def test_source_bp_line_accuracy():
     c = McpClient()
     try:
         c.init_and_launch(stop_on_entry=False)
-        time.sleep(1)
 
         bp = c.call("veh_set_source_breakpoint", {"source": SOURCE_FILE, "line": 12})
         bp_addr = bp.get("address", "")
@@ -144,7 +142,6 @@ def test_evaluate_correctness():
     c = McpClient()
     try:
         c.init_and_launch(stop_on_entry=False)
-        time.sleep(1)
 
         bp = c.call("veh_set_function_breakpoint", {"name": "WorkFunction"})
         bp_id = bp.get("id")
@@ -198,7 +195,6 @@ def test_set_register_verify():
     c = McpClient()
     try:
         c.init_and_launch(stop_on_entry=False)
-        time.sleep(1)
 
         bp = c.call("veh_set_function_breakpoint", {"name": "WorkFunction"})
         bp_id = bp.get("id")
@@ -237,7 +233,6 @@ def test_logpoint_notification():
     c = McpClient()
     try:
         c.init_and_launch(stop_on_entry=False)
-        time.sleep(1)
 
         bp = c.call("veh_set_function_breakpoint", {
             "name": "WorkFunction",
@@ -256,7 +251,7 @@ def test_logpoint_notification():
             logpoint_msgs = [n for n in c.notifications
                              if n.get("params", {}).get("logger") == "logpoint"]
             if not logpoint_msgs:
-                time.sleep(0.2)
+                time.sleep(0.02)
         print(f"    Logpoint notifications: {len(logpoint_msgs)}")
         if logpoint_msgs:
             msg_data = logpoint_msgs[0].get("params", {}).get("data", "")
@@ -291,7 +286,6 @@ def test_conditional_bp_value_check():
     c = McpClient()
     try:
         c.init_and_launch(stop_on_entry=False)
-        time.sleep(1)
 
         bp = c.call("veh_set_function_breakpoint", {
             "name": "WorkFunction",
@@ -324,7 +318,6 @@ def test_trace_callers_verification():
     c = McpClient()
     try:
         c.init_and_launch(stop_on_entry=False)
-        time.sleep(1)
 
         base = c.get_base()
         bp = c.call("veh_set_function_breakpoint", {"name": "WorkFunction"})
@@ -334,7 +327,7 @@ def test_trace_callers_verification():
         # Run trace
         trace = c.call("veh_trace_callers", {
             "address": f"0x{work_func:X}",
-            "duration_sec": 3
+            "duration_sec": 1
         }, timeout=20)
         callers = trace.get("callers", [])
         total = trace.get("totalHits", 0)
@@ -392,11 +385,10 @@ def test_step_and_verify_rip():
     c = McpClient()
     try:
         c.init_and_launch(stop_on_entry=False)
-        time.sleep(1)
 
         bp = c.call("veh_set_function_breakpoint", {"name": "WorkFunction"})
         bp_id = bp.get("id")
-        time.sleep(2)
+        c.wait_stop()
 
         tid = c.get_first_thread()
         if not tid: check("thread found", False); return
@@ -439,11 +431,10 @@ def test_stack_trace_chain():
     c = McpClient()
     try:
         c.init_and_launch(stop_on_entry=False)
-        time.sleep(1)
 
         bp = c.call("veh_set_function_breakpoint", {"name": "WorkFunction"})
         bp_id = bp.get("id")
-        time.sleep(2)
+        c.wait_stop()
 
         tid = c.get_first_thread()
         if not tid: check("thread found", False); return
@@ -485,7 +476,6 @@ def test_hit_condition_accuracy():
     c = McpClient()
     try:
         c.init_and_launch(stop_on_entry=False)
-        time.sleep(1)
 
         bp = c.call("veh_set_function_breakpoint", {
             "name": "WorkFunction",
@@ -493,24 +483,14 @@ def test_hit_condition_accuracy():
         })
         bp_id = bp.get("id")
 
-        # After 1.5s, ~1 hit -> should NOT stop
-        time.sleep(1.5)
-        bp_notes = [n for n in c.notifications
-                   if "Breakpoint" in str(n.get("params", {}).get("data", ""))]
-        check("not stopped after ~1 hit", len(bp_notes) == 0,
-              f"{len(bp_notes)} notifications")
-
-        # Wait for 3rd hit (~3s total)
-        time.sleep(3)
-
-        # Check hitCount via list_breakpoints
+        # The first two hits resume; the third stops.
+        stop = c.wait_stop()
+        check("stopped at hitCondition BP", stop.get("reason") == "breakpoint", str(stop))
         bps = c.call("veh_list_breakpoints")
-        sw = bps.get("software", [])
-        our_bp = next((b for b in sw if b.get("id") == bp_id), None)
-        if our_bp:
-            hit_count = our_bp.get("hitCount", 0)
-            print(f"    BP hitCount = {hit_count}")
-            check("hitCount >= 3", hit_count >= 3, f"hitCount={hit_count}")
+        our_bp = next((b for b in bps.get("software", []) if b.get("id") == bp_id), {})
+        hit_count = our_bp.get("hitCount", 0)
+        print(f"    BP hitCount = {hit_count}")
+        check("stops exactly on 3rd hit", hit_count == 3, f"hitCount={hit_count}")
 
         tid = c.get_first_thread()
         check("process stopped after 3rd hit", tid is not None, "no stopped thread")

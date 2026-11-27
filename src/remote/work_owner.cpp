@@ -108,6 +108,7 @@ bool WorkOwner::Initialize(const BackendProfile& profile, const Json& request, s
     scope_ = request.at("target_scope").get<std::string>();
     backendName_ = request.at("backend").get<std::string>();
     if (scope_ != profile.scope) { code = "invalid"; return false; }
+    detachTimeoutMs_ = profile.detachTimeoutMs;
     const auto operation = request.at("operation").get<std::string>();
     if (operation != "attach" && operation != "launch") { code = "invalid"; return false; }
     if (operation == "launch" && (scope_ != "host" || !profile.allowLaunch)) { code = "unsupported"; return false; }
@@ -185,7 +186,7 @@ bool WorkOwner::Initialize(const BackendProfile& profile, const Json& request, s
     if (!resumed) return StartupError(error);
     startupStage_ = "agent_pipe";
     backend_ = std::make_unique<PipeClient>(pipe);
-    if (!backend_->Connect(pid_, 5000) || backend_->PeerProcessId() != pi.dwProcessId) return false;
+    if (!backend_->ConnectToPeer(pid_, 5000, agentProcess_) || backend_->PeerProcessId() != pi.dwProcessId) return false;
     backend_->StartEventListener([this](uint32_t command, const uint8_t* data, uint32_t size) { OnEvent(command, data, size); });
     startupStage_ = "agent_ready";
     if (!backend_->WaitForReady(3000)) return false;
@@ -386,7 +387,7 @@ std::vector<uint8_t> WorkOwner::Execute(const Request& request, bool& response) 
         const bool resumed = ResumeLaunchThread(0);
         std::vector<uint8_t> detached;
         const bool received = backend_->SendAndReceive(command, request.payload.data(),
-            static_cast<uint32_t>(request.payload.size()), detached, 3000);
+            static_cast<uint32_t>(request.payload.size()), detached, static_cast<int>(detachTimeoutMs_));
         IpcStatus status = IpcStatus::Error;
         if (received && detached.size() >= sizeof(status)) memcpy(&status, detached.data(), sizeof(status));
         if (!resumed && status == IpcStatus::Ok) status = IpcStatus::Error;

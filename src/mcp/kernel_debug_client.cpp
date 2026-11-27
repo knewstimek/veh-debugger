@@ -397,7 +397,7 @@ bool KernelDebugClient::Receive(std::string* payload, uint32_t timeout_ms)
 
 bool KernelDebugClient::Request(const std::string& packet, std::string* reply, uint32_t timeout_ms)
 {
-	const auto deadline = NowMs() + timeout_ms;
+	const auto deadline = NowMs() + (timeout_ms ? timeout_ms : reply_timeout_ms_);
 	reply->clear();
 	if (!DrainPending(deadline) || NowMs() >= deadline || !Send(packet)) return false;
 	pending_reply_ = PendingReply::Request;
@@ -409,7 +409,7 @@ bool KernelDebugClient::Request(const std::string& packet, std::string* reply, u
 bool KernelDebugClient::Monitor(const std::string& hex_command, std::string* hex_output, uint32_t timeout_ms)
 {
 	hex_output->clear();
-	const auto deadline = NowMs() + timeout_ms;
+	const auto deadline = NowMs() + (timeout_ms ? timeout_ms : 2ull * reply_timeout_ms_);
 	if (!DrainPending(deadline) || NowMs() >= deadline || !Send("qRcmd," + hex_command)) return false;
 	pending_reply_ = PendingReply::Monitor;
 	pending_monitor_invalid_ = false;
@@ -521,7 +521,7 @@ bool KernelDebugClient::Handshake(std::string* stop, std::string* error)
 
 bool KernelDebugClient::Resume(const std::string& packet)
 {
-	if (!DrainPending(NowMs() + 5000) || !Send(packet))
+	if (!DrainPending(NowMs() + reply_timeout_ms_) || !Send(packet))
 		return false;
 	running_ = true;
 	return true;

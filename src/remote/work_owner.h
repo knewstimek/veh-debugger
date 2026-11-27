@@ -18,6 +18,7 @@ struct BackendProfile {
     std::string scope;
     bool allowLaunch = false;
     std::wstring stderrFile; // optional local log for agent stderr (appended)
+    uint32_t detachTimeoutMs = 3000; // wait for the agent's Detach/Shutdown acknowledgement
 };
 class WorkOwner : public std::enable_shared_from_this<WorkOwner> {
 public:
@@ -71,7 +72,7 @@ private:
     const char* startupStage_ = "validation";
     DWORD startupError_ = 0;
     StartupDiagnosticChannel startupDiagnostics_;
-    uint32_t pid_ = 0, addressBits_ = 0, mainThreadId_ = 0;
+    uint32_t pid_ = 0, addressBits_ = 0, mainThreadId_ = 0, detachTimeoutMs_ = 3000;
     HANDLE agentWait_ = nullptr;
     HANDLE agentProcess_ = nullptr, targetProcess_ = nullptr, primaryThread_ = nullptr, job_ = nullptr;
 };

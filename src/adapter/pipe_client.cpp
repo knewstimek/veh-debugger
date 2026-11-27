@@ -168,8 +168,9 @@ bool PipeClient::WaitForReady(int timeoutMs) {
 	// DLL ServerThread는 Ready 송신 전에 VEH 설치를 보장하므로(pipe_server.cpp),
 	// Ready 수신 = VEH 핸들러 설치 완료. attach 직후 BP race를 막는다.
 	std::unique_lock<std::mutex> lk(readyMutex_);
-	bool ok = readyCv_.wait_for(lk, std::chrono::milliseconds(timeoutMs),
-		[this] { return readyReceived_; });
+	readyCv_.wait_for(lk, std::chrono::milliseconds(timeoutMs),
+		[this] { return readyReceived_ || !connected_; });
+	const bool ok = readyReceived_;
 	if (ok) {
 		LOG_INFO("WaitForReady: Ready received (VEH installed)");
 	} else {
@@ -484,6 +485,8 @@ void PipeClient::ReaderThread() {
 				PipeExchangeFailure::ReaderAborted : responseFailure_,
 				responseSystemError_, responseAdvertisedPayloadSize_);
 	}
+	{ std::lock_guard<std::mutex> l(readyMutex_); }
+	readyCv_.notify_all();
 
 	LOG_DEBUG("PipeClient reader thread exiting");
 }

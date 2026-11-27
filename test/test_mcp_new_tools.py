@@ -97,6 +97,21 @@ def wait_stop(c, timeout=5):
     return c.call_tool("veh_continue", {"threadId": 0, "wait": True, "timeout": timeout}, timeout + 5)
 
 
+def bp_hits(c, bp_id):
+    listed = get_content(c.call_tool("veh_list_breakpoints"))
+    return next((bp.get("hitCount", 0) for bp in listed.get("software", []) if bp.get("id") == bp_id), 0)
+
+
+def wait_hits(c, bp_id, count, timeout=5):
+    """Hit count once it reaches count (the target loops every 20 ms), else the last value."""
+    deadline = time.monotonic() + timeout
+    hits = bp_hits(c, bp_id)
+    while hits < count and time.monotonic() < deadline:
+        time.sleep(0.02)
+        hits = bp_hits(c, bp_id)
+    return hits
+
+
 def get_content(resp):
     try:
         text = resp["result"]["content"][0]["text"]
@@ -134,11 +149,10 @@ def test_function_breakpoint():
     c = McpClient()
     try:
         c.initialize()
-        r = c.call_tool("veh_launch", {"program": TARGET, "stopOnEntry": False})
+        r = c.call_tool("veh_launch", {"program": TARGET, "args": ["--interval", "20"], "stopOnEntry": False})
         data = get_content(r)
         pid = data.get("pid")
         print(f"  Launched PID={pid}")
-        time.sleep(1)
 
         # Set function breakpoint on WorkFunction
         r = c.call_tool("veh_set_function_breakpoint", {"name": "WorkFunction"})
@@ -177,11 +191,10 @@ def test_source_breakpoint():
     c = McpClient()
     try:
         c.initialize()
-        r = c.call_tool("veh_launch", {"program": TARGET, "stopOnEntry": False})
+        r = c.call_tool("veh_launch", {"program": TARGET, "args": ["--interval", "20"], "stopOnEntry": False})
         data = get_content(r)
         pid = data.get("pid")
         print(f"  Launched PID={pid}")
-        time.sleep(1)
 
         # Set source breakpoint on line 12 (g_counter++)
         r = c.call_tool("veh_set_source_breakpoint", {
@@ -270,11 +283,10 @@ def test_evaluate():
     c = McpClient()
     try:
         c.initialize()
-        r = c.call_tool("veh_launch", {"program": TARGET, "stopOnEntry": False})
+        r = c.call_tool("veh_launch", {"program": TARGET, "args": ["--interval", "20"], "stopOnEntry": False})
         data = get_content(r)
         pid = data.get("pid")
         print(f"  Launched PID={pid}")
-        time.sleep(1)
 
         # Set function BP to stop on WorkFunction
         r = c.call_tool("veh_set_function_breakpoint", {"name": "WorkFunction"})
@@ -331,11 +343,10 @@ def test_set_register():
     c = McpClient()
     try:
         c.initialize()
-        r = c.call_tool("veh_launch", {"program": TARGET, "stopOnEntry": False})
+        r = c.call_tool("veh_launch", {"program": TARGET, "args": ["--interval", "20"], "stopOnEntry": False})
         data = get_content(r)
         pid = data.get("pid")
         print(f"  Launched PID={pid}")
-        time.sleep(1)
 
         # Set function BP
         r = c.call_tool("veh_set_function_breakpoint", {"name": "WorkFunction"})
@@ -416,11 +427,10 @@ def test_conditional_breakpoint():
     c = McpClient()
     try:
         c.initialize()
-        r = c.call_tool("veh_launch", {"program": TARGET, "stopOnEntry": False})
+        r = c.call_tool("veh_launch", {"program": TARGET, "args": ["--interval", "20"], "stopOnEntry": False})
         data = get_content(r)
         pid = data.get("pid")
         print(f"  Launched PID={pid}")
-        time.sleep(1)
 
         # Get base address
         r = c.call_tool("veh_modules")
@@ -443,16 +453,9 @@ def test_conditional_breakpoint():
         check("conditional BP set", bp_id is not None, str(data))
         print(f"  BP id={bp_id} with impossible condition")
 
-        # Wait - process should NOT stop (condition never true)
-        time.sleep(3)
-
-        # Process should still be running (not stopped at BP)
-        # Try to get threads - if process is running normally, threads still exist
-        r = c.call_tool("veh_threads")
-        threads = get_content(r)
-        print(f"  threads: {threads}")
-        # Having threads is fine - key is process didn't hang
-        check("process still alive with condition BP", "threads" in threads, str(threads))
+        # A false condition resumes the thread, so the same BP is hit again.
+        hits = wait_hits(c, bp_id, 3)
+        check("false condition BP keeps running", hits >= 3, f"hitCount={hits}")
 
         if bp_id:
             c.call_tool("veh_remove_breakpoint", {"id": bp_id})
@@ -470,11 +473,10 @@ def test_logpoint():
     c = McpClient()
     try:
         c.initialize()
-        r = c.call_tool("veh_launch", {"program": TARGET, "stopOnEntry": False})
+        r = c.call_tool("veh_launch", {"program": TARGET, "args": ["--interval", "20"], "stopOnEntry": False})
         data = get_content(r)
         pid = data.get("pid")
         print(f"  Launched PID={pid}")
-        time.sleep(1)
 
         # Get base
         r = c.call_tool("veh_modules")
@@ -496,13 +498,12 @@ def test_logpoint():
         bp_id = data.get("id")
         check("logpoint set", bp_id is not None, str(data))
 
-        # Wait - process should NOT stop
-        time.sleep(3)
-
-        # Process should still be running
-        r = c.call_tool("veh_threads")
-        threads = get_content(r)
-        check("process still alive with logpoint", "threads" in threads, str(threads))
+        # A logpoint logs and resumes, so the same BP is hit again.
+        hits = wait_hits(c, bp_id, 3)
+        check("logpoint keeps running", hits >= 3, f"hitCount={hits}")
+        logs = [n for n in c.notifications
+                if n.get("method") == "notifications/logging" and n.get("params", {}).get("logger") == "logpoint"]
+        check("logpoint output", any("Hit WorkFunction RIP=" in str(n["params"].get("data")) for n in logs), str(logs[:2]))
 
         if bp_id:
             c.call_tool("veh_remove_breakpoint", {"id": bp_id})
@@ -520,11 +521,10 @@ def test_trace_callers_with_existing_bp():
     c = McpClient()
     try:
         c.initialize()
-        r = c.call_tool("veh_launch", {"program": TARGET, "stopOnEntry": False})
+        r = c.call_tool("veh_launch", {"program": TARGET, "args": ["--interval", "20"], "stopOnEntry": False})
         data = get_content(r)
         pid = data.get("pid")
         print(f"  Launched PID={pid}")
-        time.sleep(1)
 
         # Get base
         r = c.call_tool("veh_modules")
@@ -548,7 +548,7 @@ def test_trace_callers_with_existing_bp():
         # Now trace_callers at SAME address (should work and preserve user BP)
         r = c.call_tool("veh_trace_callers", {
             "address": f"0x{work_func:X}",
-            "duration_sec": 2
+            "duration_sec": 1
         }, timeout=20)
         data = get_content(r)
         print(f"  trace_callers result: {json.dumps(data, indent=2)}")
@@ -578,11 +578,10 @@ def test_hit_condition():
     c = McpClient()
     try:
         c.initialize()
-        r = c.call_tool("veh_launch", {"program": TARGET, "stopOnEntry": False})
+        r = c.call_tool("veh_launch", {"program": TARGET, "args": ["--interval", "20"], "stopOnEntry": False})
         data = get_content(r)
         pid = data.get("pid")
         print(f"  Launched PID={pid}")
-        time.sleep(1)
 
         # Get base
         r = c.call_tool("veh_modules")
@@ -604,13 +603,11 @@ def test_hit_condition():
         bp_id = data.get("id")
         check("hitCondition BP set", bp_id is not None, str(data))
 
-        # Wait for it to hit 3 times (WorkFunction called every ~1s)
-        time.sleep(5)
-
-        # Should be stopped now (3rd hit)
-        r = c.call_tool("veh_threads")
-        threads = get_content(r)
-        check("process stopped after hitCondition", "threads" in threads, str(threads))
+        # The first two hits resume; the third stops.
+        stop = get_content(wait_stop(c))
+        check("hitCondition stops", stop.get("reason") == "breakpoint", str(stop))
+        hits = bp_hits(c, bp_id)
+        check("hitCondition stops on 3rd hit", hits == 3, f"hitCount={hits}")
 
         if bp_id:
             c.call_tool("veh_remove_breakpoint", {"id": bp_id})

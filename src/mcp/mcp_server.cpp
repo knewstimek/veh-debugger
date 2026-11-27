@@ -1791,7 +1791,8 @@ std::vector<McpServer::ToolDef> McpServer::BuildAllToolsList() {
 			 {"inputSchema", {{"type", "object"}, {"properties", {
 				{"transport", {{"type", "string"}, {"enum", json::array({"pipe", "com", "tcp", "udp"})}, {"description", "Default: pipe"}}},
 				{"address", {{"type", "string"}, {"description", "\\\\.\\pipe\\name, COM1, host:port (tcp), or ip:port (udp: the stub on a NIC reserved for it)"}}},
-				{"baud", {{"type", "integer"}, {"description", "com: default 115200"}}}
+				{"baud", {{"type", "integer"}, {"description", "com: default 115200"}}},
+				{"reply_timeout_ms", {{"type", "integer"}, {"minimum", 1}, {"maximum", 600000}, {"description", "Per-reply wait; monitor commands wait twice this. Default 5000"}}}
 			 }}, {"required", json::array({"address"})}}}}),
 		Tool(&McpServer::ToolKdDisconnect, "kernel", 0, false,
 			{{"name", "veh_kd_disconnect"}, {"description", "Remove kernel breakpoints, resume every CPU and detach."},
