@@ -27,6 +27,8 @@ target_compile_definitions(veh-debug-adapter PRIVATE
     _UNICODE
 )
 
+target_precompile_headers(veh-debug-adapter PRIVATE ${VEH_PRECOMPILED_HEADERS})
+
 # DAP 파일 트레이스 로그 (C:\tmp\veh_dap_trace.log)
 option(VEH_DAP_TRACE "Enable DAP file-based trace logging" OFF)
 if(VEH_DAP_TRACE)

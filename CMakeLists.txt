@@ -53,6 +53,9 @@ target_include_directories(veh_remote PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(veh_remote PUBLIC veh_common nlohmann_json ws2_32 secur32 crypt32 bcrypt advapi32)
 target_compile_definitions(veh_remote PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX SECURITY_WIN32 UNICODE _UNICODE)
 
+# Shared by the MCP server and DAP adapter: nlohmann/json dominates their compile time.
+set(VEH_PRECOMPILED_HEADERS <windows.h> <nlohmann/json.hpp> <string> <vector> <map> <mutex> <memory> <functional>)
+
 add_subdirectory(src/dll)
 add_subdirectory(src/adapter)
 add_subdirectory(src/mcp)

@@ -76,3 +76,5 @@ target_compile_definitions(veh-mcp-server PRIVATE
 	UNICODE
 	_UNICODE
 )
+
+target_precompile_headers(veh-mcp-server PRIVATE ${VEH_PRECOMPILED_HEADERS})
