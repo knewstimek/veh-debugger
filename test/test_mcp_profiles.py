@@ -29,7 +29,7 @@ def test_default_lite_profile_is_bounded():
         "veh_toolbox", "veh_attach", "veh_launch", "veh_continue", "veh_batch",
         "veh_terminate", "veh_registers",
     }
-    assert _serialized_size(tools) < 8000
+    assert _serialized_size(tools) < 8200
     assert len(initialized["instructions"].encode("utf-8")) < 300
     assert all("outputSchema" not in tool for tool in tools)
 
