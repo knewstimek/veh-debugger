@@ -14,10 +14,14 @@
 - `veh_stack_trace` frames include `offset`, the position inside `function`. It comes from one `Symbolize` batch per stack and is shown only when both name the same function. Backends keep sending bare function names.
 - Failure reason v1 (`kCapFailureReasonV1 = 1 << 13`, opt-in): a backend can append its own reason to a failed `WriteMemory`, `AllocateMemory`, `FreeMemory`, `ProtectMemory` or `ExecuteShellcode` reply. The reason appears after the error message, for example `VirtualAlloc failed in target process: The process is stopped as a whole; continue thread 0 first`. Malformed suffixes are ignored, and other replies keep their legacy shape.
 - VM state `Fatal` (wire value 4): `veh_virtual_machine status` reports `fatal` for a VM halted by an unrecoverable error. Backends refuse commands that need it to run with `InvalidState`.
+- `veh_kd_connect` accepts `reply_timeout_ms` (default 5000), the wait for each stub reply; monitor commands and the breakpoint retry wait twice it.
+- Remote profiles: frontend `remote.heartbeat_ms` (default 10000) sets the heartbeat interval and is sent to the runner, which now drops an idle connection after 1.5 intervals instead of a fixed 15 s. Runner backend entries accept `detach_timeout_ms` (default 3000), the wait for the agent's Detach/Shutdown acknowledgement.
 
 ### Fixed
 
 - A single step over `CPUID` no longer runs the next instruction too on a machine whose hypervisor intercepts `CPUID` (Hyper-V with virtualization-based security), which raised the single-step trap one instruction late. `veh_trace_basic_blocks` lost that instruction's step and merged both register changes into one event, and a user step, a breakpoint's step-over of its own instruction and the other trap-flag steps went one instruction too far. Where the debugger resumes a thread with the trap flag at a `CPUID`, it now runs that `CPUID` itself with the thread's leaf and subleaf and handles the trap the processor raises after it; a trap flag of the program's own still runs the `CPUID` on the processor. `RDTSC` and `XGETBV` were not affected. Covered on x64 and x86 for `veh_step_in`, a step from a breakpoint on a `CPUID`, and direct, batch and breakpoint-action traces with inline and file events.
+
+- A remote backend agent that exits during startup is reported at once with its exit code; the runner first waited out its 5 s pipe-connect or 3 s Ready deadline.
 
 - `veh_step_in`/`veh_step_over` from a software-breakpoint stop ran two instructions: the one under the breakpoint and the next. The step now ends after the instruction under the breakpoint. A breakpoint condition hit by that instruction still reports first. Covered on x64 and x86.
 
