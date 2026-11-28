@@ -578,7 +578,7 @@ DebugSession::LaunchResult DebugSession::Launch(const LaunchOptions& opts) {
 	// is the load confirmation, and a target that exits ends the wait at once.
 	auto* pipe = dynamic_cast<PipeClient*>(ipcTransport_.get());
 	const bool connected = injMethod == InjectionMethod::ImportTable && pipe ?
-		pipe->ConnectToPeer(lr.pid, 60000, targetProcess_) : ipcTransport_->Connect(lr.pid, 3500);
+		pipe->ConnectToPeer(lr.pid, 15000, targetProcess_) : ipcTransport_->Connect(lr.pid, 3500);
 	if (!connected) {
 		if (targetProcess_) {
 			TerminateProcess(targetProcess_, 1);

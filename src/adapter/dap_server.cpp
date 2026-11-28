@@ -698,7 +698,7 @@ void DapServer::OnLaunch(const Request& req) {
 	// VEH DLL과 파이프 연결. importTable은 초기화가 끝나야 DLL이 뜨므로 종료 감지와 함께 더 기다린다.
 	auto* pipe = dynamic_cast<PipeClient*>(ipcTransport_.get());
 	const bool connected = injectionMethod_ == InjectionMethod::ImportTable && pipe ?
-		pipe->ConnectToPeer(targetPid_, 60000, targetProcess_) : ipcTransport_->Connect(targetPid_, 10000);
+		pipe->ConnectToPeer(targetPid_, 15000, targetProcess_) : ipcTransport_->Connect(targetPid_, 10000);
 	if (!connected) {
 		resp.success = false;
 		resp.message = "Failed to connect to VEH DLL pipe";
