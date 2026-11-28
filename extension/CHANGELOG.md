@@ -4,7 +4,7 @@
 
 ### Added
 
-- Launch-only `injectionMethod="importTable"` (MCP `veh_launch`, DAP `launch`) prepends the VEH DLL to the suspended EXE's import table so it loads before the EXE's static DLLs. Use it when such a DLL blocks remote threads or DLL loading. `stopOnEntry` is unchanged. Optional `restoreImports=true` makes the DLL restore the original import directory as soon as it loads. Not auto-selected; the DLL path must be ASCII or have an 8.3 name. Covered on x64, x86 and WoW64 by `test/test_mcp_import_preload.py`.
+- Launch-only `injectionMethod="importTable"` (MCP `veh_launch`, DAP `launch`) prepends the VEH DLL to the suspended EXE's import table so it loads before the EXE's static DLLs. Use it when such a DLL blocks remote threads or DLL loading. The launch succeeds when the DLL's pipe comes up (up to 60 s, failing at once if the target exits), even if the target holds the initialization thread. `stopOnEntry` is unchanged. Optional `restoreImports=true` makes the DLL restore the original import directory as soon as it loads. Not auto-selected; the DLL path must be ASCII or have an 8.3 name. Covered on x64, x86 and WoW64 by `test/test_mcp_import_preload.py`.
 
 - Add independent `skills/veh` (built-in user-mode VEH DLL) and `skills/veh-backend` (external backend) agent skills. Load only the matching skill; each includes exception handling, execution evidence, cleanup and verified feedback without proprietary backend source. The backend skill distinguishes EPT execution hooks from direct code writes and forbids silently substituting the requested method. It also clarifies that exception auto-forwarding does not establish disabled observation or imply an observer-disable capability.
 

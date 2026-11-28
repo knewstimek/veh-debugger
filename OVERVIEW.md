@@ -467,7 +467,7 @@ Pattern: reader thread copies state under lock, then uses local copy outside loc
 ## Launch Flow
 1. `CreateProcess` + `CREATE_SUSPENDED`
 2. DLL injection (auto-selects method based on target bitness/protection)
-   - `importTable`: prepend a descriptor (ordinal 1, `veh_dll.def`) in a block allocated above the image, then a remote `LoadLibraryA` thread runs process initialization and only confirms the already-loaded module. The main thread stays suspended. The block header (`preload_import.h`) keeps the original directory; with `restoreImports` the DLL writes it back in `DllMain`, after the loader has bound every static import.
+   - `importTable`: prepend a descriptor (ordinal 1, `veh_dll.def`) in a block allocated above the image, then a remote thread runs process initialization. That thread is not awaited (a static DLL's thread-start hook may hold it); the launch waits up to 60 s for the DLL's pipe and stops waiting when the target exits. The main thread stays suspended. The block header (`preload_import.h`) keeps the original directory; with `restoreImports` the DLL writes it back in `DllMain`, after the loader has bound every static import.
 3. Wait for DLL "Ready" event on pipe
 4. `configurationDone` -> resume main thread
 
