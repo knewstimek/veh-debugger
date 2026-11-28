@@ -55,7 +55,7 @@ void AppendStartupDiagnostics(std::string& error, const nlohmann::json& reply) {
 }
 }
 TcpIpcTransport::TcpIpcTransport(RemoteEndpoint endpoint, std::string openRequest)
-    : endpoint_(std::move(endpoint)), openRequest_(std::move(openRequest)) {}
+    : endpoint_(std::move(endpoint)), openRequest_(std::move(openRequest)) { SetHeartbeatInterval(endpoint_.heartbeatMs); }
 
 bool TcpIpcTransport::Connect(uint32_t, int timeoutMs) {
     error_ = "Remote connection or authentication failed";

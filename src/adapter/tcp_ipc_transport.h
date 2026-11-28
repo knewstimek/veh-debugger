@@ -11,6 +11,7 @@ struct RemoteEndpoint {
     std::wstring tokenFile;
     std::string backend;
     int timeoutMs = 20000;
+    uint32_t heartbeatMs = 10000; // also sent to the runner, which derives its idle read deadline
 };
 struct RemoteWorkInfo {
     std::string id;

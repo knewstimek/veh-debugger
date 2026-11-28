@@ -137,6 +137,12 @@ bool ResolveBackend(const json& args, std::optional<DebugSession::ExternalAgent>
                 if (!timeout.is_number_unsigned() || timeout.get<uint64_t>() > 30000) throw std::runtime_error("timeout");
                 endpoint.timeoutMs = timeout.get<int>();
             }
+            if (remote.contains("heartbeat_ms")) {
+                const auto& heartbeat = remote.at("heartbeat_ms");
+                if (!heartbeat.is_number_unsigned() || heartbeat.get<uint64_t>() < 100 || heartbeat.get<uint64_t>() > 60000)
+                    throw std::runtime_error("heartbeat");
+                endpoint.heartbeatMs = heartbeat.get<uint32_t>();
+            }
             if (endpoint.backend.empty() || endpoint.timeoutMs < 100 || endpoint.timeoutMs > 30000)
                 throw std::runtime_error("selection");
             out = DebugSession::ExternalAgent{};

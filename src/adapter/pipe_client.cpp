@@ -518,11 +518,11 @@ bool PipeClient::AwaitingReply() {
 }
 
 void PipeClient::HeartbeatThread() {
-	LOG_DEBUG("Heartbeat thread started (interval=10s, timeout=30s)");
+	LOG_DEBUG("Heartbeat thread started (interval=%ums, timeout=%ums)", heartbeatIntervalMs_, 3 * heartbeatIntervalMs_);
 
 	while (heartbeatRunning_ && connected_) {
-		// 10초 대기 (StopHeartbeat/Disconnect가 stopEvent_로 즉시 깨운다)
-		if (!stopEvent_ || WaitForSingleObject(stopEvent_, 10000) != WAIT_TIMEOUT) break;
+		// interval 대기 (StopHeartbeat/Disconnect가 stopEvent_로 즉시 깨운다)
+		if (!stopEvent_ || WaitForSingleObject(stopEvent_, heartbeatIntervalMs_) != WAIT_TIMEOUT) break;
 		if (!heartbeatRunning_ || !connected_) break;
 		if (AwaitingReply()) continue;
 
@@ -532,9 +532,9 @@ void PipeClient::HeartbeatThread() {
 			continue;
 		}
 
-		// 30초 무응답 체크
+		// 3 interval 무응답 체크
 		uint64_t elapsed = GetTickCount64() - lastRecvTime_;
-		if (elapsed > 30000) {
+		if (elapsed > 3ull * heartbeatIntervalMs_) {
 			if (AwaitingReply()) continue;
 			LOG_ERROR("Heartbeat timeout: no response for %llu ms", elapsed);
 			connected_ = false;

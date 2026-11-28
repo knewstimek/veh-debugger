@@ -567,7 +567,7 @@ try{$pin=([BitConverter]::ToString($hash.ComputeHash($cert.RawData))).Replace('-
                                  ("trace-output", "guest")):
                 mappings[alias] = {"target_scope": scope, "remote": {
                     "address": "127.0.0.1", "port": port, "certificate_sha256": pin,
-                    "token_file": str(token_path), "backend": alias, "timeout_ms": 20000}}
+                    "token_file": str(token_path), "backend": alias, "timeout_ms": 20000, "heartbeat_ms": 1000}}
             mappings["badpin"] = json.loads(json.dumps(mappings["guest"]))
             mappings["badpin"]["remote"]["certificate_sha256"] = "0" * 64
             mappings["badauth"] = json.loads(json.dumps(mappings["guest"]))
@@ -646,10 +646,10 @@ try{$pin=([BitConverter]::ToString($hash.ComputeHash($cert.RawData))).Replace('-
             assert client.tool("veh_threads")["count"] == 1
             passed("startup stage, real zero/37/high-bit exit codes and Win32 failure without private text")
             started = time.monotonic()
-            trace = client.tool("veh_trace_callers", {"address": "0x1000", "duration_ms": 20000}, timeout=30)
-            assert trace.get("totalHits") == 0 and time.monotonic() - started >= 19, "long command disconnected early"
+            trace = client.tool("veh_trace_callers", {"address": "0x1000", "duration_ms": 3000}, timeout=15)
+            assert trace.get("totalHits") == 0 and time.monotonic() - started >= 2.9, "long command disconnected early"
             assert client.tool("veh_threads")["count"] == 1, "long command lost connection"
-            passed("20-second command survives idle read deadline without extra authentication")
+            passed("command twice the idle read deadline survives without extra authentication")
             for tool_name, arguments, fragment in (
                 ("veh_set_breakpoint", {"address": "0x1000", "condition": "RAX == 1"}, "Conditional breakpoint"),
                 ("veh_trace_basic_blocks", {"threadId": 77, "code_output": "file"}, "Target-side file"),

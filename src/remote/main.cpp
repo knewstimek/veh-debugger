@@ -207,6 +207,9 @@ void Serve(const std::shared_ptr<Channel>& channel, uintptr_t socket, const Conf
         if (!ReadControl(*channel, Control::OpenWork, bytes, remaining())) { channel->Cancel(); return; }
         auto request = Json::parse(bytes, nullptr, true, false);
         if (!request.is_object()) throw std::invalid_argument("request");
+        const auto heartbeat = request.contains("heartbeat_ms") ? Unsigned(request.at("heartbeat_ms")) : 10000u;
+        if (heartbeat < 100 || heartbeat > 60000) throw std::invalid_argument("heartbeat");
+        const int idleRead = static_cast<int>(heartbeat + heartbeat / 2);
         std::string code; bool outcomeUnknown = true; Json diagnostics;
         owner = registry.Open(request, channel, code, outcomeUnknown, diagnostics);
         Json reply = owner ? owner->Describe() : Json{{"success", false}, {"code", code}, {"outcome_unknown", outcomeUnknown}};
@@ -222,7 +225,7 @@ void Serve(const std::shared_ptr<Channel>& channel, uintptr_t socket, const Conf
         }
         for (;;) {
             IpcHeader header{};
-            if (!channel->Read(&header, sizeof(header), 15000)) {
+            if (!channel->Read(&header, sizeof(header), idleRead)) {
                 // Synchronous commands suppress frontend heartbeats. An empty
                 // input timeout is not disconnection while bounded work owns it.
                 // Partial frames and socket errors still terminate the connection.

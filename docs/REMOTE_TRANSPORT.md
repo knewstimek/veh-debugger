@@ -55,6 +55,8 @@ startup arguments are chosen by the resident profile; callers cannot override
 them over the network. Do not put credentials in backend arguments.
 Optional `stderr_file` appends agent stderr to a local log, never sent to clients;
 an unopenable log fails `stage=agent_start`. Without it, agent stderr is discarded.
+Optional `detach_timeout_ms` (1-60000, default 3000) bounds the wait for the
+agent's Detach/Shutdown acknowledgement.
 
 Start the runner under its configured Windows account:
 
@@ -79,6 +81,10 @@ Frontend `veh-backends.json` (or the file selected by `VEH_BACKENDS`):
   }
 }
 ```
+
+Optional `heartbeat_ms` (100-60000, default 10000) is the frontend heartbeat
+interval. It is sent in OpenWork; the runner drops a connection idle for 1.5
+intervals outside a synchronous command, and the frontend after 3 silent intervals.
 
 For the bridge use `target_scope: "guest"` and `remote.backend: "vm-guest"`.
 A VM-wide entry instead uses `target_scope: "vm"` in both profiles; attach without

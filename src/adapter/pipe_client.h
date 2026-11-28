@@ -49,9 +49,10 @@ public:
 	void StartEventListener(EventCallback cb) override;
 	void StopEventListener() override;
 
-	// Heartbeat: 10초 간격 ping, 30초 무응답 시 연결 끊김 판정
+	// Heartbeat: interval(기본 10초)마다 ping, 3 interval 무응답 시 연결 끊김 판정
 	void StartHeartbeat() override;
 	void StopHeartbeat() override;
+	void SetHeartbeatInterval(uint32_t ms) { heartbeatIntervalMs_ = ms; }
 
 protected:
 	void ReaderThread();
@@ -82,6 +83,7 @@ protected:
 	// 하트비트
 	std::thread heartbeatThread_;
 	std::atomic<bool> heartbeatRunning_{false};
+	uint32_t heartbeatIntervalMs_ = 10000;
 	std::atomic<uint64_t> lastRecvTime_{0};  // GetTickCount64
 
 	// 리더 스레드 시작 대기용

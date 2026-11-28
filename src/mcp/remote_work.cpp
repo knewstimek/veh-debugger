@@ -16,7 +16,7 @@ bool DebugSession::ConnectRemoteWork(uint32_t pid, const ExternalAgent& agent, c
         if (current && current->MatchesWork(*agent.remote, scope, pid) && !Detach()) return false;
     }
     nlohmann::json request{{"backend", agent.remote->backend}, {"operation", launch ? "launch" : "attach"},
-        {"target_scope", scope}, {"pid", pid}};
+        {"target_scope", scope}, {"pid", pid}, {"heartbeat_ms", agent.remote->heartbeatMs}};
     const bool retryingUncertainLaunch = launch && !pendingRemoteRequestId_.empty();
     if (launch) {
         if (launch->program.empty()) { lastAttachError_ = "program is required"; return false; }
