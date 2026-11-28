@@ -43,7 +43,8 @@ host VM, outside the inner guest. Guest launch remains unsupported. See
 | File | Role |
 |------|------|
 | `src/adapter/dap_server.cpp/h` | Main DAP request/event handler (~2500 lines) |
-| `src/adapter/injector.cpp/h` | CreateProcess + DLL injection (CRT/NtCreate/Hijack/APC, WoW64) |
+| `src/adapter/injector.cpp/h` | CreateProcess + DLL injection (CRT/NtCreate/Hijack/APC, launch-only import table, WoW64) |
+| `src/common/preload_import.h` | Import-table block header shared by the injector and the DLL's optional directory restore |
 | `src/adapter/symbol_engine.cpp/h` | Adapter-side PDB loader (O(1) StepOver via SymGetLineFromAddrW64) |
 | `src/adapter/ipc_transport.h` | Backend-neutral IPC transport interface shared by the adapter and MCP server |
 | `src/adapter/pipe_client.cpp/h` | Named Pipe IPC client (SendAndReceive, event callbacks) |
@@ -466,6 +467,7 @@ Pattern: reader thread copies state under lock, then uses local copy outside loc
 ## Launch Flow
 1. `CreateProcess` + `CREATE_SUSPENDED`
 2. DLL injection (auto-selects method based on target bitness/protection)
+   - `importTable`: prepend a descriptor (ordinal 1, `veh_dll.def`) in a block allocated above the image, then a remote `LoadLibraryA` thread runs process initialization and only confirms the already-loaded module. The main thread stays suspended. The block header (`preload_import.h`) keeps the original directory; with `restoreImports` the DLL writes it back in `DllMain`, after the loader has bound every static import.
 3. Wait for DLL "Ready" event on pipe
 4. `configurationDone` -> resume main thread
 

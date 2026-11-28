@@ -10,6 +10,7 @@
 #include "stack_walk.h"
 #include "../common/ipc_protocol.h"
 #include "../common/logger.h"
+#include "../common/preload_import.h"
 
 // LdrRegisterDllNotification types (ntdll undocumented)
 typedef struct _LDR_DLL_LOADED_NOTIFICATION_DATA {
@@ -311,12 +312,34 @@ void Cleanup() {
 	OutputDebugStringW(L"[VEHDebugger] Cleanup complete\n");
 }
 
+// importTable launch: the EXE import directory points past SizeOfImage at the
+// launcher's block. All static imports are bound before any DllMain runs, so the
+// original directory can be put back here when the launcher asked for it.
+void RestorePreloadImports() {
+	auto* base = reinterpret_cast<BYTE*>(GetModuleHandleW(nullptr));
+	auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + reinterpret_cast<IMAGE_DOS_HEADER*>(base)->e_lfanew);
+	auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+	if (dir.VirtualAddress < nt->OptionalHeader.SizeOfImage) return;
+	const auto* header = reinterpret_cast<const veh::PreloadImportHeader*>(
+		base + dir.VirtualAddress - sizeof(veh::PreloadImportHeader));
+	if (header->magic != veh::kPreloadImportMagic || !(header->flags & veh::kPreloadRestoreImports)) return;
+	DWORD oldProtect = 0;
+	if (!VirtualProtect(&dir, sizeof(dir), PAGE_READWRITE, &oldProtect)) return;
+	dir.VirtualAddress = header->importRva;
+	dir.Size = header->importSize;
+	VirtualProtect(&dir, sizeof(dir), oldProtect, &oldProtect);
+}
+
 } // anonymous namespace
+
+// Ordinal 1 (veh_dll.def): the export an importTable descriptor binds to.
+extern "C" void PreloadAnchor() {}
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
 	switch (reason) {
 	case DLL_PROCESS_ATTACH:
 		g_hModule = hModule;
+		RestorePreloadImports();
 		DisableThreadLibraryCalls(hModule);
 		// loader lock 회피: 별도 스레드에서 초기화
 		g_initThread = CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr);

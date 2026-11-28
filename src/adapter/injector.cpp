@@ -1,5 +1,6 @@
 #include "injector.h"
 #include "logger.h"
+#include "preload_import.h"
 #include <tlhelp32.h>
 #include <psapi.h>
 #include <filesystem>
@@ -35,6 +36,7 @@ InjectionMethod ParseInjectionMethod(const std::string& str) {
 	if (str == "ntCreateThreadEx")   return InjectionMethod::NtCreateThreadEx;
 	if (str == "threadHijack")       return InjectionMethod::ThreadHijack;
 	if (str == "queueUserApc")       return InjectionMethod::QueueUserAPC;
+	if (str == "importTable")        return InjectionMethod::ImportTable;
 	return InjectionMethod::Auto;
 }
 
@@ -97,8 +99,17 @@ static bool HasLoadedModuleAtThreadExitCode(HANDLE process, const std::string& d
 	DWORD pid = GetProcessId(process);
 	if (pid == 0) return false;
 
-	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-	if (snapshot == INVALID_HANDLE_VALUE) return false;
+	// ERROR_BAD_LENGTH: the target's loader changed the module list mid-snapshot; the
+	// documented remedy is to retry. Bounded so a dead target cannot spin forever.
+	HANDLE snapshot = INVALID_HANDLE_VALUE;
+	for (int attempt = 0; attempt < 64; ++attempt) {
+		snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+		if (snapshot != INVALID_HANDLE_VALUE || GetLastError() != ERROR_BAD_LENGTH) break;
+	}
+	if (snapshot == INVALID_HANDLE_VALUE) {
+		LOG_ERROR("Module snapshot failed for PID %lu: %lu", pid, GetLastError());
+		return false;
+	}
 
 	const std::string requestedName = FileNamePart(dllPath);
 	MODULEENTRY32W me = {};
@@ -741,11 +752,172 @@ bool Injector::InjectViaQueueUserAPC(HANDLE process, uint32_t pid, LPVOID remote
 	return loaded;
 }
 
+// --- 방식 5: import 표 (launch 전용) ---
+
+// import 이름은 ANSI다. 비ASCII 경로는 8.3 이름으로 바꾸고, 그래도 안 되면 빈 값.
+static std::string ImportablePath(const std::string& path) {
+	auto ascii = [](const std::string& s) {
+		for (unsigned char c : s) if (c >= 0x80) return false;
+		return true;
+	};
+	if (ascii(path)) return path;
+	wchar_t wide[MAX_PATH] = {}, shortPath[MAX_PATH] = {};
+	char narrow[MAX_PATH] = {};
+	if (!MultiByteToWideChar(CP_ACP, 0, path.c_str(), -1, wide, MAX_PATH) ||
+		!GetShortPathNameW(wide, shortPath, MAX_PATH) ||
+		!WideCharToMultiByte(CP_ACP, 0, shortPath, -1, narrow, MAX_PATH, nullptr, nullptr))
+		return {};
+	return ascii(narrow) ? std::string(narrow) : std::string();
+}
+
+static uint64_t AlignUp(uint64_t value, uint64_t alignment) {
+	return (value + alignment - 1) & ~(alignment - 1);
+}
+
+bool Injector::AddPreloadImport(HANDLE process, const std::string& dllPath, bool restoreImports,
+	std::string* error) {
+	using NtQueryInformationProcess_t = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+	auto query = reinterpret_cast<NtQueryInformationProcess_t>(
+		GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
+	PVOID basicInfo[6] = {};  // PROCESS_BASIC_INFORMATION: [1] = PebBaseAddress
+	if (!query || query(process, 0, basicInfo, sizeof(basicInfo), nullptr) != 0) {
+		SetInjectionError(error, "NtQueryInformationProcess(ProcessBasicInformation) failed");
+		return false;
+	}
+	// PEB: flags slot, Mutant, ImageBaseAddress, Ldr (pointer-sized in this server's view)
+	uintptr_t peb[4] = {};
+	if (!ReadProcessMemory(process, basicInfo[1], peb, sizeof(peb), nullptr)) {
+		SetInjectionError(error, "reading the target PEB failed");
+		return false;
+	}
+	if (peb[3] != 0) {
+		SetInjectionError(error, "importTable needs a process that has not initialized (launch only)");
+		return false;
+	}
+
+	auto* base = reinterpret_cast<BYTE*>(peb[2]);
+	auto read = [&](const BYTE* at, void* out, size_t size) {
+		return ReadProcessMemory(process, at, out, size, nullptr) != FALSE;
+	};
+	IMAGE_DOS_HEADER dos = {};
+	DWORD signature = 0;
+	WORD optionalMagic = 0;
+	if (!read(base, &dos, sizeof(dos)) || dos.e_magic != IMAGE_DOS_SIGNATURE ||
+		!read(base + dos.e_lfanew, &signature, sizeof(signature)) || signature != IMAGE_NT_SIGNATURE) {
+		SetInjectionError(error, "target image headers are unreadable");
+		return false;
+	}
+	BYTE* optional = base + dos.e_lfanew + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER);
+	read(optional, &optionalMagic, sizeof(optionalMagic));
+	const bool pe64 = optionalMagic == IMAGE_NT_OPTIONAL_HDR64_MAGIC;
+	if (!pe64 && optionalMagic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+		SetInjectionError(error, "unknown optional header magic");
+		return false;
+	}
+	DWORD sizeOfImage = 0, rvaCount = 0;
+	read(optional + offsetof(IMAGE_OPTIONAL_HEADER32, SizeOfImage), &sizeOfImage, sizeof(sizeOfImage));
+	read(optional + (pe64 ? offsetof(IMAGE_OPTIONAL_HEADER64, NumberOfRvaAndSizes)
+		: offsetof(IMAGE_OPTIONAL_HEADER32, NumberOfRvaAndSizes)), &rvaCount, sizeof(rvaCount));
+	if (rvaCount <= IMAGE_DIRECTORY_ENTRY_IMPORT) {
+		SetInjectionError(error, "target image has no import directory slot");
+		return false;
+	}
+	BYTE* importField = optional + (pe64 ? offsetof(IMAGE_OPTIONAL_HEADER64, DataDirectory)
+		: offsetof(IMAGE_OPTIONAL_HEADER32, DataDirectory)) +
+		IMAGE_DIRECTORY_ENTRY_IMPORT * sizeof(IMAGE_DATA_DIRECTORY);
+	IMAGE_DATA_DIRECTORY original = {};
+	read(importField, &original, sizeof(original));
+
+	std::vector<IMAGE_IMPORT_DESCRIPTOR> descriptors(original.VirtualAddress ?
+		original.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR) : 0);
+	if (!descriptors.empty() &&
+		!read(base + original.VirtualAddress, descriptors.data(), descriptors.size() * sizeof(IMAGE_IMPORT_DESCRIPTOR))) {
+		SetInjectionError(error, "reading the target import descriptors failed");
+		return false;
+	}
+	for (size_t i = 0; i < descriptors.size(); ++i) {
+		if (descriptors[i].Name == 0 && descriptors[i].FirstThunk == 0) {
+			descriptors.resize(i);
+			break;
+		}
+	}
+
+	// Block: header | ours + originals + terminator | ILT[2] | IAT[2] | DLL path
+	const size_t thunkSize = pe64 ? sizeof(uint64_t) : sizeof(uint32_t);
+	const size_t descOffset = sizeof(PreloadImportHeader);
+	const size_t descCount = descriptors.size() + 2;
+	const size_t iltOffset = static_cast<size_t>(AlignUp(descOffset + descCount * sizeof(IMAGE_IMPORT_DESCRIPTOR), 8));
+	const size_t iatOffset = iltOffset + 2 * thunkSize;
+	const size_t nameOffset = iatOffset + 2 * thunkSize;
+	std::vector<BYTE> block(nameOffset + dllPath.size() + 1);
+
+	// RVAs are 32-bit: the block must lie above the image and within 4 GiB of its base.
+	SYSTEM_INFO systemInfo = {};
+	GetSystemInfo(&systemInfo);
+	const uint64_t granularity = systemInfo.dwAllocationGranularity;
+	const uint64_t imageBase = reinterpret_cast<uintptr_t>(base);
+	const uint64_t limit = pe64 ? imageBase + 0xFFFFFFFFull : 0xFFFFFFFFull;
+	BYTE* remote = nullptr;
+	for (uint64_t at = AlignUp(imageBase + sizeOfImage, granularity); !remote && at + block.size() <= limit;) {
+		MEMORY_BASIC_INFORMATION region = {};
+		if (!VirtualQueryEx(process, reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(at)), &region, sizeof(region)))
+			break;
+		const uint64_t regionEnd = reinterpret_cast<uintptr_t>(region.BaseAddress) + region.RegionSize;
+		if (region.State == MEM_FREE && at + block.size() <= regionEnd)
+			remote = static_cast<BYTE*>(VirtualAllocEx(process, reinterpret_cast<LPVOID>(static_cast<uintptr_t>(at)),
+				block.size(), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+		at = AlignUp(regionEnd, granularity);
+	}
+	if (!remote) {
+		SetInjectionError(error, "no free memory within 4 GiB above the target image");
+		return false;
+	}
+
+	const DWORD blockRva = static_cast<DWORD>(reinterpret_cast<uintptr_t>(remote) - imageBase);
+	const PreloadImportHeader header = {kPreloadImportMagic, restoreImports ? kPreloadRestoreImports : 0u,
+		original.VirtualAddress, original.Size};
+	memcpy(block.data(), &header, sizeof(header));
+	IMAGE_IMPORT_DESCRIPTOR ours = {};
+	ours.OriginalFirstThunk = blockRva + static_cast<DWORD>(iltOffset);
+	ours.Name = blockRva + static_cast<DWORD>(nameOffset);
+	ours.FirstThunk = blockRva + static_cast<DWORD>(iatOffset);
+	memcpy(block.data() + descOffset, &ours, sizeof(ours));
+	if (!descriptors.empty())
+		memcpy(block.data() + descOffset + sizeof(ours), descriptors.data(), descriptors.size() * sizeof(ours));
+	const uint64_t ordinal = (pe64 ? IMAGE_ORDINAL_FLAG64 : IMAGE_ORDINAL_FLAG32) | kPreloadExportOrdinal;
+	memcpy(block.data() + iltOffset, &ordinal, thunkSize);
+	memcpy(block.data() + iatOffset, &ordinal, thunkSize);
+	memcpy(block.data() + nameOffset, dllPath.c_str(), dllPath.size() + 1);
+
+	const IMAGE_DATA_DIRECTORY patched = {blockRva + static_cast<DWORD>(descOffset),
+		static_cast<DWORD>(descCount * sizeof(IMAGE_IMPORT_DESCRIPTOR))};
+	DWORD oldProtect = 0;
+	const bool written = WriteProcessMemory(process, remote, block.data(), block.size(), nullptr) &&
+		VirtualProtectEx(process, importField, sizeof(patched), PAGE_READWRITE, &oldProtect) &&
+		WriteProcessMemory(process, importField, &patched, sizeof(patched), nullptr);
+	if (oldProtect) VirtualProtectEx(process, importField, sizeof(patched), oldProtect, &oldProtect);
+	if (!written) {
+		const DWORD lastError = GetLastError();
+		VirtualFreeEx(process, remote, 0, MEM_RELEASE);
+		SetInjectionError(error, "writing the preload import table failed (error " + std::to_string(lastError) + ")");
+		return false;
+	}
+	LOG_INFO("[Import] %zu descriptors moved to RVA 0x%08lX, restore=%d", descriptors.size(), blockRva, restoreImports);
+	return true;
+}
+
 // --- 메인 인젝션 함수 ---
 
-bool Injector::InjectDll(uint32_t pid, const std::string& dllPath, InjectionMethod method,
-	std::string* error) {
+bool Injector::InjectDll(uint32_t pid, const std::string& requestedDllPath, InjectionMethod method,
+	std::string* error, bool restoreImports) {
 	if (error) error->clear();
+	// The import name and the LoadLibrary string must match so the loader finds the loaded module.
+	const std::string dllPath = method == InjectionMethod::ImportTable ?
+		ImportablePath(requestedDllPath) : requestedDllPath;
+	if (dllPath.empty()) {
+		SetInjectionError(error, "importTable needs an ASCII (or 8.3) DLL path");
+		return false;
+	}
 	EnableDebugPrivilege();
 
 	HANDLE process = OpenProcess(
@@ -791,7 +963,7 @@ bool Injector::InjectDll(uint32_t pid, const std::string& dllPath, InjectionMeth
 		loadLib = GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryA");
 	}
 
-	bool apcUsed = false;  // APC 내부에서 remoteStr을 자체 관리하므로 추적 필요
+	bool keepRemoteString = false;  // APC 내부에서 remoteStr을 자체 관리하므로 추적 필요
 	std::vector<std::string> attemptErrors;
 	auto recordAttempt = [&](const char* name, bool ok, const std::string& attemptError) {
 		if (!ok) attemptErrors.push_back(std::string(name) + ": " +
@@ -823,7 +995,7 @@ bool Injector::InjectDll(uint32_t pid, const std::string& dllPath, InjectionMeth
 		}
 		if (!success) {
 			LOG_INFO("Trying QueueUserAPC...");
-			apcUsed = true;
+			keepRemoteString = true;
 			std::string why;
 			bool attemptOk = InjectViaQueueUserAPC(process, pid, remoteStr, loadLib, &why);
 			success = recordAttempt("QueueUserAPC", attemptOk, why);
@@ -841,8 +1013,21 @@ bool Injector::InjectDll(uint32_t pid, const std::string& dllPath, InjectionMeth
 			success = InjectViaThreadHijack(process, pid, remoteStr, isWow64, &why);
 			break;
 		case InjectionMethod::QueueUserAPC:
-			apcUsed = true;
+			keepRemoteString = true;
 			success = InjectViaQueueUserAPC(process, pid, remoteStr, loadLib, &why);
+			break;
+		case InjectionMethod::ImportTable:
+			// The remote thread only runs process initialization (imports, then DllMains);
+			// the loader's own thread-start hooks may hold it, so it is not awaited and
+			// its string stays allocated. The DLL's pipe is the load confirmation.
+			keepRemoteString = true;
+			if ((success = AddPreloadImport(process, dllPath, restoreImports, &why))) {
+				HANDLE thread = ::CreateRemoteThread(process, nullptr, 0,
+					(LPTHREAD_START_ROUTINE)loadLib, remoteStr, 0, nullptr);
+				if (!thread) why = "CreateRemoteThread failed (error " + std::to_string(GetLastError()) + ")";
+				else CloseHandle(thread);
+				success = thread != nullptr;
+			}
 			break;
 		default:
 			break;
@@ -861,7 +1046,7 @@ bool Injector::InjectDll(uint32_t pid, const std::string& dllPath, InjectionMeth
 	// remoteStr 해제:
 	// - APC 방식(직접 지정 또는 Auto 폴백)은 내부에서 자체 관리 (found 시 해제, 아니면 유지)
 	// - 그 외 방식은 여기서 해제 (성공/실패 무관, LoadLibrary 동기 완료 후이므로 안전)
-	if (!apcUsed) {
+	if (!keepRemoteString) {
 		FreeRemoteString(process, remoteStr);
 	}
 
@@ -876,7 +1061,8 @@ LaunchResult Injector::LaunchAndInject(
 	const std::string& dllPath,
 	InjectionMethod method,
 	bool runAsInvoker,
-	const std::vector<std::string>& env)
+	const std::vector<std::string>& env,
+	bool restoreImports)
 {
 	STARTUPINFOA si = {};
 	si.cb = sizeof(si);
@@ -966,7 +1152,7 @@ LaunchResult Injector::LaunchAndInject(
 		pi.dwProcessId, pi.dwThreadId);
 
 	std::string injectionError;
-	if (!dllPath.empty() && !InjectDll(pi.dwProcessId, dllPath, method, &injectionError)) {
+	if (!dllPath.empty() && !InjectDll(pi.dwProcessId, dllPath, method, &injectionError, restoreImports)) {
 		LOG_ERROR("DLL injection failed for '%s', terminating process %u", dllPath.c_str(), pi.dwProcessId);
 		TerminateProcess(pi.hProcess, 1);
 		CloseHandle(pi.hThread);

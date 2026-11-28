@@ -4,6 +4,8 @@
 
 ### Added
 
+- Launch-only `injectionMethod="importTable"` (MCP `veh_launch`, DAP `launch`) prepends the VEH DLL to the suspended EXE's import table so it loads before the EXE's static DLLs. Use it when such a DLL blocks remote threads or DLL loading. `stopOnEntry` is unchanged. Optional `restoreImports=true` makes the DLL restore the original import directory as soon as it loads. Not auto-selected; the DLL path must be ASCII or have an 8.3 name. Covered on x64, x86 and WoW64 by `test/test_mcp_import_preload.py`.
+
 - Add independent `skills/veh` (built-in user-mode VEH DLL) and `skills/veh-backend` (external backend) agent skills. Load only the matching skill; each includes exception handling, execution evidence, cleanup and verified feedback without proprietary backend source. The backend skill distinguishes EPT execution hooks from direct code writes and forbids silently substituting the requested method. It also clarifies that exception auto-forwarding does not establish disabled observation or imply an observer-disable capability.
 
 - Expand `--profile=vmguest` from 43 to 51 eager tools with `veh_system_memory`, `veh_hidden_hook`, `veh_event`, `veh_event_records`, `veh_transparency`, `veh_address_space`, `veh_translate` and `veh_kernel_modules`. The shared `analysis` inventory remains unchanged; operations still require backend support.
@@ -18,6 +20,8 @@
 - Remote profiles: frontend `remote.heartbeat_ms` (default 10000) sets the heartbeat interval and is sent to the runner, which now drops an idle connection after 1.5 intervals instead of a fixed 15 s. Runner backend entries accept `detach_timeout_ms` (default 3000), the wait for the agent's Detach/Shutdown acknowledgement.
 
 ### Fixed
+
+- Injection could report `LoadLibrary returned invalid module handle` for a DLL that had loaded, when the target's loader changed its module list during the check (`CreateToolhelp32Snapshot` `ERROR_BAD_LENGTH`). The check now retries the snapshot as documented.
 
 - A single step over `CPUID` no longer runs the next instruction too on a machine whose hypervisor intercepts `CPUID` (Hyper-V with virtualization-based security), which raised the single-step trap one instruction late. `veh_trace_basic_blocks` lost that instruction's step and merged both register changes into one event, and a user step, a breakpoint's step-over of its own instruction and the other trap-flag steps went one instruction too far. Where the debugger resumes a thread with the trap flag at a `CPUID`, it now runs that `CPUID` itself with the thread's leaf and subleaf and handles the trap the processor raises after it; a trap flag of the program's own still runs the `CPUID` on the processor. `RDTSC` and `XGETBV` were not affected. Covered on x64 and x86 for `veh_step_in`, a step from a breakpoint on a `CPUID`, and direct, batch and breakpoint-action traces with inline and file events.
 

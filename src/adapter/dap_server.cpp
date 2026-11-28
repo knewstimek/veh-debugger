@@ -597,6 +597,16 @@ void DapServer::OnLaunch(const Request& req) {
 	stopOnEntry_ = req.arguments.value("stopOnEntry", false);
 	injectionMethod_ = ParseInjectionMethod(req.arguments.value("injectionMethod", "auto"));
 	runAsInvoker_ = req.arguments.value("runAsInvoker", false);
+	restoreImports_ = req.arguments.value("restoreImports", false);
+	if (restoreImports_ && injectionMethod_ != InjectionMethod::ImportTable) {
+		Response invalid;
+		invalid.request_seq = req.seq;
+		invalid.command = "launch";
+		invalid.success = false;
+		invalid.message = "restoreImports requires injectionMethod=importTable";
+		SendResponse(invalid);
+		return;
+	}
 
 	// Module-load breakpoints: stop when a DLL whose name matches is loaded.
 	stopOnModuleLoadPatterns_.clear();
@@ -655,7 +665,8 @@ void DapServer::OnLaunch(const Request& req) {
 	launchCwd_ = cwd;
 
 	std::string dllPath = GetDllPath();
-	auto result = Injector::LaunchAndInject(programPath_, argStr, cwd, dllPath, injectionMethod_, runAsInvoker_);
+	auto result = Injector::LaunchAndInject(programPath_, argStr, cwd, dllPath, injectionMethod_, runAsInvoker_,
+		{}, restoreImports_);
 
 	if (result.pid == 0) {
 		resp.success = false;
@@ -671,7 +682,7 @@ void DapServer::OnLaunch(const Request& req) {
 	launchedByUs_ = true;
 
 	// 프로세스 핸들 (ReadProcessMemory용 — StepOver CALL 판별 등)
-	targetProcess_ = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, targetPid_);
+	targetProcess_ = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION | SYNCHRONIZE, FALSE, targetPid_);
 	if (!targetProcess_) {
 		LOG_WARN("OpenProcess for VM_READ failed: %u", GetLastError());
 	}
@@ -684,8 +695,11 @@ void DapServer::OnLaunch(const Request& req) {
 		}
 	}
 
-	// VEH DLL과 파이프 연결
-	if (!ipcTransport_->Connect(targetPid_, 10000)) {
+	// VEH DLL과 파이프 연결. importTable은 초기화가 끝나야 DLL이 뜨므로 종료 감지와 함께 더 기다린다.
+	auto* pipe = dynamic_cast<PipeClient*>(ipcTransport_.get());
+	const bool connected = injectionMethod_ == InjectionMethod::ImportTable && pipe ?
+		pipe->ConnectToPeer(targetPid_, 60000, targetProcess_) : ipcTransport_->Connect(targetPid_, 10000);
+	if (!connected) {
 		resp.success = false;
 		resp.message = "Failed to connect to VEH DLL pipe";
 		SendResponse(resp);
@@ -3034,7 +3048,8 @@ void DapServer::OnRestart(const Request& req) {
 
 		// 재시작 — 원래 launch 시의 args/cwd를 사용
 		std::string dllPath = GetDllPath();
-		auto relaunch = Injector::LaunchAndInject(programPath_, launchArgStr_, launchCwd_, dllPath, injectionMethod_, runAsInvoker_);
+		auto relaunch = Injector::LaunchAndInject(programPath_, launchArgStr_, launchCwd_, dllPath, injectionMethod_, runAsInvoker_,
+			{}, restoreImports_);
 
 		if (relaunch.pid == 0) {
 			resp.success = false;

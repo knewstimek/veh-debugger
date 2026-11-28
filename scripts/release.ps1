@@ -252,6 +252,7 @@ function Invoke-ReleaseTests {
         'test/test_batch.py',
         'test/test_batch_unified.py',
         'test/test_mcp_launch.py',
+        'test/test_mcp_import_preload.py',
         'test/test_mcp_deep.py',
         'test/test_mcp_new_features.py',
         'test/test_trace_inaccessible_range.py',

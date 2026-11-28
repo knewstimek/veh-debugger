@@ -85,7 +85,8 @@ Add to `.vscode/launch.json`:
 | `processId` | number | PID to attach to (attach only) |
 | `args` | string[] | Command line arguments |
 | `stopOnEntry` | boolean | Break at entry point |
-| `injectionMethod` | string | `auto` / `createRemoteThread` / `ntCreateThreadEx` / `threadHijack` / `queueUserApc` |
+| `injectionMethod` | string | `auto` / `createRemoteThread` / `ntCreateThreadEx` / `threadHijack` / `queueUserApc` / `importTable` (launch only: loads before the EXE's static DLLs) |
+| `restoreImports` | boolean | `importTable` only: restore the original import directory after load |
 | `runAsInvoker` | boolean | Bypass UAC elevation prompt (`__COMPAT_LAYER=RunAsInvoker`) |
 | `adapterPath` | string | Custom path to `veh-debug-adapter.exe` |
 | `adapterPort` | number | TCP port (0 = stdio mode) |

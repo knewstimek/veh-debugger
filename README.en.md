@@ -247,6 +247,8 @@ Add to `.vscode/launch.json`:
 }
 ```
 - `runAsInvoker`: Bypass UAC elevation prompt by running with current privileges (default: false)
+- `injectionMethod`: `auto` (default), `createRemoteThread`, `ntCreateThreadEx`, `threadHijack`, `queueUserApc`, `importTable` (see DLL Injection Methods)
+- `restoreImports`: `importTable` only; restore the original import directory after load (default: false)
 
 **Attach**
 ```json
@@ -406,7 +408,7 @@ The table below documents the complete public tool surface. Treat the running se
 | `veh_toolbox` | `operation, tool?, arguments?, profile?, query?, schema_handle?` | Lazy gateway for tools not eager in the active profile. Search, describe, and call tools; reuse a `describe` response's `schema_handle` for a short unchanged check. |
 | `veh_virtual_machine` | `operation, cpu?, max_instructions?, duration_ms?, cpl_mask?, cr3_roots?, rip_begin?, rip_end?` | Explicit whole-VM control and paused-vCPU trace; manual calls only |
 | `veh_attach` | `pid?, backend?/agent?, agent_args?, target_scope?` | VEH injection or external backend attach; guest PIDs require guest scope and backend validation. VM attachment omits pid. |
-| `veh_launch` | `program, args?, stopOnEntry?, cwd?, env?, backend?/agent?, target_scope?` | Create/attach a host process with optional cwd/env; registered local guest_launch backends support verified guest entry launch; remote guest/DAP remain attach-only |
+| `veh_launch` | `program, args?, stopOnEntry?, cwd?, env?, injectionMethod?, restoreImports?, backend?/agent?, target_scope?` | Create/attach a host process with optional cwd/env; registered local guest_launch backends support verified guest entry launch; remote guest/DAP remain attach-only |
 | `veh_detach` | `abandon?, expected_session_generation?, expected_pid?` | Normal detach retains the session on cleanup failure. After failed detach, explicit identity-guarded abandonment retires only a local external attach session, without backend control commands; cleanup and target state remain unconfirmed. See [recovery contract](docs/DEVELOPMENT_TOOLS.md). |
 | `veh_terminate` | `exitCode?` | Kill the target from **inside** (the injected DLL calls `TerminateProcess` on its own process). Works even on self-protected targets that deny external `taskkill`/`OpenProcess` (deny-DACL or higher integrity), since a process's own handle always has terminate rights. Auto-detaches afterward. Replaces the `WM_CLOSE->detach->taskkill` dance. |
 | `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?, action?` | Software BP. `action` auto-executes on hit (veh_batch format) |
@@ -549,6 +551,8 @@ Supported injection methods (auto-selected):
 2. **NtCreateThreadEx** — For protected processes
 3. **Thread Hijacking** — Hijack existing thread
 4. **QueueUserAPC** — APC queue method
+
+Launch-only `injectionMethod="importTable"` is never auto-selected. It prepends the DLL to the suspended EXE's import table so it loads before the EXE's static DLLs. Use it when a static DLL blocks thread start or DLL loading and the other methods fail. `stopOnEntry` still applies. With `restoreImports=true` the DLL restores the original import directory as soon as it loads. The DLL path must be ASCII or have an 8.3 name.
 
 ## Disassembly
 

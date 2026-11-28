@@ -36,6 +36,14 @@ target_compile_definitions(test_target PRIVATE
 target_compile_options(test_target PRIVATE /Zi /Od)
 target_link_options(test_target PRIVATE /DEBUG /PDB:$<TARGET_FILE_DIR:test_target>/test_target.pdb)
 
+# injectionMethod=importTable: the host statically imports the probe DLL
+add_library(preload_probe SHARED preload_probe.cpp)
+add_executable(preload_host preload_host.cpp)
+target_link_libraries(preload_host PRIVATE preload_probe)
+foreach(target preload_probe preload_host)
+    target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN)
+endforeach()
+
 # Deferred (pending) breakpoint tests: the host late-loads deferred_dll.dll
 add_library(deferred_dll SHARED deferred_dll.cpp)
 add_executable(deferred_host deferred_host.cpp)

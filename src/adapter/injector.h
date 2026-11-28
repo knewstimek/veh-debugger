@@ -12,6 +12,7 @@ enum class InjectionMethod {
 	NtCreateThreadEx,   // ntdll!NtCreateThreadEx (유저모드 후킹 우회)
 	ThreadHijack,       // 기존 스레드 컨텍스트 조작 (새 스레드 생성 안 함)
 	QueueUserAPC,       // Alertable wait 상태 스레드에 APC 큐잉
+	ImportTable,        // launch 전용: EXE import 표 맨 앞에 추가, 정적 DLL보다 먼저 로드
 };
 
 // 문자열 → enum 변환
@@ -27,9 +28,10 @@ struct LaunchResult {
 class Injector {
 public:
 	// 지정된 방식으로 DLL 인젝션
+	// restoreImports: ImportTable에서 DLL이 원래 import 디렉터리를 되돌린다.
 	static bool InjectDll(uint32_t pid, const std::string& dllPath,
 		InjectionMethod method = InjectionMethod::Auto,
-		std::string* error = nullptr);
+		std::string* error = nullptr, bool restoreImports = false);
 
 	// 프로세스 생성 + 인젝션 (메인 스레드는 suspended 상태 유지). dllPath가 비면 생성만
 	// (외부 백엔드: 대상에 아무것도 넣지 않는다).
@@ -42,7 +44,8 @@ public:
 		const std::string& dllPath,
 		InjectionMethod method = InjectionMethod::Auto,
 		bool runAsInvoker = false,
-		const std::vector<std::string>& env = {});
+		const std::vector<std::string>& env = {},
+		bool restoreImports = false);
 
 	// DLL 이젝트
 	static bool EjectDll(uint32_t pid, const std::string& dllName);
@@ -72,6 +75,9 @@ private:
 	// 개별 인젝션 방식
 	static bool InjectViaCreateRemoteThread(HANDLE process, LPVOID remoteStr, FARPROC loadLib,
 		const std::string& dllPath, std::string* error);
+	// 초기화 전 프로세스의 EXE import 디렉터리를 dllPath 서술자가 맨 앞인 새 표로 바꾼다.
+	static bool AddPreloadImport(HANDLE process, const std::string& dllPath, bool restoreImports,
+		std::string* error);
 	static bool InjectViaNtCreateThreadEx(HANDLE process, LPVOID remoteStr, FARPROC loadLib,
 		const std::string& dllPath, std::string* error);
 	static bool InjectViaThreadHijack(HANDLE process, uint32_t pid, LPVOID remoteStr, bool isWow64,

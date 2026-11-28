@@ -79,6 +79,7 @@ Process lazy-decode budgets and the additive wire12 contract are documented in [
 
 | Tool | Purpose |
 |---|---|
+| `test/test_mcp_import_preload.py` | `importTable` launch on the synthetic `preload_host`/`preload_probe` pair: payload-before-static-DLL order versus `createRemoteThread`, `stopOnEntry` hold, `restoreImports` on/off, option validation, MCP and DAP. Run for `build`, `--build-dir build32`, and the x64 server against the build32 host (`VEH_MCP_EXE`) for WoW64. |
 | `test/test_analysis_surfaces.py` | Native stop/step comment previews, exact-address stack/software/hardware labels, pending/comment-only exclusion, opt-out and direct/batch/action parity. |
 | `test/test_analysis.py` | Native x64/x86 JSON annotation persistence, build/RVA identity, explicit unbound notes, code-change markers, concurrent-writer revisions, corrupt/oversized input preservation, failed writes, loader-lock stops, and direct/batch/action parity. See [analysis notes](ANALYSIS_NOTES.md). |
 | `test/test_trace_external_exit.py` | Function-scoped traces (`stop_on_return`) on native x64/x86 code that leaves the range without a call: a thunk that returns into an API is followed back to the instruction after the thunk call and the resuming `block_entry` names its snapshot, a tail jump ends with `function_return`, a whole-module trace started at a function breakpoint captures the entry instructions instead of the breakpoint byte, and direct/batch/action traces stop at the exact step budget before executing outside code. |

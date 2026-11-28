@@ -12,6 +12,7 @@ set(DLL_SOURCES
     module_identity.cpp
     pipe_server.cpp
     syscall_resolver.cpp
+    veh_dll.def
 )
 
 set(DLL_DEFS

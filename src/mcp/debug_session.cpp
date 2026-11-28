@@ -528,7 +528,8 @@ DebugSession::LaunchResult DebugSession::Launch(const LaunchOptions& opts) {
 	}
 
 	InjectionMethod injMethod = ParseInjectionMethod(opts.injectionMethod);
-	auto lr = Injector::LaunchAndInject(opts.program, argsStr, opts.cwd, dllPath, injMethod, opts.runAsInvoker, opts.env);
+	auto lr = Injector::LaunchAndInject(opts.program, argsStr, opts.cwd, dllPath, injMethod, opts.runAsInvoker, opts.env,
+		opts.restoreImports);
 	if (lr.pid == 0) {
 		result.error = "Launch failed: " + opts.program;
 		if (!lr.error.empty()) result.error += " - " + lr.error;
@@ -566,13 +567,19 @@ DebugSession::LaunchResult DebugSession::Launch(const LaunchOptions& opts) {
 	}
 
 	// VM_READ: 조건부 BP 값 평가용(위 Attach 주석 참조). 우리가 만든 자식이라 항상 성공.
-	targetProcess_ = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, lr.pid);
+	targetProcess_ = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ | SYNCHRONIZE,
+		FALSE, lr.pid);
 	if (!targetProcess_) {
 		LOG_WARN("OpenProcess(TERMINATE) failed for pid=%u", lr.pid);
 	}
 	launchedByUs_ = true;
 
-	if (!ipcTransport_->Connect(lr.pid, 3500)) {
+	// importTable returns before process initialization has loaded the DLL; the pipe
+	// is the load confirmation, and a target that exits ends the wait at once.
+	auto* pipe = dynamic_cast<PipeClient*>(ipcTransport_.get());
+	const bool connected = injMethod == InjectionMethod::ImportTable && pipe ?
+		pipe->ConnectToPeer(lr.pid, 60000, targetProcess_) : ipcTransport_->Connect(lr.pid, 3500);
+	if (!connected) {
 		if (targetProcess_) {
 			TerminateProcess(targetProcess_, 1);
 			CloseHandle(targetProcess_);

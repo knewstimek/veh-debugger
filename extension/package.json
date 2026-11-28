@@ -104,17 +104,24 @@
                   "createRemoteThread",
                   "ntCreateThreadEx",
                   "threadHijack",
-                  "queueUserApc"
+                  "queueUserApc",
+                  "importTable"
                 ],
                 "enumDescriptions": [
                   "Try all methods in order (CRT -> NtCTE -> Hijack -> APC)",
                   "Classic CreateRemoteThread + LoadLibrary",
                   "ntdll!NtCreateThreadEx (bypasses user-mode CRT hooks)",
                   "Hijack existing thread context (no new thread created)",
-                  "Queue APC to alertable threads (unreliable)"
+                  "Queue APC to alertable threads (unreliable)",
+                  "Add to the EXE import table; loads before its static DLLs"
                 ],
                 "description": "DLL injection method",
                 "default": "auto"
+              },
+              "restoreImports": {
+                "type": "boolean",
+                "description": "importTable only: the DLL restores the original import directory on load",
+                "default": false
               },
               "runAsInvoker": {
                 "type": "boolean",

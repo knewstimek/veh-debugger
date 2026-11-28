@@ -253,6 +253,8 @@ npm run compile
 - `args`: 실행 인자 (선택)
 - `stopOnEntry`: 진입점에서 정지 여부
 - `runAsInvoker`: UAC 권한 상승 프롬프트 없이 현재 권한으로 실행 (기본: false)
+- `injectionMethod`: `auto`(기본), `createRemoteThread`, `ntCreateThreadEx`, `threadHijack`, `queueUserApc`, `importTable`(아래 DLL 인젝션 참고)
+- `restoreImports`: `importTable` 전용. 로드 후 원래 import 디렉터리 복원 (기본: false)
 
 **실행 중인 프로세스에 붙기 (Attach)**
 ```json
@@ -445,7 +447,7 @@ VM 세션 안에서 `veh_processes`로 찾고, `veh_attach(target_scope="guest",
 | `veh_virtual_machine` | `operation, cpu?, max_instructions?, duration_ms?, cpl_mask?, cr3_roots?, rip_begin?, rip_end?` | 명시적 VM 전체 제어·정지 상태 vCPU 트레이스. 수동 호출 전용 |
 | `veh_processes` | `backend?` | 게스트/VM 백엔드에서 OS 프로세스 목록(PID, 주소 폭, 짧은 이미지명)을 한 스냅샷으로 조회. `backend`는 세션이 없을 때만 VM 범위 백엔드에 일회성 연결. 기본 프로필에선 `veh_toolbox`로 호출 |
 | `veh_attach` | `pid?, backend?/agent?, agent_args?, target_scope?` | VEH 주입 또는 외부 백엔드 연결. VM PID는 `target_scope="guest"`와 백엔드 검증 필요. VM 자체 연결은 pid를 생략합니다. |
-| `veh_launch` | `program, args?, stopOnEntry?, cwd?, env?, backend?/agent?, target_scope?` | 호스트 프로세스 생성·연결 및 등록된 로컬 guest_launch 백엔드의 게스트 진입점 생성·검증. DAP/원격 게스트는 attach 전용 |
+| `veh_launch` | `program, args?, stopOnEntry?, cwd?, env?, injectionMethod?, restoreImports?, backend?/agent?, target_scope?` | 호스트 프로세스 생성·연결 및 등록된 로컬 guest_launch 백엔드의 게스트 진입점 생성·검증. DAP/원격 게스트는 attach 전용 |
 | `veh_detach` | `abandon?, expected_session_generation?, expected_pid?` | 일반 분리는 정리 실패 시 세션 유지. 실패 후 세션 번호·PID를 확인한 명시적 폐기는 로컬 외부 attach의 프론트 연결만 정리하며 백엔드 제어 명령을 보내지 않음. 백엔드 정리·대상 실행 상태는 미확인. [복구 계약](docs/DEVELOPMENT_TOOLS.md) 참고 |
 | `veh_terminate` | `exitCode?` | 타겟을 **내부에서** 강제 종료 (주입된 DLL이 자기 프로세스에 `TerminateProcess` 호출). 외부 `taskkill`/`OpenProcess`를 막는 자기보호 타겟(deny-DACL/상위 무결성)도 확실히 종료 -- 프로세스 자기 핸들은 항상 종료 권한 보유. 종료 후 자동 detach. `WM_CLOSE->detach->taskkill` 수순 대체 |
 | `veh_set_breakpoint` | `address, condition?, hitCondition?, logMessage?, action?` | 소프트웨어 BP. `action`으로 히트 시 자동 실행 (veh_batch 형식) |
@@ -622,6 +624,8 @@ Windows 디버거의 "실행하며 디버깅" 기능과 동일. DAP(`launch` 요
 2. **NtCreateThreadEx** — 보호된 프로세스 대응
 3. **Thread Hijacking** — 기존 스레드 하이재킹
 4. **QueueUserAPC** — APC 큐 방식
+
+launch 전용 `injectionMethod="importTable"`은 자동 선택에 포함되지 않습니다. 정지 상태 EXE의 import 표 맨 앞에 DLL을 넣어 EXE의 정적 DLL보다 먼저 로드합니다. 정적 DLL이 스레드 시작이나 DLL 로드를 막아 다른 방식이 실패할 때 씁니다. `stopOnEntry`는 그대로 동작합니다. `restoreImports=true`이면 DLL이 로드 직후 원래 import 디렉터리를 되돌립니다. DLL 경로는 ASCII나 8.3 이름이어야 합니다.
 
 ### 메모리 & 디스어셈블리
 

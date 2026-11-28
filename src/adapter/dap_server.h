@@ -127,6 +127,7 @@ private:
 	std::string launchArgStr_;   // restart 시 인자 보존용
 	std::string launchCwd_;      // restart 시 작업 디렉토리 보존용
 	InjectionMethod injectionMethod_ = InjectionMethod::Auto;
+	bool restoreImports_ = false;
 	bool runAsInvoker_ = false;          // UAC 프롬프트 없이 현재 권한으로 실행
 
 	// Variable references

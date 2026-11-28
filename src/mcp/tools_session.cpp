@@ -269,6 +269,8 @@ json McpServer::ToolLaunch(const json& args) {
     if (agent && agent->guestTarget && (agent->remote || JsonBool(args, "runAsInvoker", false) ||
         args.value("injectionMethod", "auto") != "auto"))
         return {{"error", "Guest launch requires a local backend, runAsInvoker=false and injectionMethod=auto."}};
+	if (JsonBool(args, "restoreImports", false) && args.value("injectionMethod", "auto") != "importTable")
+		return {{"error", "restoreImports requires injectionMethod=importTable"}};
 	if (session_.IsAttached() && !(agent && agent->remote)) {
 		LOG_INFO("Auto-detaching from previous session (pid=%u) before new launch", session_.GetTargetPid());
 		const auto detached = ToolDetach({});
@@ -308,6 +310,7 @@ json McpServer::ToolLaunch(const json& args) {
 	opts.stopOnEntry = JsonBool(args, "stopOnEntry", true);
 	opts.runAsInvoker = JsonBool(args, "runAsInvoker", false);
 	opts.injectionMethod = args.value("injectionMethod", "auto");
+	opts.restoreImports = JsonBool(args, "restoreImports", false);
 	opts.cwd = args.value("cwd", "");
 	opts.agent = agent ? &*agent : nullptr;
 
